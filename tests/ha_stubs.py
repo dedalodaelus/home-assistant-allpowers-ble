@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import datetime as dt
 from enum import Enum
+import json
 from types import ModuleType
 import sys
+import time
 from typing import Any, Generic, TypeVar
 
 
@@ -424,6 +428,59 @@ def _async_redact_data(value: Any, keys: set[str]) -> Any:
     return value
 
 
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
+def _as_utc(value: dt.datetime) -> dt.datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.UTC)
+    return value.astimezone(dt.UTC)
+
+
+def _utc_from_timestamp(value: float) -> dt.datetime:
+    return dt.datetime.fromtimestamp(value, tz=dt.UTC)
+
+
+def _get_default_time_zone() -> dt.tzinfo:
+    return dt.UTC
+
+
+def _set_default_time_zone(value: dt.tzinfo) -> None:
+    del value
+
+
+def _create_eager_task(coro: Any) -> asyncio.Task[Any]:
+    return asyncio.create_task(coro)
+
+
+def _get_scheduled_timer_handles(loop: asyncio.AbstractEventLoop) -> list[Any]:
+    del loop
+    return []
+
+
+def _json_loads(value: str | bytes) -> Any:
+    return json.loads(value)
+
+
+def _json_loads_object(value: str | bytes) -> dict[str, Any]:
+    result = json.loads(value)
+    return result if isinstance(result, dict) else {}
+
+
+def _load_yaml_dict(value: str) -> dict[str, Any]:
+    del value
+    return {}
+
+
+def _log_exception(format_err: Any, *args: Any) -> None:
+    del format_err, args
+
+
+def _time_tracker_timestamp() -> float:
+    return _utcnow().timestamp()
+
+
 def install() -> None:
     """Install all dependency stubs into ``sys.modules``."""
     bleak = ModuleType("bleak")
@@ -521,6 +578,68 @@ def install() -> None:
     update_coordinator.CoordinatorEntity = CoordinatorEntity
     update_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
 
+    event = ModuleType("homeassistant.helpers.event")
+    event.time_tracker_utcnow = _utcnow
+    event.time_tracker_timestamp = _time_tracker_timestamp
+
+    util = ModuleType("homeassistant.util")
+    util.utcnow = _utcnow
+
+    util_dt = ModuleType("homeassistant.util.dt")
+    util_dt.UTC = dt.UTC
+    util_dt.DEFAULT_TIME_ZONE = dt.UTC
+    util_dt.utcnow = _utcnow
+    util_dt.as_utc = _as_utc
+    util_dt.utc_from_timestamp = _utc_from_timestamp
+    util_dt.get_default_time_zone = _get_default_time_zone
+    util_dt.set_default_time_zone = _set_default_time_zone
+
+    util_location = ModuleType("homeassistant.util.location")
+
+    util_async = ModuleType("homeassistant.util.async_")
+    util_async.create_eager_task = _create_eager_task
+    util_async.get_scheduled_timer_handles = _get_scheduled_timer_handles
+
+    util_json = ModuleType("homeassistant.util.json")
+    util_json.json_loads = _json_loads
+    util_json.json_loads_object = _json_loads_object
+    util_json.JsonObjectType = dict[str, Any]
+
+    util_yaml = ModuleType("homeassistant.util.yaml")
+    util_yaml.load_yaml_dict = _load_yaml_dict
+
+    util_logging = ModuleType("homeassistant.util.logging")
+    util_logging.log_exception = _log_exception
+
+    util_ulid = ModuleType("homeassistant.util.ulid")
+    util_uuid = ModuleType("homeassistant.util.uuid")
+    util_event_type = ModuleType("homeassistant.util.event_type")
+    util_event_type.EventType = str
+    util_signal_type = ModuleType("homeassistant.util.signal_type")
+    util_signal_type.SignalType = str
+    util_unit_system = ModuleType("homeassistant.util.unit_system")
+    util_unit_system.METRIC_SYSTEM = object()
+
+    util.dt = util_dt
+    util.location = util_location
+    util.async_ = util_async
+    util.json = util_json
+    util.yaml = util_yaml
+    util.logging = util_logging
+    util.ulid = util_ulid
+    util.uuid = util_uuid
+    util.event_type = util_event_type
+    util.signal_type = util_signal_type
+    util.unit_system = util_unit_system
+
+    runner = ModuleType("homeassistant.runner")
+    runner.monotonic = time.monotonic
+
+    homeassistant.components = components
+    homeassistant.util = util
+    homeassistant.helpers = helpers
+    homeassistant.runner = runner
+
     voluptuous = ModuleType("voluptuous")
     voluptuous.Schema = _Schema
     voluptuous.Required = _Required
@@ -555,6 +674,20 @@ def install() -> None:
             "homeassistant.helpers.entity_platform": entity_platform,
             "homeassistant.helpers.device_registry": device_registry,
             "homeassistant.helpers.update_coordinator": update_coordinator,
+            "homeassistant.helpers.event": event,
+            "homeassistant.util": util,
+            "homeassistant.util.dt": util_dt,
+            "homeassistant.util.location": util_location,
+            "homeassistant.util.async_": util_async,
+            "homeassistant.util.json": util_json,
+            "homeassistant.util.yaml": util_yaml,
+            "homeassistant.util.logging": util_logging,
+            "homeassistant.util.ulid": util_ulid,
+            "homeassistant.util.uuid": util_uuid,
+            "homeassistant.util.event_type": util_event_type,
+            "homeassistant.util.signal_type": util_signal_type,
+            "homeassistant.util.unit_system": util_unit_system,
+            "homeassistant.runner": runner,
             "voluptuous": voluptuous,
         }
     )
