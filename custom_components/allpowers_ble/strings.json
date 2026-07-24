@@ -1,7 +1,6 @@
 {
   "config": {
     "abort": {
-      "already_configured": "This power station is already configured.",
       "no_devices_found": "No compatible connectable ALLPOWERS device was found. Confirm that the device is powered on and visible to a Bluetooth proxy or local adapter.",
       "not_connectable": "The discovery source cannot make active Bluetooth connections. Use a connectable ESPHome Bluetooth proxy or a supported local adapter.",
       "not_supported": "This ALLPOWERS model uses an unsupported protocol revision."
