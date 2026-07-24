@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "jsonpath": "$.version",
+          "path": "custom_components/allpowers_ble/manifest.json",
+          "type": "json"
+        }
+      ],
+      "include-component-in-tag": false,
+      "include-v-in-tag": false,
+      "package-name": "ALLPOWERS BLE",
+      "release-type": "simple"
+    }
+  }
+}

@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Prepare semantic release
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Check out released revision
+        if: steps.release.outputs.release_created == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+
+      - name: Set up Python
+        if: steps.release.outputs.release_created == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Validate release version
+        if: steps.release.outputs.release_created == 'true'
+        run: python scripts/check_version.py "${{ steps.release.outputs.tag_name }}"
+
+      - name: Build HACS asset
+        if: steps.release.outputs.release_created == 'true'
+        run: python scripts/build_release.py --clean
+
+      - name: Upload HACS asset
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release upload "${{ steps.release.outputs.tag_name }}"
+          dist/allpowers_ble.zip --clobber
+
+  tagged-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Validate version and build asset
+        run: |
+          python scripts/check_version.py "${GITHUB_REF_NAME}"
+          python scripts/build_release.py --clean
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/allpowers_ble.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

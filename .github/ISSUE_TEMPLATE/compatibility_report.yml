@@ -1,0 +1,73 @@
+name: Model compatibility report
+description: Report validation results for another ALLPOWERS model or revision.
+title: "compat: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        A matching name or UUID is not enough to establish safe compatibility.
+        Test without critical loads and sanitize every capture.
+  - type: input
+    id: model
+    attributes:
+      label: Exact product model and label revision
+    validations:
+      required: true
+  - type: input
+    id: advertised_name
+    attributes:
+      label: Advertised Bluetooth name
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Reported hardware and firmware versions
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Home Assistant, integration, ESPHome, and proxy/adapter versions
+    validations:
+      required: true
+  - type: checkboxes
+    id: results
+    attributes:
+      label: Results
+      options:
+        - label: Device was discovered.
+        - label: Active config-flow probe succeeded.
+        - label: Battery, power, and remaining time were plausible.
+        - label: AC control was tested and preserved DC/light state.
+        - label: DC control was tested and preserved AC/light state.
+        - label: Light control was tested and preserved AC/DC state.
+        - label: ECO and work mode were tested and preserved unknown settings bits.
+        - label: Reconnect and Home Assistant restart were tested.
+        - label: At least one hour of stable operation was observed.
+  - type: textarea
+    id: details
+    attributes:
+      label: Detailed observations
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics or protocol evidence
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and safety
+      options:
+        - label: >-
+            I removed addresses, serial numbers, credentials, timestamps revealing
+            occupancy, and personal data.
+          required: true
+        - label: I did not test experimental writes with a critical load attached.
+          required: true

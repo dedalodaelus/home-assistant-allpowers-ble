@@ -1,0 +1,165 @@
+{
+  "abort": {
+    "already_configured": "Esta estación de energía ya está configurada.",
+    "no_devices_found": "No se encontró ningún dispositivo ALLPOWERS compatible y conectable. Comprueba que esté encendido y visible para un proxy Bluetooth o un adaptador local.",
+    "not_connectable": "La fuente de descubrimiento no permite conexiones Bluetooth activas. Usa un proxy Bluetooth ESPHome conectable o un adaptador local compatible.",
+    "not_supported": "Este modelo ALLPOWERS utiliza una revisión de protocolo no compatible."
+  },
+  "config": {
+    "error": {
+      "cannot_connect": "No se pudo conectar mediante ningún adaptador o proxy Bluetooth disponible.",
+      "timeout": "El dispositivo se conectó, pero no devolvió una trama de estado válida antes del tiempo límite.",
+      "unknown": "Se produjo un error inesperado al validar el dispositivo. Consulta los registros para obtener más información."
+    },
+    "step": {
+      "confirm": {
+        "description": "¿Conectar con {name}, verificar la interfaz GATT FFF0/FFF1/FFF2 y exigir una trama de estado con checksum válido antes de crear la entrada?",
+        "title": "Añadir estación de energía ALLPOWERS"
+      },
+      "user": {
+        "data": {
+          "address": "Dispositivo"
+        },
+        "description": "Selecciona un dispositivo compatible visible para un adaptador Bluetooth conectable o un proxy Bluetooth ESPHome.",
+        "title": "Seleccionar dispositivo ALLPOWERS"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "ac_output": {
+        "name": "Salida CA"
+      },
+      "charging": {
+        "name": "Cargando"
+      },
+      "connected": {
+        "name": "Conectado"
+      },
+      "dc_output": {
+        "name": "Salida CC"
+      },
+      "discharging": {
+        "name": "Descargando"
+      },
+      "light_output": {
+        "name": "Salida de luz"
+      },
+      "settings_available": {
+        "name": "Ajustes disponibles"
+      },
+      "telemetry_available": {
+        "name": "Telemetría disponible"
+      }
+    },
+    "button": {
+      "reconnect": {
+        "name": "Reconectar"
+      },
+      "refresh": {
+        "name": "Actualizar estado"
+      },
+      "settings_keepalive": {
+        "name": "Enviar keepalive de ajustes"
+      }
+    },
+    "number": {
+      "settings_keepalive_interval": {
+        "name": "Intervalo de keepalive de ajustes"
+      },
+      "status_interval": {
+        "name": "Intervalo de solicitud de estado"
+      }
+    },
+    "select": {
+      "eco_timeout": {
+        "name": "Tiempo de apagado ECO",
+        "state": {
+          "four_hours": "4 horas",
+          "one_hour": "1 hora",
+          "six_hours": "6 horas",
+          "two_hours": "2 horas"
+        }
+      },
+      "work_mode": {
+        "name": "Modo de trabajo",
+        "state": {
+          "fast": "Rápido",
+          "mute": "Silencioso",
+          "standard": "Estándar"
+        }
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Batería"
+      },
+      "firmware_version": {
+        "name": "Versión de firmware"
+      },
+      "hardware_version": {
+        "name": "Versión de hardware"
+      },
+      "input_power": {
+        "name": "Potencia de entrada"
+      },
+      "output_power": {
+        "name": "Potencia de salida"
+      },
+      "protocol_errors": {
+        "name": "Errores de protocolo"
+      },
+      "reconnects": {
+        "name": "Reconexiones"
+      },
+      "remaining_time": {
+        "name": "Tiempo restante"
+      },
+      "rssi": {
+        "name": "Intensidad de señal"
+      },
+      "watchdog_resets": {
+        "name": "Reinicios del watchdog"
+      }
+    },
+    "switch": {
+      "ac_output": {
+        "name": "Salida CA"
+      },
+      "car_charger": {
+        "name": "Cargador de coche"
+      },
+      "dc_output": {
+        "name": "Salida CC"
+      },
+      "eco_mode": {
+        "name": "Modo ECO"
+      },
+      "light": {
+        "name": "Luz"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_options": "Las relaciones entre tiempos no son válidas: el tiempo de telemetría obsoleta debe superar el intervalo de estado, el watchdog debe superar el tiempo de telemetría obsoleta y, al activar el keepalive, el tiempo de validez de los ajustes debe superar su intervalo."
+    },
+    "step": {
+      "init": {
+        "data": {
+          "enable_car_charger": "Activar control experimental del cargador de coche",
+          "reconnect_max_delay": "Retardo máximo de reconexión (segundos)",
+          "settings_keepalive": "Activar keepalive de ajustes",
+          "settings_keepalive_interval": "Intervalo de keepalive de ajustes (segundos)",
+          "settings_stale_timeout": "Tiempo de validez de los ajustes (segundos)",
+          "stale_timeout": "Tiempo de telemetría obsoleta (segundos)",
+          "status_interval": "Intervalo de solicitud de estado (segundos)",
+          "watchdog_timeout": "Tiempo del watchdog de protocolo (segundos)"
+        },
+        "description": "Los valores por defecto reproducen el comportamiento observado en la R600. El keepalive y el cargador de coche permanecen desactivados hasta habilitarlos expresamente.",
+        "title": "Opciones de ALLPOWERS BLE"
+      }
+    }
+  },
+  "title": "ALLPOWERS BLE"
+}

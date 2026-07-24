@@ -1,0 +1,165 @@
+{
+  "abort": {
+    "already_configured": "This power station is already configured.",
+    "no_devices_found": "No compatible connectable ALLPOWERS device was found. Confirm that the device is powered on and visible to a Bluetooth proxy or local adapter.",
+    "not_connectable": "The discovery source cannot make active Bluetooth connections. Use a connectable ESPHome Bluetooth proxy or a supported local adapter.",
+    "not_supported": "This ALLPOWERS model uses an unsupported protocol revision."
+  },
+  "config": {
+    "error": {
+      "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
+      "timeout": "The device connected but did not return a valid status frame before the timeout.",
+      "unknown": "Unexpected error while validating the device. Check the logs for details."
+    },
+    "step": {
+      "confirm": {
+        "description": "Connect to {name}, verify the FFF0/FFF1/FFF2 GATT interface, and require a checksum-valid status frame before creating the entry?",
+        "title": "Add ALLPOWERS power station"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        },
+        "description": "Select a compatible device currently visible to a connectable Bluetooth adapter or ESPHome Bluetooth proxy.",
+        "title": "Select ALLPOWERS device"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "ac_output": {
+        "name": "AC output"
+      },
+      "charging": {
+        "name": "Charging"
+      },
+      "connected": {
+        "name": "Connected"
+      },
+      "dc_output": {
+        "name": "DC output"
+      },
+      "discharging": {
+        "name": "Discharging"
+      },
+      "light_output": {
+        "name": "Light output"
+      },
+      "settings_available": {
+        "name": "Settings available"
+      },
+      "telemetry_available": {
+        "name": "Telemetry available"
+      }
+    },
+    "button": {
+      "reconnect": {
+        "name": "Reconnect"
+      },
+      "refresh": {
+        "name": "Refresh status"
+      },
+      "settings_keepalive": {
+        "name": "Send settings keepalive"
+      }
+    },
+    "number": {
+      "settings_keepalive_interval": {
+        "name": "Settings keepalive interval"
+      },
+      "status_interval": {
+        "name": "Status request interval"
+      }
+    },
+    "select": {
+      "eco_timeout": {
+        "name": "ECO shutdown time",
+        "state": {
+          "four_hours": "4 hours",
+          "one_hour": "1 hour",
+          "six_hours": "6 hours",
+          "two_hours": "2 hours"
+        }
+      },
+      "work_mode": {
+        "name": "Work mode",
+        "state": {
+          "fast": "Fast",
+          "mute": "Mute",
+          "standard": "Standard"
+        }
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "hardware_version": {
+        "name": "Hardware version"
+      },
+      "input_power": {
+        "name": "Input power"
+      },
+      "output_power": {
+        "name": "Output power"
+      },
+      "protocol_errors": {
+        "name": "Protocol errors"
+      },
+      "reconnects": {
+        "name": "Reconnects"
+      },
+      "remaining_time": {
+        "name": "Remaining time"
+      },
+      "rssi": {
+        "name": "Signal strength"
+      },
+      "watchdog_resets": {
+        "name": "Watchdog resets"
+      }
+    },
+    "switch": {
+      "ac_output": {
+        "name": "AC output"
+      },
+      "car_charger": {
+        "name": "Car charger"
+      },
+      "dc_output": {
+        "name": "DC output"
+      },
+      "eco_mode": {
+        "name": "ECO mode"
+      },
+      "light": {
+        "name": "Light"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_options": "The timeout relationships are invalid: telemetry stale timeout must exceed the status interval, watchdog timeout must exceed telemetry stale timeout, and settings stale timeout must exceed the keepalive interval when keepalive is enabled."
+    },
+    "step": {
+      "init": {
+        "data": {
+          "enable_car_charger": "Enable experimental car charger control",
+          "reconnect_max_delay": "Maximum reconnect delay (seconds)",
+          "settings_keepalive": "Enable settings keepalive",
+          "settings_keepalive_interval": "Settings keepalive interval (seconds)",
+          "stale_timeout": "Telemetry stale timeout (seconds)",
+          "status_interval": "Status request interval (seconds)",
+          "watchdog_timeout": "Protocol watchdog timeout (seconds)",
+          "settings_stale_timeout": "Settings stale timeout (seconds)"
+        },
+        "description": "Defaults match the observed R600 behavior. Keepalive and car charger control are disabled unless explicitly enabled.",
+        "title": "ALLPOWERS BLE options"
+      }
+    }
+  },
+  "title": "ALLPOWERS BLE"
+}

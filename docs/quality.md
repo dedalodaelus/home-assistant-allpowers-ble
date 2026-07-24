@@ -1,0 +1,55 @@
+# Quality and test strategy
+
+This project applies current Home Assistant integration patterns but remains a
+community custom integration. Home Assistant does not assign official Bronze,
+Silver, Gold, or Platinum scores to this repository.
+
+## Automated test layers
+
+| Layer | Coverage |
+|---|---|
+| Protocol vectors | Header, length, XOR, payload validation, known packets, unknown packets, versions, control frames, bit preservation |
+| Stream decoder | Fragmentation, concatenation, noise, oversized payloads, invalid candidates, reset behavior |
+| Options | Ranges, cross-field relationships, booleans, defaults, serialization |
+| Client state | Freshness, shadows, disconnect invalidation, serialized writes, delayed refresh, status requests |
+| Transport runtime | Route loss, connection retry, GATT validation, notification handling, watchdog, keepalive, shutdown, cancellation |
+| Config flow | Discovery, duplicates, unsupported models, active probe outcomes, manual selection, options errors |
+| Coordinator/entities | Fresh/stale/disconnected availability, values, controls, service errors, live options |
+| Diagnostics/setup | Redaction, serialization, initial readiness, entry unload, Home Assistant stop |
+| Real HA smoke | Imports all integration modules against the pinned Home Assistant package in CI |
+
+The repository sets a coverage failure threshold of 98 percent with branch coverage
+enabled. New code should test behavior and failure modes rather than adding lines
+only to satisfy the metric.
+
+## Static and repository checks
+
+- Ruff formatting and linting.
+- Mypy type checking for integration source.
+- Pylint for integration source.
+- Python compilation and custom repository invariant checks.
+- HACS validation action.
+- Home Assistant Hassfest action.
+- CodeQL security analysis.
+- Dependency review for pull requests.
+- Dependabot for Python packages and GitHub Actions.
+- Conventional pull-request titles.
+
+## Reliability practices
+
+- Config flow and unique IDs prevent duplicate device entries.
+- Initial setup waits for valid data and uses `ConfigEntryNotReady` semantics.
+- Entity availability is based on data freshness, not socket state alone.
+- Every active route is resolved through Home Assistant Bluetooth.
+- All writes are serialized and require a safe snapshot.
+- Unknown settings bits are preserved.
+- Background tasks are named, owned, canceled, and awaited.
+- Diagnostics redact the Bluetooth address.
+- Translations and diagnostics are included from the initial release.
+
+## Remaining validation boundary
+
+Automated tests cannot prove radio behavior or command safety on an untested
+hardware revision. A model remains experimental until hardware-in-the-loop results
+cover telemetry, each writable control, reconnects, proxy failover, and prolonged
+operation.

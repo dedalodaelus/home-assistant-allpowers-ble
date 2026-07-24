@@ -1,0 +1,188 @@
+# Architecture
+
+## Design goals
+
+The integration is organized around five constraints:
+
+1. use Home Assistant's Bluetooth routing instead of direct BlueZ access;
+2. keep the vendor protocol reusable outside Home Assistant;
+3. reject unsafe writes when state is incomplete or stale;
+4. survive proxy changes, fragmented notifications, and transient disconnects;
+5. expose immutable snapshots to entities with predictable availability.
+
+## Component view
+
+```mermaid
+flowchart TB
+    subgraph HA[Home Assistant]
+        CF[Config flow and active probe]
+        ENT[Entity platforms]
+        DIA[Diagnostics]
+        CO[AllpowersCoordinator]
+        BT[Bluetooth integration]
+    end
+
+    subgraph INT[ALLPOWERS BLE integration]
+        CL[AllpowersBLEClient]
+        DEC[NotificationStreamDecoder]
+        ENC[Command encoders]
+        MOD[Immutable state models]
+        OPT[Validated connection options]
+    end
+
+    subgraph PATH[Connectable BLE routes]
+        LOCAL[Local Bluetooth adapter]
+        PROXY[ESPHome Bluetooth Proxy]
+    end
+
+    CF --> BT
+    CF --> DEC
+    ENT --> CO
+    DIA --> CO
+    CO <--> CL
+    CL --> BT
+    BT --> LOCAL
+    BT --> PROXY
+    CL --> DEC
+    CL --> ENC
+    DEC --> MOD
+    ENC --> MOD
+    OPT --> CL
+```
+
+## Module responsibilities
+
+| Module | Responsibility |
+|---|---|
+| `protocol/models.py` | Immutable decoded protocol values and enums. |
+| `protocol/codec.py` | Frame validation, stream recovery, decoding, encoding, and safe settings mutation. |
+| `client.py` | Active BLE session, route resolution, notifications, retries, watchdog, serialized writes, and statistics. |
+| `models.py` | Integration-level snapshots and connection counters. |
+| `options.py` | Home Assistant-independent option defaults and relationship validation. |
+| `coordinator.py` | Push bridge from the BLE client to CoordinatorEntity consumers. |
+| `config_flow.py` | Discovery, candidate filtering, active protocol probe, duplicate prevention, and options flow. |
+| `entity.py` | Device metadata and freshness-based availability classes. |
+| Platform modules | Home Assistant entities and service error translation. |
+| `diagnostics.py` | Redacted entry/device diagnostics. |
+
+## Setup sequence
+
+```mermaid
+sequenceDiagram
+    participant D as ALLPOWERS device
+    participant P as Adapter or proxy
+    participant B as HA Bluetooth
+    participant F as Config flow
+    participant C as BLE client
+    participant E as Entities
+
+    D-->>P: BLE advertisement
+    P-->>B: Discovery information
+    B-->>F: bluetooth step
+    F->>B: Resolve connectable BLEDevice
+    F->>D: Connect through selected route
+    F->>D: Subscribe FFF1
+    F->>D: Write status request to FFF2
+    D-->>F: Checksum-valid status notification
+    F->>F: Create config entry
+    F->>C: Start persistent client
+    C->>B: Resolve current best route
+    C->>D: Connect and subscribe
+    C->>D: Request status
+    D-->>C: Status/settings notifications
+    C-->>E: Immutable coordinator snapshot
+```
+
+The config flow does not trust an advertisement alone. It establishes a temporary
+connection, verifies the expected service and characteristics, writes the known
+status request, and waits for a valid decoded status response.
+
+## Persistent connection state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Stopped
+    Stopped --> Resolving: async_start
+    Resolving --> Connecting: route available
+    Resolving --> Backoff: no route
+    Connecting --> Subscribed: GATT and notify ready
+    Connecting --> Backoff: connection or GATT failure
+    Subscribed --> Ready: valid status frame
+    Ready --> Reconnecting: disconnect, write failure, watchdog, manual reconnect
+    Subscribed --> Reconnecting: disconnect or watchdog
+    Reconnecting --> Backoff: connection released
+    Backoff --> Resolving: delay elapsed
+    Ready --> Stopped: unload or HA stop
+    Subscribed --> Stopped: unload or HA stop
+    Backoff --> Stopped: unload or HA stop
+```
+
+Before each connection attempt the client asks Home Assistant for a fresh
+connectable `BLEDevice`. This permits failover between local adapters and Bluetooth
+proxies. Exponential backoff is capped by the configured maximum delay.
+
+## Data freshness
+
+A live GATT socket is not sufficient proof that telemetry is current. The client
+tracks monotonic timestamps for status, settings, and the last valid packet.
+
+- Status entities and output controls require a connected session and status newer
+  than `stale_timeout`.
+- Settings entities and controls require a connected session and settings newer
+  than `settings_stale_timeout`.
+- The watchdog reconnects when no valid protocol packet arrives within
+  `watchdog_timeout`.
+- Freshness transitions are emitted even when no new BLE notification arrives.
+- Cached data remains available to diagnostics, but cannot authorize writes after
+  disconnect or expiry.
+
+## Safe command construction
+
+### Combined outputs
+
+AC, DC, and light share one command byte. A command is built from the latest safe
+snapshot, changing only the requested field. A short-lived output shadow records
+the intended combined state so rapid consecutive commands do not overwrite each
+other before the device reports the first change.
+
+### Settings
+
+ECO, work mode, car charger, and ECO timeout also share a settings frame. The
+integration starts with the most recent raw settings flags, applies only the known
+mask, and sends the complete value. Unknown bits are preserved. The settings
+shadow provides the same serialization guarantee for consecutive changes.
+
+Both shadows are in-memory only and are cleared on disconnect, on new GATT session,
+or when a fresh device notification supersedes them.
+
+## Concurrency and ownership
+
+One `AllpowersBLEClient` owns all tasks and one write lock for a config entry:
+
+- connection loop;
+- maintenance/status/watchdog loop;
+- optional delayed command refresh;
+- one active GATT client;
+- one notification decoder;
+- one serialized command stream.
+
+`async_stop` cancels owned tasks, waits for them, disconnects the client, and clears
+the coordinator callback. Entry unload and Home Assistant shutdown use the same
+idempotent shutdown path.
+
+## Error boundaries
+
+- Malformed frames are discarded by the pure stream decoder and counted.
+- Expected BLE and timeout exceptions enter reconnect/backoff behavior.
+- Unexpected transport exceptions are recorded, logged, and also retried at the
+  outer connection boundary.
+- Entity services translate safe-state and disconnected errors into
+  `HomeAssistantError`.
+- Initial setup raises `ConfigEntryNotReady` when a route exists but valid telemetry
+  is not yet available, allowing Home Assistant to retry.
+
+## Persistence
+
+Only config-entry data and options are persisted. Telemetry, protocol fragments,
+shadows, counters, and connection state remain in memory. This avoids unnecessary
+storage writes and prevents ephemeral state from being trusted after restart.

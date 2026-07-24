@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pylint.d/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Builds and editors
+dist/
+build/
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+
+# Home Assistant local development
+config/

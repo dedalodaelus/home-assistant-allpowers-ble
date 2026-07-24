@@ -1,0 +1,83 @@
+name: Bug report
+description: Report reproducible behavior on an already supported or probed device.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Remove Bluetooth addresses, serial numbers, location data, and unrelated
+        Home Assistant information before submitting logs or diagnostics.
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: 2026.7.3
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Exact model and hardware revision
+      placeholder: ALLPOWERS R600, label revision ...
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware and hardware versions reported by the integration
+    validations:
+      required: false
+  - type: dropdown
+    id: route
+    attributes:
+      label: Bluetooth route
+      options:
+        - Local Home Assistant adapter
+        - ESPHome Bluetooth Proxy
+        - Both / automatic failover
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Observed behavior
+      description: Include what happened, what should have happened, and frequency.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or diagnostics
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I tested the latest released version.
+          required: true
+        - label: I searched existing issues and troubleshooting documentation.
+          required: true
+        - label: I removed addresses, serial numbers, credentials, and personal data.
+          required: true
