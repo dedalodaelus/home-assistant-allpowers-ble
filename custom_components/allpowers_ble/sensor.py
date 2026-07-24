@@ -38,8 +38,13 @@ class AllpowersSensorDescription(SensorEntityDescription):
     available_fn: Callable[[AllpowersCoordinator], bool]
 
 
+def _sensor_description(**kwargs: Any) -> AllpowersSensorDescription:
+    """Build sensor descriptions in a pylint-friendly way."""
+    return AllpowersSensorDescription(**kwargs)
+
+
 SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
-    AllpowersSensorDescription(
+    _sensor_description(
         key="battery",
         translation_key="battery",
         device_class=SensorDeviceClass.BATTERY,
@@ -49,7 +54,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.status.battery_percent if data.status else None,
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="input_power",
         translation_key="input_power",
         device_class=SensorDeviceClass.POWER,
@@ -59,7 +64,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.status.input_power_w if data.status else None,
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="output_power",
         translation_key="output_power",
         device_class=SensorDeviceClass.POWER,
@@ -69,7 +74,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.status.output_power_w if data.status else None,
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="remaining_time",
         translation_key="remaining_time",
         device_class=SensorDeviceClass.DURATION,
@@ -78,7 +83,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.status.remaining_minutes if data.status else None,
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="rssi",
         translation_key="rssi",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
@@ -89,21 +94,21 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.rssi,
         available_fn=lambda coordinator: coordinator.data.rssi is not None,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="hardware_version",
         translation_key="hardware_version",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: data.settings.hardware_version if data.settings else None,
         available_fn=lambda coordinator: coordinator.settings_are_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="firmware_version",
         translation_key="firmware_version",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: data.settings.firmware_version if data.settings else None,
         available_fn=lambda coordinator: coordinator.settings_are_fresh,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="reconnects",
         translation_key="reconnects",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -112,7 +117,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.statistics.reconnects,
         available_fn=lambda coordinator: True,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="protocol_errors",
         translation_key="protocol_errors",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -121,7 +126,7 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         value_fn=lambda data: data.statistics.protocol_errors,
         available_fn=lambda coordinator: True,
     ),
-    AllpowersSensorDescription(
+    _sensor_description(
         key="watchdog_resets",
         translation_key="watchdog_resets",
         state_class=SensorStateClass.TOTAL_INCREASING,

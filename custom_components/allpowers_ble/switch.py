@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.core import HomeAssistant
@@ -28,8 +29,13 @@ class AllpowersSwitchDescription(SwitchEntityDescription):
     settings_control: bool = False
 
 
+def _switch_description(**kwargs: Any) -> AllpowersSwitchDescription:
+    """Build switch descriptions in a pylint-friendly way."""
+    return AllpowersSwitchDescription(**kwargs)
+
+
 SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
-    AllpowersSwitchDescription(
+    _switch_description(
         key="ac_output",
         translation_key="ac_output",
         icon="mdi:power-socket",
@@ -42,7 +48,7 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             enabled
         ),
     ),
-    AllpowersSwitchDescription(
+    _switch_description(
         key="dc_output",
         translation_key="dc_output",
         icon="mdi:current-dc",
@@ -55,7 +61,7 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             enabled
         ),
     ),
-    AllpowersSwitchDescription(
+    _switch_description(
         key="light",
         translation_key="light",
         icon="mdi:lightbulb",
@@ -68,7 +74,7 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             enabled
         ),
     ),
-    AllpowersSwitchDescription(
+    _switch_description(
         key="eco_mode",
         translation_key="eco_mode",
         icon="mdi:leaf",
@@ -82,7 +88,7 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             enabled
         ),
     ),
-    AllpowersSwitchDescription(
+    _switch_description(
         key="car_charger",
         translation_key="car_charger",
         icon="mdi:car-battery",

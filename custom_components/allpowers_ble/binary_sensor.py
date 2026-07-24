@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -27,8 +28,13 @@ class AllpowersBinarySensorDescription(BinarySensorEntityDescription):
     available_fn: Callable[[AllpowersCoordinator], bool]
 
 
+def _binary_sensor_description(**kwargs: Any) -> AllpowersBinarySensorDescription:
+    """Build binary sensor descriptions in a pylint-friendly way."""
+    return AllpowersBinarySensorDescription(**kwargs)
+
+
 BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="connected",
         translation_key="connected",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
@@ -36,7 +42,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         value_fn=lambda data, coordinator: data.connected,
         available_fn=lambda coordinator: True,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="telemetry_available",
         translation_key="telemetry_available",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
@@ -45,7 +51,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         value_fn=lambda data, coordinator: coordinator.status_is_fresh,
         available_fn=lambda coordinator: True,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="settings_available",
         translation_key="settings_available",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
@@ -54,7 +60,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         value_fn=lambda data, coordinator: coordinator.settings_are_fresh,
         available_fn=lambda coordinator: True,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="charging",
         translation_key="charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
@@ -63,7 +69,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         ),
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="discharging",
         translation_key="discharging",
         device_class=BinarySensorDeviceClass.POWER,
@@ -72,7 +78,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         ),
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="ac_output",
         translation_key="ac_output",
         value_fn=lambda data, coordinator: (
@@ -80,7 +86,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         ),
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="dc_output",
         translation_key="dc_output",
         value_fn=lambda data, coordinator: (
@@ -88,7 +94,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
         ),
         available_fn=lambda coordinator: coordinator.status_is_fresh,
     ),
-    AllpowersBinarySensorDescription(
+    _binary_sensor_description(
         key="light_output",
         translation_key="light_output",
         value_fn=lambda data, coordinator: (
