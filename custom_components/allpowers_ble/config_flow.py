@@ -56,7 +56,7 @@ from .options import ConnectionOptions
 _LOGGER = logging.getLogger(__name__)
 
 
-class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
+class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle discovery and setup of one ALLPOWERS BLE device."""
 
     VERSION = 1
