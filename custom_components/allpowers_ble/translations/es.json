@@ -1,11 +1,11 @@
 {
-  "abort": {
-    "already_configured": "Esta estación de energía ya está configurada.",
-    "no_devices_found": "No se encontró ningún dispositivo ALLPOWERS compatible y conectable. Comprueba que esté encendido y visible para un proxy Bluetooth o un adaptador local.",
-    "not_connectable": "La fuente de descubrimiento no permite conexiones Bluetooth activas. Usa un proxy Bluetooth ESPHome conectable o un adaptador local compatible.",
-    "not_supported": "Este modelo ALLPOWERS utiliza una revisión de protocolo no compatible."
-  },
   "config": {
+    "abort": {
+      "already_configured": "Esta estación de energía ya está configurada.",
+      "no_devices_found": "No se encontró ningún dispositivo ALLPOWERS compatible y conectable. Comprueba que esté encendido y visible para un proxy Bluetooth o un adaptador local.",
+      "not_connectable": "La fuente de descubrimiento no permite conexiones Bluetooth activas. Usa un proxy Bluetooth ESPHome conectable o un adaptador local compatible.",
+      "not_supported": "Este modelo ALLPOWERS utiliza una revisión de protocolo no compatible."
+    },
     "error": {
       "cannot_connect": "No se pudo conectar mediante ningún adaptador o proxy Bluetooth disponible.",
       "timeout": "El dispositivo se conectó, pero no devolvió una trama de estado válida antes del tiempo límite.",
