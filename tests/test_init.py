@@ -171,7 +171,7 @@ async def test_setup_entry_defers_and_cleans_up_on_initial_timeout(
     monkeypatch.setattr(
         bluetooth,
         "async_register_callback",
-        lambda *args, **kwargs: (lambda: None),
+        lambda *args, **kwargs: lambda: None,
     )
 
     with pytest.raises(ConfigEntryNotReady, match="no valid status frame"):

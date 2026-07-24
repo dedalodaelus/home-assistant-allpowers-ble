@@ -32,7 +32,7 @@ def test_concatenated_frames(status_frame: bytes, settings_frame: bytes) -> None
 def test_leading_noise_is_ignored(status_frame: bytes) -> None:
     decoder = NotificationStreamDecoder()
 
-    packets = decoder.feed(b"\x00\xFFnoise" + status_frame)
+    packets = decoder.feed(b"\x00\xffnoise" + status_frame)
 
     assert len(packets) == 1
     assert decoder.buffered_bytes == 0
@@ -41,7 +41,7 @@ def test_leading_noise_is_ignored(status_frame: bytes) -> None:
 def test_partial_header_survives_between_feeds(status_frame: bytes) -> None:
     decoder = NotificationStreamDecoder()
 
-    assert decoder.feed(b"garbage\xA5") == []
+    assert decoder.feed(b"garbage\xa5") == []
     packets = decoder.feed(status_frame[1:])
 
     assert len(packets) == 1

@@ -128,9 +128,7 @@ class AllpowersBinarySensor(AllpowersEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         """Return the current binary state."""
-        return self.entity_description.value_fn(
-            self.coordinator.data, self.coordinator
-        )
+        return self.entity_description.value_fn(self.coordinator.data, self.coordinator)
 
     @property
     def available(self) -> bool:

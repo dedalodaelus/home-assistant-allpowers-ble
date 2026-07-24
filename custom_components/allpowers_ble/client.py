@@ -461,9 +461,7 @@ class AllpowersBLEClient:
             self._last_settings_keepalive_monotonic = None
             self._output_shadow = None
             self._settings_shadow = None
-            self._initial_settings_keepalive_pending = (
-                self._options.settings_keepalive
-            )
+            self._initial_settings_keepalive_pending = self._options.settings_keepalive
             self._reported_freshness = (False, False)
 
             await client.start_notify(notify_characteristic, self._notification_handler)
@@ -703,8 +701,7 @@ class AllpowersBLEClient:
         settings_are_fresh = (
             self._connected
             and self._settings_monotonic is not None
-            and now - self._settings_monotonic
-            <= self._options.settings_stale_timeout
+            and now - self._settings_monotonic <= self._options.settings_stale_timeout
         )
         return status_is_fresh, settings_are_fresh
 

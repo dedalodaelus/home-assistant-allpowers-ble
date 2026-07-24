@@ -27,9 +27,7 @@ ECO_TIMEOUT_FROM_OPTION = {
     "four_hours": 4,
     "six_hours": 6,
 }
-OPTION_FROM_ECO_TIMEOUT = {
-    value: key for key, value in ECO_TIMEOUT_FROM_OPTION.items()
-}
+OPTION_FROM_ECO_TIMEOUT = {value: key for key, value in ECO_TIMEOUT_FROM_OPTION.items()}
 
 
 async def async_setup_entry(

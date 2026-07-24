@@ -211,9 +211,7 @@ def test_candidate_filtering_and_helpers(monkeypatch: pytest.MonkeyPatch) -> Non
     assert set(flow._discovered_devices) == {ADDRESS, "11:22:33:44:55:66"}
 
     assert config_flow._matches_device(service_info(name="R600", service_uuids=[]))
-    assert config_flow._matches_device(
-        service_info(name="AP R600", service_uuids=[])
-    )
+    assert config_flow._matches_device(service_info(name="AP R600", service_uuids=[]))
     assert config_flow._matches_device(service_info(name="AP S300", service_uuids=[]))
     assert config_flow._matches_device(
         service_info(name="ALLPOWERS X", service_uuids=[])

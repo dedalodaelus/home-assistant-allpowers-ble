@@ -38,8 +38,8 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             if entry.runtime_data.coordinator.data.status
             else None
         ),
-        command_fn=lambda entry, enabled: (
-            entry.runtime_data.client.async_set_ac(enabled)
+        command_fn=lambda entry, enabled: entry.runtime_data.client.async_set_ac(
+            enabled
         ),
     ),
     AllpowersSwitchDescription(
@@ -51,8 +51,8 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             if entry.runtime_data.coordinator.data.status
             else None
         ),
-        command_fn=lambda entry, enabled: (
-            entry.runtime_data.client.async_set_dc(enabled)
+        command_fn=lambda entry, enabled: entry.runtime_data.client.async_set_dc(
+            enabled
         ),
     ),
     AllpowersSwitchDescription(
@@ -64,8 +64,8 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             if entry.runtime_data.coordinator.data.status
             else None
         ),
-        command_fn=lambda entry, enabled: (
-            entry.runtime_data.client.async_set_light(enabled)
+        command_fn=lambda entry, enabled: entry.runtime_data.client.async_set_light(
+            enabled
         ),
     ),
     AllpowersSwitchDescription(
@@ -78,8 +78,8 @@ SWITCH_DESCRIPTIONS: tuple[AllpowersSwitchDescription, ...] = (
             if entry.runtime_data.coordinator.data.settings
             else None
         ),
-        command_fn=lambda entry, enabled: (
-            entry.runtime_data.client.async_set_eco(enabled)
+        command_fn=lambda entry, enabled: entry.runtime_data.client.async_set_eco(
+            enabled
         ),
     ),
     AllpowersSwitchDescription(

@@ -72,9 +72,7 @@ def test_coordinator_rejects_cached_or_stale_state() -> None:
     stale = replace(
         snapshot(),
         status_monotonic=monotonic() - client.options.stale_timeout - 1,
-        settings_monotonic=(
-            monotonic() - client.options.settings_stale_timeout - 1
-        ),
+        settings_monotonic=(monotonic() - client.options.settings_stale_timeout - 1),
     )
     client.set_snapshot(stale)
     assert not coordinator.status_is_fresh

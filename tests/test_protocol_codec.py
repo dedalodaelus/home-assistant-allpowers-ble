@@ -89,7 +89,7 @@ def test_decode_unknown_command(
 
 def test_reject_too_short() -> None:
     with pytest.raises(FrameTooShortError):
-        decode_notification(b"\xA5\x65")
+        decode_notification(b"\xa5\x65")
 
 
 def test_reject_header(status_frame: bytes) -> None:
@@ -142,7 +142,7 @@ def test_reject_invalid_utf8_name(
     notification_builder: Callable[[int, bytes], bytes],
 ) -> None:
     with pytest.raises(InvalidPayloadError, match="UTF-8"):
-        decode_notification(notification_builder(0x35, b"\xFF"))
+        decode_notification(notification_builder(0x35, b"\xff"))
 
 
 def test_status_request_is_exact_vendor_vector() -> None:

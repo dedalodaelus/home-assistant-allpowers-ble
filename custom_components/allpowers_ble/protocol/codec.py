@@ -305,7 +305,7 @@ class NotificationStreamDecoder:
             candidate = bytes(self._buffer[:total_length])
             try:
                 packet = decode_notification(candidate)
-            except (InvalidChecksumError, InvalidLengthError, InvalidPayloadError):
+            except InvalidChecksumError, InvalidLengthError, InvalidPayloadError:
                 del self._buffer[0]
                 self._discarded_frames += 1
                 continue

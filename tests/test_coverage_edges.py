@@ -128,9 +128,7 @@ async def test_manual_flow_shows_probe_error_and_skips_duplicates(
     assert result["errors"] == {"base": "cannot_connect"}
 
     duplicate_flow = new_flow()
-    duplicate_flow._async_current_ids = (
-        lambda include_ignore: {ADDRESS}
-    )  # type: ignore[method-assign]
+    duplicate_flow._async_current_ids = lambda include_ignore: {ADDRESS}  # type: ignore[method-assign]
     monkeypatch.setattr(
         config_flow.bluetooth,
         "async_discovered_service_info",

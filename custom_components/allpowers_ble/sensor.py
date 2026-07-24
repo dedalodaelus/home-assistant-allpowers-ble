@@ -93,18 +93,14 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         key="hardware_version",
         translation_key="hardware_version",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: (
-            data.settings.hardware_version if data.settings else None
-        ),
+        value_fn=lambda data: data.settings.hardware_version if data.settings else None,
         available_fn=lambda coordinator: coordinator.settings_are_fresh,
     ),
     AllpowersSensorDescription(
         key="firmware_version",
         translation_key="firmware_version",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: (
-            data.settings.firmware_version if data.settings else None
-        ),
+        value_fn=lambda data: data.settings.firmware_version if data.settings else None,
         available_fn=lambda coordinator: coordinator.settings_are_fresh,
     ),
     AllpowersSensorDescription(

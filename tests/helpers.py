@@ -78,9 +78,7 @@ def snapshot(
         status=status_value,
         settings=settings_value,
         status_monotonic=now - status_age if status_value is not None else None,
-        settings_monotonic=(
-            now - settings_age if settings_value is not None else None
-        ),
+        settings_monotonic=(now - settings_age if settings_value is not None else None),
         last_packet_monotonic=now,
         rssi=-61,
         advertised_name="ALLPOWERS R600",
@@ -265,12 +263,8 @@ def configured_entry(
     )
     fake_hass = hass or FakeHass()
     client = FakeIntegrationClient(state=state, options=runtime_options)
-    coordinator = AllpowersCoordinator(
-        fake_hass, entry, client
-    )  # type: ignore[arg-type]
-    entry.runtime_data = AllpowersRuntimeData(
-        client=client, coordinator=coordinator
-    )  # type: ignore[arg-type]
+    coordinator = AllpowersCoordinator(fake_hass, entry, client)  # type: ignore[arg-type]
+    entry.runtime_data = AllpowersRuntimeData(client=client, coordinator=coordinator)  # type: ignore[arg-type]
     return entry, client, coordinator, fake_hass
 
 
