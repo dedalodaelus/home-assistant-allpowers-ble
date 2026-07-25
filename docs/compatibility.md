@@ -46,7 +46,16 @@ change a rejected family to supported merely because it exposes one matching UUI
 
 ## Reporting a result
 
-Use the compatibility issue template and provide:
+Use the public issue forms to report compatibility and bugs:
+
+- Compatibility reports:
+  <https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose>
+- Bug reports:
+  <https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose>
+- Security reports (private):
+  <https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new>
+
+For a compatibility report, provide:
 
 - product model and revision from the physical label;
 - advertised Bluetooth name;

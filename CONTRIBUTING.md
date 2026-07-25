@@ -3,6 +3,13 @@
 Contributions are welcome when they keep protocol safety and compatibility
 explicit.
 
+## Support channel
+
+- Use the public issue forms for bugs and compatibility reports:
+  <https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose>
+- Use private vulnerability reporting for security issues:
+  <https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new>
+
 ## Before opening a change
 
 - Search existing issues and pull requests.
