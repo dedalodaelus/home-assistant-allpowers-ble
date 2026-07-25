@@ -21,9 +21,7 @@ def main() -> int:
 
     manifest_version = str(json.loads(MANIFEST.read_text())["version"])
     if args.tag.startswith("v"):
-        raise SystemExit(
-            f"release tags must not start with 'v': received {args.tag!r}"
-        )
+        raise SystemExit(f"release tags must not start with 'v': received {args.tag!r}")
     tag_version = args.tag
     if SEMVER.fullmatch(manifest_version) is None:
         raise SystemExit(f"manifest version is not SemVer: {manifest_version}")
