@@ -7,6 +7,9 @@
     },
     "error": {
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
+      "connect_timeout": "Bluetooth connection could not be established within the probe timeout.",
+      "gatt_unavailable": "The required ALLPOWERS BLE GATT services/characteristics are not available on this device.",
+      "notify_failed": "Could not enable status notifications from the ALLPOWERS device.",
       "timeout": "The device connected but did not return a valid status frame before the timeout.",
       "unknown": "Unexpected error while validating the device. Check the logs for details."
     },

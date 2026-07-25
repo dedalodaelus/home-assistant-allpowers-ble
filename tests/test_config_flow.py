@@ -12,6 +12,10 @@ from homeassistant.config_entries import ConfigEntry
 from custom_components.allpowers_ble import config_flow
 from custom_components.allpowers_ble.client import (
     DeviceNotFoundError,
+    ProbeConnectionTimeoutError,
+    ProbeGattValidationError,
+    ProbeNotificationSetupError,
+    ProbeStatusTimeoutError,
     UnsupportedDeviceError,
 )
 from custom_components.allpowers_ble.const import SERVICE_UUID
@@ -92,7 +96,10 @@ async def test_confirm_success_creates_entry(monkeypatch: pytest.MonkeyPatch) ->
     ("error", "expected"),
     [
         (DeviceNotFoundError("no route"), "cannot_connect"),
-        (TimeoutError(), "timeout"),
+        (ProbeConnectionTimeoutError(), "connect_timeout"),
+        (ProbeGattValidationError("missing gatt"), "gatt_unavailable"),
+        (ProbeNotificationSetupError("notify failed"), "notify_failed"),
+        (ProbeStatusTimeoutError(), "timeout"),
         (FakeBleakError("radio"), "cannot_connect"),
         (RuntimeError("unexpected"), "unknown"),
     ],
