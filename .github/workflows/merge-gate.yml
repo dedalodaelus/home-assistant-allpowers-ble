@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 50
     steps:
       - name: Wait for required checks on PR head
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
