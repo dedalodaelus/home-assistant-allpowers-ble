@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.0...0.1.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* correct manifest key alphabetical order ([724e5d1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/724e5d1cb4723c2768e15b00b746ec38cea2d3c0))
+* remove unused already_configured from Spanish translation ([78c4bb4](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/78c4bb42a107d41d6aa9cce81a31b4f1f43c1c27))
+
 ## [Unreleased]
 
 ## [0.1.0] - 2026-07-23
