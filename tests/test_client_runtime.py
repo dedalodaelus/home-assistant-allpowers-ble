@@ -461,6 +461,44 @@ async def test_disconnect_waits_for_in_flight_write(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_transport_write_releases_operation_lock() -> None:
+    class BlockingWriteClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.write_started = asyncio.Event()
+            self.release_write = asyncio.Event()
+
+        async def write_gatt_char(
+            self,
+            characteristic: object,
+            data: bytes,
+            *,
+            response: bool,
+        ) -> None:
+            self.write_started.set()
+            await self.release_write.wait()
+            await super().write_gatt_char(characteristic, data, response=response)
+
+    client = make_client()
+    fake = BlockingWriteClient()
+    client._client = fake
+    client._write_characteristic = FakeCharacteristic()
+    client._connected = True
+    client._active_session_generation = 1
+
+    first = asyncio.create_task(client.async_request_status())
+    await fake.write_started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    fake.release_write.set()
+    await client.async_request_status()
+
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
 async def test_session_generation_rejects_stale_disconnect_and_notifications(
     status_frame: bytes,
 ) -> None:
