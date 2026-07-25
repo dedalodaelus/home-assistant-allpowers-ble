@@ -685,6 +685,73 @@ def test_update_advertisement_emits_only_on_change() -> None:
     assert callbacks == 1
 
 
+def test_update_advertisement_debounces_rssi_only_changes() -> None:
+    client, _ = _connected_client()
+    callbacks = 0
+    now = 100.0
+
+    def update() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    def loop_time() -> float:
+        return now
+
+    client.set_update_callback(update)
+    client._loop_time = loop_time  # type: ignore[method-assign]
+
+    client.update_advertisement(SimpleNamespace(name="ALLPOWERS R600", rssi=-60))
+    assert callbacks == 1
+
+    now += 1
+    client.update_advertisement(SimpleNamespace(name="ALLPOWERS R600", rssi=-61))
+    assert callbacks == 1
+
+    now += 1
+    client.update_advertisement(SimpleNamespace(name="ALLPOWERS R600", rssi=-63))
+    assert callbacks == 2
+
+
+def test_update_advertisement_publishes_rssi_after_max_interval() -> None:
+    client, _ = _connected_client()
+    callbacks = 0
+    now = 10.0
+
+    def update() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    def loop_time() -> float:
+        return now
+
+    client.set_update_callback(update)
+    client._loop_time = loop_time  # type: ignore[method-assign]
+
+    client.update_advertisement(SimpleNamespace(name="ALLPOWERS R600", rssi=-60))
+    assert callbacks == 1
+
+    now += 31.0
+    client.update_advertisement(SimpleNamespace(name="ALLPOWERS R600", rssi=-61))
+    assert callbacks == 2
+
+
+def test_should_publish_rssi_handles_none_transitions() -> None:
+    client, _ = _connected_client()
+    now = 42.0
+
+    def loop_time() -> float:
+        return now
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+
+    assert client._should_publish_rssi(None) is False
+
+    client._last_published_rssi = -60
+    assert client._should_publish_rssi(None) is True
+    assert client._last_published_rssi is None
+    assert client._last_rssi_publish_monotonic == now
+
+
 @pytest.mark.asyncio
 async def test_apply_options_updates_snapshot_callback() -> None:
     client, _ = _connected_client()

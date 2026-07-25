@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
+from random import Random
 from time import monotonic
 from typing import Any
 
@@ -46,6 +47,10 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_RECONNECT_JITTER_RATIO = 0.15
+_RSSI_UPDATE_MIN_DELTA = 3
+_RSSI_UPDATE_MAX_INTERVAL = 30.0
 
 
 class AllpowersClientError(RuntimeError):
@@ -170,6 +175,9 @@ class AllpowersBLEClient:
         self._settings_blocked_until_version: int | None = None
         self._initial_settings_keepalive_pending = options.settings_keepalive
         self._reported_freshness = (False, False)
+        self._reconnect_jitter = Random(self.address).uniform
+        self._last_published_rssi: int | None = None
+        self._last_rssi_publish_monotonic: float | None = None
 
     @property
     def options(self) -> ConnectionOptions:
@@ -195,7 +203,8 @@ class AllpowersBLEClient:
             changed = True
         if rssi != self._rssi:
             self._rssi = rssi
-            changed = True
+            if self._should_publish_rssi(rssi):
+                changed = True
         if changed:
             self._emit_update()
 
@@ -503,7 +512,7 @@ class AllpowersBLEClient:
 
             if self._stop_event.is_set():
                 break
-            await self._sleep_until_retry(delay)
+            await self._sleep_until_retry(self._retry_delay_with_jitter(delay))
             delay = min(delay * 2, self._options.reconnect_max_delay)
 
     async def _connect_once(self) -> None:
@@ -905,6 +914,43 @@ class AllpowersBLEClient:
 
     def _loop_time(self) -> float:
         return monotonic()
+
+    def _retry_delay_with_jitter(self, delay: float) -> float:
+        """Return a bounded reconnect delay with symmetric jitter."""
+        bounded_delay = min(max(0.0, delay), self._options.reconnect_max_delay)
+        jitter_span = bounded_delay * _RECONNECT_JITTER_RATIO
+        jitter = self._reconnect_jitter(-jitter_span, jitter_span)
+        return min(
+            max(0.0, bounded_delay + jitter),
+            self._options.reconnect_max_delay,
+        )
+
+    def _should_publish_rssi(self, rssi: int | None) -> bool:
+        """Throttle RSSI-only updates while preserving meaningful changes."""
+        if rssi is None:
+            should_publish = self._last_published_rssi is not None
+            if should_publish:
+                self._last_published_rssi = None
+                self._last_rssi_publish_monotonic = self._loop_time()
+            return should_publish
+
+        now = self._loop_time()
+        if self._last_published_rssi is None:
+            self._last_published_rssi = rssi
+            self._last_rssi_publish_monotonic = now
+            return True
+
+        if abs(rssi - self._last_published_rssi) >= _RSSI_UPDATE_MIN_DELTA:
+            self._last_published_rssi = rssi
+            self._last_rssi_publish_monotonic = now
+            return True
+
+        last_publish = self._last_rssi_publish_monotonic
+        if last_publish is not None and now - last_publish >= _RSSI_UPDATE_MAX_INTERVAL:
+            self._last_published_rssi = rssi
+            self._last_rssi_publish_monotonic = now
+            return True
+        return False
 
     def _freshness(self, now: float) -> tuple[bool, bool]:
         status_is_fresh = (
