@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.1...0.1.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* Simplify error message for release tag validation ([b555d4f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/b555d4ff9092781b78bbeac97ff16fea04cd6bcd))
+
 ## [0.1.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.0...0.1.1) (2026-07-25)
 
 
