@@ -105,6 +105,8 @@ class AllpowersBLEClient:
         self._write_lock = asyncio.Lock()
         self._disconnect_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._session_generation_counter = 0
+        self._active_session_generation: int | None = None
 
         self._connected = False
         self._connected_monotonic: float | None = None
@@ -414,6 +416,7 @@ class AllpowersBLEClient:
             delay = min(delay * 2, self._options.reconnect_max_delay)
 
     async def _connect_once(self) -> None:
+        session_generation = self._activate_session_generation()
         self._statistics = replace(
             self._statistics,
             connection_attempts=self._statistics.connection_attempts + 1,
@@ -435,7 +438,7 @@ class AllpowersBLEClient:
             BleakClientWithServiceCache,
             device,
             self._advertised_name,
-            disconnected_callback=self._disconnected_callback,
+            disconnected_callback=self._make_disconnected_callback(session_generation),
             max_attempts=3,
             ble_device_callback=self._fresh_ble_device,
             use_services_cache=True,
@@ -451,8 +454,6 @@ class AllpowersBLEClient:
             # A new GATT session must never inherit parser fragments or freshness
             # timestamps from a previous connection. Cached values remain available
             # for diagnostics, but cannot authorize writes until refreshed.
-            self._decoder = NotificationStreamDecoder()
-            self._ready_event.clear()
             self._status_monotonic = None
             self._settings_monotonic = None
             self._last_packet_monotonic = None
@@ -463,7 +464,10 @@ class AllpowersBLEClient:
             self._initial_settings_keepalive_pending = self._options.settings_keepalive
             self._reported_freshness = (False, False)
 
-            await client.start_notify(notify_characteristic, self._notification_handler)
+            await client.start_notify(
+                notify_characteristic,
+                self._make_notification_handler(session_generation, client),
+            )
         except Exception:
             try:
                 async with asyncio.timeout(WRITE_TIMEOUT):
@@ -488,6 +492,8 @@ class AllpowersBLEClient:
         async with self._disconnect_lock:
             client = self._client
             was_connected = self._connected
+            self._active_session_generation = None
+            self._ready_event.clear()
             self._client = None
             self._write_characteristic = None
             self._connected = False
@@ -523,6 +529,47 @@ class AllpowersBLEClient:
         if loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(self._disconnect_event.set)
+
+    def _activate_session_generation(self) -> int:
+        """Start a new BLE session generation and reset session-scoped state."""
+        self._session_generation_counter += 1
+        self._active_session_generation = self._session_generation_counter
+        self._decoder = NotificationStreamDecoder()
+        self._ready_event.clear()
+        return self._session_generation_counter
+
+    def _make_disconnected_callback(
+        self,
+        generation: int,
+    ) -> Callable[[BleakClient], None]:
+        def _callback(client: BleakClient) -> None:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            if generation != self._active_session_generation:
+                return
+            if self._client is not client:
+                return
+            loop.call_soon_threadsafe(self._disconnect_event.set)
+
+        return _callback
+
+    def _make_notification_handler(
+        self,
+        generation: int,
+        expected_client: BleakClient,
+    ) -> Callable[[BleakGATTCharacteristic, bytearray], None]:
+        def _handler(
+            characteristic: BleakGATTCharacteristic,
+            data: bytearray,
+        ) -> None:
+            if generation != self._active_session_generation:
+                return
+            if self._client is not expected_client:
+                return
+            self._notification_handler(characteristic, data)
+
+        return _handler
 
     def _notification_handler(
         self,
