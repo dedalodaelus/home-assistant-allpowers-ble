@@ -7,6 +7,9 @@
     },
     "error": {
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
+      "connect_timeout": "Connection setup exceeded the probe timeout before a BLE session could be established.",
+      "gatt_unavailable": "The device connected but the required ALLPOWERS GATT service or characteristics were unavailable.",
+      "notify_failed": "The device connected but notification setup failed before telemetry could be validated.",
       "timeout": "The device connected but did not return a valid status frame before the timeout.",
       "unknown": "Unexpected error while validating the device. Check the logs for details."
     },

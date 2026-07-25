@@ -14,6 +14,9 @@ from custom_components.allpowers_ble.client import (
     AllpowersBLEClient,
     DeviceNotFoundError,
     NotConnectedError,
+    ProbeConnectionTimeoutError,
+    ProbeGattValidationError,
+    ProbeNotificationSetupError,
     UnsupportedDeviceError,
 )
 from custom_components.allpowers_ble.options import ConnectionOptions
@@ -769,6 +772,18 @@ class ProbeClient(FakeClient):
         await super().disconnect()
 
 
+class ProbeClientWithStopNotify(ProbeClient):
+    """Probe client variant that records stop_notify cleanup calls."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        super().__init__(frames)
+        self.stop_notify_calls = 0
+
+    async def stop_notify(self, characteristic: object) -> None:
+        del characteristic
+        self.stop_notify_calls += 1
+
+
 @pytest.mark.asyncio
 async def test_probe_success_and_cleanup(
     monkeypatch: pytest.MonkeyPatch,
@@ -869,7 +884,7 @@ async def test_probe_rejects_model_route_gatt_and_timeout(
         return invalid_gatt
 
     monkeypatch.setattr(client_module, "establish_connection", establish_invalid)
-    with pytest.raises(UnsupportedDeviceError):
+    with pytest.raises(ProbeGattValidationError):
         await client_module.async_probe_device(
             FakeHass(),  # type: ignore[arg-type]
             address="AA:BB:CC:DD:EE:FF",
@@ -893,3 +908,170 @@ async def test_probe_rejects_model_route_gatt_and_timeout(
             timeout=0.001,
         )
     assert silent.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_connection_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+
+    async def establish_slow(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        await asyncio.sleep(0.02)
+        return FakeClient()
+
+    monkeypatch.setattr(client_module, "establish_connection", establish_slow)
+    with pytest.raises(ProbeConnectionTimeoutError):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_notification_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NotifyFailClient(ProbeClient):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            del characteristic, callback
+            raise FakeBleakError("notify failed")
+
+    failing = NotifyFailClient([])
+
+    async def establish_notify_fail(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return failing
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_notify_fail)
+
+    with pytest.raises(ProbeNotificationSetupError):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.05,
+        )
+    assert failing.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_notification_setup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NotifyTimeoutClient(ProbeClient):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            del characteristic, callback
+            await asyncio.sleep(0.02)
+
+    timing_out = NotifyTimeoutClient([])
+
+    async def establish_notify_timeout(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return timing_out
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_notify_timeout)
+
+    with pytest.raises(ProbeNotificationSetupError, match="timed out"):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+    assert timing_out.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["timeout", "ble_error"])
+async def test_probe_reports_status_request_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    class WriteFailureProbeClient(ProbeClient):
+        async def write_gatt_char(
+            self,
+            characteristic: object,
+            data: bytes,
+            *,
+            response: bool,
+        ) -> None:
+            del characteristic, data, response
+            if mode == "timeout":
+                await asyncio.sleep(0.02)
+                return
+            raise FakeBleakError("write failed")
+
+    failing = WriteFailureProbeClient([])
+
+    async def establish_write_failure(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return failing
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_write_failure)
+
+    if mode == "timeout":
+        error_match = "status request timed out"
+    else:
+        error_match = "status request failed"
+
+    with pytest.raises(ProbeNotificationSetupError, match=error_match):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+    assert failing.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_cleanup_stops_notifications_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+) -> None:
+    fake = ProbeClientWithStopNotify([status_frame])
+
+    async def establish(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+
+    result = await client_module.async_probe_device(
+        FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS R600",
+        timeout=0.1,
+    )
+
+    assert result.status.battery_percent == 73
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1

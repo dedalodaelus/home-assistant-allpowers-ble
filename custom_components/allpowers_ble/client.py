@@ -60,6 +60,22 @@ class UnsupportedDeviceError(AllpowersClientError):
     """Raised when the advertised device does not expose the expected GATT API."""
 
 
+class ProbeConnectionTimeoutError(AllpowersClientError, TimeoutError):
+    """Raised when probe connection setup exceeds the configured deadline."""
+
+
+class ProbeStatusTimeoutError(AllpowersClientError, TimeoutError):
+    """Raised when probe status telemetry is not received before the deadline."""
+
+
+class ProbeGattValidationError(AllpowersClientError):
+    """Raised when probe GATT validation fails for a connectable device."""
+
+
+class ProbeNotificationSetupError(AllpowersClientError):
+    """Raised when probe notification subscription cannot be established."""
+
+
 class NotConnectedError(AllpowersClientError):
     """Raised when a command is attempted without an active GATT connection."""
 
@@ -955,18 +971,33 @@ async def async_probe_device(
             f"No connectable Bluetooth adapter or proxy can reach {normalized_address}"
         )
 
-    client = await establish_connection(
-        BleakClientWithServiceCache,
-        device,
-        advertised_name,
-        max_attempts=3,
-        ble_device_callback=fresh_device,
-        use_services_cache=True,
-    )
+    deadline = monotonic() + timeout
+
+    def remaining(stage: str) -> float:
+        del stage
+        return max(0.001, deadline - monotonic())
+
+    try:
+        async with asyncio.timeout(remaining("connection")):
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                device,
+                advertised_name,
+                max_attempts=3,
+                ble_device_callback=fresh_device,
+                use_services_cache=True,
+            )
+    except TimeoutError as ex:
+        raise ProbeConnectionTimeoutError(
+            f"Probe connection timed out for {normalized_address}"
+        ) from ex
+
     decoder = NotificationStreamDecoder()
     status: StatusData | None = None
     settings: SettingsData | None = None
     status_event = asyncio.Event()
+    notify_characteristic: BleakGATTCharacteristic | None = None
+    notify_started = False
 
     def notification_handler(
         characteristic: BleakGATTCharacteristic,
@@ -982,19 +1013,62 @@ async def async_probe_device(
                 settings = packet
 
     try:
-        notify_characteristic, write_characteristic = _required_characteristics(client)
-        await client.start_notify(notify_characteristic, notification_handler)
-        await client.write_gatt_char(
-            write_characteristic, encode_status_request(), response=False
-        )
-        async with asyncio.timeout(timeout):
-            await status_event.wait()
+        try:
+            notify_characteristic, write_characteristic = _required_characteristics(
+                client
+            )
+        except UnsupportedDeviceError as ex:
+            raise ProbeGattValidationError(str(ex)) from ex
+
+        try:
+            async with asyncio.timeout(remaining("notify")):
+                await client.start_notify(notify_characteristic, notification_handler)
+            notify_started = True
+        except TimeoutError as ex:
+            raise ProbeNotificationSetupError(
+                f"Probe notification setup timed out for {normalized_address}"
+            ) from ex
+        except BLEAK_RETRY_EXCEPTIONS as ex:
+            raise ProbeNotificationSetupError(
+                f"Probe notification setup failed for {normalized_address}: {ex}"
+            ) from ex
+
+        try:
+            async with asyncio.timeout(remaining("status_request")):
+                await client.write_gatt_char(
+                    write_characteristic, encode_status_request(), response=False
+                )
+        except TimeoutError as ex:
+            raise ProbeNotificationSetupError(
+                f"Probe status request timed out for {normalized_address}"
+            ) from ex
+        except BLEAK_RETRY_EXCEPTIONS as ex:
+            raise ProbeNotificationSetupError(
+                f"Probe status request failed for {normalized_address}: {ex}"
+            ) from ex
+
+        try:
+            async with asyncio.timeout(remaining("status")):
+                await status_event.wait()
+        except TimeoutError as ex:
+            raise ProbeStatusTimeoutError(
+                f"Probe status timed out for {normalized_address}"
+            ) from ex
+
         if status is None:  # pragma: no cover - event invariant
             raise TimeoutError("Status event was set without a status frame")
         return ProbeResult(status=status, settings=settings, model_support=support)
     finally:
         if client.is_connected:
             try:
+                stop_notify = getattr(client, "stop_notify", None)
+                if (
+                    notify_started
+                    and notify_characteristic is not None
+                    and callable(stop_notify)
+                ):
+                    async with asyncio.timeout(WRITE_TIMEOUT):
+                        await stop_notify(notify_characteristic)
                 async with asyncio.timeout(WRITE_TIMEOUT):
                     await client.disconnect()
             except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS):

@@ -21,6 +21,10 @@ from homeassistant.core import callback
 
 from .client import (
     DeviceNotFoundError,
+    ProbeConnectionTimeoutError,
+    ProbeGattValidationError,
+    ProbeNotificationSetupError,
+    ProbeStatusTimeoutError,
     UnsupportedDeviceError,
     async_probe_device,
 )
@@ -193,7 +197,19 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
             _LOGGER.debug("No connectable path during setup: %s", ex)
             self.context["probe_error"] = "cannot_connect"
             return None
-        except TimeoutError:
+        except ProbeConnectionTimeoutError as ex:
+            _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
+            self.context["probe_error"] = "connect_timeout"
+            return None
+        except ProbeGattValidationError as ex:
+            _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
+            self.context["probe_error"] = "gatt_unavailable"
+            return None
+        except ProbeNotificationSetupError as ex:
+            _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
+            self.context["probe_error"] = "notify_failed"
+            return None
+        except ProbeStatusTimeoutError:
             self.context["probe_error"] = "timeout"
             return None
         except BLEAK_RETRY_EXCEPTIONS as ex:
