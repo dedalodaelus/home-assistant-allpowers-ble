@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import importlib
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +85,46 @@ async def test_sequential_output_commands_use_shadow_snapshot() -> None:
 
     assert fake.writes[0][7] == 0x22
     assert fake.writes[1][7] == 0x23
+
+
+@pytest.mark.asyncio
+async def test_stale_status_notification_does_not_clear_pending_output_transaction(
+    status_frame: bytes,
+) -> None:
+    client, fake = _connected_client()
+    client._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=True)
+    client._status_monotonic = asyncio.get_running_loop().time()
+
+    await client.async_set_ac(True)
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    await client.async_set_dc(True)
+
+    assert fake.writes[0][7] == 0x22
+    assert fake.writes[1][7] == 0x23
+
+
+@pytest.mark.asyncio
+async def test_output_timeout_blocks_dependent_writes_until_fresh_status(
+    status_frame: bytes,
+) -> None:
+    client, fake = _connected_client()
+    client._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=True)
+    client._status_monotonic = asyncio.get_running_loop().time()
+
+    await client.async_set_ac(True)
+    pending = client._pending_output_transaction
+    assert pending is not None
+    client._pending_output_transaction = replace(
+        pending,
+        confirm_deadline_monotonic=asyncio.get_running_loop().time() - 1,
+    )
+
+    with pytest.raises(client_module.StateUnavailableError, match="timed out"):
+        await client.async_set_dc(True)
+
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    await client.async_set_dc(True)
+    assert len(fake.writes) == 2
 
 
 def test_snapshot_guards_reject_disconnected_state() -> None:
@@ -229,6 +271,214 @@ async def test_write_error_updates_statistics_and_reconnect_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_command_builders_require_active_session_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _connected_client()
+    client._status = _status()
+    client._settings = _settings()
+    client._status_monotonic = asyncio.get_running_loop().time()
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    client._active_session_generation = None
+
+    async def no_write(_frame: bytes) -> None:
+        return None
+
+    monkeypatch.setattr(client, "_write_frame_unlocked", no_write)
+
+    with pytest.raises(NotConnectedError, match="not connected"):
+        await client.async_set_ac(True)
+    with pytest.raises(NotConnectedError, match="not connected"):
+        await client.async_set_eco(True)
+    with pytest.raises(NotConnectedError, match="not connected"):
+        await client.async_send_settings_keepalive()
+
+
+def test_ambiguous_blocked_state_rejects_writes_until_next_version() -> None:
+    client, _ = _connected_client()
+    now = monotonic()
+    client._status = _status()
+    client._status_monotonic = now
+    client._status_version = 1
+    client._output_blocked_until_version = 2
+
+    with pytest.raises(client_module.StateUnavailableError, match="ambiguous"):
+        client._safe_output_snapshot()
+
+    client._settings = _settings()
+    client._settings_monotonic = now
+    client._settings_version = 1
+    client._settings_blocked_until_version = 2
+
+    with pytest.raises(client_module.StateUnavailableError, match="ambiguous"):
+        client._safe_settings_snapshot()
+
+
+def test_notification_handler_updates_pending_transaction_error_paths(
+    status_frame: bytes,
+    settings_frame: bytes,
+) -> None:
+    client, _ = _connected_client()
+    now = monotonic()
+
+    client._pending_output_transaction = client_module.PendingOutputTransaction(
+        session_generation=2,
+        source_version=1,
+        target_dc=True,
+        target_ac=True,
+        target_light=True,
+        sent_monotonic=now,
+        confirm_deadline_monotonic=now + 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert client._pending_output_transaction is None
+
+    client._pending_output_transaction = client_module.PendingOutputTransaction(
+        session_generation=1,
+        source_version=1,
+        target_dc=True,
+        target_ac=True,
+        target_light=True,
+        sent_monotonic=now - 20,
+        confirm_deadline_monotonic=now - 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert client._pending_output_transaction is None
+    assert client._output_blocked_until_version is not None
+
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=2,
+        source_version=1,
+        target=_settings(),
+        sent_monotonic=now,
+        confirm_deadline_monotonic=now + 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert client._pending_settings_transaction is None
+
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=1,
+        target=_settings(),
+        sent_monotonic=now - 20,
+        confirm_deadline_monotonic=now - 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert client._pending_settings_transaction is None
+    assert client._settings_blocked_until_version is not None
+
+
+def test_notification_handler_clears_pending_transactions_on_exact_match(
+    status_frame: bytes,
+    settings_frame: bytes,
+) -> None:
+    client, _ = _connected_client()
+    now = monotonic()
+
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert client._status is not None
+    client._pending_output_transaction = client_module.PendingOutputTransaction(
+        session_generation=1,
+        source_version=client._status_version,
+        target_dc=client._status.dc_enabled,
+        target_ac=client._status.ac_enabled,
+        target_light=client._status.light_enabled,
+        sent_monotonic=now,
+        confirm_deadline_monotonic=now + 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert client._pending_output_transaction is None
+
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert client._settings is not None
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=client._settings_version,
+        target=client._settings,
+        sent_monotonic=now,
+        confirm_deadline_monotonic=now + 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert client._pending_settings_transaction is None
+
+
+def test_notification_handler_keeps_pending_settings_when_confirmation_mismatches(
+    settings_frame: bytes,
+) -> None:
+    client, _ = _connected_client()
+    now = monotonic()
+
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=1,
+        target=_settings(raw_flags=0xFF),
+        sent_monotonic=now,
+        confirm_deadline_monotonic=now + 10,
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client._pending_settings_transaction is not None
+
+
+@pytest.mark.asyncio
+async def test_callback_factories_ignore_stale_generation_and_client_mismatch(
+    status_frame: bytes,
+) -> None:
+    client, _ = _connected_client()
+    loop = asyncio.get_running_loop()
+    first = FakeClient()
+    second = FakeClient()
+
+    client._loop = loop
+    client._client = first
+    client._active_session_generation = 1
+
+    stale_disconnect = client._make_disconnected_callback(2)
+    stale_disconnect(first)
+    await asyncio.sleep(0)
+    assert not client._disconnect_event.is_set()
+
+    wrong_client_disconnect = client._make_disconnected_callback(1)
+    wrong_client_disconnect(second)
+    await asyncio.sleep(0)
+    assert not client._disconnect_event.is_set()
+
+    stale_notify = client._make_notification_handler(2, first)
+    stale_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client._status is None
+
+    wrong_client_notify = client._make_notification_handler(1, second)
+    wrong_client_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client._status is None
+
+
+def test_callback_factory_ignores_disconnect_when_loop_is_missing() -> None:
+    client, _ = _connected_client()
+    client._loop = None
+    client._client = FakeClient()
+    client._active_session_generation = 1
+
+    callback = client._make_disconnected_callback(1)
+    callback(client._client)
+
+    assert not client._disconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_session_change_after_transport_write() -> None:
+    client, fake = _connected_client()
+
+    async def write_and_swap(*args, **kwargs) -> None:
+        del args, kwargs
+        client._active_session_generation = 2
+
+    fake.write_gatt_char = write_and_swap  # type: ignore[method-assign]
+
+    with pytest.raises(NotConnectedError, match="session changed"):
+        await client._write_frame_unlocked(b"test")
+
+
+@pytest.mark.asyncio
 async def test_notification_updates_status_settings_and_counters(
     status_frame: bytes,
     settings_frame: bytes,
@@ -272,6 +522,42 @@ async def test_device_name_notification_updates_name(notification_builder) -> No
     client._notification_handler(FakeCharacteristic(), bytearray(frame))
 
     assert client.advertised_name == "Living room R600"
+
+
+@pytest.mark.asyncio
+async def test_device_name_notification_ignores_empty_name(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    original_name = client.advertised_name
+    frame = notification_builder(0x35, b"\x00\x00")
+
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    assert client.advertised_name == original_name
+
+
+def test_notification_handler_without_packets_or_discards_skips_emit_update() -> None:
+    class IdleDecoder:
+        def __init__(self) -> None:
+            self.discarded_frames = 0
+
+        def feed(self, data: bytearray) -> list[object]:
+            del data
+            return []
+
+    client, _ = _connected_client()
+    callbacks = 0
+
+    def update() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    client._decoder = IdleDecoder()  # type: ignore[assignment]
+    client.set_update_callback(update)
+    client._notification_handler(FakeCharacteristic(), bytearray(b"noop"))
+
+    assert callbacks == 0
 
 
 def test_update_advertisement_emits_only_on_change() -> None:
