@@ -127,6 +127,17 @@ async def test_start_is_idempotent_and_stop_cancels_owned_tasks(
 
 
 @pytest.mark.asyncio
+async def test_stop_without_running_tasks_is_safe() -> None:
+    client = make_client()
+
+    await client.async_stop()
+
+    assert client._connection_task is None
+    assert client._maintenance_task is None
+    assert client._refresh_task is None
+
+
+@pytest.mark.asyncio
 async def test_wait_ready_apply_options_reconnect_and_wrappers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,6 +151,11 @@ async def test_wait_ready_apply_options_reconnect_and_wrappers(
     disabled = ConnectionOptions(settings_keepalive=False)
     await client.async_apply_options(disabled)
     assert not client._initial_settings_keepalive_pending
+
+    unchanged = make_client(ConnectionOptions(settings_keepalive=True))
+    unchanged._initial_settings_keepalive_pending = False
+    await unchanged.async_apply_options(ConnectionOptions(settings_keepalive=True))
+    assert not unchanged._initial_settings_keepalive_pending
 
     disconnected = 0
 
@@ -165,33 +181,50 @@ async def test_wait_ready_apply_options_reconnect_and_wrappers(
 
 
 @pytest.mark.asyncio
-async def test_expired_shadows_fall_back_to_fresh_snapshots(
+async def test_expired_pending_transactions_require_fresh_updates(
     monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+    settings_frame: bytes,
 ) -> None:
     client = make_client()
     fake = connect_fake(client)
     now = monotonic()
     client._status = status(dc_enabled=False, ac_enabled=False, light_enabled=False)
     client._status_monotonic = now
-    client._output_shadow = (
-        True,
-        True,
-        True,
-        now - client_module.OUTPUT_SHADOW_TIMEOUT - 1,
+    client._status_version = 1
+    client._pending_output_transaction = client_module.PendingOutputTransaction(
+        session_generation=1,
+        source_version=1,
+        target_dc=True,
+        target_ac=True,
+        target_light=True,
+        sent_monotonic=now - 10,
+        confirm_deadline_monotonic=now - 1,
     )
     client._settings = settings(raw_flags=0xA0)
     client._settings_monotonic = now
-    client._settings_shadow = (
-        settings(raw_flags=0xFF),
-        now - client_module.SETTINGS_SHADOW_TIMEOUT - 1,
+    client._settings_version = 1
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=1,
+        target=settings(raw_flags=0xFF),
+        sent_monotonic=now - 10,
+        confirm_deadline_monotonic=now - 1,
     )
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+
+    with pytest.raises(StateUnavailableError, match="timed out"):
+        await client.async_set_ac(True)
+    with pytest.raises(StateUnavailableError, match="timed out"):
+        await client.async_set_eco(True)
+
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
 
     await client.async_set_ac(True)
     await client.async_set_eco(True)
 
-    assert fake.writes[0][7] == 0x02
-    assert fake.writes[1][7] == 0xA1
+    assert len(fake.writes) == 2
 
 
 @pytest.mark.asyncio
@@ -261,6 +294,16 @@ async def test_connection_loop_propagates_cancellation(
 
 
 @pytest.mark.asyncio
+async def test_connection_loop_exits_immediately_when_stop_already_set() -> None:
+    client = make_client()
+    client._stop_event.set()
+
+    await client._connection_loop()
+
+    assert client.snapshot().statistics.connection_attempts == 0
+
+
+@pytest.mark.asyncio
 async def test_connect_once_success_missing_route_and_unsupported_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -323,9 +366,24 @@ async def test_disconnect_cancels_refresh_and_tolerates_ble_error() -> None:
     client._client = fake
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
+    client._active_session_generation = 1
     client._ready_event.set()
-    client._output_shadow = (True, True, True, monotonic())
-    client._settings_shadow = (settings(), monotonic())
+    client._pending_output_transaction = client_module.PendingOutputTransaction(
+        session_generation=1,
+        source_version=1,
+        target_dc=True,
+        target_ac=True,
+        target_light=True,
+        sent_monotonic=monotonic(),
+        confirm_deadline_monotonic=monotonic() + 10,
+    )
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=1,
+        target=settings(),
+        sent_monotonic=monotonic(),
+        confirm_deadline_monotonic=monotonic() + 10,
+    )
     refresh = asyncio.create_task(asyncio.sleep(100))
     client._refresh_task = refresh
 
@@ -335,8 +393,8 @@ async def test_disconnect_cancels_refresh_and_tolerates_ble_error() -> None:
     assert client._client is None
     assert not client.snapshot().connected
     assert not client._ready_event.is_set()
-    assert client._output_shadow is None
-    assert client._settings_shadow is None
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
 
 
 @pytest.mark.asyncio
@@ -637,6 +695,7 @@ async def test_probe_success_and_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     status_frame: bytes,
     settings_frame: bytes,
+    notification_builder,
 ) -> None:
     fake = ProbeClient([settings_frame, status_frame])
 
@@ -659,6 +718,21 @@ async def test_probe_success_and_cleanup(
     )
     assert result.status.battery_percent == 73
     assert result.settings is not None
+
+    mixed = ProbeClient([notification_builder(0x35, b"ProbeName"), status_frame])
+
+    async def establish_mixed(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return mixed
+
+    monkeypatch.setattr(client_module, "establish_connection", establish_mixed)
+    result = await client_module.async_probe_device(
+        FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS R600",
+        timeout=0.1,
+    )
+    assert result.status.battery_percent == 73
     assert result.model_support.verified
     assert fake.disconnect_calls == 1
 
