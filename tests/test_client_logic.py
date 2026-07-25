@@ -162,6 +162,36 @@ async def test_settings_keepalive_reuses_raw_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_output_write_does_not_update_settings_keepalive_activity() -> None:
+    options = ConnectionOptions(settings_keepalive=True)
+    client, _ = _connected_client(options)
+    client._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=False)
+    client._status_monotonic = asyncio.get_running_loop().time()
+    client._initial_settings_keepalive_pending = True
+    client._last_settings_keepalive_monotonic = None
+
+    await client.async_set_ac(True)
+
+    assert client._initial_settings_keepalive_pending is True
+    assert client._last_settings_keepalive_monotonic is None
+
+
+@pytest.mark.asyncio
+async def test_settings_write_updates_settings_keepalive_activity() -> None:
+    options = ConnectionOptions(settings_keepalive=True)
+    client, _ = _connected_client(options)
+    client._settings = _settings(eco_enabled=False)
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    client._initial_settings_keepalive_pending = True
+    client._last_settings_keepalive_monotonic = None
+
+    await client.async_set_eco(True)
+
+    assert client._initial_settings_keepalive_pending is False
+    assert client._last_settings_keepalive_monotonic is not None
+
+
+@pytest.mark.asyncio
 async def test_status_request_records_write() -> None:
     client, fake = _connected_client()
 
