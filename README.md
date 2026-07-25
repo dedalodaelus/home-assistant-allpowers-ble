@@ -127,9 +127,10 @@ therefore applies the following invariants:
    command preserving the other output states.
 2. ECO, work mode, car charger, and ECO timeout changes require a fresh settings
    snapshot and preserve every unrelated raw flag bit.
-3. A short-lived in-memory shadow serializes consecutive UI commands while the
-   device is preparing its next notification.
-4. Shadows and freshness are invalidated on every disconnect and new GATT session.
+3. Each write starts a versioned command transaction and waits for a matching
+   on-device confirmation before the next write can reuse that state.
+4. Pending transactions and freshness are invalidated on every disconnect and
+   new GATT session.
 5. Writes are rejected rather than guessed when the required snapshot is missing,
    stale, or disconnected.
 
@@ -143,7 +144,7 @@ Defaults are deliberately conservative and match observed R600 behavior.
 |---|---:|---|
 | Status request interval | 20 s | 10–120 s |
 | Telemetry stale timeout | 30 s | Must exceed the status interval |
-| Protocol watchdog | 45 s | Must exceed the stale timeout |
+| Telemetry and transport watchdog timeout | 45 s | Must exceed the stale timeout |
 | Maximum reconnect delay | 60 s | 5–300 s |
 | Settings stale timeout | 600 s | 60–3600 s |
 | Settings keepalive | Off | Experimental; disabled unless explicitly enabled |
@@ -158,7 +159,8 @@ Download diagnostics from the integration or device page in Home Assistant. The
 payload includes:
 
 - connection attempts, successful connections, disconnects, and reconnects;
-- notification, valid-packet, protocol-error, write-error, and watchdog counters;
+- notification, valid-packet, protocol-error, write-error, and watchdog counters
+   (total, telemetry, and transport);
 - last connection, disconnection, packet, and error information;
 - current cached protocol state and freshness metadata;
 - active options and model-support classification.
