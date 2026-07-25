@@ -13,6 +13,7 @@
 ## Code and metadata
 
 - `manifest.json` version is valid SemVer.
+- Release tags use plain `X.Y.Z` (no `v` prefix).
 - Minimum Home Assistant version is still justified.
 - English and Spanish translation trees match `strings.json`.
 - Compatibility documentation distinguishes verified and experimental hardware.

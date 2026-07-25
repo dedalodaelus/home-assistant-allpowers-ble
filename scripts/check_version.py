@@ -13,11 +13,6 @@ MANIFEST = ROOT / "custom_components" / "allpowers_ble" / "manifest.json"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].+)?$")
 
 
-def normalized_tag(tag: str) -> str:
-    """Strip the conventional leading ``v`` from a release tag."""
-    return tag[1:] if tag.startswith("v") else tag
-
-
 def main() -> int:
     """Compare the supplied tag with ``manifest.json``."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,7 +20,11 @@ def main() -> int:
     args = parser.parse_args()
 
     manifest_version = str(json.loads(MANIFEST.read_text())["version"])
-    tag_version = normalized_tag(args.tag)
+    if args.tag.startswith("v"):
+        raise SystemExit(
+            f"release tags must not start with 'v': received {args.tag!r}"
+        )
+    tag_version = args.tag
     if SEMVER.fullmatch(manifest_version) is None:
         raise SystemExit(f"manifest version is not SemVer: {manifest_version}")
     if tag_version != manifest_version:
