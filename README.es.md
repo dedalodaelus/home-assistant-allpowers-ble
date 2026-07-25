@@ -171,6 +171,13 @@ Para construir el ZIP de una release HACS:
 python scripts/build_release.py --clean
 ```
 
+## Soporte y reportes
+
+- Reporta fallos y compatibilidad de modelos con los formularios públicos de
+   [GitHub Issues](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose)
+- Reporta vulnerabilidades de forma privada mediante
+   [GitHub Security Advisories](https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new)
+
 El proyecto es una integración personalizada mantenida por la comunidad. No forma
 parte de Home Assistant Core ni ha sido auditado o soportado por el proyecto Home
 Assistant.

@@ -25,9 +25,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     COMMAND_REFRESH_DELAY,
     NOTIFY_UUID,
-    OUTPUT_SHADOW_TIMEOUT,
     SERVICE_UUID,
-    SETTINGS_SHADOW_TIMEOUT,
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
@@ -75,6 +73,30 @@ class ProbeResult:
     model_support: ModelSupport
 
 
+@dataclass(frozen=True, slots=True)
+class PendingOutputTransaction:
+    """Pending output command awaiting explicit on-device confirmation."""
+
+    session_generation: int
+    source_version: int
+    target_dc: bool
+    target_ac: bool
+    target_light: bool
+    sent_monotonic: float
+    confirm_deadline_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class PendingSettingsTransaction:
+    """Pending settings command awaiting explicit on-device confirmation."""
+
+    session_generation: int
+    source_version: int
+    target: SettingsData
+    sent_monotonic: float
+    confirm_deadline_monotonic: float
+
+
 class AllpowersBLEClient:
     """Maintain one active connection and serialize safe protocol commands."""
 
@@ -102,9 +124,11 @@ class AllpowersBLEClient:
         self._stop_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
         self._ready_event = asyncio.Event()
-        self._write_lock = asyncio.Lock()
-        self._disconnect_lock = asyncio.Lock()
+        # One lock owns every operation that mutates or uses the active client.
+        self._operation_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._session_generation_counter = 0
+        self._active_session_generation: int | None = None
 
         self._connected = False
         self._connected_monotonic: float | None = None
@@ -112,6 +136,8 @@ class AllpowersBLEClient:
         self._settings: SettingsData | None = None
         self._status_monotonic: float | None = None
         self._settings_monotonic: float | None = None
+        self._status_version = 0
+        self._settings_version = 0
         self._last_packet_monotonic: float | None = None
         self._last_status_request_monotonic: float | None = None
         self._last_settings_keepalive_monotonic: float | None = None
@@ -122,8 +148,10 @@ class AllpowersBLEClient:
         self._last_error: str | None = None
         self._statistics = ConnectionStatistics()
 
-        self._output_shadow: tuple[bool, bool, bool, float] | None = None
-        self._settings_shadow: tuple[SettingsData, float] | None = None
+        self._pending_output_transaction: PendingOutputTransaction | None = None
+        self._pending_settings_transaction: PendingSettingsTransaction | None = None
+        self._output_blocked_until_version: int | None = None
+        self._settings_blocked_until_version: int | None = None
         self._initial_settings_keepalive_pending = options.settings_keepalive
         self._reported_freshness = (False, False)
 
@@ -229,7 +257,7 @@ class AllpowersBLEClient:
 
     async def async_request_status(self) -> None:
         """Request a fresh status notification."""
-        async with self._write_lock:
+        async with self._operation_lock:
             await self._write_frame_unlocked(encode_status_request())
             self._last_status_request_monotonic = self._loop_time()
 
@@ -258,7 +286,7 @@ class AllpowersBLEClient:
         ac: bool | None = None,
         light: bool | None = None,
     ) -> None:
-        async with self._write_lock:
+        async with self._operation_lock:
             current_dc, current_ac, current_light = self._safe_output_snapshot()
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
@@ -271,8 +299,18 @@ class AllpowersBLEClient:
                 )
             )
             now = self._loop_time()
-            self._output_shadow = (target_dc, target_ac, target_light, now)
-            self._record_settings_write_activity(now)
+            active_generation = self._active_session_generation
+            if active_generation is None:
+                raise NotConnectedError("The ALLPOWERS device is not connected")
+            self._pending_output_transaction = PendingOutputTransaction(
+                session_generation=active_generation,
+                source_version=self._output_source_version(),
+                target_dc=target_dc,
+                target_ac=target_ac,
+                target_light=target_light,
+                sent_monotonic=now,
+                confirm_deadline_monotonic=now + self._options.stale_timeout,
+            )
         self._schedule_status_refresh()
 
     async def async_set_eco(self, enabled: bool) -> None:
@@ -303,7 +341,7 @@ class AllpowersBLEClient:
         car_charger_enabled: bool | None = None,
         eco_timeout_hours: int | None = None,
     ) -> None:
-        async with self._write_lock:
+        async with self._operation_lock:
             current = self._safe_settings_snapshot()
             target = updated_settings(
                 current,
@@ -314,17 +352,35 @@ class AllpowersBLEClient:
             )
             await self._write_frame_unlocked(encode_settings_control(target))
             now = self._loop_time()
-            self._settings_shadow = (target, now)
+            active_generation = self._active_session_generation
+            if active_generation is None:
+                raise NotConnectedError("The ALLPOWERS device is not connected")
+            self._pending_settings_transaction = PendingSettingsTransaction(
+                session_generation=active_generation,
+                source_version=self._settings_source_version(),
+                target=target,
+                sent_monotonic=now,
+                confirm_deadline_monotonic=now + self._options.settings_stale_timeout,
+            )
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
     async def async_send_settings_keepalive(self) -> None:
         """Re-send the current settings snapshot to keep vendor state alive."""
-        async with self._write_lock:
+        async with self._operation_lock:
             current = self._safe_settings_snapshot()
             await self._write_frame_unlocked(encode_settings_control(current))
             now = self._loop_time()
-            self._settings_shadow = (current, now)
+            active_generation = self._active_session_generation
+            if active_generation is None:
+                raise NotConnectedError("The ALLPOWERS device is not connected")
+            self._pending_settings_transaction = PendingSettingsTransaction(
+                session_generation=active_generation,
+                source_version=self._settings_source_version(),
+                target=current,
+                sent_monotonic=now,
+                confirm_deadline_monotonic=now + self._options.settings_stale_timeout,
+            )
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
@@ -334,11 +390,21 @@ class AllpowersBLEClient:
                 "A fresh status snapshot is required before changing outputs"
             )
         now = self._loop_time()
-        if self._output_shadow is not None:
-            dc, ac, light, timestamp = self._output_shadow
-            if now - timestamp <= OUTPUT_SHADOW_TIMEOUT:
-                return dc, ac, light
-            self._output_shadow = None
+        pending = self._pending_output_transaction
+        if pending is not None:
+            if now <= pending.confirm_deadline_monotonic:
+                return pending.target_dc, pending.target_ac, pending.target_light
+            self._pending_output_transaction = None
+            self._output_blocked_until_version = self._status_version + 1
+            raise StateUnavailableError(
+                "Output command confirmation timed out; wait for a fresh status update"
+            )
+
+        blocked_until = self._output_blocked_until_version
+        if blocked_until is not None and self._status_version < blocked_until:
+            raise StateUnavailableError(
+                "Output command state is ambiguous; wait for a fresh status update"
+            )
 
         if (
             self._status is None
@@ -360,11 +426,21 @@ class AllpowersBLEClient:
                 "A fresh settings snapshot is required before changing settings"
             )
         now = self._loop_time()
-        if self._settings_shadow is not None:
-            settings, timestamp = self._settings_shadow
-            if now - timestamp <= SETTINGS_SHADOW_TIMEOUT:
-                return settings
-            self._settings_shadow = None
+        pending = self._pending_settings_transaction
+        if pending is not None:
+            if now <= pending.confirm_deadline_monotonic:
+                return pending.target
+            self._pending_settings_transaction = None
+            self._settings_blocked_until_version = self._settings_version + 1
+            raise StateUnavailableError(
+                "Settings command confirmation timed out; wait for a fresh settings update"
+            )
+
+        blocked_until = self._settings_blocked_until_version
+        if blocked_until is not None and self._settings_version < blocked_until:
+            raise StateUnavailableError(
+                "Settings command state is ambiguous; wait for a fresh settings update"
+            )
 
         if (
             self._settings is None
@@ -415,6 +491,7 @@ class AllpowersBLEClient:
             delay = min(delay * 2, self._options.reconnect_max_delay)
 
     async def _connect_once(self) -> None:
+        session_generation = self._activate_session_generation()
         self._statistics = replace(
             self._statistics,
             connection_attempts=self._statistics.connection_attempts + 1,
@@ -436,7 +513,7 @@ class AllpowersBLEClient:
             BleakClientWithServiceCache,
             device,
             self._advertised_name,
-            disconnected_callback=self._disconnected_callback,
+            disconnected_callback=self._make_disconnected_callback(session_generation),
             max_attempts=3,
             ble_device_callback=self._fresh_ble_device,
             use_services_cache=True,
@@ -446,25 +523,46 @@ class AllpowersBLEClient:
                 notify_characteristic,
                 write_characteristic,
             ) = _required_characteristics(client)
-            self._client = client
-            self._write_characteristic = write_characteristic
+            async with self._operation_lock:
+                self._client = client
+                self._write_characteristic = write_characteristic
 
-            # A new GATT session must never inherit parser fragments or freshness
-            # timestamps from a previous connection. Cached values remain available
-            # for diagnostics, but cannot authorize writes until refreshed.
-            self._decoder = NotificationStreamDecoder()
-            self._ready_event.clear()
-            self._status_monotonic = None
-            self._settings_monotonic = None
-            self._last_packet_monotonic = None
-            self._last_status_request_monotonic = None
-            self._last_settings_keepalive_monotonic = None
-            self._output_shadow = None
-            self._settings_shadow = None
-            self._initial_settings_keepalive_pending = self._options.settings_keepalive
-            self._reported_freshness = (False, False)
+                # A new GATT session must never inherit parser fragments or freshness
+                # timestamps from a previous connection. Cached values remain available
+                # for diagnostics, but cannot authorize writes until refreshed.
+                self._status_monotonic = None
+                self._settings_monotonic = None
+                self._last_packet_monotonic = None
+                self._last_status_request_monotonic = None
+                self._last_settings_keepalive_monotonic = None
+                self._status_version = 0
+                self._settings_version = 0
+                self._pending_output_transaction = None
+                self._pending_settings_transaction = None
+                self._output_blocked_until_version = None
+                self._settings_blocked_until_version = None
+                self._initial_settings_keepalive_pending = (
+                    self._options.settings_keepalive
+                )
+                self._reported_freshness = (False, False)
 
-            await client.start_notify(notify_characteristic, self._notification_handler)
+                await client.start_notify(
+                    notify_characteristic,
+                    self._make_notification_handler(session_generation, client),
+                )
+
+                now = self._loop_time()
+                self._connected = True
+                self._connected_monotonic = now
+                self._last_connected_at = _utcnow()
+                self._last_error = None
+                self._statistics = replace(
+                    self._statistics,
+                    successful_connections=self._statistics.successful_connections + 1,
+                )
+
+                await self._write_frame_unlocked(encode_status_request())
+                self._last_status_request_monotonic = self._loop_time()
         except Exception:
             try:
                 async with asyncio.timeout(WRITE_TIMEOUT):
@@ -472,29 +570,22 @@ class AllpowersBLEClient:
             except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
                 pass
             raise
-
-        now = self._loop_time()
-        self._connected = True
-        self._connected_monotonic = now
-        self._last_connected_at = _utcnow()
-        self._last_error = None
-        self._statistics = replace(
-            self._statistics,
-            successful_connections=self._statistics.successful_connections + 1,
-        )
         self._emit_update()
-        await self.async_request_status()
 
     async def _disconnect_client(self) -> None:
-        async with self._disconnect_lock:
+        async with self._operation_lock:
             client = self._client
             was_connected = self._connected
+            self._active_session_generation = None
+            self._ready_event.clear()
             self._client = None
             self._write_characteristic = None
             self._connected = False
             self._connected_monotonic = None
-            self._output_shadow = None
-            self._settings_shadow = None
+            self._pending_output_transaction = None
+            self._pending_settings_transaction = None
+            self._output_blocked_until_version = None
+            self._settings_blocked_until_version = None
             self._initial_settings_keepalive_pending = False
             self._reported_freshness = (False, False)
 
@@ -524,6 +615,47 @@ class AllpowersBLEClient:
         if loop is None or loop.is_closed():
             return
         loop.call_soon_threadsafe(self._disconnect_event.set)
+
+    def _activate_session_generation(self) -> int:
+        """Start a new BLE session generation and reset session-scoped state."""
+        self._session_generation_counter += 1
+        self._active_session_generation = self._session_generation_counter
+        self._decoder = NotificationStreamDecoder()
+        self._ready_event.clear()
+        return self._session_generation_counter
+
+    def _make_disconnected_callback(
+        self,
+        generation: int,
+    ) -> Callable[[BleakClient], None]:
+        def _callback(client: BleakClient) -> None:
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                return
+            if generation != self._active_session_generation:
+                return
+            if self._client is not client:
+                return
+            loop.call_soon_threadsafe(self._disconnect_event.set)
+
+        return _callback
+
+    def _make_notification_handler(
+        self,
+        generation: int,
+        expected_client: BleakClient,
+    ) -> Callable[[BleakGATTCharacteristic, bytearray], None]:
+        def _handler(
+            characteristic: BleakGATTCharacteristic,
+            data: bytearray,
+        ) -> None:
+            if generation != self._active_session_generation:
+                return
+            if self._client is not expected_client:
+                return
+            self._notification_handler(characteristic, data)
+
+        return _handler
 
     def _notification_handler(
         self,
@@ -555,12 +687,52 @@ class AllpowersBLEClient:
             if isinstance(packet, StatusData):
                 self._status = packet
                 self._status_monotonic = now
-                self._output_shadow = None
+                self._status_version += 1
+                if (
+                    self._output_blocked_until_version is not None
+                    and self._status_version >= self._output_blocked_until_version
+                ):
+                    self._output_blocked_until_version = None
+                pending_output = self._pending_output_transaction
+                if pending_output is not None:
+                    if (
+                        pending_output.session_generation
+                        != self._active_session_generation
+                    ):
+                        self._pending_output_transaction = None
+                    elif now > pending_output.confirm_deadline_monotonic:
+                        self._pending_output_transaction = None
+                        self._output_blocked_until_version = self._status_version + 1
+                    elif (
+                        packet.dc_enabled == pending_output.target_dc
+                        and packet.ac_enabled == pending_output.target_ac
+                        and packet.light_enabled == pending_output.target_light
+                    ):
+                        self._pending_output_transaction = None
                 self._ready_event.set()
             elif isinstance(packet, SettingsData):
                 self._settings = packet
                 self._settings_monotonic = now
-                self._settings_shadow = None
+                self._settings_version += 1
+                if (
+                    self._settings_blocked_until_version is not None
+                    and self._settings_version >= self._settings_blocked_until_version
+                ):
+                    self._settings_blocked_until_version = None
+                pending_settings = self._pending_settings_transaction
+                if pending_settings is not None:
+                    if (
+                        pending_settings.session_generation
+                        != self._active_session_generation
+                    ):
+                        self._pending_settings_transaction = None
+                    elif now > pending_settings.confirm_deadline_monotonic:
+                        self._pending_settings_transaction = None
+                        self._settings_blocked_until_version = (
+                            self._settings_version + 1
+                        )
+                    elif packet == pending_settings.target:
+                        self._pending_settings_transaction = None
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
 
@@ -571,17 +743,25 @@ class AllpowersBLEClient:
     async def _write_frame_unlocked(self, frame: bytes) -> None:
         client = self._client
         characteristic = self._write_characteristic
+        active_generation = self._active_session_generation
         if (
             not self._connected
             or client is None
             or not client.is_connected
             or characteristic is None
+            or active_generation is None
         ):
             raise NotConnectedError("The ALLPOWERS device is not connected")
 
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
                 await client.write_gatt_char(characteristic, frame, response=False)
+            if (
+                self._active_session_generation != active_generation
+                or self._client is not client
+                or not self._connected
+            ):
+                raise NotConnectedError("The ALLPOWERS device session changed")
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
             self._statistics = replace(
                 self._statistics,
@@ -715,6 +895,18 @@ class AllpowersBLEClient:
     def _record_settings_write_activity(self, now: float) -> None:
         self._last_settings_keepalive_monotonic = now
         self._initial_settings_keepalive_pending = False
+
+    def _output_source_version(self) -> int:
+        pending = self._pending_output_transaction
+        if pending is not None:
+            return pending.source_version
+        return self._status_version
+
+    def _settings_source_version(self) -> int:
+        pending = self._pending_settings_transaction
+        if pending is not None:
+            return pending.source_version
+        return self._settings_version
 
     def _emit_update(self) -> None:
         if self._update_callback is not None:

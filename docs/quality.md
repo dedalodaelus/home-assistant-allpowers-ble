@@ -49,6 +49,22 @@ only to satisfy the metric.
 
 ## Remaining validation boundary
 
+## Deterministic sequence regression fixtures
+
+Transport and command-transaction regressions use deterministic fixtures instead of
+wall-clock sleeps. Stateful fakes can hold writes, release awaits, inject ordered
+notifications, and model stale versus active session callbacks so tests can verify
+event-order contracts directly.
+
+Critical sequence scenarios include:
+
+- late old-session disconnect and notification callbacks;
+- reconnect, write, and shutdown interleavings;
+- consecutive output/settings writes with delayed, duplicate, contradictory, and
+  missing confirmations;
+- cancellation while awaiting transport operations;
+- independent clients for separate config entries.
+
 Automated tests cannot prove radio behavior or command safety on an untested
 hardware revision. A model remains experimental until hardware-in-the-loop results
 cover telemetry, each writable control, reconnects, proxy failover, and prolonged
