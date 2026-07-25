@@ -56,7 +56,7 @@ flowchart TB
 |---|---|
 | `protocol/models.py` | Immutable decoded protocol values and enums. |
 | `protocol/codec.py` | Frame validation, stream recovery, decoding, encoding, and safe settings mutation. |
-| `client.py` | Active BLE session, route resolution, notifications, retries, watchdog, serialized writes, and statistics. |
+| `client.py` | Active BLE session, route resolution, notifications, retries, watchdog, versioned command transactions, and statistics. |
 | `models.py` | Integration-level snapshots and connection counters. |
 | `options.py` | Home Assistant-independent option defaults and relationship validation. |
 | `coordinator.py` | Push bridge from the BLE client to CoordinatorEntity consumers. |
@@ -119,7 +119,8 @@ stateDiagram-v2
 
 Before each connection attempt the client asks Home Assistant for a fresh
 connectable `BLEDevice`. This permits failover between local adapters and Bluetooth
-proxies. Exponential backoff is capped by the configured maximum delay.
+proxies. Exponential backoff is capped by the configured maximum delay and adds
+bounded jitter to reduce synchronized reconnect spikes across multiple devices.
 
 ## Data freshness
 
@@ -130,8 +131,13 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
   than `stale_timeout`.
 - Settings entities and controls require a connected session and settings newer
   than `settings_stale_timeout`.
-- The watchdog reconnects when no valid protocol packet arrives within
+- The telemetry watchdog reconnects when no fresh status telemetry arrives
+  within `watchdog_timeout`.
+- The transport watchdog reconnects when no BLE packet arrives within
   `watchdog_timeout`.
+- RSSI-only advertisement changes are debounced: updates publish immediately on the
+  first value, when change magnitude is at least 3 dBm, or every 30 seconds as a
+  maximum refresh interval.
 - Freshness transitions are emitted even when no new BLE notification arrives.
 - Cached data remains available to diagnostics, but cannot authorize writes after
   disconnect or expiry.
@@ -141,19 +147,27 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
 ### Combined outputs
 
 AC, DC, and light share one command byte. A command is built from the latest safe
-snapshot, changing only the requested field. A short-lived output shadow records
-the intended combined state so rapid consecutive commands do not overwrite each
-other before the device reports the first change.
+snapshot, changing only the requested field. Each write opens a pending output
+transaction tied to the active session generation, the source status version,
+and a confirmation deadline.
 
 ### Settings
 
 ECO, work mode, car charger, and ECO timeout also share a settings frame. The
 integration starts with the most recent raw settings flags, applies only the known
-mask, and sends the complete value. Unknown bits are preserved. The settings
-shadow provides the same serialization guarantee for consecutive changes.
+mask, and sends the complete value. Unknown bits are preserved. Settings writes
+use the same pending-transaction model as output writes.
 
-Both shadows are in-memory only and are cleared on disconnect, on new GATT session,
-or when a fresh device notification supersedes them.
+Transactions complete only when the matching notification arrives from the same
+session generation. They are in-memory only and are cleared on disconnect, on new
+GATT session, or when confirmation times out and a newer safe version is required.
+
+## Session generation boundaries
+
+Every connection attempt increments a session generation identifier. Notification
+and disconnection callbacks capture that identifier, and callbacks from older
+generations are ignored. This prevents stale callbacks from mutating state after
+route failover or reconnect.
 
 ## Concurrency and ownership
 
@@ -184,5 +198,5 @@ idempotent shutdown path.
 ## Persistence
 
 Only config-entry data and options are persisted. Telemetry, protocol fragments,
-shadows, counters, and connection state remain in memory. This avoids unnecessary
+pending transactions, counters, and connection state remain in memory. This avoids unnecessary
 storage writes and prevents ephemeral state from being trusted after restart.

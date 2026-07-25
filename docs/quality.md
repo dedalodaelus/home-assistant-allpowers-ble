@@ -11,7 +11,7 @@ Silver, Gold, or Platinum scores to this repository.
 | Protocol vectors | Header, length, XOR, payload validation, known packets, unknown packets, versions, control frames, bit preservation |
 | Stream decoder | Fragmentation, concatenation, noise, oversized payloads, invalid candidates, reset behavior |
 | Options | Ranges, cross-field relationships, booleans, defaults, serialization |
-| Client state | Freshness, shadows, disconnect invalidation, serialized writes, delayed refresh, status requests |
+| Client state | Freshness, versioned command transactions, disconnect invalidation, serialized writes, delayed refresh, status requests |
 | Transport runtime | Route loss, connection retry, GATT validation, notification handling, watchdog, keepalive, shutdown, cancellation |
 | Config flow | Discovery, duplicates, unsupported models, active probe outcomes, manual selection, options errors |
 | Coordinator/entities | Fresh/stale/disconnected availability, values, controls, service errors, live options |
@@ -41,7 +41,7 @@ only to satisfy the metric.
 - Initial setup waits for valid data and uses `ConfigEntryNotReady` semantics.
 - Entity availability is based on data freshness, not socket state alone.
 - Every active route is resolved through Home Assistant Bluetooth.
-- All writes are serialized and require a safe snapshot.
+- All writes are serialized, require a safe snapshot, and complete through explicit transaction confirmation.
 - Unknown settings bits are preserved.
 - Background tasks are named, owned, canceled, and awaited.
 - Diagnostics redact the Bluetooth address.

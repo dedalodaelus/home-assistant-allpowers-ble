@@ -14,6 +14,9 @@ from custom_components.allpowers_ble.client import (
     AllpowersBLEClient,
     DeviceNotFoundError,
     NotConnectedError,
+    ProbeConnectionTimeoutError,
+    ProbeGattValidationError,
+    ProbeNotificationSetupError,
     UnsupportedDeviceError,
 )
 from custom_components.allpowers_ble.options import ConnectionOptions
@@ -268,6 +271,26 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         monkeypatch.setattr(another, "_disconnect_client", disconnect)
         await another._connection_loop()
         assert type(error).__name__ in (another.snapshot().last_error or "")
+
+
+def test_retry_delay_with_jitter_is_bounded_and_seeded_per_client() -> None:
+    options = ConnectionOptions(reconnect_max_delay=60)
+    first = make_client(options)
+    second = make_client(options)
+    other = make_client(options, name="ALLPOWERS S700")
+    other.address = "11:22:33:44:55:66"
+    other._reconnect_jitter = client_module.Random(other.address).uniform
+
+    base_delay = 40.0
+    first_values = [first._retry_delay_with_jitter(base_delay) for _ in range(5)]
+    second_values = [second._retry_delay_with_jitter(base_delay) for _ in range(5)]
+    other_values = [other._retry_delay_with_jitter(base_delay) for _ in range(5)]
+
+    assert first_values == second_values
+    assert first_values != other_values
+    assert all(0.0 <= value <= options.reconnect_max_delay for value in first_values)
+    capped = first._retry_delay_with_jitter(120.0)
+    assert 0.0 <= capped <= options.reconnect_max_delay
 
 
 @pytest.mark.asyncio
@@ -587,8 +610,26 @@ async def test_maintenance_watchdog_and_status_request(
 
     monkeypatch.setattr(client, "async_reconnect", reconnect)
     await client._maintenance_loop()
-    assert reasons == ["Protocol watchdog expired"]
+    assert reasons == ["Telemetry watchdog expired"]
     assert client.snapshot().statistics.watchdog_resets == 1
+    assert client.snapshot().statistics.telemetry_watchdog_resets == 1
+    assert client.snapshot().statistics.transport_watchdog_resets == 0
+
+    status_missing = make_client()
+    status_missing._connected = True
+    status_missing._connected_monotonic = monotonic() - 100
+    status_missing._last_packet_monotonic = monotonic()
+    status_missing._stop_event = IterationStop()  # type: ignore[assignment]
+    status_missing_reasons: list[str] = []
+
+    async def reconnect_status_missing(reason: str) -> None:
+        status_missing_reasons.append(reason)
+
+    monkeypatch.setattr(status_missing, "async_reconnect", reconnect_status_missing)
+    await status_missing._maintenance_loop()
+    assert status_missing_reasons == ["Telemetry watchdog expired"]
+    assert status_missing.snapshot().statistics.watchdog_resets == 1
+    assert status_missing.snapshot().statistics.telemetry_watchdog_resets == 1
 
     requester = make_client()
     requester._connected = True
@@ -612,6 +653,198 @@ async def test_maintenance_watchdog_and_status_request(
 
     monkeypatch.setattr(requester, "async_request_status", fail_request)
     await requester._maintenance_loop()
+
+
+def test_next_maintenance_deadline_prefers_earliest_deadline() -> None:
+    options = ConnectionOptions(
+        status_interval=60,
+        watchdog_timeout=120,
+        settings_keepalive=False,
+        stale_timeout=300,
+    )
+    client = make_client(options)
+    client._connected = True
+    now = 100.0
+    client._connected_monotonic = 50.0
+    client._last_packet_monotonic = 70.0
+    client._last_status_request_monotonic = 80.0
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(140.0)
+
+
+def test_next_maintenance_deadline_handles_simultaneous_deadlines() -> None:
+    options = ConnectionOptions(
+        status_interval=30,
+        watchdog_timeout=30,
+        settings_keepalive=False,
+    )
+    client = make_client(options)
+    client._connected = True
+    now = 100.0
+    client._connected_monotonic = 90.0
+    client._last_packet_monotonic = 90.0
+    client._last_status_request_monotonic = 90.0
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(120.0)
+
+
+def test_next_maintenance_deadline_keepalive_initial_uses_now() -> None:
+    options = ConnectionOptions(settings_keepalive=True, status_interval=300)
+    client = make_client(options)
+    now = 100.0
+    client._last_status_request_monotonic = 10_000.0
+    client._initial_settings_keepalive_pending = True
+    client._settings = settings()
+    client._settings_monotonic = now
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(now)
+
+
+def test_next_maintenance_deadline_covers_false_branches() -> None:
+    options = ConnectionOptions(
+        settings_keepalive=True,
+        status_interval=30,
+        stale_timeout=10,
+        settings_stale_timeout=10,
+    )
+    client = make_client(options)
+    now = 100.0
+    client._connected_monotonic = None
+    client._status_monotonic = now - 20.0
+    client._last_packet_monotonic = None
+    client._last_status_request_monotonic = 50.0
+    client._initial_settings_keepalive_pending = False
+    client._settings = None
+    client._settings_monotonic = now - 20.0
+    client._last_settings_keepalive_monotonic = None
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(80.0)
+
+
+def test_next_maintenance_deadline_keepalive_without_reference() -> None:
+    options = ConnectionOptions(settings_keepalive=True, status_interval=30)
+    client = make_client(options)
+    now = 100.0
+    client._connected_monotonic = None
+    client._last_status_request_monotonic = 50.0
+    client._initial_settings_keepalive_pending = False
+    client._settings = None
+    client._settings_monotonic = None
+    client._last_settings_keepalive_monotonic = None
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_maintenance_loop_waits_until_computed_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=45,
+        watchdog_timeout=120,
+        settings_keepalive=False,
+    )
+    client = make_client(options)
+    client._connected = True
+    client._connected_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 100.0
+    now = 110.0
+
+    def loop_time() -> float:
+        return now
+
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert waits == [pytest.approx(35.0)]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_maintenance_wakeup_clears_event() -> None:
+    class NeverStop:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> None:
+            await asyncio.sleep(10)
+
+    client = make_client()
+    client._stop_event = NeverStop()  # type: ignore[assignment]
+    client._maintenance_wakeup.set()
+
+    await client._wait_for_maintenance_wakeup(timeout=0.1)
+
+    assert not client._maintenance_wakeup.is_set()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_maintenance_wakeup_propagates_non_timeout_exception() -> None:
+    class ErrorStop:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> None:
+            raise RuntimeError("boom")
+
+    client = make_client()
+    client._stop_event = ErrorStop()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await client._wait_for_maintenance_wakeup(timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_apply_options_wakes_maintenance_scheduler() -> None:
+    client = make_client()
+    client._loop = asyncio.get_running_loop()
+    client._maintenance_wakeup.clear()
+
+    await client.async_apply_options(ConnectionOptions(status_interval=15))
+    await asyncio.sleep(0)
+
+    assert client._maintenance_wakeup.is_set()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_transport_watchdog_uses_any_packet_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    client._connected = True
+    client._connected_monotonic = monotonic() - 100
+    client._status_monotonic = monotonic()
+    client._last_packet_monotonic = monotonic() - 100
+    client._stop_event = IterationStop()  # type: ignore[assignment]
+    reasons: list[str] = []
+
+    async def reconnect(reason: str) -> None:
+        reasons.append(reason)
+
+    monkeypatch.setattr(client, "async_reconnect", reconnect)
+    await client._maintenance_loop()
+    assert reasons == ["Transport watchdog expired"]
+    assert client.snapshot().statistics.watchdog_resets == 1
+    assert client.snapshot().statistics.telemetry_watchdog_resets == 0
+    assert client.snapshot().statistics.transport_watchdog_resets == 1
 
 
 @pytest.mark.asyncio
@@ -728,6 +961,18 @@ class ProbeClient(FakeClient):
         await super().disconnect()
 
 
+class ProbeClientWithStopNotify(ProbeClient):
+    """Probe client variant that records stop_notify cleanup calls."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        super().__init__(frames)
+        self.stop_notify_calls = 0
+
+    async def stop_notify(self, characteristic: object) -> None:
+        del characteristic
+        self.stop_notify_calls += 1
+
+
 @pytest.mark.asyncio
 async def test_probe_success_and_cleanup(
     monkeypatch: pytest.MonkeyPatch,
@@ -828,7 +1073,7 @@ async def test_probe_rejects_model_route_gatt_and_timeout(
         return invalid_gatt
 
     monkeypatch.setattr(client_module, "establish_connection", establish_invalid)
-    with pytest.raises(UnsupportedDeviceError):
+    with pytest.raises(ProbeGattValidationError):
         await client_module.async_probe_device(
             FakeHass(),  # type: ignore[arg-type]
             address="AA:BB:CC:DD:EE:FF",
@@ -852,3 +1097,170 @@ async def test_probe_rejects_model_route_gatt_and_timeout(
             timeout=0.001,
         )
     assert silent.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_connection_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+
+    async def establish_slow(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        await asyncio.sleep(0.02)
+        return FakeClient()
+
+    monkeypatch.setattr(client_module, "establish_connection", establish_slow)
+    with pytest.raises(ProbeConnectionTimeoutError):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_notification_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NotifyFailClient(ProbeClient):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            del characteristic, callback
+            raise FakeBleakError("notify failed")
+
+    failing = NotifyFailClient([])
+
+    async def establish_notify_fail(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return failing
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_notify_fail)
+
+    with pytest.raises(ProbeNotificationSetupError):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.05,
+        )
+    assert failing.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_notification_setup_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NotifyTimeoutClient(ProbeClient):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            del characteristic, callback
+            await asyncio.sleep(0.02)
+
+    timing_out = NotifyTimeoutClient([])
+
+    async def establish_notify_timeout(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return timing_out
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_notify_timeout)
+
+    with pytest.raises(ProbeNotificationSetupError, match="timed out"):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+    assert timing_out.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["timeout", "ble_error"])
+async def test_probe_reports_status_request_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    class WriteFailureProbeClient(ProbeClient):
+        async def write_gatt_char(
+            self,
+            characteristic: object,
+            data: bytes,
+            *,
+            response: bool,
+        ) -> None:
+            del characteristic, data, response
+            if mode == "timeout":
+                await asyncio.sleep(0.02)
+                return
+            raise FakeBleakError("write failed")
+
+    failing = WriteFailureProbeClient([])
+
+    async def establish_write_failure(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return failing
+
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    monkeypatch.setattr(client_module, "establish_connection", establish_write_failure)
+
+    if mode == "timeout":
+        error_match = "status request timed out"
+    else:
+        error_match = "status request failed"
+
+    with pytest.raises(ProbeNotificationSetupError, match=error_match):
+        await client_module.async_probe_device(
+            FakeHass(),  # type: ignore[arg-type]
+            address="AA:BB:CC:DD:EE:FF",
+            advertised_name="ALLPOWERS R600",
+            timeout=0.001,
+        )
+    assert failing.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_cleanup_stops_notifications_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+) -> None:
+    fake = ProbeClientWithStopNotify([status_frame])
+
+    async def establish(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+
+    result = await client_module.async_probe_device(
+        FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS R600",
+        timeout=0.1,
+    )
+
+    assert result.status.battery_percent == 73
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1

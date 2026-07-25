@@ -69,7 +69,8 @@ requires fresh settings.
 - Check whether the proxy is rebooting or roaming between network paths.
 - Keep the status interval at or above 10 seconds.
 - Keep `stale_timeout` above the status interval and the watchdog above both.
-- Review `last_error`, `write_errors`, and `watchdog_resets` in diagnostics.
+- Review `last_error`, `write_errors`, `watchdog_resets`,
+  `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
 
 ## Enabling logs
 
