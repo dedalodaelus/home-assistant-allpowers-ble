@@ -1,0 +1,124 @@
+name: Merge gate
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+concurrency:
+  group: merge-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gate all required checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Wait for required checks on PR head
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request;
+
+            if (!pr) {
+              core.setFailed("This workflow only supports pull_request events.");
+              return;
+            }
+
+            if (pr.draft) {
+              core.info("Draft PR detected. Skipping strict gate until ready for review.");
+              return;
+            }
+
+            const requiredChecks = [
+              "Python, tests, and release validation",
+              "HACS validation",
+              "Home Assistant Hassfest",
+              "Validate title",
+              "Review dependency changes",
+              "Analyze Python",
+            ];
+
+            const headSha = pr.head.sha;
+            const pollIntervalMs = 15000;
+            const timeoutMs = 45 * 60 * 1000;
+            const start = Date.now();
+
+            function formatRunsMap(checkRuns) {
+              const map = new Map();
+              for (const run of checkRuns) {
+                const previous = map.get(run.name);
+                if (!previous || new Date(run.started_at) > new Date(previous.started_at)) {
+                  map.set(run.name, run);
+                }
+              }
+              return map;
+            }
+
+            while (true) {
+              const elapsed = Date.now() - start;
+              if (elapsed > timeoutMs) {
+                core.setFailed("Timeout waiting for required checks to complete.");
+                return;
+              }
+
+              const response = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: headSha,
+                per_page: 100,
+              });
+
+              const checkRuns = response.data.check_runs || [];
+              const latestByName = formatRunsMap(checkRuns);
+
+              const missing = [];
+              const pending = [];
+              const failed = [];
+
+              for (const checkName of requiredChecks) {
+                const run = latestByName.get(checkName);
+                if (!run) {
+                  missing.push(checkName);
+                  continue;
+                }
+
+                if (run.status !== "completed") {
+                  pending.push(`${checkName} (${run.status})`);
+                  continue;
+                }
+
+                if (run.conclusion !== "success") {
+                  failed.push(`${checkName} (${run.conclusion || "unknown"})`);
+                }
+              }
+
+              core.info(`Head SHA: ${headSha}`);
+              if (missing.length) core.info(`Missing: ${missing.join(", ")}`);
+              if (pending.length) core.info(`Pending: ${pending.join(", ")}`);
+              if (failed.length) core.info(`Failed: ${failed.join(", ")}`);
+
+              if (failed.length) {
+                core.setFailed(`Required checks failed: ${failed.join("; ")}`);
+                return;
+              }
+
+              if (missing.length === 0 && pending.length === 0) {
+                core.info("All required checks completed successfully.");
+                return;
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+            }

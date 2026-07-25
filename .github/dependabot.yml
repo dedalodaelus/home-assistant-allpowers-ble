@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: pip
     directory: /
+    target-branch: devel
     schedule:
       interval: weekly
       day: monday
@@ -24,6 +25,7 @@ updates:
       - python
   - package-ecosystem: github-actions
     directory: /
+    target-branch: devel
     schedule:
       interval: weekly
       day: monday
