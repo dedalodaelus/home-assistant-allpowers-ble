@@ -655,6 +655,175 @@ async def test_maintenance_watchdog_and_status_request(
     await requester._maintenance_loop()
 
 
+def test_next_maintenance_deadline_prefers_earliest_deadline() -> None:
+    options = ConnectionOptions(
+        status_interval=60,
+        watchdog_timeout=120,
+        settings_keepalive=False,
+        stale_timeout=300,
+    )
+    client = make_client(options)
+    client._connected = True
+    now = 100.0
+    client._connected_monotonic = 50.0
+    client._last_packet_monotonic = 70.0
+    client._last_status_request_monotonic = 80.0
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(140.0)
+
+
+def test_next_maintenance_deadline_handles_simultaneous_deadlines() -> None:
+    options = ConnectionOptions(
+        status_interval=30,
+        watchdog_timeout=30,
+        settings_keepalive=False,
+    )
+    client = make_client(options)
+    client._connected = True
+    now = 100.0
+    client._connected_monotonic = 90.0
+    client._last_packet_monotonic = 90.0
+    client._last_status_request_monotonic = 90.0
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(120.0)
+
+
+def test_next_maintenance_deadline_keepalive_initial_uses_now() -> None:
+    options = ConnectionOptions(settings_keepalive=True, status_interval=300)
+    client = make_client(options)
+    now = 100.0
+    client._last_status_request_monotonic = 10_000.0
+    client._initial_settings_keepalive_pending = True
+    client._settings = settings()
+    client._settings_monotonic = now
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(now)
+
+
+def test_next_maintenance_deadline_covers_false_branches() -> None:
+    options = ConnectionOptions(
+        settings_keepalive=True,
+        status_interval=30,
+        stale_timeout=10,
+        settings_stale_timeout=10,
+    )
+    client = make_client(options)
+    now = 100.0
+    client._connected_monotonic = None
+    client._status_monotonic = now - 20.0
+    client._last_packet_monotonic = None
+    client._last_status_request_monotonic = 50.0
+    client._initial_settings_keepalive_pending = False
+    client._settings = None
+    client._settings_monotonic = now - 20.0
+    client._last_settings_keepalive_monotonic = None
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(80.0)
+
+
+def test_next_maintenance_deadline_keepalive_without_reference() -> None:
+    options = ConnectionOptions(settings_keepalive=True, status_interval=30)
+    client = make_client(options)
+    now = 100.0
+    client._connected_monotonic = None
+    client._last_status_request_monotonic = 50.0
+    client._initial_settings_keepalive_pending = False
+    client._settings = None
+    client._settings_monotonic = None
+    client._last_settings_keepalive_monotonic = None
+
+    deadline = client._next_maintenance_deadline(now)
+
+    assert deadline == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_maintenance_loop_waits_until_computed_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=45,
+        watchdog_timeout=120,
+        settings_keepalive=False,
+    )
+    client = make_client(options)
+    client._connected = True
+    client._connected_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 100.0
+    now = 110.0
+
+    def loop_time() -> float:
+        return now
+
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert waits == [pytest.approx(35.0)]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_maintenance_wakeup_clears_event() -> None:
+    class NeverStop:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> None:
+            await asyncio.sleep(10)
+
+    client = make_client()
+    client._stop_event = NeverStop()  # type: ignore[assignment]
+    client._maintenance_wakeup.set()
+
+    await client._wait_for_maintenance_wakeup(timeout=0.1)
+
+    assert not client._maintenance_wakeup.is_set()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_maintenance_wakeup_propagates_non_timeout_exception() -> None:
+    class ErrorStop:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> None:
+            raise RuntimeError("boom")
+
+    client = make_client()
+    client._stop_event = ErrorStop()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await client._wait_for_maintenance_wakeup(timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_apply_options_wakes_maintenance_scheduler() -> None:
+    client = make_client()
+    client._loop = asyncio.get_running_loop()
+    client._maintenance_wakeup.clear()
+
+    await client.async_apply_options(ConnectionOptions(status_interval=15))
+    await asyncio.sleep(0)
+
+    assert client._maintenance_wakeup.is_set()
+
+
 @pytest.mark.asyncio
 async def test_maintenance_transport_watchdog_uses_any_packet_clock(
     monkeypatch: pytest.MonkeyPatch,
