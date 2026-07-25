@@ -145,6 +145,7 @@ class AllpowersBLEClient:
         self._stop_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
         self._ready_event = asyncio.Event()
+        self._maintenance_wakeup = asyncio.Event()
         # One lock owns every operation that mutates or uses the active client.
         self._operation_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -215,6 +216,7 @@ class AllpowersBLEClient:
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
         self._disconnect_event.clear()
+        self._maintenance_wakeup.clear()
         self._connection_task = asyncio.create_task(
             self._connection_loop(), name=f"allpowers-ble-{self.address}"
         )
@@ -226,6 +228,7 @@ class AllpowersBLEClient:
         """Stop all tasks and release the Bluetooth connection slot."""
         self._stop_event.set()
         self._disconnect_event.set()
+        self._maintenance_wakeup.set()
         tasks = [
             task
             for task in (
@@ -260,6 +263,7 @@ class AllpowersBLEClient:
         elif not options.settings_keepalive:
             self._initial_settings_keepalive_pending = False
         self._reported_freshness = self._freshness(self._loop_time())
+        self._wake_maintenance_loop()
         self._emit_update()
 
     def snapshot(self) -> AllpowersSnapshot:
@@ -290,6 +294,7 @@ class AllpowersBLEClient:
         """Disconnect now so the connection loop can establish a fresh route."""
         self._last_error = reason
         self._disconnect_event.set()
+        self._wake_maintenance_loop()
         await self._disconnect_client()
 
     async def async_set_ac(self, enabled: bool) -> None:
@@ -588,6 +593,7 @@ class AllpowersBLEClient:
 
                 await self._write_frame_unlocked(encode_status_request())
                 self._last_status_request_monotonic = self._loop_time()
+                self._wake_maintenance_loop()
         except Exception:
             try:
                 async with asyncio.timeout(WRITE_TIMEOUT):
@@ -633,6 +639,7 @@ class AllpowersBLEClient:
                     _LOGGER.debug("Disconnect failed for %s: %s", self.address, ex)
             if was_connected:
                 self._emit_update()
+        self._wake_maintenance_loop()
 
     def _disconnected_callback(self, client: BleakClient) -> None:
         del client
@@ -763,6 +770,7 @@ class AllpowersBLEClient:
 
         if packets or discarded:
             self._reported_freshness = self._freshness(self._loop_time())
+            self._wake_maintenance_loop()
             self._emit_update()
 
     async def _write_frame_unlocked(self, frame: bytes) -> None:
@@ -819,15 +827,12 @@ class AllpowersBLEClient:
 
     async def _maintenance_loop(self) -> None:
         while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
-                continue
-            except TimeoutError:
-                pass
-
             if not self._connected:
+                await self._wait_for_maintenance_wakeup(timeout=None)
                 continue
+
             now = self._loop_time()
+            action_taken = False
             self._emit_freshness_change(now)
 
             status_reference = self._status_monotonic or self._connected_monotonic
@@ -843,36 +848,120 @@ class AllpowersBLEClient:
                     ),
                 )
                 await self.async_reconnect("Telemetry watchdog expired")
-                continue
+                action_taken = True
 
-            packet_reference = self._last_packet_monotonic or self._connected_monotonic
-            if (
-                packet_reference is not None
-                and now - packet_reference > self._options.watchdog_timeout
-            ):
-                self._statistics = replace(
-                    self._statistics,
-                    watchdog_resets=self._statistics.watchdog_resets + 1,
-                    transport_watchdog_resets=(
-                        self._statistics.transport_watchdog_resets + 1
-                    ),
+            if not action_taken:
+                packet_reference = (
+                    self._last_packet_monotonic or self._connected_monotonic
                 )
-                await self.async_reconnect("Transport watchdog expired")
-                continue
+                if (
+                    packet_reference is not None
+                    and now - packet_reference > self._options.watchdog_timeout
+                ):
+                    self._statistics = replace(
+                        self._statistics,
+                        watchdog_resets=self._statistics.watchdog_resets + 1,
+                        transport_watchdog_resets=(
+                            self._statistics.transport_watchdog_resets + 1
+                        ),
+                    )
+                    await self.async_reconnect("Transport watchdog expired")
+                    action_taken = True
 
-            if (
-                self._last_status_request_monotonic is None
-                or now - self._last_status_request_monotonic
-                >= self._options.status_interval
-            ):
-                try:
-                    await self.async_request_status()
-                except (NotConnectedError, TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
-                    continue
+            if not action_taken:
+                if (
+                    self._last_status_request_monotonic is None
+                    or now - self._last_status_request_monotonic
+                    >= self._options.status_interval
+                ):
+                    try:
+                        await self.async_request_status()
+                    except (NotConnectedError, TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
+                        pass
+                    action_taken = True
 
-            if not self._options.settings_keepalive:
-                continue
+                if not action_taken and self._options.settings_keepalive:
+                    should_send_initial = (
+                        self._initial_settings_keepalive_pending
+                        and self._settings is not None
+                        and self._settings_monotonic is not None
+                        and now - self._settings_monotonic
+                        <= self._options.settings_stale_timeout
+                    )
+                    reference = (
+                        self._last_settings_keepalive_monotonic
+                        or self._settings_monotonic
+                        or self._connected_monotonic
+                    )
+                    should_send_periodic = (
+                        reference is not None
+                        and now - reference >= self._options.settings_keepalive_interval
+                    )
+                    if should_send_initial or should_send_periodic:
+                        try:
+                            await self.async_send_settings_keepalive()
+                        except (
+                            StateUnavailableError,
+                            NotConnectedError,
+                            TimeoutError,
+                            *BLEAK_RETRY_EXCEPTIONS,
+                        ):
+                            pass
+                        action_taken = True
 
+            next_deadline = self._next_maintenance_deadline(now)
+            timeout: float | None = 0.001 if action_taken else None
+            if timeout is None and next_deadline is not None:
+                timeout = max(0.001, next_deadline - now)
+            await self._wait_for_maintenance_wakeup(timeout)
+
+    def _wake_maintenance_loop(self) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._maintenance_wakeup.set()
+            return
+        loop.call_soon_threadsafe(self._maintenance_wakeup.set)
+
+    async def _wait_for_maintenance_wakeup(self, timeout: float | None) -> None:
+        stop_wait = asyncio.create_task(self._stop_event.wait())
+        wake_wait = asyncio.create_task(self._maintenance_wakeup.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {stop_wait, wake_wait},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                exception = task.exception()
+                if exception is not None and not isinstance(exception, TimeoutError):
+                    raise exception
+            if wake_wait in done and wake_wait.exception() is None:
+                self._maintenance_wakeup.clear()
+        finally:
+            for task in (stop_wait, wake_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stop_wait, wake_wait, return_exceptions=True)
+
+    def _next_maintenance_deadline(self, now: float) -> float | None:
+        deadlines: list[float] = []
+
+        status_reference = self._status_monotonic or self._connected_monotonic
+        if status_reference is not None:
+            deadlines.append(status_reference + self._options.watchdog_timeout)
+
+        packet_reference = self._last_packet_monotonic or self._connected_monotonic
+        if packet_reference is not None:
+            deadlines.append(packet_reference + self._options.watchdog_timeout)
+
+        if self._last_status_request_monotonic is None:
+            deadlines.append(now)
+        else:
+            deadlines.append(
+                self._last_status_request_monotonic + self._options.status_interval
+            )
+
+        if self._options.settings_keepalive:
             should_send_initial = (
                 self._initial_settings_keepalive_pending
                 and self._settings is not None
@@ -880,26 +969,34 @@ class AllpowersBLEClient:
                 and now - self._settings_monotonic
                 <= self._options.settings_stale_timeout
             )
-            reference = (
-                self._last_settings_keepalive_monotonic
-                or self._settings_monotonic
-                or self._connected_monotonic
+            if should_send_initial:
+                deadlines.append(now)
+            else:
+                reference = (
+                    self._last_settings_keepalive_monotonic
+                    or self._settings_monotonic
+                    or self._connected_monotonic
+                )
+                if reference is not None:
+                    deadlines.append(
+                        reference + self._options.settings_keepalive_interval
+                    )
+
+        if self._status_monotonic is not None:
+            status_freshness_deadline = (
+                self._status_monotonic + self._options.stale_timeout
             )
-            should_send_periodic = (
-                reference is not None
-                and now - reference >= self._options.settings_keepalive_interval
+            if now <= status_freshness_deadline:
+                deadlines.append(status_freshness_deadline)
+
+        if self._settings_monotonic is not None:
+            settings_freshness_deadline = (
+                self._settings_monotonic + self._options.settings_stale_timeout
             )
-            if not should_send_initial and not should_send_periodic:
-                continue
-            try:
-                await self.async_send_settings_keepalive()
-            except (
-                StateUnavailableError,
-                NotConnectedError,
-                TimeoutError,
-                *BLEAK_RETRY_EXCEPTIONS,
-            ):
-                continue
+            if now <= settings_freshness_deadline:
+                deadlines.append(settings_freshness_deadline)
+
+        return min(deadlines)
 
     async def _sleep_until_retry(self, delay: float) -> None:
         try:
