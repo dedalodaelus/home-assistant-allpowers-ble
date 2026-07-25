@@ -225,6 +225,13 @@ More information:
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
+## Support and reporting
+
+- Report bugs and model compatibility through the public issue forms:
+   [GitHub Issues](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose)
+- Report vulnerabilities privately through
+   [GitHub Security Advisories](https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new)
+
 ## Project status
 
 This is a community custom integration. It follows current Home Assistant patterns
