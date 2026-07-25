@@ -272,7 +272,6 @@ class AllpowersBLEClient:
             )
             now = self._loop_time()
             self._output_shadow = (target_dc, target_ac, target_light, now)
-            self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
     async def async_set_eco(self, enabled: bool) -> None:
