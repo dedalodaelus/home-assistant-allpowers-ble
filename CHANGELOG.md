@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.5](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.4...0.1.5) (2026-07-25)
+
+
+### Bug Fixes
+
+* add reconnect jitter and RSSI debounce ([#68](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/68)) ([559e9ed](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/559e9edb36108438e07e4b78538c2e06695f1bb9)), closes [#28](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/28) [#29](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/29)
+* enforce end-to-end probe timeout and map stage failures ([ede2084](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/ede2084fcd9ed7cf7106446034fef7a72176432d))
+* split telemetry and transport watchdog resets ([6d81fc2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/6d81fc2fc9025b299af4d69b13bdc975038b80e0))
+
+
+### Performance Improvements
+
+* **client:** schedule maintenance loop by deadline wakeups ([#69](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/69)) ([f63d72f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/f63d72f7c069b57e27a24d07e19595584940eb6f)), closes [#30](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/30)
+
 ## [0.1.4](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.3...0.1.4) (2026-07-25)
 
 
