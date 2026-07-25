@@ -587,8 +587,26 @@ async def test_maintenance_watchdog_and_status_request(
 
     monkeypatch.setattr(client, "async_reconnect", reconnect)
     await client._maintenance_loop()
-    assert reasons == ["Protocol watchdog expired"]
+    assert reasons == ["Telemetry watchdog expired"]
     assert client.snapshot().statistics.watchdog_resets == 1
+    assert client.snapshot().statistics.telemetry_watchdog_resets == 1
+    assert client.snapshot().statistics.transport_watchdog_resets == 0
+
+    status_missing = make_client()
+    status_missing._connected = True
+    status_missing._connected_monotonic = monotonic() - 100
+    status_missing._last_packet_monotonic = monotonic()
+    status_missing._stop_event = IterationStop()  # type: ignore[assignment]
+    status_missing_reasons: list[str] = []
+
+    async def reconnect_status_missing(reason: str) -> None:
+        status_missing_reasons.append(reason)
+
+    monkeypatch.setattr(status_missing, "async_reconnect", reconnect_status_missing)
+    await status_missing._maintenance_loop()
+    assert status_missing_reasons == ["Telemetry watchdog expired"]
+    assert status_missing.snapshot().statistics.watchdog_resets == 1
+    assert status_missing.snapshot().statistics.telemetry_watchdog_resets == 1
 
     requester = make_client()
     requester._connected = True
@@ -612,6 +630,29 @@ async def test_maintenance_watchdog_and_status_request(
 
     monkeypatch.setattr(requester, "async_request_status", fail_request)
     await requester._maintenance_loop()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_transport_watchdog_uses_any_packet_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    client._connected = True
+    client._connected_monotonic = monotonic() - 100
+    client._status_monotonic = monotonic()
+    client._last_packet_monotonic = monotonic() - 100
+    client._stop_event = IterationStop()  # type: ignore[assignment]
+    reasons: list[str] = []
+
+    async def reconnect(reason: str) -> None:
+        reasons.append(reason)
+
+    monkeypatch.setattr(client, "async_reconnect", reconnect)
+    await client._maintenance_loop()
+    assert reasons == ["Transport watchdog expired"]
+    assert client.snapshot().statistics.watchdog_resets == 1
+    assert client.snapshot().statistics.telemetry_watchdog_resets == 0
+    assert client.snapshot().statistics.transport_watchdog_resets == 1
 
 
 @pytest.mark.asyncio
