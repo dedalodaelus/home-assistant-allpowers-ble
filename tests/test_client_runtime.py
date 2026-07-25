@@ -322,6 +322,7 @@ async def test_disconnect_cancels_refresh_and_tolerates_ble_error() -> None:
     client._client = fake
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
+    client._ready_event.set()
     client._output_shadow = (True, True, True, monotonic())
     client._settings_shadow = (settings(), monotonic())
     refresh = asyncio.create_task(asyncio.sleep(100))
@@ -332,6 +333,7 @@ async def test_disconnect_cancels_refresh_and_tolerates_ble_error() -> None:
     assert refresh.cancelled() or refresh.cancelling()
     assert client._client is None
     assert not client.snapshot().connected
+    assert not client._ready_event.is_set()
     assert client._output_shadow is None
     assert client._settings_shadow is None
 
@@ -351,6 +353,46 @@ async def test_disconnected_callback_handles_loop_states() -> None:
     client._loop = SimpleNamespace(is_closed=lambda: True)  # type: ignore[assignment]
     client._disconnected_callback(FakeClient())
     assert not client._disconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_session_generation_rejects_stale_disconnect_and_notifications(
+    status_frame: bytes,
+) -> None:
+    client = make_client()
+    loop = asyncio.get_running_loop()
+    client._loop = loop
+
+    first = FakeClient()
+    second = FakeClient()
+
+    generation_one = client._activate_session_generation()
+    client._client = first
+    stale_disconnect = client._make_disconnected_callback(generation_one)
+    stale_notify = client._make_notification_handler(generation_one, first)
+
+    generation_two = client._activate_session_generation()
+    client._client = second
+    client._connected = True
+    active_disconnect = client._make_disconnected_callback(generation_two)
+    active_notify = client._make_notification_handler(generation_two, second)
+
+    stale_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client._status is None
+    assert not client._ready_event.is_set()
+
+    active_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client._status is not None
+    assert client._ready_event.is_set()
+
+    client._disconnect_event.clear()
+    stale_disconnect(first)
+    await asyncio.sleep(0)
+    assert not client._disconnect_event.is_set()
+
+    active_disconnect(second)
+    await asyncio.sleep(0)
+    assert client._disconnect_event.is_set()
 
 
 @pytest.mark.asyncio
