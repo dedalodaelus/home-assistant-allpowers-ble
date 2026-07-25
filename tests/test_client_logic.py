@@ -104,6 +104,44 @@ async def test_stale_status_notification_does_not_clear_pending_output_transacti
 
 
 @pytest.mark.asyncio
+async def test_consecutive_output_commands_handle_delayed_and_duplicate_confirmations(
+    notification_builder,
+) -> None:
+    client, fake = _connected_client()
+    client._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=False)
+    client._status_monotonic = asyncio.get_running_loop().time()
+
+    await client.async_set_ac(True)
+    await client.async_set_dc(True)
+
+    pending = client._pending_output_transaction
+    assert pending is not None
+    assert pending.target_ac is True
+    assert pending.target_dc is True
+    assert pending.target_light is False
+
+    contradictory = notification_builder(
+        0x01,
+        bytes((0x02, 73, 0x01, 0x2C, 0x00, 0x96, 0x00, 0x78)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(contradictory))
+    assert client._pending_output_transaction is not None
+
+    matching = notification_builder(
+        0x01,
+        bytes((0x03, 73, 0x01, 0x2C, 0x00, 0x96, 0x00, 0x78)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
+    assert client._pending_output_transaction is None
+
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
+    assert client._pending_output_transaction is None
+
+    await client.async_set_light(True)
+    assert fake.writes[-1][7] == 0x23
+
+
+@pytest.mark.asyncio
 async def test_output_timeout_blocks_dependent_writes_until_fresh_status(
     status_frame: bytes,
 ) -> None:
@@ -161,6 +199,75 @@ async def test_sequential_settings_commands_preserve_unknown_bits() -> None:
     assert fake.writes[0][7] == 0xA1
     assert fake.writes[1][7] == 0xA5
     assert fake.writes[1][8] == 2
+
+
+@pytest.mark.asyncio
+async def test_consecutive_settings_commands_handle_contradictory_and_duplicate_confirmations(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    client._settings = _settings()
+    client._settings_monotonic = asyncio.get_running_loop().time()
+
+    await client.async_set_eco(True)
+    await client.async_set_work_mode(WorkMode.FAST)
+
+    pending = client._pending_settings_transaction
+    assert pending is not None
+    assert pending.target.eco_enabled is True
+    assert pending.target.work_mode is WorkMode.FAST
+
+    contradictory = notification_builder(
+        0x03,
+        bytes((0xA1, 2, 0x00, 0x00, 0x10, 0x11)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(contradictory))
+    assert client._pending_settings_transaction is not None
+
+    matching = notification_builder(
+        0x03,
+        bytes((0xA5, 2, 0x00, 0x00, 0x10, 0x11)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
+    assert client._pending_settings_transaction is None
+
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
+    assert client._pending_settings_transaction is None
+
+
+@pytest.mark.asyncio
+async def test_multiple_clients_keep_transactions_isolated(
+    notification_builder,
+) -> None:
+    first, _ = _connected_client()
+    second, _ = _connected_client()
+    first._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=False)
+    second._status = _status(dc_enabled=False, ac_enabled=False, light_enabled=False)
+    now = asyncio.get_running_loop().time()
+    first._status_monotonic = now
+    second._status_monotonic = now
+
+    await first.async_set_ac(True)
+    await second.async_set_dc(True)
+
+    assert first._pending_output_transaction is not None
+    assert second._pending_output_transaction is not None
+
+    ac_only = notification_builder(
+        0x01,
+        bytes((0x02, 73, 0x01, 0x2C, 0x00, 0x96, 0x00, 0x78)),
+    )
+    dc_only = notification_builder(
+        0x01,
+        bytes((0x01, 73, 0x01, 0x2C, 0x00, 0x96, 0x00, 0x78)),
+    )
+
+    first._notification_handler(FakeCharacteristic(), bytearray(ac_only))
+    assert first._pending_output_transaction is None
+    assert second._pending_output_transaction is not None
+
+    second._notification_handler(FakeCharacteristic(), bytearray(dc_only))
+    assert second._pending_output_transaction is None
 
 
 @pytest.mark.asyncio

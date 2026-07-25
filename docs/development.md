@@ -25,6 +25,11 @@ error-path tests fast and deterministic:
 USE_REAL_HOMEASSISTANT=0 pytest --ignore=tests/homeassistant
 ```
 
+When adding lifecycle or command-transaction tests, prefer deterministic stateful
+fakes over ad-hoc mocks or sleeps. Keep transport sequencing explicit by modeling
+blocked awaits, delayed callbacks, and ordered notifications so regressions remain
+reproducible across environments.
+
 Coverage:
 
 ```bash
