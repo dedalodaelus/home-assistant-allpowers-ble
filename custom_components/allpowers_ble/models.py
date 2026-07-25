@@ -21,6 +21,8 @@ class ConnectionStatistics:
     protocol_errors: int = 0
     write_errors: int = 0
     watchdog_resets: int = 0
+    telemetry_watchdog_resets: int = 0
+    transport_watchdog_resets: int = 0
 
 
 @dataclass(frozen=True, slots=True)

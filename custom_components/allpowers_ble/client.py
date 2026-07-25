@@ -805,6 +805,21 @@ class AllpowersBLEClient:
             now = self._loop_time()
             self._emit_freshness_change(now)
 
+            status_reference = self._status_monotonic or self._connected_monotonic
+            if (
+                status_reference is not None
+                and now - status_reference > self._options.watchdog_timeout
+            ):
+                self._statistics = replace(
+                    self._statistics,
+                    watchdog_resets=self._statistics.watchdog_resets + 1,
+                    telemetry_watchdog_resets=(
+                        self._statistics.telemetry_watchdog_resets + 1
+                    ),
+                )
+                await self.async_reconnect("Telemetry watchdog expired")
+                continue
+
             packet_reference = self._last_packet_monotonic or self._connected_monotonic
             if (
                 packet_reference is not None
@@ -813,8 +828,11 @@ class AllpowersBLEClient:
                 self._statistics = replace(
                     self._statistics,
                     watchdog_resets=self._statistics.watchdog_resets + 1,
+                    transport_watchdog_resets=(
+                        self._statistics.transport_watchdog_resets + 1
+                    ),
                 )
-                await self.async_reconnect("Protocol watchdog expired")
+                await self.async_reconnect("Transport watchdog expired")
                 continue
 
             if (

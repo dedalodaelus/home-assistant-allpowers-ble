@@ -115,9 +115,10 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    combinado que conserva las demás salidas.
 2. ECO, modo de trabajo, cargador de coche y temporizador requieren ajustes
    recientes y conservan todos los bits no relacionados.
-3. Una sombra temporal serializa comandos consecutivos mientras llega la siguiente
-   notificación del dispositivo.
-4. Las sombras y la frescura se invalidan al desconectar o iniciar otra sesión GATT.
+3. Cada escritura abre una transacción versionada y espera una confirmación en
+   notificación antes de reutilizar ese estado para otra escritura.
+4. Las transacciones pendientes y la frescura se invalidan al desconectar o
+   iniciar otra sesión GATT.
 5. Si no existe una instantánea segura, la escritura se rechaza en vez de adivinar.
 
 Consulta [Arquitectura](docs/architecture.md) y [Protocolo](docs/protocol.md).
@@ -128,7 +129,7 @@ Consulta [Arquitectura](docs/architecture.md) y [Protocolo](docs/protocol.md).
 |---|---:|---|
 | Intervalo de solicitud de estado | 20 s | 10–120 s |
 | Caducidad de telemetría | 30 s | Debe superar el intervalo de estado |
-| Watchdog de protocolo | 45 s | Debe superar la caducidad de telemetría |
+| Tiempo del watchdog de telemetría y transporte | 45 s | Debe superar la caducidad de telemetría |
 | Retardo máximo de reconexión | 60 s | 5–300 s |
 | Caducidad de ajustes | 600 s | 60–3600 s |
 | Keepalive de ajustes | Desactivado | Experimental |
@@ -139,8 +140,9 @@ Los cambios de opciones se aplican en caliente, sin recargar la integración.
 
 ## Diagnósticos
 
-Los diagnósticos incluyen contadores de conexión, paquetes, errores, watchdog,
-últimas marcas temporales, estado en caché, clasificación del modelo y opciones.
+Los diagnósticos incluyen contadores de conexión, paquetes, errores y watchdog
+(total, telemetría y transporte), últimas marcas temporales, estado en caché,
+clasificación del modelo y opciones.
 La dirección Bluetooth se redacta y no se almacenan credenciales de nube.
 
 Para activar registros de depuración de forma temporal:
