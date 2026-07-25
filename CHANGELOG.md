@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.3](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.2...0.1.3) (2026-07-25)
+
+
+### Bug Fixes
+
+* **release:** trigger patch release for GA test ([#18](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/18)) ([1d5d21c](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/1d5d21c55f652b4df09d7bd312f51abd5c3e2def))
+
 ## [0.1.2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.1...0.1.2) (2026-07-25)
 
 
