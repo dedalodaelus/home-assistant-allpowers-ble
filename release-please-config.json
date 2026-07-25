@@ -12,7 +12,7 @@
       ],
       "include-component-in-tag": false,
       "include-v-in-tag": false,
-      "package-name": "ALLPOWERS BLE",
+      "package-name": "allpowers-ble",
       "release-type": "simple"
     }
   }
