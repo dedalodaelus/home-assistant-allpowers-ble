@@ -273,6 +273,26 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         assert type(error).__name__ in (another.snapshot().last_error or "")
 
 
+def test_retry_delay_with_jitter_is_bounded_and_seeded_per_client() -> None:
+    options = ConnectionOptions(reconnect_max_delay=60)
+    first = make_client(options)
+    second = make_client(options)
+    other = make_client(options, name="ALLPOWERS S700")
+    other.address = "11:22:33:44:55:66"
+    other._reconnect_jitter = client_module.Random(other.address).uniform
+
+    base_delay = 40.0
+    first_values = [first._retry_delay_with_jitter(base_delay) for _ in range(5)]
+    second_values = [second._retry_delay_with_jitter(base_delay) for _ in range(5)]
+    other_values = [other._retry_delay_with_jitter(base_delay) for _ in range(5)]
+
+    assert first_values == second_values
+    assert first_values != other_values
+    assert all(0.0 <= value <= options.reconnect_max_delay for value in first_values)
+    capped = first._retry_delay_with_jitter(120.0)
+    assert 0.0 <= capped <= options.reconnect_max_delay
+
+
 @pytest.mark.asyncio
 async def test_connection_loop_propagates_cancellation(
     monkeypatch: pytest.MonkeyPatch,

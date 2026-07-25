@@ -119,7 +119,8 @@ stateDiagram-v2
 
 Before each connection attempt the client asks Home Assistant for a fresh
 connectable `BLEDevice`. This permits failover between local adapters and Bluetooth
-proxies. Exponential backoff is capped by the configured maximum delay.
+proxies. Exponential backoff is capped by the configured maximum delay and adds
+bounded jitter to reduce synchronized reconnect spikes across multiple devices.
 
 ## Data freshness
 
@@ -134,6 +135,9 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
   within `watchdog_timeout`.
 - The transport watchdog reconnects when no BLE packet arrives within
   `watchdog_timeout`.
+- RSSI-only advertisement changes are debounced: updates publish immediately on the
+  first value, when change magnitude is at least 3 dBm, or every 30 seconds as a
+  maximum refresh interval.
 - Freshness transitions are emitted even when no new BLE notification arrives.
 - Cached data remains available to diagnostics, but cannot authorize writes after
   disconnect or expiry.
