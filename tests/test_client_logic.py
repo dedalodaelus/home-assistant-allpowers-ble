@@ -67,6 +67,7 @@ def _connected_client(options: ConnectionOptions | None = None):
     client._client = fake
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
+    client._active_session_generation = 1
     client._schedule_status_refresh = lambda: None
     return client, fake
 

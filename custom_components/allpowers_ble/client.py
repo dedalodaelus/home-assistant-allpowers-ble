@@ -102,8 +102,8 @@ class AllpowersBLEClient:
         self._stop_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
         self._ready_event = asyncio.Event()
-        self._write_lock = asyncio.Lock()
-        self._disconnect_lock = asyncio.Lock()
+        # One lock owns every operation that mutates or uses the active client.
+        self._operation_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session_generation_counter = 0
         self._active_session_generation: int | None = None
@@ -231,7 +231,7 @@ class AllpowersBLEClient:
 
     async def async_request_status(self) -> None:
         """Request a fresh status notification."""
-        async with self._write_lock:
+        async with self._operation_lock:
             await self._write_frame_unlocked(encode_status_request())
             self._last_status_request_monotonic = self._loop_time()
 
@@ -260,7 +260,7 @@ class AllpowersBLEClient:
         ac: bool | None = None,
         light: bool | None = None,
     ) -> None:
-        async with self._write_lock:
+        async with self._operation_lock:
             current_dc, current_ac, current_light = self._safe_output_snapshot()
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
@@ -304,7 +304,7 @@ class AllpowersBLEClient:
         car_charger_enabled: bool | None = None,
         eco_timeout_hours: int | None = None,
     ) -> None:
-        async with self._write_lock:
+        async with self._operation_lock:
             current = self._safe_settings_snapshot()
             target = updated_settings(
                 current,
@@ -321,7 +321,7 @@ class AllpowersBLEClient:
 
     async def async_send_settings_keepalive(self) -> None:
         """Re-send the current settings snapshot to keep vendor state alive."""
-        async with self._write_lock:
+        async with self._operation_lock:
             current = self._safe_settings_snapshot()
             await self._write_frame_unlocked(encode_settings_control(current))
             now = self._loop_time()
@@ -448,26 +448,42 @@ class AllpowersBLEClient:
                 notify_characteristic,
                 write_characteristic,
             ) = _required_characteristics(client)
-            self._client = client
-            self._write_characteristic = write_characteristic
+            async with self._operation_lock:
+                self._client = client
+                self._write_characteristic = write_characteristic
 
-            # A new GATT session must never inherit parser fragments or freshness
-            # timestamps from a previous connection. Cached values remain available
-            # for diagnostics, but cannot authorize writes until refreshed.
-            self._status_monotonic = None
-            self._settings_monotonic = None
-            self._last_packet_monotonic = None
-            self._last_status_request_monotonic = None
-            self._last_settings_keepalive_monotonic = None
-            self._output_shadow = None
-            self._settings_shadow = None
-            self._initial_settings_keepalive_pending = self._options.settings_keepalive
-            self._reported_freshness = (False, False)
+                # A new GATT session must never inherit parser fragments or freshness
+                # timestamps from a previous connection. Cached values remain available
+                # for diagnostics, but cannot authorize writes until refreshed.
+                self._status_monotonic = None
+                self._settings_monotonic = None
+                self._last_packet_monotonic = None
+                self._last_status_request_monotonic = None
+                self._last_settings_keepalive_monotonic = None
+                self._output_shadow = None
+                self._settings_shadow = None
+                self._initial_settings_keepalive_pending = (
+                    self._options.settings_keepalive
+                )
+                self._reported_freshness = (False, False)
 
-            await client.start_notify(
-                notify_characteristic,
-                self._make_notification_handler(session_generation, client),
-            )
+                await client.start_notify(
+                    notify_characteristic,
+                    self._make_notification_handler(session_generation, client),
+                )
+
+                now = self._loop_time()
+                self._connected = True
+                self._connected_monotonic = now
+                self._last_connected_at = _utcnow()
+                self._last_error = None
+                self._statistics = replace(
+                    self._statistics,
+                    successful_connections=self._statistics.successful_connections + 1,
+                )
+
+                await self._write_frame_unlocked(encode_status_request())
+                self._last_status_request_monotonic = self._loop_time()
         except Exception:
             try:
                 async with asyncio.timeout(WRITE_TIMEOUT):
@@ -475,21 +491,10 @@ class AllpowersBLEClient:
             except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
                 pass
             raise
-
-        now = self._loop_time()
-        self._connected = True
-        self._connected_monotonic = now
-        self._last_connected_at = _utcnow()
-        self._last_error = None
-        self._statistics = replace(
-            self._statistics,
-            successful_connections=self._statistics.successful_connections + 1,
-        )
         self._emit_update()
-        await self.async_request_status()
 
     async def _disconnect_client(self) -> None:
-        async with self._disconnect_lock:
+        async with self._operation_lock:
             client = self._client
             was_connected = self._connected
             self._active_session_generation = None
@@ -617,17 +622,25 @@ class AllpowersBLEClient:
     async def _write_frame_unlocked(self, frame: bytes) -> None:
         client = self._client
         characteristic = self._write_characteristic
+        active_generation = self._active_session_generation
         if (
             not self._connected
             or client is None
             or not client.is_connected
             or characteristic is None
+            or active_generation is None
         ):
             raise NotConnectedError("The ALLPOWERS device is not connected")
 
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
                 await client.write_gatt_char(characteristic, frame, response=False)
+            if (
+                self._active_session_generation != active_generation
+                or self._client is not client
+                or not self._connected
+            ):
+                raise NotConnectedError("The ALLPOWERS device session changed")
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
             self._statistics = replace(
                 self._statistics,
