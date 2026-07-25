@@ -89,6 +89,7 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._client = fake
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
+    client._active_session_generation = 1
     client._connected_monotonic = monotonic()
     return fake
 
@@ -353,6 +354,52 @@ async def test_disconnected_callback_handles_loop_states() -> None:
     client._loop = SimpleNamespace(is_closed=lambda: True)  # type: ignore[assignment]
     client._disconnected_callback(FakeClient())
     assert not client._disconnect_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_waits_for_in_flight_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingWriteClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.write_started = asyncio.Event()
+            self.release_write = asyncio.Event()
+
+        async def write_gatt_char(
+            self,
+            characteristic: object,
+            data: bytes,
+            *,
+            response: bool,
+        ) -> None:
+            self.write_started.set()
+            await self.release_write.wait()
+            await super().write_gatt_char(characteristic, data, response=response)
+
+    client = make_client()
+    fake = BlockingWriteClient()
+    client._client = fake
+    client._write_characteristic = FakeCharacteristic()
+    client._connected = True
+    client._active_session_generation = 1
+    client._status = status(dc_enabled=False, ac_enabled=False, light_enabled=False)
+    client._status_monotonic = monotonic()
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+
+    write_task = asyncio.create_task(client.async_set_ac(True))
+    await fake.write_started.wait()
+
+    disconnect_task = asyncio.create_task(client._disconnect_client())
+    await asyncio.sleep(0)
+    assert not disconnect_task.done()
+
+    fake.release_write.set()
+    await write_task
+    await disconnect_task
+
+    assert fake.disconnect_calls == 1
+    assert not client.snapshot().connected
 
 
 @pytest.mark.asyncio
