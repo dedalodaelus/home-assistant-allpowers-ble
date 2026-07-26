@@ -28,6 +28,10 @@ from .models import (
     UnknownPacket,
     WorkMode,
 )
+from .semantics import (
+    settings_write_validation_errors,
+    status_write_validation_errors,
+)
 
 __all__ = [
     "DeviceNameData",
@@ -52,4 +56,6 @@ __all__ = [
     "format_version",
     "updated_settings",
     "xor_checksum",
+    "settings_write_validation_errors",
+    "status_write_validation_errors",
 ]
