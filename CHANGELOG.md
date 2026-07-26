@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.6...0.2.0) (2026-07-26)
+
+
+### Features
+
+* **config-entry:** add baseline migration to schema 1.1 ([#81](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/81)) ([5f6e28a](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/5f6e28a698a3a1bccfa920c7ee790762d5483184))
+* **config-flow:** section options flow and field-level errors ([#85](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/85)) ([cf67f40](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/cf67f40e4247432628fe076be013e2622ceab3bc))
+
+
+### Bug Fixes
+
+* **coordinator:** refresh device registry metadata from valid settings ([#86](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/86)) ([1f645cd](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/1f645cd639fd5f84b155fb41d8e5d72dc7ebc7d1)), closes [#44](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/44)
+* **docs:** align safety guarantees and user workflows ([#84](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/84)) ([9cde9b2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/9cde9b2f4c2d3da345c205da6926a61eacbc0caa))
+* **entities:** correct input/output binary sensor semantics ([#82](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/82)) ([45ff32b](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/45ff32be04f7caf9b56711f7ab333775c9829e43))
+* **entities:** normalize BLE command failures into translated HA errors ([#79](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/79)) ([35378ba](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/35378ba5306a39d934d0c5e1a16a41c598293422)), closes [#38](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/38)
+* **security:** redact bluetooth identifiers recursively in diagnostics ([#80](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/80)) ([3aae1e2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/3aae1e233d1a239d4616ca3b40af632f118a1e9c))
+
 ## [0.1.6](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.5...0.1.6) (2026-07-26)
 
 
