@@ -131,8 +131,22 @@ async def test_entity_setup_and_state_values() -> None:
         for entity in sensor_entities
         if entity.entity_description.key == "protocol_errors"
     )
-    assert ordinary.extra_state_attributes is None
-    assert diagnostic.extra_state_attributes == {"last_error": "synthetic error"}
+    assert getattr(ordinary, "extra_state_attributes", None) is None
+    assert getattr(diagnostic, "extra_state_attributes", None) is None
+    for key in {
+        "reconnects",
+        "protocol_errors",
+        "parser_discards",
+        "watchdog_resets",
+    }:
+        assert (
+            next(
+                entity
+                for entity in sensor_entities
+                if entity.entity_description.key == key
+            ).entity_description.state_class
+            is None
+        )
 
     binary_entities: list[Any] = []
     await binary_sensor.async_setup_entry(

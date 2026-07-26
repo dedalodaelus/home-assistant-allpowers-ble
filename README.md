@@ -117,6 +117,8 @@ Diagnostic and advanced tuning entities are disabled by default where appropriat
 The car-charger control is unavailable until it is explicitly enabled in the
 integration options. Experimental profiles are telemetry-only and do not create
 write entities.
+Diagnostic counters are session-scoped values and intentionally do not expose a
+long-term statistics state class.
 
 ## Safety model
 
@@ -169,7 +171,8 @@ payload includes:
 Bluetooth identifiers are redacted recursively across structured fields and
 nested strings. Device-provided names and user entry names are replaced with a
 stable redaction marker in diagnostics payloads. The `last_error` field keeps an
-error category with sanitized detail. No cloud credentials exist.
+error category with sanitized detail and is reported in diagnostics payloads.
+No cloud credentials exist.
 
 For temporary debug logging:
 

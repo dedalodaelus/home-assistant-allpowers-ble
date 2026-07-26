@@ -109,6 +109,8 @@ escritura a partir de datos de una sesión anterior.
 Los perfiles experimentales funcionan en modo de solo lectura: no crean entidades
 de control de escritura hasta validar explícitamente las capacidades por modelo y
 revisión de hardware.
+Los contadores de diagnóstico son valores de sesión y no exponen una clase de
+estado para estadísticas de largo plazo.
 
 ## Seguridad de las escrituras
 
@@ -151,8 +153,8 @@ clasificación del modelo y opciones.
 Los identificadores Bluetooth se redactan de forma recursiva en campos
 estructurados y cadenas anidadas. Los nombres del dispositivo y el título de la
 entrada se sustituyen por un marcador de redacción en los diagnósticos. El
-campo `last_error` conserva la categoría del error con detalle saneado. No se
-almacenan credenciales de nube.
+campo `last_error` conserva la categoría del error con detalle saneado y se
+publica en los diagnósticos. No se almacenan credenciales de nube.
 
 Para activar registros de depuración de forma temporal:
 
