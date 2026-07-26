@@ -81,8 +81,10 @@ logger:
     bleak_retry_connector: debug
 ```
 
-Reproduce one failure, download diagnostics, then disable debug logging. Redact
-Bluetooth addresses and personal data before sharing logs.
+Reproduce one failure, download diagnostics, then disable debug logging.
+Diagnostics already redact Bluetooth identifiers and device names recursively,
+including nested strings and sanitized `last_error` details. Still review raw
+debug logs for personal data before sharing.
 
 ## HACS installs the integration but it does not appear
 
