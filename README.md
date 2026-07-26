@@ -107,7 +107,7 @@ old state to construct a write.
 | Platform | Entities |
 |---|---|
 | Sensor | Battery, input power, output power, remaining time, RSSI, hardware version, firmware version, reconnects, protocol errors, watchdog resets |
-| Binary sensor | Connected, telemetry available, settings available, charging, discharging, AC output, DC output, light output |
+| Binary sensor | Connected, telemetry available, settings available, input active, output active, AC output, DC output, light output |
 | Switch | AC output, DC output, light, ECO mode, experimental car charger |
 | Select | Work mode, ECO shutdown time |
 | Button | Refresh status, reconnect, send settings keepalive |

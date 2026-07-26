@@ -33,7 +33,7 @@
         "name": "Salida CA"
       },
       "charging": {
-        "name": "Cargando"
+        "name": "Entrada activa"
       },
       "connected": {
         "name": "Conectado"
@@ -42,7 +42,7 @@
         "name": "Salida CC"
       },
       "discharging": {
-        "name": "Descargando"
+        "name": "Salida activa"
       },
       "light_output": {
         "name": "Salida de luz"
