@@ -183,11 +183,17 @@ class ConfigEntry(Generic[T]):
         data: Mapping[str, Any] | None = None,
         options: Mapping[str, Any] | None = None,
         entry_id: str = "entry-id",
+        version: int = 1,
+        minor_version: int = 1,
+        unique_id: str | None = None,
     ) -> None:
         self.title = title
         self.data = dict(data or {})
         self.options = dict(options or {})
         self.entry_id = entry_id
+        self.version = version
+        self.minor_version = minor_version
+        self.unique_id = unique_id
         self.runtime_data: T
         self._unload_callbacks: list[Callable[..., Any]] = []
 
@@ -268,8 +274,31 @@ class OptionsFlow(_FlowBase):
 ConfigFlowResult = dict[str, Any]
 
 
+class section:
+    """Minimal data-entry section wrapper used by config/option forms."""
+
+    def __init__(self, schema: Any, options: Mapping[str, Any] | None = None) -> None:
+        self.schema = schema
+        self.options = dict(options or {})
+
+
 class HomeAssistantError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        translation_domain: str | None = None,
+        translation_key: str | None = None,
+        translation_placeholders: Mapping[str, str] | None = None,
+    ) -> None:
+        if message is None and translation_key is not None:
+            message = translation_key
+        super().__init__(message or "")
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+        self.translation_placeholders = (
+            dict(translation_placeholders) if translation_placeholders else None
+        )
 
 
 class ConfigEntryNotReady(RuntimeError):
@@ -547,6 +576,9 @@ def install() -> None:
     config_entries.ConfigFlowResult = ConfigFlowResult
     config_entries.OptionsFlow = OptionsFlow
 
+    data_entry_flow = ModuleType("homeassistant.data_entry_flow")
+    data_entry_flow.section = section
+
     const = ModuleType("homeassistant.const")
     const.CONF_ADDRESS = "address"
     const.EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
@@ -667,6 +699,7 @@ def install() -> None:
             "homeassistant.components.select": select,
             "homeassistant.components.number": number,
             "homeassistant.config_entries": config_entries,
+            "homeassistant.data_entry_flow": data_entry_flow,
             "homeassistant.const": const,
             "homeassistant.core": core,
             "homeassistant.exceptions": exceptions,

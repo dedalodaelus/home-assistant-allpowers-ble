@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import Platform
+from homeassistant.const import CONF_ADDRESS, Platform
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
     from .coordinator import AllpowersConfigEntry
+
+from .const import (
+    CONFIG_ENTRY_MINOR_VERSION,
+    CONFIG_ENTRY_VERSION,
+    CONF_DEVICE_NAME,
+)
+from .options import ConnectionOptions
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: tuple[Platform, ...] = (
     Platform.SENSOR,
@@ -21,11 +31,72 @@ PLATFORMS: tuple[Platform, ...] = (
 )
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
+    """Migrate old config entries to the latest supported schema."""
+    if entry.version > CONFIG_ENTRY_VERSION or (
+        entry.version == CONFIG_ENTRY_VERSION
+        and entry.minor_version > CONFIG_ENTRY_MINOR_VERSION
+    ):
+        _LOGGER.error(
+            "Cannot migrate config entry %s: unsupported future version %s.%s",
+            entry.entry_id,
+            entry.version,
+            entry.minor_version,
+        )
+        return False
+
+    if (
+        entry.version == CONFIG_ENTRY_VERSION
+        and entry.minor_version == CONFIG_ENTRY_MINOR_VERSION
+    ):
+        return True
+
+    if entry.version == 1 and entry.minor_version == 0:
+        try:
+            migrated_options = ConnectionOptions.from_mapping(entry.options).as_dict()
+        except (TypeError, ValueError) as ex:
+            _LOGGER.error(
+                "Cannot migrate config entry %s from version 1.0: invalid options (%s)",
+                entry.entry_id,
+                ex,
+            )
+            return False
+
+        migrated_data = dict(entry.data)
+        if CONF_ADDRESS in migrated_data:
+            migrated_data[CONF_ADDRESS] = str(migrated_data[CONF_ADDRESS]).upper()
+        if CONF_DEVICE_NAME in migrated_data:
+            migrated_data[CONF_DEVICE_NAME] = str(migrated_data[CONF_DEVICE_NAME])
+
+        hass.config_entries.async_update_entry(
+            entry,
+            data=migrated_data,
+            options=migrated_options,
+            version=CONFIG_ENTRY_VERSION,
+            minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        )
+        _LOGGER.info(
+            "Migrated config entry %s from version 1.0 to %s.%s",
+            entry.entry_id,
+            CONFIG_ENTRY_VERSION,
+            CONFIG_ENTRY_MINOR_VERSION,
+        )
+        return True
+
+    _LOGGER.error(
+        "Cannot migrate config entry %s: unsupported version %s.%s",
+        entry.entry_id,
+        entry.version,
+        entry.minor_version,
+    )
+    return False
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
     """Set up an ALLPOWERS BLE device from a config entry."""
     from homeassistant.components import bluetooth
     from homeassistant.components.bluetooth.match import BluetoothCallbackMatcher
-    from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
     from homeassistant.exceptions import ConfigEntryNotReady
 
     from .client import AllpowersBLEClient

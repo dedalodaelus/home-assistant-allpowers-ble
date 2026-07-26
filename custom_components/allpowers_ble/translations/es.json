@@ -33,7 +33,7 @@
         "name": "Salida CA"
       },
       "charging": {
-        "name": "Cargando"
+        "name": "Entrada activa"
       },
       "connected": {
         "name": "Conectado"
@@ -42,7 +42,7 @@
         "name": "Salida CC"
       },
       "discharging": {
-        "name": "Descargando"
+        "name": "Salida activa"
       },
       "light_output": {
         "name": "Salida de luz"
@@ -147,12 +147,20 @@
   },
   "options": {
     "error": {
-      "invalid_options": "Las relaciones entre tiempos no son válidas: el tiempo de telemetría obsoleta debe superar el intervalo de estado, el watchdog debe superar el tiempo de telemetría obsoleta y, al activar el keepalive, el tiempo de validez de los ajustes debe superar su intervalo."
+      "invalid_boolean": "Introduce verdadero o falso.",
+      "invalid_number": "Introduce un numero valido.",
+      "out_of_range": "El valor esta fuera del rango permitido.",
+      "settings_stale_timeout_must_exceed_keepalive_interval": "El tiempo de validez de los ajustes debe ser mayor que el intervalo de keepalive cuando esta habilitado.",
+      "stale_timeout_must_exceed_status_interval": "El tiempo de telemetria obsoleta debe ser mayor que el intervalo de solicitud de estado.",
+      "watchdog_timeout_must_exceed_stale_timeout": "El timeout del watchdog de protocolo debe ser mayor que el tiempo de telemetria obsoleta."
     },
     "step": {
       "init": {
         "data": {
+          "advanced_timing": "Temporizacion avanzada",
+          "connection_health": "Salud de conexion",
           "enable_car_charger": "Activar control experimental del cargador de coche",
+          "experimental_controls": "Controles experimentales",
           "reconnect_max_delay": "Retardo máximo de reconexión (segundos)",
           "settings_keepalive": "Activar keepalive de ajustes",
           "settings_keepalive_interval": "Intervalo de keepalive de ajustes (segundos)",
@@ -161,9 +169,34 @@
           "status_interval": "Intervalo de solicitud de estado (segundos)",
           "watchdog_timeout": "Tiempo del watchdog de protocolo (segundos)"
         },
+        "data_description": {
+          "enable_car_charger": "Ruta de escritura experimental. Mantenla desactivada salvo que el modelo/revision tengan soporte verificado.",
+          "settings_keepalive": "Usala solo cuando los ajustes dejen de actualizarse de forma consistente en tu entorno BLE.",
+          "settings_keepalive_interval": "Valores bajos incrementan el trafico BLE. Mantenlo claramente por debajo del tiempo de validez de ajustes."
+        },
         "description": "Los valores por defecto reproducen el comportamiento observado en la R600. El keepalive y el cargador de coche permanecen desactivados hasta habilitarlos expresamente. Los perfiles experimentales se mantienen en solo lectura hasta verificar sus capacidades de escritura.",
         "title": "Opciones de ALLPOWERS BLE"
       }
+    }
+  },
+  "exceptions": {
+    "command_disconnected": {
+      "message": "El dispositivo no está conectado en este momento. Espera a que se restablezca Bluetooth y vuelve a intentarlo."
+    },
+    "command_timeout": {
+      "message": "El comando superó el tiempo límite antes de que el dispositivo lo confirmara. Vuelve a intentarlo en unos segundos."
+    },
+    "command_stale_state": {
+      "message": "Se necesita un estado reciente del dispositivo antes de enviar este comando. Espera a que se actualice la telemetría y vuelve a intentarlo."
+    },
+    "command_unsupported": {
+      "message": "Este comando no es compatible con el modelo actual o con el estado del protocolo."
+    },
+    "command_transport": {
+      "message": "La capa Bluetooth falló al enviar el comando. Verifica la conectividad y vuelve a intentarlo."
+    },
+    "command_unconfirmed": {
+      "message": "El dispositivo todavía no confirmó el comando anterior. Espera una actualización reciente y vuelve a intentarlo."
     }
   },
   "title": "ALLPOWERS BLE"

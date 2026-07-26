@@ -27,7 +27,7 @@ required on the power station side.
 - Local operation through Home Assistant Bluetooth and ESPHome Bluetooth Proxy.
 - Multiple power stations, one config entry and BLE connection manager per device.
 - Battery, power, remaining-time, output, settings, version, RSSI, and health entities.
-- Safe read-modify-write commands that preserve unrelated and undocumented bits.
+- Safe write gating from fresh snapshots; settings writes preserve unknown bits and output writes preserve verified output states.
 - Reconnection with a fresh Home Assistant-selected adapter/proxy route.
 - Incremental parser for fragmented, concatenated, and noisy BLE notifications.
 - Config-entry and device diagnostics with address redaction.
@@ -98,6 +98,17 @@ Home Assistant chooses the best currently available connectable route. The
 integration resolves that route again before each reconnection rather than pinning
 it permanently to one proxy.
 
+## BLE trust boundary
+
+This integration assumes a trusted local Home Assistant environment:
+
+- write commands are accepted only from Home Assistant users who can control entities;
+- BLE proximity limits command reach, but nearby radio access is still part of the risk model;
+- ESPHome proxies are transport relays and must be managed like trusted local infrastructure;
+- there is no cloud credential boundary to rotate if local access is compromised.
+
+Do not treat this integration as a hard safety interlock for unattended critical loads.
+
 ## Entities
 
 Entities become unavailable when the underlying data is stale. This prevents a
@@ -107,7 +118,7 @@ old state to construct a write.
 | Platform | Entities |
 |---|---|
 | Sensor | Battery, input power, output power, remaining time, RSSI, hardware version, firmware version, reconnects, protocol errors, watchdog resets |
-| Binary sensor | Connected, telemetry available, settings available, charging, discharging, AC output, DC output, light output |
+| Binary sensor | Connected, telemetry available, settings available, input active, output active, AC output, DC output, light output |
 | Switch | AC output, DC output, light, ECO mode, experimental car charger |
 | Select | Work mode, ECO shutdown time |
 | Button | Refresh status, reconnect, send settings keepalive |
@@ -117,6 +128,8 @@ Diagnostic and advanced tuning entities are disabled by default where appropriat
 The car-charger control is unavailable until it is explicitly enabled in the
 integration options. Experimental profiles are telemetry-only and do not create
 write entities.
+Diagnostic counters are session-scoped values and intentionally do not expose a
+long-term statistics state class.
 
 ## Safety model
 
@@ -126,6 +139,8 @@ therefore applies the following invariants:
 
 1. AC, DC, and light changes require a fresh status snapshot and emit one combined
    command preserving the other output states.
+   Preservation is guaranteed for documented output states only; undocumented
+   output-command semantics are not claimed safe.
 2. ECO, work mode, car charger, and ECO timeout changes require a fresh settings
    snapshot and preserve every unrelated raw flag bit.
 3. Each write starts a versioned command transaction and waits for a matching
@@ -135,7 +150,69 @@ therefore applies the following invariants:
 5. Writes are rejected rather than guessed when the required snapshot is missing,
    stale, or disconnected.
 
+Any future write-safety guarantee must be supported by captured evidence from the
+target hardware revision and a matching regression test.
+
 See [Architecture](docs/architecture.md) and [Protocol](docs/protocol.md).
+
+## Conservative automation examples
+
+Use automations that fail safe when telemetry is stale or unavailable, and avoid
+autonomous control of critical loads.
+
+Example 1: notify when telemetry drops instead of forcing output writes.
+
+```yaml
+automation:
+   - alias: allpowers_telemetry_unavailable
+      triggers:
+         - trigger: state
+            entity_id: binary_sensor.allpowers_telemetry_available
+            to: "off"
+            for: "00:01:00"
+      actions:
+         - action: persistent_notification.create
+            data:
+               title: ALLPOWERS telemetry unavailable
+               message: Check BLE route, proxy availability, and station power state.
+```
+
+Example 2: gate a non-critical AC enable action behind explicit conditions.
+
+```yaml
+automation:
+   - alias: allpowers_enable_ac_non_critical
+      triggers:
+         - trigger: state
+            entity_id: binary_sensor.allpowers_connected
+            to: "on"
+      conditions:
+         - condition: state
+            entity_id: binary_sensor.allpowers_telemetry_available
+            state: "on"
+         - condition: numeric_state
+            entity_id: sensor.allpowers_battery
+            above: 40
+      actions:
+         - action: switch.turn_on
+            target:
+               entity_id: switch.allpowers_ac_output
+```
+
+Always test automations manually with non-critical loads before enabling them.
+
+## Removal and recovery
+
+To remove the integration cleanly:
+
+1. Disable or remove automations that reference ALLPOWERS entities.
+2. Remove the ALLPOWERS BLE config entry from Home Assistant Devices and services.
+3. If installed with HACS, uninstall ALLPOWERS BLE in HACS and restart Home Assistant.
+4. If installed manually, delete `custom_components/allpowers_ble` and restart.
+5. Confirm that entity and device records are gone; remove orphaned helpers if present.
+
+If you plan to reinstall, keep a sanitized diagnostics export before removal so
+route and model-detection history can be compared after recovery.
 
 ## Runtime options
 
@@ -166,8 +243,11 @@ payload includes:
 - current cached protocol state and freshness metadata;
 - active options and model-support classification.
 
-The Bluetooth address is redacted and the advertised device name is omitted from
-entry data. No cloud credentials exist.
+Bluetooth identifiers are redacted recursively across structured fields and
+nested strings. Device-provided names and user entry names are replaced with a
+stable redaction marker in diagnostics payloads. The `last_error` field keeps an
+error category with sanitized detail and is reported in diagnostics payloads.
+No cloud credentials exist.
 
 For temporary debug logging:
 
@@ -240,6 +320,11 @@ More information:
 This is a community custom integration. It follows current Home Assistant patterns
 and quality-scale practices, but it is not part of Home Assistant Core and has not
 been reviewed or supported by the Home Assistant project.
+
+Releases are promoted through reviewed pull requests from `devel` to `main` with
+CI validation, repository validation, and safety-documentation updates before
+publication. Quality goals describe current evidence and tests, not a formal
+Home Assistant certification program.
 
 ## License
 

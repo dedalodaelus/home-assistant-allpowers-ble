@@ -5,17 +5,15 @@ from __future__ import annotations
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .client import NotConnectedError
 from .coordinator import AllpowersConfigEntry
 from .entity import (
     AllpowersEntity,
     AllpowersSettingsControlEntity,
+    raise_command_error,
     runtime_model_support,
 )
-from .protocol import StateUnavailableError
 
 
 async def async_setup_entry(
@@ -54,8 +52,8 @@ class AllpowersRefreshButton(AllpowersEntity, ButtonEntity):
         """Request status now."""
         try:
             await self.coordinator.client.async_request_status()
-        except NotConnectedError as ex:
-            raise HomeAssistantError(str(ex)) from ex
+        except Exception as ex:
+            raise_command_error(ex)
 
 
 class AllpowersReconnectButton(AllpowersEntity, ButtonEntity):
@@ -70,7 +68,10 @@ class AllpowersReconnectButton(AllpowersEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Request reconnect."""
-        await self.coordinator.client.async_reconnect("Reconnect requested by user")
+        try:
+            await self.coordinator.client.async_reconnect("Reconnect requested by user")
+        except Exception as ex:
+            raise_command_error(ex)
 
 
 class AllpowersSettingsKeepaliveButton(
@@ -91,5 +92,5 @@ class AllpowersSettingsKeepaliveButton(
         """Send the settings keepalive."""
         try:
             await self.coordinator.client.async_send_settings_keepalive()
-        except (StateUnavailableError, NotConnectedError) as ex:
-            raise HomeAssistantError(str(ex)) from ex
+        except Exception as ex:
+            raise_command_error(ex)

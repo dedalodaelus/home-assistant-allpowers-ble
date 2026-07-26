@@ -7,6 +7,7 @@ from typing import Any, override
 
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 import voluptuous as vol
+from homeassistant import data_entry_flow
 
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -29,6 +30,8 @@ from .client import (
     async_probe_device,
 )
 from .const import (
+    CONFIG_ENTRY_MINOR_VERSION,
+    CONFIG_ENTRY_VERSION,
     CONF_DEVICE_NAME,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
@@ -59,12 +62,16 @@ from .options import ConnectionOptions
 
 _LOGGER = logging.getLogger(__name__)
 
+SECTION_CONNECTION_HEALTH = "connection_health"
+SECTION_ADVANCED_TIMING = "advanced_timing"
+SECTION_EXPERIMENTAL_CONTROLS = "experimental_controls"
+
 
 class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle discovery and setup of one ALLPOWERS BLE device."""
 
-    VERSION = 1
-    MINOR_VERSION = 1
+    VERSION = CONFIG_ENTRY_VERSION
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
@@ -245,12 +252,12 @@ class AllpowersOptionsFlow(OptionsFlow):
         """Show and validate runtime options."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                options = ConnectionOptions.from_mapping(user_input)
-            except (TypeError, ValueError) as ex:
-                _LOGGER.debug("Invalid ALLPOWERS options: %s", ex)
-                errors["base"] = "invalid_options"
+            flat_input = _flatten_options_input(user_input)
+            options, errors = _validate_options_input(flat_input)
+            if errors:
+                _LOGGER.debug("Invalid ALLPOWERS options input: %s", errors)
             else:
+                assert options is not None
                 return self.async_create_entry(title="", data=options.as_dict())
 
         current = ConnectionOptions.from_mapping(self.config_entry.options)
@@ -258,72 +265,252 @@ class AllpowersOptionsFlow(OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_STATUS_INTERVAL,
-                        default=current.status_interval,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(min=MIN_STATUS_INTERVAL, max=MAX_STATUS_INTERVAL),
-                    ),
-                    vol.Required(
-                        CONF_STALE_TIMEOUT,
-                        default=current.stale_timeout,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(min=MIN_STALE_TIMEOUT, max=MAX_STALE_TIMEOUT),
-                    ),
-                    vol.Required(
-                        CONF_WATCHDOG_TIMEOUT,
-                        default=current.watchdog_timeout,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(
-                            min=MIN_WATCHDOG_TIMEOUT,
-                            max=MAX_WATCHDOG_TIMEOUT,
+                    vol.Required(SECTION_CONNECTION_HEALTH): data_entry_flow.section(
+                        vol.Schema(
+                            {
+                                vol.Required(
+                                    CONF_STATUS_INTERVAL,
+                                    default=current.status_interval,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_STATUS_INTERVAL,
+                                        max=MAX_STATUS_INTERVAL,
+                                    ),
+                                ),
+                                vol.Required(
+                                    CONF_STALE_TIMEOUT,
+                                    default=current.stale_timeout,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_STALE_TIMEOUT,
+                                        max=MAX_STALE_TIMEOUT,
+                                    ),
+                                ),
+                                vol.Required(
+                                    CONF_WATCHDOG_TIMEOUT,
+                                    default=current.watchdog_timeout,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_WATCHDOG_TIMEOUT,
+                                        max=MAX_WATCHDOG_TIMEOUT,
+                                    ),
+                                ),
+                            }
                         ),
                     ),
-                    vol.Required(
-                        CONF_RECONNECT_MAX_DELAY,
-                        default=current.reconnect_max_delay,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(
-                            min=MIN_RECONNECT_MAX_DELAY,
-                            max=MAX_RECONNECT_MAX_DELAY,
+                    vol.Required(SECTION_ADVANCED_TIMING): data_entry_flow.section(
+                        vol.Schema(
+                            {
+                                vol.Required(
+                                    CONF_RECONNECT_MAX_DELAY,
+                                    default=current.reconnect_max_delay,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_RECONNECT_MAX_DELAY,
+                                        max=MAX_RECONNECT_MAX_DELAY,
+                                    ),
+                                ),
+                                vol.Required(
+                                    CONF_SETTINGS_STALE_TIMEOUT,
+                                    default=current.settings_stale_timeout,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_SETTINGS_STALE_TIMEOUT,
+                                        max=MAX_SETTINGS_STALE_TIMEOUT,
+                                    ),
+                                ),
+                                vol.Required(
+                                    CONF_SETTINGS_KEEPALIVE,
+                                    default=current.settings_keepalive,
+                                ): bool,
+                                vol.Required(
+                                    CONF_SETTINGS_KEEPALIVE_INTERVAL,
+                                    default=current.settings_keepalive_interval,
+                                ): vol.All(
+                                    vol.Coerce(float),
+                                    vol.Range(
+                                        min=MIN_SETTINGS_KEEPALIVE_INTERVAL,
+                                        max=MAX_SETTINGS_KEEPALIVE_INTERVAL,
+                                    ),
+                                ),
+                            }
                         ),
+                        {"collapsed": True},
                     ),
                     vol.Required(
-                        CONF_SETTINGS_STALE_TIMEOUT,
-                        default=current.settings_stale_timeout,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(
-                            min=MIN_SETTINGS_STALE_TIMEOUT,
-                            max=MAX_SETTINGS_STALE_TIMEOUT,
+                        SECTION_EXPERIMENTAL_CONTROLS
+                    ): data_entry_flow.section(
+                        vol.Schema(
+                            {
+                                vol.Required(
+                                    CONF_ENABLE_CAR_CHARGER,
+                                    default=current.enable_car_charger,
+                                ): bool,
+                            }
                         ),
+                        {"collapsed": True},
                     ),
-                    vol.Required(
-                        CONF_SETTINGS_KEEPALIVE,
-                        default=current.settings_keepalive,
-                    ): bool,
-                    vol.Required(
-                        CONF_SETTINGS_KEEPALIVE_INTERVAL,
-                        default=current.settings_keepalive_interval,
-                    ): vol.All(
-                        vol.Coerce(float),
-                        vol.Range(
-                            min=MIN_SETTINGS_KEEPALIVE_INTERVAL,
-                            max=MAX_SETTINGS_KEEPALIVE_INTERVAL,
-                        ),
-                    ),
-                    vol.Required(
-                        CONF_ENABLE_CAR_CHARGER,
-                        default=current.enable_car_charger,
-                    ): bool,
                 }
             ),
             errors=errors,
         )
+
+
+def _flatten_options_input(values: dict[str, Any]) -> dict[str, Any]:
+    """Normalize both flat and sectioned options-flow payloads."""
+    flat: dict[str, Any] = dict(values)
+    for section in (
+        SECTION_CONNECTION_HEALTH,
+        SECTION_ADVANCED_TIMING,
+        SECTION_EXPERIMENTAL_CONTROLS,
+    ):
+        section_values = values.get(section)
+        if isinstance(section_values, dict):
+            flat.update(section_values)
+    return flat
+
+
+def _validate_options_input(
+    values: dict[str, Any],
+) -> tuple[ConnectionOptions, dict[str, str]] | tuple[None, dict[str, str]]:
+    """Validate and attribute options errors to specific fields."""
+    errors: dict[str, str] = {}
+
+    status_interval = _parse_float(values, CONF_STATUS_INTERVAL, errors)
+    stale_timeout = _parse_float(values, CONF_STALE_TIMEOUT, errors)
+    watchdog_timeout = _parse_float(values, CONF_WATCHDOG_TIMEOUT, errors)
+    reconnect_max_delay = _parse_float(values, CONF_RECONNECT_MAX_DELAY, errors)
+    settings_stale_timeout = _parse_float(values, CONF_SETTINGS_STALE_TIMEOUT, errors)
+    settings_keepalive_interval = _parse_float(
+        values,
+        CONF_SETTINGS_KEEPALIVE_INTERVAL,
+        errors,
+    )
+    settings_keepalive = _parse_bool(values, CONF_SETTINGS_KEEPALIVE, errors)
+    enable_car_charger = _parse_bool(values, CONF_ENABLE_CAR_CHARGER, errors)
+
+    if errors:
+        return None, errors
+
+    assert status_interval is not None
+    assert stale_timeout is not None
+    assert watchdog_timeout is not None
+    assert reconnect_max_delay is not None
+    assert settings_stale_timeout is not None
+    assert settings_keepalive_interval is not None
+    assert settings_keepalive is not None
+    assert enable_car_charger is not None
+
+    _validate_range(
+        CONF_STATUS_INTERVAL,
+        status_interval,
+        MIN_STATUS_INTERVAL,
+        MAX_STATUS_INTERVAL,
+        errors,
+    )
+    _validate_range(
+        CONF_STALE_TIMEOUT,
+        stale_timeout,
+        MIN_STALE_TIMEOUT,
+        MAX_STALE_TIMEOUT,
+        errors,
+    )
+    _validate_range(
+        CONF_WATCHDOG_TIMEOUT,
+        watchdog_timeout,
+        MIN_WATCHDOG_TIMEOUT,
+        MAX_WATCHDOG_TIMEOUT,
+        errors,
+    )
+    _validate_range(
+        CONF_RECONNECT_MAX_DELAY,
+        reconnect_max_delay,
+        MIN_RECONNECT_MAX_DELAY,
+        MAX_RECONNECT_MAX_DELAY,
+        errors,
+    )
+    _validate_range(
+        CONF_SETTINGS_STALE_TIMEOUT,
+        settings_stale_timeout,
+        MIN_SETTINGS_STALE_TIMEOUT,
+        MAX_SETTINGS_STALE_TIMEOUT,
+        errors,
+    )
+    _validate_range(
+        CONF_SETTINGS_KEEPALIVE_INTERVAL,
+        settings_keepalive_interval,
+        MIN_SETTINGS_KEEPALIVE_INTERVAL,
+        MAX_SETTINGS_KEEPALIVE_INTERVAL,
+        errors,
+    )
+
+    if stale_timeout <= status_interval:
+        errors[CONF_STALE_TIMEOUT] = "stale_timeout_must_exceed_status_interval"
+    if watchdog_timeout <= stale_timeout:
+        errors[CONF_WATCHDOG_TIMEOUT] = "watchdog_timeout_must_exceed_stale_timeout"
+    if settings_keepalive and settings_stale_timeout <= settings_keepalive_interval:
+        errors[CONF_SETTINGS_STALE_TIMEOUT] = (
+            "settings_stale_timeout_must_exceed_keepalive_interval"
+        )
+
+    if errors:
+        return None, errors
+
+    options = ConnectionOptions(
+        status_interval=status_interval,
+        stale_timeout=stale_timeout,
+        watchdog_timeout=watchdog_timeout,
+        reconnect_max_delay=reconnect_max_delay,
+        settings_stale_timeout=settings_stale_timeout,
+        settings_keepalive=settings_keepalive,
+        settings_keepalive_interval=settings_keepalive_interval,
+        enable_car_charger=enable_car_charger,
+    )
+    return options, errors
+
+
+def _parse_float(
+    values: dict[str, Any],
+    key: str,
+    errors: dict[str, str],
+) -> float | None:
+    raw = values.get(key)
+    if raw is None:
+        errors[key] = "invalid_number"
+        return None
+    try:
+        return float(raw)
+    except TypeError, ValueError:
+        errors[key] = "invalid_number"
+        return None
+
+
+def _parse_bool(
+    values: dict[str, Any],
+    key: str,
+    errors: dict[str, str],
+) -> bool | None:
+    raw = values.get(key)
+    if isinstance(raw, bool):
+        return raw
+    errors[key] = "invalid_boolean"
+    return None
+
+
+def _validate_range(
+    key: str,
+    value: float,
+    minimum: float,
+    maximum: float,
+    errors: dict[str, str],
+) -> None:
+    if not minimum <= value <= maximum:
+        errors[key] = "out_of_range"
 
 
 def _matches_device(discovery_info: BluetoothServiceInfoBleak) -> bool:

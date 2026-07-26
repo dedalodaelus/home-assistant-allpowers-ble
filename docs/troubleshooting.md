@@ -71,6 +71,7 @@ requires fresh settings.
 - Keep `stale_timeout` above the status interval and the watchdog above both.
 - Review `last_error`, `parser_discards`, `protocol_errors`, `write_errors`, `watchdog_resets`,
   `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
+  Those counters are session-scoped diagnostics and can reset after reloads or reconnects.
 
 ## Enabling logs
 
@@ -81,8 +82,10 @@ logger:
     bleak_retry_connector: debug
 ```
 
-Reproduce one failure, download diagnostics, then disable debug logging. Redact
-Bluetooth addresses and personal data before sharing logs.
+Reproduce one failure, download diagnostics, then disable debug logging.
+Diagnostics already redact Bluetooth identifiers and device names recursively,
+including nested strings and sanitized `last_error` details. Still review raw
+debug logs for personal data before sharing.
 
 ## HACS installs the integration but it does not appear
 

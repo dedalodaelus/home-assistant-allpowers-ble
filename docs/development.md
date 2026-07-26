@@ -123,3 +123,24 @@ period.
 - Never authorize a write from data belonging to a previous GATT session.
 - Treat unknown bits and enum values as information to preserve.
 - Avoid persistent writes for telemetry and counters.
+
+## Config-entry migration workflow
+
+When changing persisted `entry.data` or `entry.options`:
+
+- update `CONFIG_ENTRY_VERSION` or `CONFIG_ENTRY_MINOR_VERSION` in
+  `custom_components/allpowers_ble/const.py`;
+- keep `AllpowersConfigFlow.VERSION` and `.MINOR_VERSION` aligned through those
+  constants;
+- add or update explicit steps in `async_migrate_entry`;
+- reject unsupported future versions with a clear failure (`False`) rather than
+  partial setup;
+- keep migration local-only (no Bluetooth/network I/O).
+
+Every migration change should include tests for:
+
+- no-op on current schema;
+- historical schema fixture to latest schema;
+- repeated migration (idempotence);
+- malformed persisted input;
+- unsupported future version rejection.

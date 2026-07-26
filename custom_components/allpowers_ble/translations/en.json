@@ -33,7 +33,7 @@
         "name": "AC output"
       },
       "charging": {
-        "name": "Charging"
+        "name": "Input active"
       },
       "connected": {
         "name": "Connected"
@@ -42,7 +42,7 @@
         "name": "DC output"
       },
       "discharging": {
-        "name": "Discharging"
+        "name": "Output active"
       },
       "light_output": {
         "name": "Light output"
@@ -147,12 +147,20 @@
   },
   "options": {
     "error": {
-      "invalid_options": "The timeout relationships are invalid: telemetry stale timeout must exceed the status interval, watchdog timeout must exceed telemetry stale timeout, and settings stale timeout must exceed the keepalive interval when keepalive is enabled."
+      "invalid_boolean": "Enter true or false.",
+      "invalid_number": "Enter a valid number.",
+      "out_of_range": "Value is outside the allowed range.",
+      "settings_stale_timeout_must_exceed_keepalive_interval": "Settings stale timeout must be greater than the settings keepalive interval when keepalive is enabled.",
+      "stale_timeout_must_exceed_status_interval": "Telemetry stale timeout must be greater than the status request interval.",
+      "watchdog_timeout_must_exceed_stale_timeout": "Protocol watchdog timeout must be greater than telemetry stale timeout."
     },
     "step": {
       "init": {
         "data": {
+          "advanced_timing": "Advanced timing",
+          "connection_health": "Connection health",
           "enable_car_charger": "Enable experimental car charger control",
+          "experimental_controls": "Experimental controls",
           "reconnect_max_delay": "Maximum reconnect delay (seconds)",
           "settings_keepalive": "Enable settings keepalive",
           "settings_keepalive_interval": "Settings keepalive interval (seconds)",
@@ -161,9 +169,34 @@
           "watchdog_timeout": "Protocol watchdog timeout (seconds)",
           "settings_stale_timeout": "Settings stale timeout (seconds)"
         },
+        "data_description": {
+          "enable_car_charger": "Experimental write path. Keep disabled unless your model/revision has verified support.",
+          "settings_keepalive": "Use only when settings data stops updating consistently in your BLE environment.",
+          "settings_keepalive_interval": "Lower values increase BLE traffic. Keep this comfortably below settings stale timeout."
+        },
         "description": "Defaults match the observed R600 behavior. Keepalive and car charger control are disabled unless explicitly enabled. Experimental profiles remain telemetry-only until write capabilities are verified.",
         "title": "ALLPOWERS BLE options"
       }
+    }
+  },
+  "exceptions": {
+    "command_disconnected": {
+      "message": "The device is not currently connected. Wait for Bluetooth reconnection and retry."
+    },
+    "command_timeout": {
+      "message": "The command timed out before the device confirmed it. Retry in a few seconds."
+    },
+    "command_stale_state": {
+      "message": "A fresh device snapshot is required before this command can be sent. Wait for telemetry to refresh and retry."
+    },
+    "command_unsupported": {
+      "message": "This command is not supported by the current model or protocol state."
+    },
+    "command_transport": {
+      "message": "Bluetooth transport failed while sending the command. Check connectivity and retry."
+    },
+    "command_unconfirmed": {
+      "message": "The device did not confirm the previous command yet. Wait for a fresh update and retry."
     }
   },
   "title": "ALLPOWERS BLE"

@@ -128,6 +128,11 @@ fresh status snapshot and preserves the other output states. When unknown status
 bits are present on a verified profile, the write is rejected because safe
 preservation cannot be proven.
 
+The protocol documentation does not claim that undocumented output-command bits
+are preserved safely. New guarantees for output-bit preservation require packet
+evidence for the target revision and regression vectors that prove no cross-field
+side effects.
+
 ## Settings notification (`0x03`)
 
 The parser requires at least six payload bytes:
@@ -188,6 +193,10 @@ Unknown packets and raw flag bits are data, not errors. They are retained where
 safe and never overwritten casually. New writable behavior requires packet
 captures or equivalent evidence from the exact hardware revision and regression
 vectors in the protocol tests.
+
+Documentation guarantees must stay aligned with this boundary: claims can be
+promoted only when matching code and tests are merged for the same hardware
+profile.
 
 See [Adding models](adding-models.md).
 

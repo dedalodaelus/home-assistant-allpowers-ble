@@ -78,6 +78,17 @@ def make_entry() -> ConfigEntry[Any]:
     )
 
 
+def make_legacy_entry(*, options: dict[str, Any]) -> ConfigEntry[Any]:
+    return ConfigEntry(
+        title="ALLPOWERS R600 AABB",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        options=options,
+        version=1,
+        minor_version=0,
+        unique_id=ADDRESS,
+    )
+
+
 @pytest.mark.asyncio
 async def test_setup_entry_success_registers_callbacks_and_platforms(
     monkeypatch: pytest.MonkeyPatch,
@@ -205,3 +216,102 @@ async def test_unload_entry_shuts_down_only_after_platform_unload() -> None:
     hass.config_entries.unload_result = False
     assert not await integration.async_unload_entry(hass, entry)
     assert coordinator.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_current_version_is_noop() -> None:
+    hass = FakeHass()
+    entry = make_entry()
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert not hass.config_entries.updates
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_0_normalizes_options_and_sets_latest_version() -> (
+    None
+):
+    hass = FakeHass()
+    legacy_options = ConnectionOptions().as_dict()
+    legacy_options.pop("enable_car_charger")
+    entry = make_legacy_entry(options=legacy_options)
+    unique_id = entry.unique_id
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.version == 1
+    assert entry.minor_version == 1
+    assert entry.unique_id == unique_id
+    assert entry.options["enable_car_charger"] is False
+    assert len(hass.config_entries.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_is_idempotent_after_first_successful_migration() -> None:
+    hass = FakeHass()
+    legacy_options = ConnectionOptions().as_dict()
+    legacy_options.pop("enable_car_charger")
+    entry = make_legacy_entry(options=legacy_options)
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert await integration.async_migrate_entry(hass, entry)
+    assert len(hass.config_entries.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_rejects_invalid_legacy_options() -> None:
+    hass = FakeHass()
+    entry = make_legacy_entry(options={"settings_keepalive": "invalid"})
+
+    assert not await integration.async_migrate_entry(hass, entry)
+    assert entry.version == 1
+    assert entry.minor_version == 0
+    assert not hass.config_entries.updates
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_rejects_future_minor_version() -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 AABB",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=99,
+    )
+
+    assert not await integration.async_migrate_entry(hass, entry)
+    assert not hass.config_entries.updates
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_0_without_optional_data_keys() -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 AABB",
+        data={},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=0,
+        unique_id=ADDRESS,
+    )
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.version == 1
+    assert entry.minor_version == 1
+    assert entry.data == {}
+    assert len(hass.config_entries.updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_rejects_unsupported_legacy_version() -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 AABB",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        options=ConnectionOptions().as_dict(),
+        version=0,
+        minor_version=0,
+    )
+
+    assert not await integration.async_migrate_entry(hass, entry)
+    assert not hass.config_entries.updates

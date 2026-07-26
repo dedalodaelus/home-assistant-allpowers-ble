@@ -151,6 +151,9 @@ snapshot, changing only the requested field. Each write opens a pending output
 transaction tied to the active session generation, the source status version,
 and a confirmation deadline.
 
+This preserves the documented output state mapping for the verified profile. It
+does not claim safe preservation of undocumented output-command semantics.
+
 ### Settings
 
 ECO, work mode, car charger, and ECO timeout also share a settings frame. The
@@ -161,6 +164,9 @@ use the same pending-transaction model as output writes.
 Transactions complete only when the matching notification arrives from the same
 session generation. They are in-memory only and are cleared on disconnect, on new
 GATT session, or when confirmation times out and a newer safe version is required.
+
+Any new safety claim must include matching protocol evidence and regression tests
+before it is documented as guaranteed behavior.
 
 ## Session generation boundaries
 
@@ -201,3 +207,28 @@ idempotent shutdown path.
 Only config-entry data and options are persisted. Telemetry, protocol fragments,
 pending transactions, counters, and connection state remain in memory. This avoids unnecessary
 storage writes and prevents ephemeral state from being trusted after restart.
+
+### Config-entry schema and migration baseline
+
+The integration currently persists config entries at schema version `1.1`.
+
+- `entry.data`
+  - `address` (`str`, normalized uppercase Bluetooth MAC address)
+  - `device_name` (`str`, device label captured at setup)
+- `entry.options`
+  - `status_interval` (`float`)
+  - `stale_timeout` (`float`)
+  - `watchdog_timeout` (`float`)
+  - `reconnect_max_delay` (`float`)
+  - `settings_stale_timeout` (`float`)
+  - `settings_keepalive` (`bool`)
+  - `settings_keepalive_interval` (`float`)
+  - `enable_car_charger` (`bool`)
+
+Migration runs through `async_migrate_entry` before setup. The current baseline
+supports migration from `1.0` to `1.1` by normalizing persisted options and
+filling any missing keys with safe defaults. Unsupported future versions are
+rejected explicitly so setup fails cleanly instead of partially initializing.
+
+Migration does not perform network I/O, does not mutate unique IDs, and is
+idempotent once an entry reaches the latest schema.

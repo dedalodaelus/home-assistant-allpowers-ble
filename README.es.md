@@ -25,7 +25,7 @@ componente ESPHome específico para la estación.
 - Comunicación local mediante Bluetooth de Home Assistant o ESPHome Bluetooth Proxy.
 - Varias estaciones simultáneas, cada una con su propia entrada y conexión.
 - Sensores, controles, versiones, RSSI y contadores de salud de la conexión.
-- Escrituras read-modify-write que conservan bits no relacionados o desconocidos.
+- Escrituras protegidas con instantáneas recientes; los ajustes conservan bits desconocidos y las salidas solo preservan estados verificados.
 - Reconexión resolviendo de nuevo el mejor adaptador o proxy disponible.
 - Parser incremental para notificaciones fragmentadas, concatenadas o con ruido.
 - Diagnósticos de entrada y dispositivo con la dirección Bluetooth redactada.
@@ -91,12 +91,23 @@ Home Assistant elige la mejor ruta conectable disponible. En cada reconexión, l
 integración vuelve a resolver el adaptador o proxy y no queda fijada de forma
 permanente a uno concreto.
 
+## Límite de confianza BLE
+
+Esta integración asume un entorno local de Home Assistant de confianza:
+
+- los comandos de escritura solo se aceptan desde usuarios con permisos sobre entidades;
+- la proximidad BLE limita el alcance, pero el acceso por radio cercano sigue siendo parte del riesgo;
+- los proxies ESPHome son relés de transporte y deben gestionarse como infraestructura local de confianza;
+- no existe una frontera de credenciales en nube que rotar si el acceso local se compromete.
+
+No uses esta integración como enclavamiento duro de seguridad para cargas críticas desatendidas.
+
 ## Entidades
 
 | Plataforma | Entidades |
 |---|---|
 | Sensor | Batería, potencia de entrada, potencia de salida, tiempo restante, RSSI, versiones, reconexiones, errores de protocolo y reinicios del watchdog |
-| Sensor binario | Conectado, telemetría disponible, ajustes disponibles, cargando, descargando y estado de salidas |
+| Sensor binario | Conectado, telemetría disponible, ajustes disponibles, entrada activa, salida activa y estado de salidas |
 | Interruptor | Salida CA, salida CC, luz, modo ECO y cargador de coche experimental |
 | Selector | Modo de trabajo y tiempo de apagado ECO |
 | Botón | Actualizar estado, reconectar y enviar keepalive de ajustes |
@@ -109,6 +120,8 @@ escritura a partir de datos de una sesión anterior.
 Los perfiles experimentales funcionan en modo de solo lectura: no crean entidades
 de control de escritura hasta validar explícitamente las capacidades por modelo y
 revisión de hardware.
+Los contadores de diagnóstico son valores de sesión y no exponen una clase de
+estado para estadísticas de largo plazo.
 
 ## Seguridad de las escrituras
 
@@ -117,6 +130,8 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
 
 1. Los cambios de CA, CC y luz requieren un estado reciente y envían un comando
    combinado que conserva las demás salidas.
+   La preservación solo está garantizada para estados de salida documentados;
+   no se afirma seguridad para semánticas no documentadas del comando de salida.
 2. ECO, modo de trabajo, cargador de coche y temporizador requieren ajustes
    recientes y conservan todos los bits no relacionados.
 3. Cada escritura abre una transacción versionada y espera una confirmación en
@@ -125,7 +140,69 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    iniciar otra sesión GATT.
 5. Si no existe una instantánea segura, la escritura se rechaza en vez de adivinar.
 
+Cualquier garantía futura de seguridad en escritura debe apoyarse en evidencia
+capturada del hardware objetivo y en pruebas de regresión equivalentes.
+
 Consulta [Arquitectura](docs/architecture.md) y [Protocolo](docs/protocol.md).
+
+## Ejemplos de automatización conservadora
+
+Usa automatizaciones que fallen de forma segura cuando la telemetría esté obsoleta
+o no disponible, y evita control autónomo de cargas críticas.
+
+Ejemplo 1: notificar cuando cae la telemetría en lugar de forzar escrituras.
+
+```yaml
+automation:
+   - alias: allpowers_telemetry_unavailable
+      triggers:
+         - trigger: state
+            entity_id: binary_sensor.allpowers_telemetry_available
+            to: "off"
+            for: "00:01:00"
+      actions:
+         - action: persistent_notification.create
+            data:
+               title: Telemetría ALLPOWERS no disponible
+               message: Revisa ruta BLE, disponibilidad del proxy y estado de la estación.
+```
+
+Ejemplo 2: condicionar una activación no crítica de salida CA.
+
+```yaml
+automation:
+   - alias: allpowers_enable_ac_non_critical
+      triggers:
+         - trigger: state
+            entity_id: binary_sensor.allpowers_connected
+            to: "on"
+      conditions:
+         - condition: state
+            entity_id: binary_sensor.allpowers_telemetry_available
+            state: "on"
+         - condition: numeric_state
+            entity_id: sensor.allpowers_battery
+            above: 40
+      actions:
+         - action: switch.turn_on
+            target:
+               entity_id: switch.allpowers_ac_output
+```
+
+Prueba siempre estas automatizaciones manualmente con cargas no críticas antes de activarlas.
+
+## Retirada y recuperación
+
+Para retirar la integración limpiamente:
+
+1. Desactiva o elimina automatizaciones que usen entidades ALLPOWERS.
+2. Elimina la entrada de configuración ALLPOWERS BLE en Dispositivos y servicios.
+3. Si instalaste con HACS, desinstala ALLPOWERS BLE en HACS y reinicia Home Assistant.
+4. Si instalaste manualmente, borra `custom_components/allpowers_ble` y reinicia.
+5. Comprueba que no quedan entidades ni dispositivos huérfanos y limpia helpers si hace falta.
+
+Si planeas reinstalar, guarda antes un diagnóstico saneado para comparar historial
+de ruta y detección de modelo tras la recuperación.
 
 ## Opciones
 
@@ -148,7 +225,11 @@ Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes
 parser, errores de protocolo, errores de escritura y watchdog (total, telemetría
 y transporte), además de las últimas marcas temporales, estado en caché,
 clasificación del modelo y opciones.
-La dirección Bluetooth se redacta y no se almacenan credenciales de nube.
+Los identificadores Bluetooth se redactan de forma recursiva en campos
+estructurados y cadenas anidadas. Los nombres del dispositivo y el título de la
+entrada se sustituyen por un marcador de redacción en los diagnósticos. El
+campo `last_error` conserva la categoría del error con detalle saneado y se
+publica en los diagnósticos. No se almacenan credenciales de nube.
 
 Para activar registros de depuración de forma temporal:
 
@@ -188,5 +269,12 @@ python scripts/build_release.py --clean
 El proyecto es una integración personalizada mantenida por la comunidad. No forma
 parte de Home Assistant Core ni ha sido auditado o soportado por el proyecto Home
 Assistant.
+
+## Estado del proyecto
+
+Las releases se promueven mediante pull requests revisadas desde `devel` hacia
+`main`, con validación de CI, validación de repositorio y revisión de documentación
+de seguridad antes de publicar. Los objetivos de calidad describen evidencia y
+pruebas actuales; no suponen un programa formal de certificación de Home Assistant.
 
 Licencia MIT. Consulta [LICENSE](LICENSE).
