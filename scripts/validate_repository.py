@@ -30,6 +30,7 @@ REQUIRED_REPOSITORY_FILES = {
     "SECURITY.md",
     "hacs.json",
     "pyproject.toml",
+    "scripts/validate_release_metadata.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
@@ -69,6 +70,10 @@ RELEASE_MAIN_IF_GUARD = re.compile(
     r"^\s*if:\s*github\.ref\s*==\s*['\"]refs/heads/main['\"]\s*$",
     re.MULTILINE,
 )
+RELEASE_TAG_TRIGGER = re.compile(r"^\s*tags:\s*$", re.MULTILINE)
+RELEASE_TAGGED_JOB = re.compile(r"^\s*tagged-release:\s*$", re.MULTILINE)
+RELEASE_METADATA_VALIDATION_STEP = re.compile(r"scripts/validate_release_metadata\.py")
+RELEASE_CHECKSUM_ASSET = re.compile(r"dist/allpowers_ble\.zip\.sha256")
 BLOCKED_RUFF_IGNORE_RULES = {"ALL"}
 BLOCKED_REPO_CODE_GLOBS = {
     "*",
@@ -369,6 +374,18 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             errors.append("release workflow must trigger push branch on main")
         if RELEASE_MAIN_IF_GUARD.search(release_workflow) is None:
             errors.append("release-please job must remain guarded to refs/heads/main")
+        if RELEASE_TAG_TRIGGER.search(release_workflow) is not None:
+            errors.append("release workflow must not publish from pushed tags")
+        if RELEASE_TAGGED_JOB.search(release_workflow) is not None:
+            errors.append("release workflow must not define a tagged-release job")
+        if RELEASE_METADATA_VALIDATION_STEP.search(release_workflow) is None:
+            errors.append(
+                "release workflow must validate release metadata before upload"
+            )
+        if RELEASE_CHECKSUM_ASSET.search(release_workflow) is None:
+            errors.append(
+                "release workflow must upload checksum asset for allpowers_ble.zip"
+            )
 
 
 def _module_list(value: Any) -> list[str]:

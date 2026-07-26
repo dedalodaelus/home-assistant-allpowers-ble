@@ -106,6 +106,7 @@ The validator checks:
 ```bash
 python scripts/build_release.py --clean
 python scripts/check_version.py 0.1.0
+python scripts/validate_release_metadata.py --tag 0.1.0 --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 ```
 
 The builder sorts files, normalizes timestamps and permissions, excludes caches,
@@ -116,14 +117,15 @@ prints a SHA-256 digest.
 
 Conventional commits feed Release Please. Merging its release pull request updates
 the changelog and manifest version, creates a GitHub release, builds
-`allpowers_ble.zip`, and uploads the HACS asset.
+`allpowers_ble.zip`, and uploads the HACS asset with checksum.
 
 A release is valid only when:
 
 - the tag, manifest version, and Release Please manifest agree;
 - CI, HACS, and Hassfest succeed;
-- the release contains `allpowers_ble.zip`;
+- the release contains `allpowers_ble.zip` and `allpowers_ble.zip.sha256`;
 - the ZIP has `manifest.json` at archive root;
+- the checksum file matches the published ZIP digest;
 - compatibility claims match tested hardware.
 
 ## Manual Home Assistant development
