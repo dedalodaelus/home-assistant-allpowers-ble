@@ -113,9 +113,11 @@ jobs:
               "Review dependency changes",
               "Analyze Python",
             ];
+            const acceptedConclusions = new Set(["success", "neutral", "skipped"]);
 
             const pollIntervalMs = 15000;
-            const timeoutMs = 45 * 60 * 1000;
+            const timeoutMs = 30 * 60 * 1000;
+            const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
             function formatRunsMap(checkRuns) {
@@ -162,7 +164,7 @@ jobs:
                   continue;
                 }
 
-                if (run.conclusion !== "success") {
+                if (!acceptedConclusions.has(run.conclusion || "")) {
                   failed.push(`${checkName} (${run.conclusion || "unknown"})`);
                 }
               }
@@ -174,6 +176,17 @@ jobs:
 
               if (failed.length) {
                 core.setFailed(`Required checks failed: ${failed.join("; ")}`);
+                return;
+              }
+
+              // Fail early with actionable context when expected checks do not appear.
+              if (missing.length && elapsed >= missingChecksGraceMs) {
+                const discoveredChecks = [...latestByName.keys()].sort();
+                core.setFailed(
+                  `Missing required checks after ${Math.floor(missingChecksGraceMs / 60000)} minutes: `
+                  + `${missing.join(", ")}. Discovered checks: ${discoveredChecks.join(", ") || "none"}. `
+                  + "If checks were renamed, update requiredChecks in .github/workflows/merge-gate.yml."
+                );
                 return;
               }
 

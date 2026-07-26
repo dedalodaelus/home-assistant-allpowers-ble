@@ -64,6 +64,8 @@ The repository uses an explicit promotion model:
 - Direct commits into `devel` and `main` are not permitted.
 - Urgent production fixes may target `main` only from a `hotfix/*` branch cut
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
+- Rulesets require a single status check: `Merge gate`. That workflow enforces
+  downstream validation checks transitively.
 
 When opening a pull request:
 
