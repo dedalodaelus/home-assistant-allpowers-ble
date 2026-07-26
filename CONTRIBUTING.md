@@ -57,6 +57,8 @@ A pull request should include:
 - the problem and design rationale;
 - tests for normal, malformed, stale, disconnected, and retry paths as relevant;
 - documentation and translations for user-visible changes;
+- aligned updates for `README.md` and `README.es.md` when safety guarantees,
+  trust-boundary assumptions, removal steps, or automation guidance change;
 - a changelog fragment in the pull request description;
 - no generated caches, local configuration, diagnostics, or packet captures with
   identifying data.
@@ -70,6 +72,9 @@ from Home Assistant and BLE transport.
 Any writable bit or byte requires evidence. Preserve unknown fields during
 read-modify-write operations. When a safe current snapshot is unavailable, reject
 the write instead of assuming defaults.
+
+Do not document a behavior as guaranteed unless the same pull request (or a
+referenced merged pull request) contains the matching implementation and tests.
 
 See [Adding models](docs/adding-models.md) for the verification process.
 

@@ -52,6 +52,14 @@ import smoke test in CI. Behavioral API changes may still require adaptation.
 6. Evaluate Bluetooth connection-slot coordination metrics as Home Assistant APIs
    evolve.
 
+## Release and quality flow
+
+- Changes land on `devel` with CI, lint, typing, and repository checks.
+- Milestone releases are promoted from `devel` to `main` through reviewed pull requests.
+- Documentation guarantees are updated only when matching code and tests are already merged.
+- This project tracks practical quality targets for a community integration; it does
+   not claim official Home Assistant Core certification tiers.
+
 ## Non-goals
 
 - cloud account integration;
