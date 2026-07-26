@@ -1,5 +1,10 @@
 # Architecture
 
+> [!NOTE]
+> The structured architecture set, including system views and Architecture
+> Decision Records, is available in [`docs/architecture/`](architecture/README.md).
+> This file remains the concise implementation reference.
+
 ## Design goals
 
 The integration is organized around five constraints:
