@@ -57,6 +57,16 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml
 
+      - name: Config flow coverage gate
+        env:
+          USE_REAL_HOMEASSISTANT: "0"
+        run: >-
+          pytest tests/test_config_flow.py
+          --cov=custom_components.allpowers_ble.config_flow
+          --cov-branch
+          --cov-report=term-missing
+          --cov-fail-under=100
+
       - name: Real Home Assistant lifecycle harness (gating lane)
         env:
           USE_REAL_HOMEASSISTANT: "1"

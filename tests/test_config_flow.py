@@ -197,6 +197,63 @@ async def test_manual_step_aborts_when_no_devices(
     assert result == {"type": "abort", "reason": "no_devices_found"}
 
 
+@pytest.mark.asyncio
+async def test_manual_step_probe_error_returns_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = new_flow()
+    candidate = service_info()
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise DeviceNotFoundError("no route")
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [candidate],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    initial = await flow.async_step_user()
+    assert initial["type"] == "form"
+
+    result = await flow.async_step_user({"address": ADDRESS})
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+def test_discover_candidates_skips_current_and_existing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow = new_flow()
+    existing = service_info(address="11:22:33:44:55:66")
+    flow._discovered_devices[existing.address] = existing
+    candidates = [
+        service_info(),
+        service_info(address=existing.address),
+    ]
+
+    monkeypatch.setattr(flow, "_async_current_ids", lambda include_ignore: [ADDRESS])
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: candidates,
+    )
+
+    flow._discover_candidates()
+
+    assert set(flow._discovered_devices) == {existing.address}
+
+
 def test_candidate_filtering_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     flow = new_flow()
     candidates = [

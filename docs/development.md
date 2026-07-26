@@ -39,6 +39,13 @@ USE_REAL_HOMEASSISTANT=0 pytest \
   --cov-branch \
   --cov-report=term-missing \
   --cov-report=xml
+
+# Dedicated config-flow gate (must stay at 100% line+branch coverage)
+USE_REAL_HOMEASSISTANT=0 pytest tests/test_config_flow.py \
+  --cov=custom_components.allpowers_ble.config_flow \
+  --cov-branch \
+  --cov-report=term-missing \
+  --cov-fail-under=100
 ```
 
 ## Real Home Assistant lifecycle harness

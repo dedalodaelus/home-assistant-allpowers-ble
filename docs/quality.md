@@ -22,6 +22,10 @@ The repository sets a coverage failure threshold of 98 percent with branch cover
 enabled. New code should test behavior and failure modes rather than adding lines
 only to satisfy the metric.
 
+Config-flow readiness has an additional strict gate: CI runs
+`tests/test_config_flow.py` with branch coverage scoped to
+`custom_components.allpowers_ble.config_flow` and fails unless coverage is 100%.
+
 ## Static and repository checks
 
 - Ruff formatting and linting.
