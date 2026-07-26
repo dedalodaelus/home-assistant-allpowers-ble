@@ -40,6 +40,12 @@ recover:
 - a trailing partial header.
 
 Payload lengths above 128 bytes are rejected as implausible for this protocol.
+Decoder input processing is additionally bounded to keep parser memory/work
+deterministic under synthetic oversized callbacks:
+
+- each callback is processed in chunks of up to 1024 bytes;
+- retained parser buffer is capped at 4096 bytes;
+- dropped bytes are counted for diagnostics while preserving resynchronization.
 
 ## Commands
 
@@ -50,6 +56,17 @@ Payload lengths above 128 bytes are rejected as implausible for this protocol.
 | `0x03` | Device → HA | Settings notification |
 | `0x35` | Device → HA | Optional UTF-8 device name |
 | Other | Device → HA | Retained as a validated unknown packet |
+
+### Device-name sanitization (`0x35`)
+
+Device names are accepted as UTF-8 and normalized at the protocol boundary
+before being exposed to Home Assistant:
+
+- trailing null padding is removed;
+- surrounding whitespace is trimmed;
+- Unicode control-category code points are removed;
+- names are capped to 64 characters;
+- empty results are ignored by the client and do not replace the current title.
 
 ### Status request
 

@@ -79,6 +79,42 @@ def test_decode_device_name(
     assert packet == DeviceNameData(name="R600 Kitchen")
 
 
+def test_decode_device_name_trims_and_strips_controls(
+    notification_builder: Callable[[int, bytes], bytes],
+) -> None:
+    packet = decode_notification(
+        notification_builder(0x35, "  Sala\n\tR600\x00 ".encode("utf-8"))
+    )
+
+    assert packet == DeviceNameData(name="SalaR600")
+
+
+def test_decode_device_name_keeps_valid_unicode(
+    notification_builder: Callable[[int, bytes], bytes],
+) -> None:
+    packet = decode_notification(
+        notification_builder(0x35, "  Ático estación  ".encode("utf-8"))
+    )
+
+    assert packet == DeviceNameData(name="Ático estación")
+
+
+def test_decode_device_name_whitespace_only_becomes_empty(
+    notification_builder: Callable[[int, bytes], bytes],
+) -> None:
+    packet = decode_notification(notification_builder(0x35, b"  \t\n\x00"))
+
+    assert packet == DeviceNameData(name="")
+
+
+def test_decode_device_name_is_capped(
+    notification_builder: Callable[[int, bytes], bytes],
+) -> None:
+    packet = decode_notification(notification_builder(0x35, b"X" * 100))
+
+    assert packet == DeviceNameData(name="X" * 64)
+
+
 def test_decode_unknown_command(
     notification_builder: Callable[[int, bytes], bytes],
 ) -> None:
