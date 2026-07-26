@@ -37,6 +37,69 @@ jobs:
               return;
             }
 
+            const baseRef = pr.base?.ref || "";
+            const headRef = pr.head?.ref || "";
+            const headSha = pr.head.sha;
+            const isHotfixBranch = /^hotfix\//.test(headRef);
+
+            // Policy: PRs to main are only allowed from devel or hotfix/* branches.
+            if (baseRef === "main" && headRef !== "devel" && !isHotfixBranch) {
+              core.setFailed(
+                `PRs targeting main must come from 'devel' or 'hotfix/*'. Current source: '${headRef}'.`
+              );
+              return;
+            }
+
+            // Best-effort policy: hotfix branches targeting main should be cut from main,
+            // not from devel. When devel and main diverge, reject hotfix heads that include devel.
+            if (baseRef === "main" && isHotfixBranch) {
+              const mainVsDevel = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: "main",
+                head: "devel",
+              });
+
+              if (mainVsDevel.data.status !== "identical") {
+                const develVsHotfix = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: "devel",
+                  head: headSha,
+                });
+
+                if (
+                  develVsHotfix.data.status === "ahead"
+                  || develVsHotfix.data.status === "identical"
+                ) {
+                  core.setFailed(
+                    `Hotfix branch '${headRef}' appears to be based on 'devel'. Create hotfix branches from 'main'.`
+                  );
+                  return;
+                }
+              }
+            }
+
+            // Policy: CHANGELOG.md is managed by release-please and must not be edited
+            // in regular development PRs.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
+            const isFeatureToDevel = baseRef === "devel";
+            const isPromotionToMain = baseRef === "main";
+
+            if (touchesChangelog && (isFeatureToDevel || isPromotionToMain)) {
+              core.setFailed(
+                "CHANGELOG.md is managed by release-please and cannot be modified in PRs to devel or main."
+              );
+              return;
+            }
+
             if (pr.draft) {
               core.info("Draft PR detected. Skipping strict gate until ready for review.");
               return;
@@ -51,7 +114,6 @@ jobs:
               "Analyze Python",
             ];
 
-            const headSha = pr.head.sha;
             const pollIntervalMs = 15000;
             const timeoutMs = 45 * 60 * 1000;
             const start = Date.now();

@@ -60,6 +60,14 @@ README_REQUIRED_HEADINGS = {
 }
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+DEPENDABOT_TARGET_BRANCH = re.compile(r"^\s*target-branch:\s*(\S+)\s*$", re.MULTILINE)
+RELEASE_MAIN_PUSH_BRANCH = re.compile(
+    r"^\s*branches:\s*\n\s*-\s*main\s*$", re.MULTILINE
+)
+RELEASE_MAIN_IF_GUARD = re.compile(
+    r"^\s*if:\s*github\.ref\s*==\s*['\"]refs/heads/main['\"]\s*$",
+    re.MULTILINE,
+)
 
 
 def normalize_markdown_anchor(value: str) -> str:
@@ -318,6 +326,40 @@ def validate_markdown_links_and_headings(errors: list[str]) -> None:
                     )
 
 
+def validate_branch_workflow_contract(errors: list[str]) -> None:
+    """Enforce repository branch workflow invariants used by CI/release."""
+    try:
+        dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    except OSError as ex:
+        errors.append(f"failed reading .github/dependabot.yml: {ex}")
+        dependabot = ""
+
+    if dependabot:
+        targets = DEPENDABOT_TARGET_BRANCH.findall(dependabot)
+        if not targets:
+            errors.append("dependabot.yml must define at least one target-branch")
+        for index, target in enumerate(targets, start=1):
+            if target != "devel":
+                errors.append(
+                    "dependabot target-branch must be devel "
+                    f"(entry {index} is {target!r})"
+                )
+
+    try:
+        release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+    except OSError as ex:
+        errors.append(f"failed reading .github/workflows/release.yml: {ex}")
+        release_workflow = ""
+
+    if release_workflow:
+        if RELEASE_MAIN_PUSH_BRANCH.search(release_workflow) is None:
+            errors.append("release workflow must trigger push branch on main")
+        if RELEASE_MAIN_IF_GUARD.search(release_workflow) is None:
+            errors.append("release-please job must remain guarded to refs/heads/main")
+
+
 def validate_release_if_present(errors: list[str]) -> None:
     """Verify the HACS release archive layout when it has been built."""
     archive_path = ROOT / "dist" / "allpowers_ble.zip"
@@ -343,6 +385,7 @@ def main() -> int:
     validate_text_files(errors)
     validate_clean_tree(errors)
     validate_markdown_links_and_headings(errors)
+    validate_branch_workflow_contract(errors)
     validate_release_if_present(errors)
 
     for source in sorted(ROOT.rglob("*.py")):

@@ -20,6 +20,12 @@
 - [ ] Documentation and changelog impact addressed.
 - [ ] Logs, diagnostics, addresses, serial numbers, and packet captures are sanitized.
 
+## Branch workflow
+
+- [ ] For non-hotfix work, base branch is `devel`.
+- [ ] For `main` targets, source branch is `devel` or `hotfix/*` (cut from `main`) only.
+- [ ] This change does not require bypassing branch protections on `devel` or `main`.
+
 ## Hardware results
 
 <!-- Exact model/revision, firmware, adapter/proxy, operations tested, and duration. -->

@@ -277,7 +277,11 @@ Assistant.
 
 Las releases se promueven mediante pull requests revisadas desde `devel` hacia
 `main`, con validación de CI, validación de repositorio y revisión de documentación
-de seguridad antes de publicar. Los objetivos de calidad describen evidencia y
+de seguridad antes de publicar. Las correcciones urgentes de producción pueden
+apuntar a `main` solo desde ramas `hotfix/*` creadas desde `main`, y después deben
+propagarse de vuelta a `devel`. Los objetivos de calidad describen evidencia y
 pruebas actuales; no suponen un programa formal de certificación de Home Assistant.
+
+No se permiten commits directos sobre `devel` ni sobre `main`. Las pull requests hacia `main` solo se permiten desde `devel` o desde ramas `hotfix/*` creadas desde `main`.
 
 Licencia MIT. Consulta [LICENSE](LICENSE).
