@@ -111,7 +111,6 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
     _sensor_description(
         key="reconnects",
         translation_key="reconnects",
-        state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         value_fn=lambda data: data.statistics.reconnects,
@@ -120,7 +119,6 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
     _sensor_description(
         key="protocol_errors",
         translation_key="protocol_errors",
-        state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         value_fn=lambda data: data.statistics.protocol_errors,
@@ -129,7 +127,6 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
     _sensor_description(
         key="parser_discards",
         translation_key="parser_discards",
-        state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         value_fn=lambda data: data.statistics.parser_discards,
@@ -138,7 +135,6 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
     _sensor_description(
         key="watchdog_resets",
         translation_key="watchdog_resets",
-        state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
         value_fn=lambda data: data.statistics.watchdog_resets,
@@ -181,15 +177,3 @@ class AllpowersSensor(AllpowersEntity, SensorEntity):
     def available(self) -> bool:
         """Return availability defined by the sensor data source."""
         return self.entity_description.available_fn(self.coordinator)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Expose the last transport error only on diagnostic counters."""
-        if self.entity_description.key not in {
-            "reconnects",
-            "protocol_errors",
-            "parser_discards",
-            "watchdog_resets",
-        }:
-            return None
-        return {"last_error": self.coordinator.data.last_error}

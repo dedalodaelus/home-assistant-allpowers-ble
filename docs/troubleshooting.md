@@ -71,6 +71,7 @@ requires fresh settings.
 - Keep `stale_timeout` above the status interval and the watchdog above both.
 - Review `last_error`, `parser_discards`, `protocol_errors`, `write_errors`, `watchdog_resets`,
   `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
+  Those counters are session-scoped diagnostics and can reset after reloads or reconnects.
 
 ## Enabling logs
 
