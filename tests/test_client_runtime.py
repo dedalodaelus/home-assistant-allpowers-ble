@@ -79,12 +79,14 @@ def make_client(
     *,
     name: str = "ALLPOWERS R600",
 ) -> AllpowersBLEClient:
-    return AllpowersBLEClient(
+    client = AllpowersBLEClient(
         hass=FakeHass(),  # type: ignore[arg-type]
         address="aa:bb:cc:dd:ee:ff",
         advertised_name=name,
         options=options or ConnectionOptions(),
     )
+    client._settings = settings()
+    return client
 
 
 def connect_fake(client: AllpowersBLEClient) -> FakeClient:
@@ -93,6 +95,7 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
     client._active_session_generation = 1
+    client._settings = settings()
     client._connected_monotonic = monotonic()
     return fake
 
