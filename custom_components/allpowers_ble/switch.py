@@ -134,7 +134,7 @@ async def async_setup_entry(
 class _AllpowersSwitchMixin:
     """Shared switch implementation."""
 
-    entity_description: AllpowersSwitchDescription
+    entity_description: Any
     _entry: AllpowersConfigEntry
 
     @property

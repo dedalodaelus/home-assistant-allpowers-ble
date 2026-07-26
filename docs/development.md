@@ -63,6 +63,17 @@ mypy custom_components/allpowers_ble
 pylint --errors-only custom_components/allpowers_ble
 ```
 
+Static-analysis policy:
+
+- Ruff enforces correctness and bug-risk findings (`E4`, `E7`, `E9`, `F`, `B`).
+- Mypy runs with `follow_imports = normal` and no global `ignore_missing_imports`.
+- Missing-import allowances must remain explicit and limited to external libraries.
+- Pylint remains error-focused to keep only non-redundant runtime-safety checks.
+- Pre-commit hooks are mandatory before push and are re-checked in CI.
+
+Any new ignore must document why the check is noisy, why the scope is minimal, and
+why moving the exception to test-only code is not possible.
+
 `make all` runs the standard local sequence.
 
 ## Repository validation

@@ -32,7 +32,14 @@ Run the full local validation:
 
 ```bash
 make all
+pre-commit run --all-files
 ```
+
+Mandatory pre-commit policy:
+
+- Every contributor must run `pre-commit run --all-files` before push.
+- Commits that skip local hooks (for example with `--no-verify`) are not accepted.
+- The CI workflow runs the same pre-commit hooks and blocks merging when any hook fails.
 
 Build and inspect the HACS asset:
 
