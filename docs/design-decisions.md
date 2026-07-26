@@ -1,5 +1,10 @@
 # Design decisions
 
+> [!NOTE]
+> These original informal decisions are retained as source evidence. The
+> structured decision log is available in
+> [`docs/architecture/decisions/`](architecture/decisions/README.md).
+
 ## Use Home Assistant Bluetooth as the only transport entry point
 
 **Decision:** Resolve `BLEDevice` instances through Home Assistant with
