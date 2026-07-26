@@ -138,12 +138,15 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    notificación antes de reutilizar ese estado para otra escritura.
 4. Las transacciones pendientes y la frescura se invalidan al desconectar o
    iniciar otra sesión GATT.
-5. Si no existe una instantánea segura, la escritura se rechaza en vez de adivinar.
+5. El cliente BLE aplica capacidades de escritura por perfil y revisión en el
+   borde de transporte para salidas, ajustes y keepalive de ajustes.
+6. Si no existe una instantánea segura o el perfil activo no autoriza la
+   operación, la escritura se rechaza en vez de adivinar.
 
 Cualquier garantía futura de seguridad en escritura debe apoyarse en evidencia
 capturada del hardware objetivo y en pruebas de regresión equivalentes.
 
-Consulta [Arquitectura](docs/architecture.md) y [Protocolo](docs/protocol.md).
+Consulta [Arquitectura](docs/architecture/README.md) y [Protocolo](docs/protocol.md).
 
 ## Ejemplos de automatización conservadora
 

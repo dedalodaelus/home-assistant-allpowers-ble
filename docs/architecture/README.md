@@ -22,7 +22,7 @@ on which the original implementation choice was made.
 | [System architecture](system-architecture.md) | Context, components, deployment, runtime flows, trust boundaries, data lifecycle, quality attributes, and known limits. |
 | [Architecture decision log](decisions/README.md) | Indexed list of architecture decision records and their relationships. |
 | [ADR template](decisions/template.md) | Template for future architecture decisions. |
-| [Existing concise architecture](../architecture.md) | Current implementation-oriented architecture summary. |
+| [Implementation architecture](implementation-architecture.md) | Concise implementation-oriented architecture summary. |
 | [Existing design decisions](../design-decisions.md) | Original informal decision list retained as source evidence. |
 | [Protocol](../protocol.md) | BLE framing, commands, state fields, and protocol safety notes. |
 | [Compatibility](../compatibility.md) | Verified, experimental, and rejected device profiles. |

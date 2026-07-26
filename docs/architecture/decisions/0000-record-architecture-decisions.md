@@ -63,7 +63,7 @@ access boundary that is unnecessary for a small open-source repository.
 
 ## Evidence
 
-- [Existing architecture summary](../../architecture.md)
+- [Existing architecture summary](../implementation-architecture.md)
 - [Existing informal design decisions](../../design-decisions.md)
 - [Quality and test strategy](../../quality.md)
 - [Architecture documentation entry point](../README.md)

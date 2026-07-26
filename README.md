@@ -147,13 +147,15 @@ therefore applies the following invariants:
    on-device confirmation before the next write can reuse that state.
 4. Pending transactions and freshness are invalidated on every disconnect and
    new GATT session.
-5. Writes are rejected rather than guessed when the required snapshot is missing,
-   stale, or disconnected.
+5. The BLE client enforces revision-aware write capabilities at the transport
+   boundary for output, settings, and settings keepalive commands.
+6. Writes are rejected rather than guessed when the required snapshot is missing,
+   stale, disconnected, or unauthorized for the active profile.
 
 Any future write-safety guarantee must be supported by captured evidence from the
 target hardware revision and a matching regression test.
 
-See [Architecture](docs/architecture.md) and [Protocol](docs/protocol.md).
+See [Architecture](docs/architecture/README.md) and [Protocol](docs/protocol.md).
 
 ## Conservative automation examples
 
