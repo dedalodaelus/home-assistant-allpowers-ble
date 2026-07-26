@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+import unicodedata
 
 from .errors import (
     FrameTooShortError,
@@ -27,6 +28,9 @@ SETTINGS_WRITE_COMMAND = 0x02
 SETTINGS_NOTIFICATION_COMMAND = 0x03
 DEVICE_NAME_COMMAND = 0x35
 MAX_NOTIFICATION_PAYLOAD = 128
+MAX_DEVICE_NAME_CHARS = 64
+MAX_STREAM_INPUT_CHUNK_BYTES = 1024
+MAX_STREAM_BUFFER_BYTES = 4096
 
 STATUS_REQUEST = bytes((0xA5, 0x65, 0xB1, 0x00, 0x01, 0x06, 0x01, 0, 0, 0, 0, 0))
 
@@ -156,7 +160,13 @@ def _decode_device_name(payload: bytes) -> DeviceNameData:
         name = payload.rstrip(b"\x00").decode("utf-8")
     except UnicodeDecodeError as ex:
         raise InvalidPayloadError("Device name is not valid UTF-8") from ex
-    return DeviceNameData(name=name)
+
+    # Device-provided names are untrusted input. Keep valid UTF-8, strip outer
+    # whitespace, remove control code points, and cap a deterministic length.
+    sanitized = "".join(
+        char for char in name.strip() if not unicodedata.category(char).startswith("C")
+    )
+    return DeviceNameData(name=sanitized[:MAX_DEVICE_NAME_CHARS])
 
 
 def encode_status_request() -> bytes:
@@ -252,10 +262,11 @@ def _set_mask(value: int, mask: int, enabled: bool) -> int:
 class NotificationStreamDecoder:
     """Incrementally recover complete frames from fragmented or noisy input."""
 
-    __slots__ = ("_buffer", "_discarded_frames")
+    __slots__ = ("_buffer", "_discarded_bytes", "_discarded_frames")
 
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._discarded_bytes = 0
         self._discarded_frames = 0
 
     @property
@@ -268,25 +279,48 @@ class NotificationStreamDecoder:
         """Return the number of invalid candidate frames discarded."""
         return self._discarded_frames
 
+    @property
+    def discarded_bytes(self) -> int:
+        """Return the number of bytes discarded during stream recovery."""
+        return self._discarded_bytes
+
     def reset(self) -> None:
         """Discard all buffered bytes and error counters."""
         self._buffer.clear()
+        self._discarded_bytes = 0
         self._discarded_frames = 0
 
     def feed(self, data: bytes | bytearray | memoryview) -> list[ProtocolPacket]:
         """Feed bytes and return every complete, valid packet recovered."""
-        self._buffer.extend(data)
+        packets: list[ProtocolPacket] = []
+        chunk = memoryview(data)
+        for start in range(0, len(chunk), MAX_STREAM_INPUT_CHUNK_BYTES):
+            self._buffer.extend(chunk[start : start + MAX_STREAM_INPUT_CHUNK_BYTES])
+            if len(self._buffer) > MAX_STREAM_BUFFER_BYTES:
+                overflow = len(self._buffer) - MAX_STREAM_BUFFER_BYTES
+                del self._buffer[:overflow]
+                self._discarded_bytes += overflow
+            packets.extend(self._drain_buffer())
+
+        return packets
+
+    def _drain_buffer(self) -> list[ProtocolPacket]:
         packets: list[ProtocolPacket] = []
 
         while True:
             header_index = self._buffer.find(HEADER)
             if header_index < 0:
                 if self._buffer.endswith(HEADER[:1]):
-                    del self._buffer[:-1]
+                    removed = len(self._buffer) - 1
+                    if removed > 0:
+                        del self._buffer[:-1]
+                        self._discarded_bytes += removed
                 else:
+                    self._discarded_bytes += len(self._buffer)
                     self._buffer.clear()
                 break
             if header_index:
+                self._discarded_bytes += header_index
                 del self._buffer[:header_index]
 
             if len(self._buffer) < 7:
@@ -295,6 +329,7 @@ class NotificationStreamDecoder:
             payload_length = self._buffer[5]
             if payload_length > MAX_NOTIFICATION_PAYLOAD:
                 del self._buffer[0]
+                self._discarded_bytes += 1
                 self._discarded_frames += 1
                 continue
 
@@ -311,6 +346,7 @@ class NotificationStreamDecoder:
                 InvalidPayloadError,
             ):
                 del self._buffer[0]
+                self._discarded_bytes += 1
                 self._discarded_frames += 1
                 continue
 
