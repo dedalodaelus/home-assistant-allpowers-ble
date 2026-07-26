@@ -511,6 +511,17 @@ async def test_switches_send_commands_and_wrap_safety_errors() -> None:
         cause=StateUnavailableError,
     )
 
+    client.errors["set_ac"] = StateUnavailableError(
+        "Unsupported output command for active model profile: r600-unverified-revision"
+    )
+    with pytest.raises(HomeAssistantError) as error_info:
+        await by_key["ac_output"].async_turn_on()
+    assert_command_error(
+        error_info,
+        key="command_unsupported",
+        cause=StateUnavailableError,
+    )
+
     client.errors["set_eco"] = NotConnectedError("offline")
     with pytest.raises(HomeAssistantError) as error_info:
         await by_key["eco_mode"].async_turn_on()
@@ -540,6 +551,39 @@ async def test_switches_send_commands_and_wrap_safety_errors() -> None:
     with pytest.raises(HomeAssistantError) as error_info:
         await by_key["car_charger"].async_turn_off()
     assert_command_error(error_info, key="command_transport", cause=RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_downgrade_disables_all_switch_controls() -> None:
+    entry, client, _, _ = configured_entry()
+    entities: list[Any] = []
+    await switch.async_setup_entry(None, entry, lambda values: entities.extend(values))
+    by_key = {entity.entity_description.key: entity for entity in entities}
+
+    assert by_key["ac_output"].available
+    assert by_key["dc_output"].available
+    assert by_key["light"].available
+    assert by_key["eco_mode"].available
+    assert not by_key["car_charger"].available
+
+    enabled = ConnectionOptions(enable_car_charger=True)
+    await entry.runtime_data.coordinator.async_apply_options(enabled)
+    assert by_key["car_charger"].available
+
+    downgraded = replace(
+        client.snapshot(),
+        settings=settings(hardware_version="1.0", raw_hardware_version=0x10),
+        status=status(),
+        status_monotonic=monotonic(),
+        settings_monotonic=monotonic(),
+    )
+    client.set_snapshot(downgraded)
+
+    assert not by_key["ac_output"].available
+    assert not by_key["dc_output"].available
+    assert not by_key["light"].available
+    assert not by_key["eco_mode"].available
+    assert not by_key["car_charger"].available
 
 
 @pytest.mark.asyncio

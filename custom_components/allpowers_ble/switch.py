@@ -195,9 +195,11 @@ class AllpowersSettingsSwitch(
     @property
     def available(self) -> bool:
         """Require a fresh settings snapshot and explicit opt-in when experimental."""
+        if not super().available:
+            return False
         if (
             self.entity_description.key == "car_charger"
             and not self.coordinator.client.options.enable_car_charger
         ):
             return False
-        return self.coordinator.settings_controls_available
+        return True

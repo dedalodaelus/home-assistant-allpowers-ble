@@ -48,10 +48,10 @@ def _settings(**changes: object) -> SettingsData:
         "work_mode": WorkMode.MUTE,
         "car_charger_enabled": False,
         "eco_timeout_hours": 2,
-        "hardware_version": "1.0",
+        "hardware_version": "1.2",
         "firmware_version": "1.1",
         "raw_flags": 0xA0,
-        "raw_hardware_version": 0x10,
+        "raw_hardware_version": 0x12,
         "raw_firmware_version": 0x11,
     }
     values.update(changes)
@@ -70,6 +70,7 @@ def _connected_client(options: ConnectionOptions | None = None):
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
     client._active_session_generation = 1
+    client._settings = _settings()
     client._schedule_status_refresh = lambda: None
     return client, fake
 
@@ -231,14 +232,14 @@ async def test_consecutive_settings_commands_handle_contradictory_and_duplicate_
 
     contradictory = notification_builder(
         0x03,
-        bytes((0xA1, 2, 0x00, 0x00, 0x10, 0x11)),
+        bytes((0xA1, 2, 0x00, 0x00, 0x12, 0x11)),
     )
     client._notification_handler(FakeCharacteristic(), bytearray(contradictory))
     assert client._pending_settings_transaction is not None
 
     matching = notification_builder(
         0x03,
-        bytes((0xA5, 2, 0x00, 0x00, 0x10, 0x11)),
+        bytes((0xA5, 2, 0x00, 0x00, 0x12, 0x11)),
     )
     client._notification_handler(FakeCharacteristic(), bytearray(matching))
     assert client._pending_settings_transaction is None
@@ -344,6 +345,64 @@ async def test_car_charger_enabled_option() -> None:
     await client.async_set_car_charger(True)
 
     assert fake.writes[-1][7] == 0xB0
+
+
+@pytest.mark.asyncio
+async def test_write_commands_are_rejected_for_read_only_profiles() -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings = _settings(hardware_version="1.0", raw_hardware_version=0x10)
+    client._settings_monotonic = now
+
+    with pytest.raises(
+        client_module.StateUnavailableError,
+        match="Unsupported output command for active model profile",
+    ):
+        await client.async_set_ac(True)
+    with pytest.raises(
+        client_module.StateUnavailableError,
+        match="Unsupported settings command for active model profile",
+    ):
+        await client.async_set_eco(True)
+    with pytest.raises(
+        client_module.StateUnavailableError,
+        match="Unsupported settings keepalive command for active model profile",
+    ):
+        await client.async_send_settings_keepalive()
+
+    assert fake.writes == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_downgrade_blocks_subsequent_writes() -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings = _settings(hardware_version="1.2", raw_hardware_version=0x12)
+    client._settings_monotonic = now
+
+    await client.async_set_ac(True)
+    assert len(fake.writes) == 1
+
+    client._status = _status(ac_enabled=True)
+    client._status_monotonic = asyncio.get_running_loop().time()
+    client._settings = _settings(hardware_version="1.0", raw_hardware_version=0x10)
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    client._pending_output_transaction = None
+    client._pending_settings_transaction = None
+
+    with pytest.raises(client_module.StateUnavailableError, match="Unsupported output"):
+        await client.async_set_dc(True)
+    with pytest.raises(
+        client_module.StateUnavailableError,
+        match="Unsupported settings command",
+    ):
+        await client.async_set_eco(False)
+
+    assert len(fake.writes) == 1
 
 
 @pytest.mark.asyncio
