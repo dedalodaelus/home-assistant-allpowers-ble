@@ -166,5 +166,25 @@
       }
     }
   },
+  "exceptions": {
+    "command_disconnected": {
+      "message": "El dispositivo no está conectado en este momento. Espera a que se restablezca Bluetooth y vuelve a intentarlo."
+    },
+    "command_timeout": {
+      "message": "El comando superó el tiempo límite antes de que el dispositivo lo confirmara. Vuelve a intentarlo en unos segundos."
+    },
+    "command_stale_state": {
+      "message": "Se necesita un estado reciente del dispositivo antes de enviar este comando. Espera a que se actualice la telemetría y vuelve a intentarlo."
+    },
+    "command_unsupported": {
+      "message": "Este comando no es compatible con el modelo actual o con el estado del protocolo."
+    },
+    "command_transport": {
+      "message": "La capa Bluetooth falló al enviar el comando. Verifica la conectividad y vuelve a intentarlo."
+    },
+    "command_unconfirmed": {
+      "message": "El dispositivo todavía no confirmó el comando anterior. Espera una actualización reciente y vuelve a intentarlo."
+    }
+  },
   "title": "ALLPOWERS BLE"
 }

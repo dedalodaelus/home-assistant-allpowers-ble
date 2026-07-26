@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .client import NotConnectedError
 from .coordinator import AllpowersConfigEntry
-from .entity import AllpowersSettingsControlEntity, runtime_model_support
-from .protocol import StateUnavailableError, WorkMode
+from .entity import (
+    AllpowersSettingsControlEntity,
+    raise_command_error,
+    runtime_model_support,
+)
+from .protocol import WorkMode
 
 WORK_MODE_OPTIONS = ("mute", "standard", "fast")
 WORK_MODE_FROM_OPTION = {
@@ -68,10 +70,8 @@ class AllpowersWorkModeSelect(AllpowersSettingsControlEntity, SelectEntity):
         try:
             mode = WORK_MODE_FROM_OPTION[option]
             await self.coordinator.client.async_set_work_mode(mode)
-        except KeyError as ex:
-            raise HomeAssistantError(f"Unsupported work mode: {option}") from ex
-        except (StateUnavailableError, NotConnectedError) as ex:
-            raise HomeAssistantError(str(ex)) from ex
+        except Exception as ex:
+            raise_command_error(ex)
 
 
 class AllpowersEcoTimeoutSelect(AllpowersSettingsControlEntity, SelectEntity):
@@ -97,7 +97,5 @@ class AllpowersEcoTimeoutSelect(AllpowersSettingsControlEntity, SelectEntity):
         try:
             hours = ECO_TIMEOUT_FROM_OPTION[option]
             await self.coordinator.client.async_set_eco_timeout(hours)
-        except KeyError as ex:
-            raise HomeAssistantError(f"Unsupported ECO timeout: {option}") from ex
-        except (StateUnavailableError, NotConnectedError) as ex:
-            raise HomeAssistantError(str(ex)) from ex
+        except Exception as ex:
+            raise_command_error(ex)

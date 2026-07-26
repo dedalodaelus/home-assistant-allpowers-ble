@@ -148,8 +148,19 @@ async def test_base_entity_availability_and_eco_error_wrapping() -> None:
 
     eco = select.AllpowersEcoTimeoutSelect(entry)
     client.errors["set_eco_timeout"] = StateUnavailableError("stale settings")
-    with pytest.raises(HomeAssistantError, match="stale settings"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await eco.async_select_option("one_hour")
+    assert getattr(error_info.value, "translation_key", None) == "command_stale_state"
+    assert isinstance(error_info.value.__cause__, StateUnavailableError)
+
+
+@pytest.mark.asyncio
+async def test_entity_command_error_boundary_preserves_cancellation() -> None:
+    entry, client, _, _ = configured_entry()
+    work_mode = select.AllpowersWorkModeSelect(entry)
+    client.errors["set_work_mode"] = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await work_mode.async_select_option("fast")
 
 
 def test_option_boolean_and_keepalive_relationship_validation() -> None:
@@ -175,3 +186,28 @@ def test_updated_settings_preserves_reserved_work_mode() -> None:
     updated = updated_settings(current, eco_enabled=True)
     assert updated.work_mode is None
     assert updated.raw_flags & 0x06 == 0x06
+
+
+def test_translated_command_error_legacy_runtime_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LegacyHomeAssistantError(RuntimeError):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            if kwargs:
+                raise TypeError("legacy")
+            super().__init__(*args)
+
+    monkeypatch.setattr(entity, "HomeAssistantError", LegacyHomeAssistantError)
+    error = entity._translated_command_error("command_transport")
+    assert isinstance(error, LegacyHomeAssistantError)
+    assert str(error) == "command_transport"
+
+
+def test_raise_command_error_branches_for_cancelled_and_transport_base() -> None:
+    with pytest.raises(asyncio.CancelledError):
+        entity.raise_command_error(asyncio.CancelledError())
+
+    with pytest.raises(HomeAssistantError) as error_info:
+        entity.raise_command_error(client_module.AllpowersClientError("ble failure"))
+    assert getattr(error_info.value, "translation_key", None) == "command_transport"
+    assert isinstance(error_info.value.__cause__, client_module.AllpowersClientError)

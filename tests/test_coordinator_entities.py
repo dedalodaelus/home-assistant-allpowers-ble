@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -29,6 +31,19 @@ from tests.helpers import (
     settings,
     snapshot,
 )
+
+
+def assert_command_error(
+    error_info: pytest.ExceptionInfo[HomeAssistantError],
+    *,
+    key: str,
+    cause: type[Exception],
+) -> None:
+    """Assert that a writable entity exposes a translated command error."""
+    error = error_info.value
+    assert getattr(error, "translation_domain", None) == "allpowers_ble"
+    assert getattr(error, "translation_key", None) == key
+    assert isinstance(error.__cause__, cause)
 
 
 @pytest.mark.asyncio
@@ -211,12 +226,43 @@ async def test_switches_send_commands_and_wrap_safety_errors() -> None:
     assert ("set_car_charger", True) in client.calls
 
     client.errors["set_ac"] = StateUnavailableError("fresh state required")
-    with pytest.raises(HomeAssistantError, match="fresh state"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await by_key["ac_output"].async_turn_on()
+    assert_command_error(
+        error_info,
+        key="command_stale_state",
+        cause=StateUnavailableError,
+    )
 
     client.errors["set_eco"] = NotConnectedError("offline")
-    with pytest.raises(HomeAssistantError, match="offline"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await by_key["eco_mode"].async_turn_on()
+    assert_command_error(
+        error_info,
+        key="command_disconnected",
+        cause=NotConnectedError,
+    )
+
+    client.errors["set_dc"] = StateUnavailableError(
+        "Output command confirmation timed out; wait for a fresh status update"
+    )
+    with pytest.raises(HomeAssistantError) as error_info:
+        await by_key["dc_output"].async_turn_on()
+    assert_command_error(
+        error_info,
+        key="command_unconfirmed",
+        cause=StateUnavailableError,
+    )
+
+    client.errors["set_light"] = TimeoutError("write timeout")
+    with pytest.raises(HomeAssistantError) as error_info:
+        await by_key["light"].async_turn_on()
+    assert_command_error(error_info, key="command_timeout", cause=TimeoutError)
+
+    client.errors["set_car_charger"] = RuntimeError("transport exploded")
+    with pytest.raises(HomeAssistantError) as error_info:
+        await by_key["car_charger"].async_turn_off()
+    assert_command_error(error_info, key="command_transport", cause=RuntimeError)
 
 
 @pytest.mark.asyncio
@@ -233,14 +279,33 @@ async def test_selects_handle_known_unknown_and_invalid_values() -> None:
     assert ("set_work_mode", WorkMode.FAST) in client.calls
     assert ("set_eco_timeout", 6) in client.calls
 
-    with pytest.raises(HomeAssistantError, match="Unsupported work mode"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await work_mode.async_select_option("turbo")
-    with pytest.raises(HomeAssistantError, match="Unsupported ECO timeout"):
+    assert_command_error(error_info, key="command_unsupported", cause=KeyError)
+
+    with pytest.raises(HomeAssistantError) as error_info:
         await eco_timeout.async_select_option("forever")
+    assert_command_error(error_info, key="command_unsupported", cause=KeyError)
 
     client.errors["set_work_mode"] = NotConnectedError("offline")
-    with pytest.raises(HomeAssistantError, match="offline"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await work_mode.async_select_option("mute")
+    assert_command_error(
+        error_info,
+        key="command_disconnected",
+        cause=NotConnectedError,
+    )
+
+    client.errors["set_eco_timeout"] = StateUnavailableError(
+        "Settings writes are blocked by semantic validation: unsupported ECO timeout"
+    )
+    with pytest.raises(HomeAssistantError) as error_info:
+        await eco_timeout.async_select_option("one_hour")
+    assert_command_error(
+        error_info,
+        key="command_unsupported",
+        cause=StateUnavailableError,
+    )
 
     unknown = replace(
         client.snapshot(),
@@ -303,11 +368,27 @@ async def test_buttons_send_commands_and_wrap_errors() -> None:
     assert ("settings_keepalive", None) in client.calls
 
     client.errors["request_status"] = NotConnectedError("offline")
-    with pytest.raises(HomeAssistantError, match="offline"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await refresh.async_press()
+    assert_command_error(
+        error_info,
+        key="command_disconnected",
+        cause=NotConnectedError,
+    )
+
     client.errors["settings_keepalive"] = StateUnavailableError("settings stale")
-    with pytest.raises(HomeAssistantError, match="settings stale"):
+    with pytest.raises(HomeAssistantError) as error_info:
         await keepalive.async_press()
+    assert_command_error(
+        error_info,
+        key="command_stale_state",
+        cause=StateUnavailableError,
+    )
+
+    client.errors["reconnect"] = RuntimeError("adapter failure")
+    with pytest.raises(HomeAssistantError) as error_info:
+        await reconnect.async_press()
+    assert_command_error(error_info, key="command_transport", cause=RuntimeError)
 
     client.set_snapshot(disconnected_snapshot())
     assert not refresh.available
@@ -329,3 +410,24 @@ async def test_option_numbers_validate_and_persist_complete_options() -> None:
 
     with pytest.raises(HomeAssistantError, match="stale_timeout"):
         await status_interval.async_set_native_value(120)
+
+
+def test_command_exception_translations_are_present() -> None:
+    expected = {
+        "command_disconnected",
+        "command_timeout",
+        "command_stale_state",
+        "command_unsupported",
+        "command_transport",
+        "command_unconfirmed",
+    }
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "custom_components/allpowers_ble/strings.json",
+        "custom_components/allpowers_ble/translations/en.json",
+        "custom_components/allpowers_ble/translations/es.json",
+    ):
+        payload = json.loads((root / relative).read_text(encoding="utf-8"))
+        exceptions = payload.get("exceptions", {})
+        assert expected.issubset(exceptions)
+        assert all(exceptions[key].get("message") for key in expected)

@@ -166,5 +166,25 @@
       }
     }
   },
+  "exceptions": {
+    "command_disconnected": {
+      "message": "The device is not currently connected. Wait for Bluetooth reconnection and retry."
+    },
+    "command_timeout": {
+      "message": "The command timed out before the device confirmed it. Retry in a few seconds."
+    },
+    "command_stale_state": {
+      "message": "A fresh device snapshot is required before this command can be sent. Wait for telemetry to refresh and retry."
+    },
+    "command_unsupported": {
+      "message": "This command is not supported by the current model or protocol state."
+    },
+    "command_transport": {
+      "message": "Bluetooth transport failed while sending the command. Check connectivity and retry."
+    },
+    "command_unconfirmed": {
+      "message": "The device did not confirm the previous command yet. Wait for a fresh update and retry."
+    }
+  },
   "title": "ALLPOWERS BLE"
 }
