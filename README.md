@@ -325,8 +325,12 @@ been reviewed or supported by the Home Assistant project.
 
 Releases are promoted through reviewed pull requests from `devel` to `main` with
 CI validation, repository validation, and safety-documentation updates before
-publication. Quality goals describe current evidence and tests, not a formal
-Home Assistant certification program.
+publication. Urgent production fixes may target `main` only from `hotfix/*`
+branches cut from `main`, and then must be propagated back to `devel`.
+Quality goals describe current evidence and tests, not a formal Home Assistant
+certification program.
+
+Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 
 ## License
 

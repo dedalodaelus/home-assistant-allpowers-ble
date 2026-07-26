@@ -52,6 +52,25 @@ feat: add verified support for S300 revision 2
 fix: invalidate settings shadow after disconnect
 ```
 
+### Branch and promotion workflow
+
+The repository uses an explicit promotion model:
+
+- Feature, bugfix, docs, and dependency work must target `devel`.
+- `main` is release-only and receives reviewed pull requests only from `devel` or
+  `hotfix/*` branches.
+- Release Please runs from `main` and is the only automation that updates
+  `CHANGELOG.md` and release tags.
+- Direct commits into `devel` and `main` are not permitted.
+- Urgent production fixes may target `main` only from a `hotfix/*` branch cut
+  from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
+
+When opening a pull request:
+
+- use `devel` as the base branch;
+- include the issue reference and validation evidence;
+- document any release-process impact in the same pull request.
+
 A pull request should include:
 
 - the problem and design rationale;

@@ -10,6 +10,17 @@
   review checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
 
+## Branch workflow and promotion
+
+- Day-to-day work merges into `devel` through reviewed pull requests.
+- Promotion into `main` happens through reviewed pull requests from `devel`.
+- Urgent production fixes may target `main` only from `hotfix/*` branches cut
+  from `main`, then must be propagated back to `devel`.
+- Release Please runs only on `main` and remains the single writer for
+  `CHANGELOG.md` and release tags.
+- Dependabot pull requests target `devel`.
+- Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
+
 ## Code and metadata
 
 - `manifest.json` version is valid SemVer.
