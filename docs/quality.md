@@ -16,7 +16,7 @@ Silver, Gold, or Platinum scores to this repository.
 | Config flow | Discovery, duplicates, unsupported models, active probe outcomes, manual selection, options errors |
 | Coordinator/entities | Fresh/stale/disconnected availability, values, controls, service errors, live options |
 | Diagnostics/setup | Redaction, serialization, initial readiness, entry unload, Home Assistant stop |
-| Real HA smoke | Imports all integration modules against the pinned Home Assistant package in CI |
+| Real HA lifecycle harness | Runs config-entry lifecycle, registry updates, diagnostics, and service/entity actions against the pinned Home Assistant package in CI |
 
 The repository sets a coverage failure threshold of 98 percent with branch coverage
 enabled. New code should test behavior and failure modes rather than adding lines
