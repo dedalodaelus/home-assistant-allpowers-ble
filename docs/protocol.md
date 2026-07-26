@@ -190,3 +190,50 @@ captures or equivalent evidence from the exact hardware revision and regression
 vectors in the protocol tests.
 
 See [Adding models](adding-models.md).
+
+## Profile verification and write authorization
+
+### Verified profiles
+
+A device is marked as *verified* when it meets all of the following:
+
+1. Advertised name matches a known hardware family pattern.
+2. Active GATT probe confirms the expected service UUID, notification, and write characteristics.
+3. The device returns a valid status frame that passes header, length, checksum, and payload validation.
+4. The hardware revision signature (e.g., `hardware_version=1.2`, `raw_hardware_version=0x12`) matches a known verified revision.
+
+Only verified profiles are permitted to accept **output and settings write commands**. Verified devices can issue output control and settings updates to change power-station behavior.
+
+### Experimental profiles
+
+Devices that pass steps 1–3 above but either:
+
+- Cannot be matched to a known verified hardware revision, or
+- Are matched to a protocol family candidate without full write capability validation
+
+are marked as *experimental* and operate in **read-only mode**. Telemetry entities (battery, power, remaining time, RSSI) are exposed. Writable control entities (output enable, settings) are not created.
+
+### Rejected profiles
+
+Devices that are known to use an incompatible protocol are rejected entirely. Setup is stopped before a persistent config entry is created.
+
+### Why profiles control write access
+
+The protocol provides no cryptographic authentication. Write authorization depends on:
+
+1. **Verified hardware identity**: The exact hardware revision must be documented and tested.
+2. **Protocol stability**: The meaning of flag bits, reserved fields, and payload layout must be understood for safe read-modify-write operations.
+3. **Semantic constraints**: Each verified profile has documented constraints on valid state transitions and flag combinations (e.g., unknown status bits trigger write rejection).
+
+Write access is not determined by advertised name or service discovery alone. A device that advertises `ALLPOWERS R600` but has an unverified hardware revision remains read-only.
+
+### Capability matrix
+
+| Profile | Read telemetry | Write output | Write settings |
+|---|---|---|---|
+| Verified R600 (hw 1.2) | ✓ | ✓ | ✓ |
+| R600 unverified revision | ✓ | ✗ | ✗ |
+| AP S* experimental | ✓ | ✗ | ✗ |
+| Generic ALLPOWERS | ✓ | ✗ | ✗ |
+| Service UUID candidate | ✓ | ✗ | ✗ |
+| Rejected (S500, S700 V2) | ✗ | ✗ | ✗ |

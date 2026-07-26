@@ -73,3 +73,60 @@ write controls are enabled.
 For verified profiles, write authorization depends on both freshness and semantic
 validation of the latest snapshot. Structurally valid packets can still be shown
 for diagnostics even when they are not trusted for writes.
+
+## Security and trust model
+
+### Why profile verification matters for write access
+
+The BLE protocol used by ALLPOWERS devices does not provide cryptographic device
+authentication. Write authorization therefore depends on:
+
+1. **Hardware identity verification**: The exact hardware revision and firmware
+   must be confirmed to match the integration's tested and documented capability
+   profile.
+2. **Protocol stability**: Flag bits, reserved fields, and payload structure must
+   be fully understood to perform safe read-modify-write operations without
+   corrupting device state.
+3. **Semantic validation**: Detected inconsistencies in state (e.g., unknown flag
+   bits in status) trigger write rejection rather than guessing at safe behavior.
+
+### Read-only mode for experimental devices
+
+Devices that pass active protocol validation but cannot be matched to a verified
+hardware revision profile operate in read-only mode. This includes:
+
+- R600 devices with an unverified hardware revision signature.
+- AP S* protocol family candidates.
+- Generic ALLPOWERS advertisements without a specific model match.
+
+Even if such a device successfully responds to status requests, writable control
+entities are not created. Telemetry collection continues, allowing long-term
+monitoring and data gathering to support future hardware verification.
+
+### Adding a new profile with write capabilities
+
+To enable write controls for a new hardware model requires:
+
+1. Capturing representative traffic from the exact hardware revision on your
+   physical device.
+2. Documenting all behavior: status flag bit meanings, settings byte layout,
+   output command encoding.
+3. Adding regression tests that validate the protocol behavior for that revision.
+4. Explicitly merging a model profile change to the integration with a `verified`
+   classification.
+
+Contributing a new unverified device that merely exposes the FFF0 service will
+not enable writes. The integration distinguishes between "device is working" and
+"device is safe to write to."
+
+### Trust boundary assumptions
+
+Write authorization assumes:
+
+- **Local network isolation**: Only devices on the local network can be discovered
+  or issued commands.
+- **Physical proximity**: BLE range limits attack surface to nearby locations.
+- **Home Assistant access control**: Only users with configuration or entity
+  control permissions can issue commands.
+- **No credential compromise**: The protocol uses no shared secrets; there is no
+  token or key to leak remotely.
