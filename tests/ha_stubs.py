@@ -269,7 +269,22 @@ ConfigFlowResult = dict[str, Any]
 
 
 class HomeAssistantError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        translation_domain: str | None = None,
+        translation_key: str | None = None,
+        translation_placeholders: Mapping[str, str] | None = None,
+    ) -> None:
+        if message is None and translation_key is not None:
+            message = translation_key
+        super().__init__(message or "")
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+        self.translation_placeholders = (
+            dict(translation_placeholders) if translation_placeholders else None
+        )
 
 
 class ConfigEntryNotReady(RuntimeError):

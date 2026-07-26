@@ -8,17 +8,15 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .client import NotConnectedError
 from .coordinator import AllpowersConfigEntry
 from .entity import (
     AllpowersOutputControlEntity,
     AllpowersSettingsControlEntity,
+    raise_command_error,
     runtime_model_support,
 )
-from .protocol import StateUnavailableError
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -157,8 +155,8 @@ class _AllpowersSwitchMixin:
     async def _async_set(self, enabled: bool) -> None:
         try:
             await self.entity_description.command_fn(self._entry, enabled)
-        except (StateUnavailableError, NotConnectedError) as ex:
-            raise HomeAssistantError(str(ex)) from ex
+        except Exception as ex:
+            raise_command_error(ex)
 
 
 class AllpowersOutputSwitch(

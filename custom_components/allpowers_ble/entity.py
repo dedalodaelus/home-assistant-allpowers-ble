@@ -2,13 +2,70 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import NoReturn
+
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
+
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .client import AllpowersClientError, NotConnectedError
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
 from .model_support import ModelSupport, identify_model
+from .protocol import StateUnavailableError
+
+
+def _translated_command_error(key: str) -> HomeAssistantError:
+    """Build a translatable Home Assistant command error."""
+    try:
+        return HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=key,
+        )
+    except TypeError:
+        # Compatibility fallback for runtimes where translation kwargs are unsupported.
+        return HomeAssistantError(key)
+
+
+def _state_error_key(error: StateUnavailableError) -> str:
+    """Map state-guard failures to a stable user-facing translation key."""
+    message = str(error).lower()
+    if "confirmation timed out" in message or "state is ambiguous" in message:
+        return "command_unconfirmed"
+    if (
+        "semantic validation" in message
+        or "unsupported" in message
+        or "disabled in integration options" in message
+        or "reserved" in message
+    ):
+        return "command_unsupported"
+    return "command_stale_state"
+
+
+def raise_command_error(error: Exception) -> NoReturn:
+    """Normalize command failures into translatable Home Assistant exceptions."""
+    if isinstance(error, asyncio.CancelledError):
+        raise error
+
+    key = "command_transport"
+    if isinstance(error, NotConnectedError):
+        key = "command_disconnected"
+    elif isinstance(error, TimeoutError):
+        key = "command_timeout"
+    elif isinstance(error, StateUnavailableError):
+        key = _state_error_key(error)
+    elif isinstance(error, AllpowersClientError) or isinstance(
+        error, BLEAK_RETRY_EXCEPTIONS
+    ):
+        key = "command_transport"
+    elif isinstance(error, (KeyError, ValueError)):
+        key = "command_unsupported"
+
+    raise _translated_command_error(key) from error
 
 
 def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
