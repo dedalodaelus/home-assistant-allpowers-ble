@@ -16,7 +16,7 @@ The repository distinguishes three levels:
 
 | Model or advertised family | Level | Setup behavior |
 |---|---|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verified | Accepted after active probe with writable controls enabled. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verified | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
 | AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. Telemetry only; writable entities are not created. |
 | AP S500 | Rejected | Aborted as a known different protocol family. |
 | AP S700 V2 | Rejected | Aborted as a known different protocol family. |
@@ -69,3 +69,7 @@ For a compatibility report, provide:
 A positive status probe does not automatically make write features safe. Each
 shared bit field and hardware revision must be verified independently before
 write controls are enabled.
+
+For verified profiles, write authorization depends on both freshness and semantic
+validation of the latest snapshot. Structurally valid packets can still be shown
+for diagnostics even when they are not trusted for writes.

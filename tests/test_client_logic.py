@@ -188,6 +188,18 @@ async def test_output_command_requires_fresh_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_output_command_rejects_unknown_status_bits_on_verified_profile() -> None:
+    client, _ = _connected_client()
+    client._settings = _settings(hardware_version="1.2", raw_hardware_version=0x12)
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    client._status = _status(raw_flags=0x14)
+    client._status_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(client_module.StateUnavailableError, match="unknown flag bits"):
+        await client.async_set_ac(True)
+
+
+@pytest.mark.asyncio
 async def test_sequential_settings_commands_preserve_unknown_bits() -> None:
     client, fake = _connected_client()
     client._settings = _settings()
@@ -275,6 +287,40 @@ async def test_settings_command_requires_fresh_settings() -> None:
     client, _ = _connected_client()
 
     with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        await client.async_set_eco(True)
+
+
+@pytest.mark.asyncio
+async def test_settings_command_rejects_reserved_work_mode_on_verified_profile() -> (
+    None
+):
+    client, _ = _connected_client()
+    client._settings = _settings(
+        hardware_version="1.2",
+        raw_hardware_version=0x12,
+        work_mode=None,
+    )
+    client._settings_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(client_module.StateUnavailableError, match="reserved work mode"):
+        await client.async_set_eco(True)
+
+
+@pytest.mark.asyncio
+async def test_settings_command_rejects_unsupported_timeout_on_verified_profile() -> (
+    None
+):
+    client, _ = _connected_client()
+    client._settings = _settings(
+        hardware_version="1.2",
+        raw_hardware_version=0x12,
+        eco_timeout_hours=9,
+    )
+    client._settings_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(
+        client_module.StateUnavailableError, match="unsupported ECO timeout"
+    ):
         await client.async_set_eco(True)
 
 

@@ -101,6 +101,11 @@ Known status masks:
 The raw flags byte is retained in the immutable model for diagnostics and future
 protocol work.
 
+For the verified `r600-hw-1.2` profile, output writes are additionally gated by
+semantic validation: if status contains unknown flag bits outside `0x01`, `0x02`,
+and `0x10`, writes are rejected instead of normalizing potentially unrelated
+output-command bits.
+
 ## Combined output command
 
 Output writes use one combined flags byte rather than independent commands:
@@ -119,7 +124,9 @@ A5 65 00 B1 01 01 00 <flags> <xor>
 
 Note that the light mask differs between status (`0x10`) and output control
 (`0x20`). The integration never builds this command from defaults. It requires a
-fresh status snapshot and preserves the other output states.
+fresh status snapshot and preserves the other output states. When unknown status
+bits are present on a verified profile, the write is rejected because safe
+preservation cannot be proven.
 
 ## Settings notification (`0x03`)
 
@@ -143,6 +150,11 @@ Known settings masks:
 
 Known work-mode values are 0 (mute), 1 (standard), and 2 (fast). Unknown values are
 kept as `None` rather than coerced to a supported mode.
+
+For the verified `r600-hw-1.2` profile, settings writes are blocked when the
+snapshot carries a reserved work-mode value (`None`) or an unsupported ECO
+timeout. This keeps structural decoding independent from semantic write
+authorization.
 
 Version bytes are displayed as BCD-style `high.low` when both nibbles are decimal;
 otherwise the raw hexadecimal byte is shown.

@@ -43,6 +43,8 @@ from .protocol import (
     encode_output_control,
     encode_settings_control,
     encode_status_request,
+    settings_write_validation_errors,
+    status_write_validation_errors,
     updated_settings,
 )
 
@@ -444,6 +446,13 @@ class AllpowersBLEClient:
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
+
+        support = self._runtime_model_support()
+        errors = status_write_validation_errors(support.profile, self._status)
+        if errors:
+            raise StateUnavailableError(
+                "Output writes are blocked by semantic validation: " + "; ".join(errors)
+            )
         return (
             self._status.dc_enabled,
             self._status.ac_enabled,
@@ -480,7 +489,24 @@ class AllpowersBLEClient:
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
+
+        support = self._runtime_model_support()
+        errors = settings_write_validation_errors(support.profile, self._settings)
+        if errors:
+            raise StateUnavailableError(
+                "Settings writes are blocked by semantic validation: "
+                + "; ".join(errors)
+            )
         return self._settings
+
+    def _runtime_model_support(self) -> ModelSupport:
+        """Return model support resolved from the latest revision-aware snapshot."""
+        settings = self._settings
+        return identify_model(
+            self._advertised_name,
+            hardware_version=settings.hardware_version if settings else None,
+            raw_hardware_version=settings.raw_hardware_version if settings else None,
+        )
 
     async def _connection_loop(self) -> None:
         delay = 1.0
