@@ -71,7 +71,7 @@ unsafe.
 - [`const.py`](../../../custom_components/allpowers_ble/const.py)
 - [`models.py`](../../../custom_components/allpowers_ble/models.py)
 - [`options.py`](../../../custom_components/allpowers_ble/options.py)
-- [Existing architecture summary](../../architecture.md#persistence)
+- [Existing architecture summary](../implementation-architecture.md#persistence)
 
 ## Fitness functions
 

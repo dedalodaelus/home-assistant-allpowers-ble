@@ -68,7 +68,7 @@ This improves apparent continuity but risks treating old device state as current
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
 - [`coordinator.py`](../../../custom_components/allpowers_ble/coordinator.py)
 - [`entity.py`](../../../custom_components/allpowers_ble/entity.py)
-- [Existing architecture summary](../../architecture.md#data-freshness)
+- [Existing architecture summary](../implementation-architecture.md#data-freshness)
 
 ## Fitness functions
 

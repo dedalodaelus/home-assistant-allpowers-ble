@@ -62,7 +62,7 @@ late-callback races.
 ## Evidence
 
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
-- [Existing architecture summary](../../architecture.md#session-generation-boundaries)
+- [Existing architecture summary](../implementation-architecture.md#session-generation-boundaries)
 - [Quality strategy](../../quality.md#deterministic-sequence-regression-fixtures)
 
 ## Fitness functions

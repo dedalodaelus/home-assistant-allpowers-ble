@@ -67,7 +67,7 @@ R600 revision.
 - [`protocol/semantics.py`](../../../custom_components/allpowers_ble/protocol/semantics.py)
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
 - [Protocol](../../protocol.md)
-- [Existing architecture summary](../../architecture.md#safe-command-construction)
+- [Existing architecture summary](../implementation-architecture.md#safe-command-construction)
 
 ## Fitness functions
 

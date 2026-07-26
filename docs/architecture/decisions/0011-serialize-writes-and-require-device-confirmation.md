@@ -67,7 +67,7 @@ radio latency reliably.
 ## Evidence
 
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
-- [Existing architecture summary](../../architecture.md#safe-command-construction)
+- [Existing architecture summary](../implementation-architecture.md#safe-command-construction)
 - [Quality strategy](../../quality.md#deterministic-sequence-regression-fixtures)
 - [README safety model](../../../README.md#safety-model)
 
