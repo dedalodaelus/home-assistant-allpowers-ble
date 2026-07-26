@@ -186,7 +186,8 @@ idempotent shutdown path.
 
 ## Error boundaries
 
-- Malformed frames are discarded by the pure stream decoder and counted.
+- Stream recovery byte discards and malformed-frame candidates are counted
+  separately by the pure decoder path.
 - Expected BLE and timeout exceptions enter reconnect/backoff behavior.
 - Unexpected transport exceptions are recorded, logged, and also retried at the
   outer connection boundary.

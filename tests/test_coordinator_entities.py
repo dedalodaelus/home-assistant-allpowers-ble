@@ -100,6 +100,7 @@ async def test_entity_setup_and_state_values() -> None:
         "hardware_version": "1.2",
         "firmware_version": "3.4",
         "reconnects": 1,
+        "parser_discards": 3,
         "protocol_errors": 1,
         "watchdog_resets": 1,
     }

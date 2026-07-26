@@ -617,8 +617,21 @@ def test_invalid_notification_updates_protocol_errors(status_frame: bytes) -> No
 
     client._notification_handler(FakeCharacteristic(), invalid)
 
+    assert client.snapshot().statistics.parser_discards == len(status_frame)
     assert client.snapshot().statistics.protocol_errors == 1
     assert client.snapshot().statistics.valid_packets == 0
+
+
+def test_noise_notification_updates_only_parser_discards(status_frame: bytes) -> None:
+    client, _ = _connected_client()
+
+    client._notification_handler(
+        FakeCharacteristic(), bytearray(b"noise" + status_frame)
+    )
+
+    assert client.snapshot().statistics.parser_discards == len(b"noise")
+    assert client.snapshot().statistics.protocol_errors == 0
+    assert client.snapshot().statistics.valid_packets == 1
 
 
 @pytest.mark.asyncio
@@ -648,6 +661,7 @@ def test_notification_handler_without_packets_or_discards_skips_emit_update() ->
     class IdleDecoder:
         def __init__(self) -> None:
             self.discarded_frames = 0
+            self.discarded_bytes = 0
 
         def feed(self, data: bytearray) -> list[object]:
             del data
@@ -665,6 +679,32 @@ def test_notification_handler_without_packets_or_discards_skips_emit_update() ->
     client._notification_handler(FakeCharacteristic(), bytearray(b"noop"))
 
     assert callbacks == 0
+
+
+def test_notification_handler_with_only_byte_discards_emits_update() -> None:
+    class ByteDiscardDecoder:
+        def __init__(self) -> None:
+            self.discarded_frames = 0
+            self.discarded_bytes = 0
+
+        def feed(self, data: bytearray) -> list[object]:
+            self.discarded_bytes += len(data)
+            return []
+
+    client, _ = _connected_client()
+    callbacks = 0
+
+    def update() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    client._decoder = ByteDiscardDecoder()  # type: ignore[assignment]
+    client.set_update_callback(update)
+    client._notification_handler(FakeCharacteristic(), bytearray(b"noop"))
+
+    assert callbacks == 1
+    assert client.snapshot().statistics.parser_discards == len(b"noop")
+    assert client.snapshot().statistics.protocol_errors == 0
 
 
 def test_update_advertisement_emits_only_on_change() -> None:
