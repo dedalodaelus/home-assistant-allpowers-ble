@@ -1203,7 +1203,16 @@ async def async_probe_device(
 
         if status is None:  # pragma: no cover - event invariant
             raise TimeoutError("Status event was set without a status frame")
-        return ProbeResult(status=status, settings=settings, model_support=support)
+        resolved_support = identify_model(
+            advertised_name,
+            hardware_version=settings.hardware_version if settings else None,
+            raw_hardware_version=(settings.raw_hardware_version if settings else None),
+        )
+        return ProbeResult(
+            status=status,
+            settings=settings,
+            model_support=resolved_support,
+        )
     finally:
         if client.is_connected:
             try:

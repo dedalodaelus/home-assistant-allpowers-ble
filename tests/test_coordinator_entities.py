@@ -257,6 +257,37 @@ async def test_selects_handle_known_unknown_and_invalid_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_experimental_profiles_expose_no_writable_entities() -> None:
+    experimental_state = replace(
+        snapshot(),
+        advertised_name="AP S300",
+    )
+    entry, _, _, _ = configured_entry(state=experimental_state)
+
+    switch_entities: list[Any] = []
+    await switch.async_setup_entry(
+        None, entry, lambda values: switch_entities.extend(values)
+    )
+    assert switch_entities == []
+
+    select_entities: list[Any] = []
+    await select.async_setup_entry(
+        None, entry, lambda values: select_entities.extend(values)
+    )
+    assert select_entities == []
+
+    button_entities: list[Any] = []
+    await button.async_setup_entry(
+        None, entry, lambda values: button_entities.extend(values)
+    )
+    assert len(button_entities) == 2
+    assert {entity._attr_translation_key for entity in button_entities} == {
+        "refresh",
+        "reconnect",
+    }
+
+
+@pytest.mark.asyncio
 async def test_buttons_send_commands_and_wrap_errors() -> None:
     entry, client, _, _ = configured_entry()
     entities: list[Any] = []

@@ -161,7 +161,7 @@
           "status_interval": "Intervalo de solicitud de estado (segundos)",
           "watchdog_timeout": "Tiempo del watchdog de protocolo (segundos)"
         },
-        "description": "Los valores por defecto reproducen el comportamiento observado en la R600. El keepalive y el cargador de coche permanecen desactivados hasta habilitarlos expresamente.",
+        "description": "Los valores por defecto reproducen el comportamiento observado en la R600. El keepalive y el cargador de coche permanecen desactivados hasta habilitarlos expresamente. Los perfiles experimentales se mantienen en solo lectura hasta verificar sus capacidades de escritura.",
         "title": "Opciones de ALLPOWERS BLE"
       }
     }

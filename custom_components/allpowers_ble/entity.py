@@ -8,7 +8,18 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
-from .model_support import identify_model
+from .model_support import ModelSupport, identify_model
+
+
+def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
+    """Return revision-aware model support from the latest snapshot."""
+    data = coordinator.data
+    settings = data.settings
+    return identify_model(
+        data.advertised_name,
+        hardware_version=settings.hardware_version if settings else None,
+        raw_hardware_version=settings.raw_hardware_version if settings else None,
+    )
 
 
 class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
@@ -26,7 +37,7 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
     def device_info(self) -> DeviceInfo:
         """Return device-registry metadata from the latest protocol snapshot."""
         data = self.coordinator.data
-        support = identify_model(data.advertised_name)
+        support = runtime_model_support(self.coordinator)
         settings = data.settings
         return DeviceInfo(
             identifiers={(DOMAIN, self._address)},
@@ -63,7 +74,11 @@ class AllpowersOutputControlEntity(AllpowersEntity):
     @property
     def available(self) -> bool:
         """Return whether a safe combined output command can be built."""
-        return self.coordinator.controls_available
+        support = runtime_model_support(self.coordinator)
+        return (
+            support.capabilities.write_output_controls
+            and self.coordinator.controls_available
+        )
 
 
 class AllpowersSettingsControlEntity(AllpowersEntity):
@@ -72,4 +87,8 @@ class AllpowersSettingsControlEntity(AllpowersEntity):
     @property
     def available(self) -> bool:
         """Return whether a safe settings command can be built."""
-        return self.coordinator.settings_controls_available
+        support = runtime_model_support(self.coordinator)
+        return (
+            support.capabilities.write_settings_controls
+            and self.coordinator.settings_controls_available
+        )

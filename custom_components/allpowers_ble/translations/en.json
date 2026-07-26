@@ -161,7 +161,7 @@
           "watchdog_timeout": "Protocol watchdog timeout (seconds)",
           "settings_stale_timeout": "Settings stale timeout (seconds)"
         },
-        "description": "Defaults match the observed R600 behavior. Keepalive and car charger control are disabled unless explicitly enabled.",
+        "description": "Defaults match the observed R600 behavior. Keepalive and car charger control are disabled unless explicitly enabled. Experimental profiles remain telemetry-only until write capabilities are verified.",
         "title": "ALLPOWERS BLE options"
       }
     }
