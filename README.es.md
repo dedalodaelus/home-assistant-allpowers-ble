@@ -140,8 +140,9 @@ Los cambios de opciones se aplican en caliente, sin recargar la integración.
 
 ## Diagnósticos
 
-Los diagnósticos incluyen contadores de conexión, paquetes, errores y watchdog
-(total, telemetría y transporte), últimas marcas temporales, estado en caché,
+Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes del
+parser, errores de protocolo, errores de escritura y watchdog (total, telemetría
+y transporte), además de las últimas marcas temporales, estado en caché,
 clasificación del modelo y opciones.
 La dirección Bluetooth se redacta y no se almacenan credenciales de nube.
 

@@ -93,6 +93,7 @@ def snapshot(
             reconnects=1,
             notifications=10,
             valid_packets=9,
+            parser_discards=3,
             protocol_errors=1,
             write_errors=2,
             watchdog_resets=1,

@@ -159,7 +159,7 @@ Download diagnostics from the integration or device page in Home Assistant. The
 payload includes:
 
 - connection attempts, successful connections, disconnects, and reconnects;
-- notification, valid-packet, protocol-error, write-error, and watchdog counters
+- notification, valid-packet, parser-discard, protocol-error, write-error, and watchdog counters
    (total, telemetry, and transport);
 - last connection, disconnection, packet, and error information;
 - current cached protocol state and freshness metadata;

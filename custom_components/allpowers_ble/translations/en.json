@@ -111,6 +111,9 @@
       "protocol_errors": {
         "name": "Protocol errors"
       },
+      "parser_discards": {
+        "name": "Parser discards"
+      },
       "reconnects": {
         "name": "Reconnects"
       },

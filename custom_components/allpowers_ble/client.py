@@ -699,12 +699,15 @@ class AllpowersBLEClient:
             self._statistics,
             notifications=self._statistics.notifications + 1,
         )
+        discarded_bytes_before = self._decoder.discarded_bytes
         discarded_before = self._decoder.discarded_frames
         packets = self._decoder.feed(data)
+        discarded_bytes = self._decoder.discarded_bytes - discarded_bytes_before
         discarded = self._decoder.discarded_frames - discarded_before
-        if discarded:
+        if discarded_bytes or discarded:
             self._statistics = replace(
                 self._statistics,
+                parser_discards=self._statistics.parser_discards + discarded_bytes,
                 protocol_errors=self._statistics.protocol_errors + discarded,
             )
 
@@ -768,7 +771,7 @@ class AllpowersBLEClient:
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
 
-        if packets or discarded:
+        if packets or discarded or discarded_bytes:
             self._reported_freshness = self._freshness(self._loop_time())
             self._wake_maintenance_loop()
             self._emit_update()

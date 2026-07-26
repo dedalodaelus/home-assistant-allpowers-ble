@@ -127,6 +127,15 @@ SENSOR_DESCRIPTIONS: tuple[AllpowersSensorDescription, ...] = (
         available_fn=lambda coordinator: True,
     ),
     _sensor_description(
+        key="parser_discards",
+        translation_key="parser_discards",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda data: data.statistics.parser_discards,
+        available_fn=lambda coordinator: True,
+    ),
+    _sensor_description(
         key="watchdog_resets",
         translation_key="watchdog_resets",
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -179,6 +188,7 @@ class AllpowersSensor(AllpowersEntity, SensorEntity):
         if self.entity_description.key not in {
             "reconnects",
             "protocol_errors",
+            "parser_discards",
             "watchdog_resets",
         }:
             return None
