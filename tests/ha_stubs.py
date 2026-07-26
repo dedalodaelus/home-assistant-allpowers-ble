@@ -274,6 +274,14 @@ class OptionsFlow(_FlowBase):
 ConfigFlowResult = dict[str, Any]
 
 
+class section:
+    """Minimal data-entry section wrapper used by config/option forms."""
+
+    def __init__(self, schema: Any, options: Mapping[str, Any] | None = None) -> None:
+        self.schema = schema
+        self.options = dict(options or {})
+
+
 class HomeAssistantError(RuntimeError):
     def __init__(
         self,
@@ -568,6 +576,9 @@ def install() -> None:
     config_entries.ConfigFlowResult = ConfigFlowResult
     config_entries.OptionsFlow = OptionsFlow
 
+    data_entry_flow = ModuleType("homeassistant.data_entry_flow")
+    data_entry_flow.section = section
+
     const = ModuleType("homeassistant.const")
     const.CONF_ADDRESS = "address"
     const.EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
@@ -688,6 +699,7 @@ def install() -> None:
             "homeassistant.components.select": select,
             "homeassistant.components.number": number,
             "homeassistant.config_entries": config_entries,
+            "homeassistant.data_entry_flow": data_entry_flow,
             "homeassistant.const": const,
             "homeassistant.core": core,
             "homeassistant.exceptions": exceptions,
