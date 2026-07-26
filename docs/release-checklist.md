@@ -6,8 +6,9 @@
 - Topics: `home-assistant`, `hacs`, `custom-component`, `bluetooth`, `ble`,
   `esphome-bluetooth-proxy`, and `allpowers`.
 - Vulnerability reporting enabled.
-- Branch protection requires CI, HACS, Hassfest, conventional title, and dependency
-  review checks.
+- Branch protection/ruleset requires exactly one status check: `Merge gate`.
+- `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
+  and CodeQL checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
 
 ## Branch workflow and promotion
