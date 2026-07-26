@@ -166,8 +166,10 @@ payload includes:
 - current cached protocol state and freshness metadata;
 - active options and model-support classification.
 
-The Bluetooth address is redacted and the advertised device name is omitted from
-entry data. No cloud credentials exist.
+Bluetooth identifiers are redacted recursively across structured fields and
+nested strings. Device-provided names and user entry names are replaced with a
+stable redaction marker in diagnostics payloads. The `last_error` field keeps an
+error category with sanitized detail. No cloud credentials exist.
 
 For temporary debug logging:
 

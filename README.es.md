@@ -148,7 +148,11 @@ Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes
 parser, errores de protocolo, errores de escritura y watchdog (total, telemetría
 y transporte), además de las últimas marcas temporales, estado en caché,
 clasificación del modelo y opciones.
-La dirección Bluetooth se redacta y no se almacenan credenciales de nube.
+Los identificadores Bluetooth se redactan de forma recursiva en campos
+estructurados y cadenas anidadas. Los nombres del dispositivo y el título de la
+entrada se sustituyen por un marcador de redacción en los diagnósticos. El
+campo `last_error` conserva la categoría del error con detalle saneado. No se
+almacenan credenciales de nube.
 
 Para activar registros de depuración de forma temporal:
 
