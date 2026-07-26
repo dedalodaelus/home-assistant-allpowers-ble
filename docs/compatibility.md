@@ -76,6 +76,17 @@ for diagnostics even when they are not trusted for writes.
 
 ## Security and trust model
 
+Write authorization is a local trust decision and depends on multiple layers:
+
+- Home Assistant user permissions control who can issue entity writes.
+- BLE proximity constrains range but does not remove local radio risk.
+- ESPHome proxies and local adapters are part of the trusted transport boundary.
+- Experimental/read-only profiles are intentionally prevented from creating write entities.
+
+For safety, avoid unattended automation of critical loads. Prefer notifications,
+manual acknowledgements, and explicit conditions for connectivity, telemetry
+freshness, and battery thresholds before issuing non-critical control actions.
+
 ## Entity semantics
 
 Binary sensors for power flow use measured power direction only:

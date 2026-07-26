@@ -151,6 +151,9 @@ snapshot, changing only the requested field. Each write opens a pending output
 transaction tied to the active session generation, the source status version,
 and a confirmation deadline.
 
+This preserves the documented output state mapping for the verified profile. It
+does not claim safe preservation of undocumented output-command semantics.
+
 ### Settings
 
 ECO, work mode, car charger, and ECO timeout also share a settings frame. The
@@ -161,6 +164,9 @@ use the same pending-transaction model as output writes.
 Transactions complete only when the matching notification arrives from the same
 session generation. They are in-memory only and are cleared on disconnect, on new
 GATT session, or when confirmation times out and a newer safe version is required.
+
+Any new safety claim must include matching protocol evidence and regression tests
+before it is documented as guaranteed behavior.
 
 ## Session generation boundaries
 

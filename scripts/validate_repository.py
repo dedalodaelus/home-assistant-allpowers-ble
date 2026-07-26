@@ -42,6 +42,51 @@ REQUIRED_INTEGRATION_FILES = {
     "translations/es.json",
 }
 IGNORED_DIRS = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist"}
+README_REQUIRED_HEADINGS = {
+    "README.md": {
+        "## Safety model",
+        "## Conservative automation examples",
+        "## Removal and recovery",
+        "## BLE trust boundary",
+        "## Project status",
+    },
+    "README.es.md": {
+        "## Seguridad de las escrituras",
+        "## Ejemplos de automatización conservadora",
+        "## Retirada y recuperación",
+        "## Límite de confianza BLE",
+        "## Estado del proyecto",
+    },
+}
+MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+
+
+def normalize_markdown_anchor(value: str) -> str:
+    """Approximate GitHub markdown anchor generation for local checks."""
+    normalized = value.strip().lower()
+    normalized = re.sub(r"[\\`*_~\[\]().,!?:;\"']", "", normalized)
+    normalized = re.sub(r"\s+", "-", normalized)
+    return normalized
+
+
+def heading_set(markdown: str) -> set[str]:
+    """Collect normalized heading anchors from markdown content."""
+    anchors: set[str] = set()
+    for line in markdown.splitlines():
+        match = MARKDOWN_HEADING.match(line)
+        if match is None:
+            continue
+        anchors.add(normalize_markdown_anchor(match.group(2)))
+    return anchors
+
+
+def split_link_target(target: str) -> tuple[str, str]:
+    """Split markdown link target into path and optional fragment."""
+    if "#" not in target:
+        return target, ""
+    link_path, fragment = target.split("#", 1)
+    return link_path, fragment
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -197,6 +242,82 @@ def validate_clean_tree(errors: list[str]) -> None:
             errors.append(f"generated Python cache present: {path.relative_to(ROOT)}")
 
 
+def validate_markdown_links_and_headings(errors: list[str]) -> None:
+    """Validate required README headings and local markdown links/fragments."""
+    for relative, required_headings in README_REQUIRED_HEADINGS.items():
+        path = ROOT / relative
+        if not path.is_file():
+            errors.append(f"missing required README file: {relative}")
+            continue
+        try:
+            markdown = path.read_text(encoding="utf-8")
+        except OSError as ex:
+            errors.append(f"failed reading markdown file {relative}: {ex}")
+            continue
+
+        lines = set(markdown.splitlines())
+        for heading in sorted(required_headings):
+            if heading not in lines:
+                errors.append(f"{relative} missing required heading: {heading}")
+
+    checked_files: dict[Path, set[str]] = {}
+    markdown_files = [ROOT / "README.md", ROOT / "README.es.md"]
+
+    for source in markdown_files:
+        if not source.is_file():
+            continue
+        try:
+            source_text = source.read_text(encoding="utf-8")
+        except OSError as ex:
+            errors.append(
+                f"failed reading markdown file {source.relative_to(ROOT)}: {ex}"
+            )
+            continue
+
+        source_anchors = heading_set(source_text)
+        for match in MARKDOWN_LINK.finditer(source_text):
+            target = match.group(1).strip()
+            if (
+                not target
+                or target.startswith(("http://", "https://", "mailto:"))
+                or target.startswith("<")
+            ):
+                continue
+
+            link_path, fragment = split_link_target(target)
+            if link_path.startswith("#"):
+                fragment = link_path[1:] + (f"-{fragment}" if fragment else "")
+                link_path = ""
+
+            resolved = source if not link_path else (ROOT / link_path).resolve()
+            if not resolved.is_file():
+                errors.append(
+                    f"broken local markdown link in {source.relative_to(ROOT)}: {target}"
+                )
+                continue
+
+            if fragment:
+                if resolved not in checked_files:
+                    try:
+                        checked_files[resolved] = heading_set(
+                            resolved.read_text(encoding="utf-8")
+                        )
+                    except OSError as ex:
+                        errors.append(
+                            f"failed reading markdown target {resolved.relative_to(ROOT)}: {ex}"
+                        )
+                        continue
+                normalized_fragment = normalize_markdown_anchor(fragment)
+                anchors = (
+                    source_anchors if resolved == source else checked_files[resolved]
+                )
+                if normalized_fragment not in anchors:
+                    errors.append(
+                        "broken markdown fragment in "
+                        f"{source.relative_to(ROOT)}: {target}"
+                    )
+
+
 def validate_release_if_present(errors: list[str]) -> None:
     """Verify the HACS release archive layout when it has been built."""
     archive_path = ROOT / "dist" / "allpowers_ble.zip"
@@ -221,6 +342,7 @@ def main() -> int:
     validate_brand(errors)
     validate_text_files(errors)
     validate_clean_tree(errors)
+    validate_markdown_links_and_headings(errors)
     validate_release_if_present(errors)
 
     for source in sorted(ROOT.rglob("*.py")):
