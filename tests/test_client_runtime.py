@@ -1001,6 +1001,7 @@ async def test_probe_success_and_cleanup(
     )
     assert result.status.battery_percent == 73
     assert result.settings is not None
+    assert result.model_support.verified
 
     mixed = ProbeClient([notification_builder(0x35, b"ProbeName"), status_frame])
 
@@ -1016,7 +1017,8 @@ async def test_probe_success_and_cleanup(
         timeout=0.1,
     )
     assert result.status.battery_percent == 73
-    assert result.model_support.verified
+    assert not result.model_support.verified
+    assert result.model_support.classification == "experimental_read_only"
     assert fake.disconnect_calls == 1
 
     tolerant = ProbeClient([status_frame], disconnect_error=FakeBleakError("bye"))

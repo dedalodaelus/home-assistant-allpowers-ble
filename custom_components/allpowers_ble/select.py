@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .client import NotConnectedError
 from .coordinator import AllpowersConfigEntry
-from .entity import AllpowersSettingsControlEntity
+from .entity import AllpowersSettingsControlEntity, runtime_model_support
 from .protocol import StateUnavailableError, WorkMode
 
 WORK_MODE_OPTIONS = ("mute", "standard", "fast")
@@ -37,6 +37,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE selects."""
     del hass
+    support = runtime_model_support(entry.runtime_data.coordinator)
+    if not support.capabilities.write_settings_controls:
+        return
     async_add_entities(
         (AllpowersWorkModeSelect(entry), AllpowersEcoTimeoutSelect(entry))
     )

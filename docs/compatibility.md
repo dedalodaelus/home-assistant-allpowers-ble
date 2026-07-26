@@ -7,7 +7,8 @@ The repository distinguishes three levels:
 - **Verified**: protocol behavior has been exercised on the named hardware and is
   covered by known vectors and integration behavior.
 - **Experimental**: the device advertises a candidate name and passes the active
-  GATT/protocol probe, but the exact hardware has not been fully validated.
+  GATT/protocol probe, but the exact hardware revision has not been fully
+  validated. These devices run in read-only mode.
 - **Rejected**: available evidence indicates another protocol revision; setup is
   stopped before a persistent entry is created.
 
@@ -15,12 +16,12 @@ The repository distinguishes three levels:
 
 | Model or advertised family | Level | Setup behavior |
 |---|---|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) | Verified | Accepted after active probe. |
-| AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verified | Accepted after active probe with writable controls enabled. |
+| AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. Telemetry only; writable entities are not created. |
 | AP S500 | Rejected | Aborted as a known different protocol family. |
 | AP S700 V2 | Rejected | Aborted as a known different protocol family. |
-| Generic `ALLPOWERS*` | Experimental candidate | Requires active probe. |
-| Service UUID FFF0 without a useful name | Experimental candidate | Requires active probe. |
+| Generic `ALLPOWERS*` | Experimental candidate | Requires active probe. Telemetry only; writable entities are not created. |
+| Service UUID FFF0 without a useful name | Experimental candidate | Requires active probe. Telemetry only; writable entities are not created. |
 
 ## Why advertisement matching is broad
 
@@ -65,5 +66,6 @@ For a compatibility report, provide:
 - sanitized diagnostics;
 - packet evidence only after removing addresses and identifying information.
 
-A positive report does not automatically make a write feature safe. Each shared
-bit field must be verified independently.
+A positive status probe does not automatically make write features safe. Each
+shared bit field and hardware revision must be verified independently before
+write controls are enabled.

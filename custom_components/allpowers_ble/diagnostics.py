@@ -46,7 +46,12 @@ async def async_get_device_diagnostics(
 
 def _diagnostics_payload(entry: AllpowersConfigEntry) -> dict[str, Any]:
     snapshot = entry.runtime_data.coordinator.data
-    support = identify_model(snapshot.advertised_name)
+    settings = snapshot.settings
+    support = identify_model(
+        snapshot.advertised_name,
+        hardware_version=settings.hardware_version if settings else None,
+        raw_hardware_version=settings.raw_hardware_version if settings else None,
+    )
     payload: dict[str, Any] = {
         "entry": {
             "title": entry.title,

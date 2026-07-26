@@ -10,7 +10,11 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .client import NotConnectedError
 from .coordinator import AllpowersConfigEntry
-from .entity import AllpowersEntity, AllpowersSettingsControlEntity
+from .entity import (
+    AllpowersEntity,
+    AllpowersSettingsControlEntity,
+    runtime_model_support,
+)
 from .protocol import StateUnavailableError
 
 
@@ -21,13 +25,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE buttons."""
     del hass
-    async_add_entities(
-        (
-            AllpowersRefreshButton(entry),
-            AllpowersReconnectButton(entry),
-            AllpowersSettingsKeepaliveButton(entry),
-        )
-    )
+    support = runtime_model_support(entry.runtime_data.coordinator)
+    entities: list[ButtonEntity] = [
+        AllpowersRefreshButton(entry),
+        AllpowersReconnectButton(entry),
+    ]
+    if support.capabilities.write_settings_keepalive:
+        entities.append(AllpowersSettingsKeepaliveButton(entry))
+    async_add_entities(tuple(entities))
 
 
 class AllpowersRefreshButton(AllpowersEntity, ButtonEntity):
