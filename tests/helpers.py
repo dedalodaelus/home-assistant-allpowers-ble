@@ -204,10 +204,20 @@ class FakeConfigEntriesManager:
         self,
         entry: ConfigEntry[Any],
         *,
-        options: dict[str, Any],
+        data: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        version: int | None = None,
+        minor_version: int | None = None,
     ) -> None:
-        entry.options = dict(options)
-        self.updates.append((entry, dict(options)))
+        if data is not None:
+            entry.data = dict(data)
+        if options is not None:
+            entry.options = dict(options)
+            self.updates.append((entry, dict(options)))
+        if version is not None:
+            entry.version = version
+        if minor_version is not None:
+            entry.minor_version = minor_version
 
     async def async_forward_entry_setups(
         self,

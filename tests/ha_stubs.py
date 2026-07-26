@@ -183,11 +183,17 @@ class ConfigEntry(Generic[T]):
         data: Mapping[str, Any] | None = None,
         options: Mapping[str, Any] | None = None,
         entry_id: str = "entry-id",
+        version: int = 1,
+        minor_version: int = 1,
+        unique_id: str | None = None,
     ) -> None:
         self.title = title
         self.data = dict(data or {})
         self.options = dict(options or {})
         self.entry_id = entry_id
+        self.version = version
+        self.minor_version = minor_version
+        self.unique_id = unique_id
         self.runtime_data: T
         self._unload_callbacks: list[Callable[..., Any]] = []
 

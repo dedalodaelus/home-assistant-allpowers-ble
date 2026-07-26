@@ -29,6 +29,8 @@ from .client import (
     async_probe_device,
 )
 from .const import (
+    CONFIG_ENTRY_MINOR_VERSION,
+    CONFIG_ENTRY_VERSION,
     CONF_DEVICE_NAME,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
@@ -63,8 +65,8 @@ _LOGGER = logging.getLogger(__name__)
 class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle discovery and setup of one ALLPOWERS BLE device."""
 
-    VERSION = 1
-    MINOR_VERSION = 1
+    VERSION = CONFIG_ENTRY_VERSION
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
