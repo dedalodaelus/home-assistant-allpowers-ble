@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.6](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.5...0.1.6) (2026-07-26)
+
+
+### Bug Fixes
+
+* **metrics:** split parser discarded bytes from frame error counters ([#73](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/73)) ([9c69cf9](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/9c69cf97dfd7c58c4ec2f55115484e64cc800319)), closes [#36](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/36)
+* **model-support:** enforce read-only capability profiles for experimental devices ([#74](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/74)) ([fe76ebf](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/fe76ebf1abdbf96888f193903602297d1654f309)), closes [#31](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/31)
+* **protocol:** enforce semantic profile validation and safe output writes ([#75](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/75)) ([54fcb3e](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/54fcb3e583326184c4034b6cc5e1cde360fd4d53)), closes [#32](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/32) [#33](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/33)
+* **protocol:** sanitize device names and harden stream decoder limits ([#72](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/72)) ([49a937f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/49a937f239776876f1d026913b8569633d0fc21a)), closes [#34](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/34) [#35](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/35)
+
 ## [0.1.5](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.4...0.1.5) (2026-07-25)
 
 
