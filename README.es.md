@@ -35,10 +35,10 @@ componente ESPHome específico para la estación.
 
 | Modelo o anuncio | Estado | Observaciones |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) | Verificado | Objetivo principal de desarrollo y protocolo. |
-| AP S300 y unidades similares `AP S*` | Experimental | Solo se aceptan tras una prueba activa GATT y de protocolo. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) con firma de revisión verificada (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verificado | Objetivo principal de desarrollo y protocolo con controles de escritura habilitados. |
+| AP S300 y unidades similares `AP S*` | Experimental de solo lectura | Solo se aceptan tras una prueba activa GATT y de protocolo. Se exponen entidades de telemetría, pero no controles de escritura. |
 | AP S500 / AP S700 V2 | Rechazado | Utilizan una revisión de protocolo diferente. |
-| Anuncio genérico `ALLPOWERS*` o servicio FFF0 | Requiere prueba | La configuración continúa únicamente si la validación de protocolo termina correctamente. |
+| Anuncio genérico `ALLPOWERS*` o servicio FFF0 | Experimental de solo lectura | La configuración continúa únicamente si la validación de protocolo termina correctamente. Se expone telemetría, pero no controles de escritura. |
 
 Consulta [Compatibilidad](docs/compatibility.md) antes de declarar compatible otro
 modelo.
@@ -106,6 +106,10 @@ Los valores y controles pasan a no disponibles cuando la información necesaria
 está obsoleta. Así se evita mostrar como actual un estado antiguo o construir una
 escritura a partir de datos de una sesión anterior.
 
+Los perfiles experimentales funcionan en modo de solo lectura: no crean entidades
+de control de escritura hasta validar explícitamente las capacidades por modelo y
+revisión de hardware.
+
 ## Seguridad de las escrituras
 
 El protocolo agrupa varios controles dentro de los mismos campos de bits. Para no
@@ -140,8 +144,9 @@ Los cambios de opciones se aplican en caliente, sin recargar la integración.
 
 ## Diagnósticos
 
-Los diagnósticos incluyen contadores de conexión, paquetes, errores y watchdog
-(total, telemetría y transporte), últimas marcas temporales, estado en caché,
+Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes del
+parser, errores de protocolo, errores de escritura y watchdog (total, telemetría
+y transporte), además de las últimas marcas temporales, estado en caché,
 clasificación del modelo y opciones.
 La dirección Bluetooth se redacta y no se almacenan credenciales de nube.
 

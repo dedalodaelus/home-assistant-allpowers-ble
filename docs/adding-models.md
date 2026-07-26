@@ -60,6 +60,10 @@ The preferred pattern is:
 6. clear temporary shadows on disconnect;
 7. request and verify fresh state after the command.
 
+In addition to structural payload parsing, define profile-driven semantic checks
+that decide whether a snapshot may authorize writes. Keep semantically invalid
+values observable for diagnostics while denying writes that depend on them.
+
 Do not add a guessed default frame as a fallback.
 
 ## 6. Extend model policy

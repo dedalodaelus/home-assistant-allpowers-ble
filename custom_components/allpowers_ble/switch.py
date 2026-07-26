@@ -16,6 +16,7 @@ from .coordinator import AllpowersConfigEntry
 from .entity import (
     AllpowersOutputControlEntity,
     AllpowersSettingsControlEntity,
+    runtime_model_support,
 )
 from .protocol import StateUnavailableError
 
@@ -113,11 +114,22 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE switches."""
     del hass
+    support = runtime_model_support(entry.runtime_data.coordinator)
+
+    descriptions = tuple(
+        description
+        for description in SWITCH_DESCRIPTIONS
+        if (
+            support.capabilities.write_settings_controls
+            if description.settings_control
+            else support.capabilities.write_output_controls
+        )
+    )
     async_add_entities(
         AllpowersSettingsSwitch(entry, description)
         if description.settings_control
         else AllpowersOutputSwitch(entry, description)
-        for description in SWITCH_DESCRIPTIONS
+        for description in descriptions
     )
 
 

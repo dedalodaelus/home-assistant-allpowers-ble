@@ -188,6 +188,18 @@ async def test_output_command_requires_fresh_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_output_command_rejects_unknown_status_bits_on_verified_profile() -> None:
+    client, _ = _connected_client()
+    client._settings = _settings(hardware_version="1.2", raw_hardware_version=0x12)
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    client._status = _status(raw_flags=0x14)
+    client._status_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(client_module.StateUnavailableError, match="unknown flag bits"):
+        await client.async_set_ac(True)
+
+
+@pytest.mark.asyncio
 async def test_sequential_settings_commands_preserve_unknown_bits() -> None:
     client, fake = _connected_client()
     client._settings = _settings()
@@ -275,6 +287,40 @@ async def test_settings_command_requires_fresh_settings() -> None:
     client, _ = _connected_client()
 
     with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        await client.async_set_eco(True)
+
+
+@pytest.mark.asyncio
+async def test_settings_command_rejects_reserved_work_mode_on_verified_profile() -> (
+    None
+):
+    client, _ = _connected_client()
+    client._settings = _settings(
+        hardware_version="1.2",
+        raw_hardware_version=0x12,
+        work_mode=None,
+    )
+    client._settings_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(client_module.StateUnavailableError, match="reserved work mode"):
+        await client.async_set_eco(True)
+
+
+@pytest.mark.asyncio
+async def test_settings_command_rejects_unsupported_timeout_on_verified_profile() -> (
+    None
+):
+    client, _ = _connected_client()
+    client._settings = _settings(
+        hardware_version="1.2",
+        raw_hardware_version=0x12,
+        eco_timeout_hours=9,
+    )
+    client._settings_monotonic = asyncio.get_running_loop().time()
+
+    with pytest.raises(
+        client_module.StateUnavailableError, match="unsupported ECO timeout"
+    ):
         await client.async_set_eco(True)
 
 
@@ -617,8 +663,21 @@ def test_invalid_notification_updates_protocol_errors(status_frame: bytes) -> No
 
     client._notification_handler(FakeCharacteristic(), invalid)
 
+    assert client.snapshot().statistics.parser_discards == len(status_frame)
     assert client.snapshot().statistics.protocol_errors == 1
     assert client.snapshot().statistics.valid_packets == 0
+
+
+def test_noise_notification_updates_only_parser_discards(status_frame: bytes) -> None:
+    client, _ = _connected_client()
+
+    client._notification_handler(
+        FakeCharacteristic(), bytearray(b"noise" + status_frame)
+    )
+
+    assert client.snapshot().statistics.parser_discards == len(b"noise")
+    assert client.snapshot().statistics.protocol_errors == 0
+    assert client.snapshot().statistics.valid_packets == 1
 
 
 @pytest.mark.asyncio
@@ -648,6 +707,7 @@ def test_notification_handler_without_packets_or_discards_skips_emit_update() ->
     class IdleDecoder:
         def __init__(self) -> None:
             self.discarded_frames = 0
+            self.discarded_bytes = 0
 
         def feed(self, data: bytearray) -> list[object]:
             del data
@@ -665,6 +725,32 @@ def test_notification_handler_without_packets_or_discards_skips_emit_update() ->
     client._notification_handler(FakeCharacteristic(), bytearray(b"noop"))
 
     assert callbacks == 0
+
+
+def test_notification_handler_with_only_byte_discards_emits_update() -> None:
+    class ByteDiscardDecoder:
+        def __init__(self) -> None:
+            self.discarded_frames = 0
+            self.discarded_bytes = 0
+
+        def feed(self, data: bytearray) -> list[object]:
+            self.discarded_bytes += len(data)
+            return []
+
+    client, _ = _connected_client()
+    callbacks = 0
+
+    def update() -> None:
+        nonlocal callbacks
+        callbacks += 1
+
+    client._decoder = ByteDiscardDecoder()  # type: ignore[assignment]
+    client.set_update_callback(update)
+    client._notification_handler(FakeCharacteristic(), bytearray(b"noop"))
+
+    assert callbacks == 1
+    assert client.snapshot().statistics.parser_discards == len(b"noop")
+    assert client.snapshot().statistics.protocol_errors == 0
 
 
 def test_update_advertisement_emits_only_on_change() -> None:

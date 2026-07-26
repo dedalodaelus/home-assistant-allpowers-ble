@@ -24,6 +24,9 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     assert "device_name" not in payload["entry"]["data"]
     assert payload["entry"]["options"]["status_interval"] == 20
     assert payload["model_support"]["model"] == "R600"
+    assert payload["model_support"]["classification"] == "verified"
+    assert payload["model_support"]["profile"] == "r600-hw-1.2"
+    assert payload["model_support"]["capabilities"]["write_output_controls"]
     assert payload["snapshot"]["settings"]["work_mode"] == 1
     assert payload["snapshot"]["last_packet_at"].endswith("+00:00")
     assert payload["protocol"]["safety"]["preserve_unknown_settings_bits"]

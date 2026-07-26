@@ -47,6 +47,14 @@ def test_partial_header_survives_between_feeds(status_frame: bytes) -> None:
     assert len(packets) == 1
 
 
+def test_single_header_byte_is_retained_without_discard() -> None:
+    decoder = NotificationStreamDecoder()
+
+    assert decoder.feed(b"\xa5") == []
+    assert decoder.buffered_bytes == 1
+    assert decoder.discarded_bytes == 0
+
+
 def test_invalid_checksum_is_discarded_and_next_frame_recovers(
     status_frame: bytes,
     settings_frame: bytes,
@@ -93,13 +101,55 @@ def test_no_header_clears_buffer() -> None:
 
     assert decoder.feed(b"not a frame") == []
     assert decoder.buffered_bytes == 0
+    assert decoder.discarded_bytes == len(b"not a frame")
+
+
+def test_oversized_noise_chunk_is_bounded_and_recovers(status_frame: bytes) -> None:
+    decoder = NotificationStreamDecoder()
+    oversized_noise = b"\x01" * 10_000
+
+    assert decoder.feed(oversized_noise) == []
+    assert decoder.buffered_bytes == 0
+    assert decoder.discarded_bytes == len(oversized_noise)
+
+    packets = decoder.feed(status_frame)
+
+    assert len(packets) == 1
+    assert isinstance(packets[0], StatusData)
+
+
+def test_buffer_limit_drops_oldest_bytes_and_recovers(status_frame: bytes) -> None:
+    decoder = NotificationStreamDecoder()
+    partial_header = status_frame[:1]
+
+    decoder.feed((b"\xff" * 5000) + partial_header)
+    assert decoder.buffered_bytes <= 4096
+    assert decoder.discarded_bytes > 0
+
+    packets = decoder.feed(status_frame[1:])
+
+    assert len(packets) == 1
+    assert isinstance(packets[0], StatusData)
+
+
+def test_feed_overflow_trims_oldest_bytes(monkeypatch) -> None:
+    decoder = NotificationStreamDecoder()
+    decoder._buffer.extend(b"\x00" * 4096)
+
+    monkeypatch.setattr(NotificationStreamDecoder, "_drain_buffer", lambda _self: [])
+
+    assert decoder.feed(b"\x01") == []
+    assert decoder.buffered_bytes == 4096
+    assert decoder.discarded_bytes == 1
 
 
 def test_reset(status_frame: bytes) -> None:
     decoder = NotificationStreamDecoder()
     decoder.feed(status_frame[:4])
+    decoder.feed(b"noise")
 
     decoder.reset()
 
     assert decoder.buffered_bytes == 0
+    assert decoder.discarded_bytes == 0
     assert decoder.discarded_frames == 0

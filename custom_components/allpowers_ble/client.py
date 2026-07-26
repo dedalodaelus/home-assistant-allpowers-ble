@@ -43,6 +43,8 @@ from .protocol import (
     encode_output_control,
     encode_settings_control,
     encode_status_request,
+    settings_write_validation_errors,
+    status_write_validation_errors,
     updated_settings,
 )
 
@@ -444,6 +446,13 @@ class AllpowersBLEClient:
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
+
+        support = self._runtime_model_support()
+        errors = status_write_validation_errors(support.profile, self._status)
+        if errors:
+            raise StateUnavailableError(
+                "Output writes are blocked by semantic validation: " + "; ".join(errors)
+            )
         return (
             self._status.dc_enabled,
             self._status.ac_enabled,
@@ -480,7 +489,24 @@ class AllpowersBLEClient:
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
+
+        support = self._runtime_model_support()
+        errors = settings_write_validation_errors(support.profile, self._settings)
+        if errors:
+            raise StateUnavailableError(
+                "Settings writes are blocked by semantic validation: "
+                + "; ".join(errors)
+            )
         return self._settings
+
+    def _runtime_model_support(self) -> ModelSupport:
+        """Return model support resolved from the latest revision-aware snapshot."""
+        settings = self._settings
+        return identify_model(
+            self._advertised_name,
+            hardware_version=settings.hardware_version if settings else None,
+            raw_hardware_version=settings.raw_hardware_version if settings else None,
+        )
 
     async def _connection_loop(self) -> None:
         delay = 1.0
@@ -699,12 +725,15 @@ class AllpowersBLEClient:
             self._statistics,
             notifications=self._statistics.notifications + 1,
         )
+        discarded_bytes_before = self._decoder.discarded_bytes
         discarded_before = self._decoder.discarded_frames
         packets = self._decoder.feed(data)
+        discarded_bytes = self._decoder.discarded_bytes - discarded_bytes_before
         discarded = self._decoder.discarded_frames - discarded_before
-        if discarded:
+        if discarded_bytes or discarded:
             self._statistics = replace(
                 self._statistics,
+                parser_discards=self._statistics.parser_discards + discarded_bytes,
                 protocol_errors=self._statistics.protocol_errors + discarded,
             )
 
@@ -768,7 +797,7 @@ class AllpowersBLEClient:
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
 
-        if packets or discarded:
+        if packets or discarded or discarded_bytes:
             self._reported_freshness = self._freshness(self._loop_time())
             self._wake_maintenance_loop()
             self._emit_update()
@@ -1200,7 +1229,16 @@ async def async_probe_device(
 
         if status is None:  # pragma: no cover - event invariant
             raise TimeoutError("Status event was set without a status frame")
-        return ProbeResult(status=status, settings=settings, model_support=support)
+        resolved_support = identify_model(
+            advertised_name,
+            hardware_version=settings.hardware_version if settings else None,
+            raw_hardware_version=(settings.raw_hardware_version if settings else None),
+        )
+        return ProbeResult(
+            status=status,
+            settings=settings,
+            model_support=resolved_support,
+        )
     finally:
         if client.is_connected:
             try:

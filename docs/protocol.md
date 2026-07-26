@@ -40,6 +40,12 @@ recover:
 - a trailing partial header.
 
 Payload lengths above 128 bytes are rejected as implausible for this protocol.
+Decoder input processing is additionally bounded to keep parser memory/work
+deterministic under synthetic oversized callbacks:
+
+- each callback is processed in chunks of up to 1024 bytes;
+- retained parser buffer is capped at 4096 bytes;
+- dropped bytes are counted for diagnostics while preserving resynchronization.
 
 ## Commands
 
@@ -50,6 +56,17 @@ Payload lengths above 128 bytes are rejected as implausible for this protocol.
 | `0x03` | Device → HA | Settings notification |
 | `0x35` | Device → HA | Optional UTF-8 device name |
 | Other | Device → HA | Retained as a validated unknown packet |
+
+### Device-name sanitization (`0x35`)
+
+Device names are accepted as UTF-8 and normalized at the protocol boundary
+before being exposed to Home Assistant:
+
+- trailing null padding is removed;
+- surrounding whitespace is trimmed;
+- Unicode control-category code points are removed;
+- names are capped to 64 characters;
+- empty results are ignored by the client and do not replace the current title.
 
 ### Status request
 
@@ -84,6 +101,11 @@ Known status masks:
 The raw flags byte is retained in the immutable model for diagnostics and future
 protocol work.
 
+For the verified `r600-hw-1.2` profile, output writes are additionally gated by
+semantic validation: if status contains unknown flag bits outside `0x01`, `0x02`,
+and `0x10`, writes are rejected instead of normalizing potentially unrelated
+output-command bits.
+
 ## Combined output command
 
 Output writes use one combined flags byte rather than independent commands:
@@ -102,7 +124,9 @@ A5 65 00 B1 01 01 00 <flags> <xor>
 
 Note that the light mask differs between status (`0x10`) and output control
 (`0x20`). The integration never builds this command from defaults. It requires a
-fresh status snapshot and preserves the other output states.
+fresh status snapshot and preserves the other output states. When unknown status
+bits are present on a verified profile, the write is rejected because safe
+preservation cannot be proven.
 
 ## Settings notification (`0x03`)
 
@@ -126,6 +150,11 @@ Known settings masks:
 
 Known work-mode values are 0 (mute), 1 (standard), and 2 (fast). Unknown values are
 kept as `None` rather than coerced to a supported mode.
+
+For the verified `r600-hw-1.2` profile, settings writes are blocked when the
+snapshot carries a reserved work-mode value (`None`) or an unsupported ECO
+timeout. This keeps structural decoding independent from semantic write
+authorization.
 
 Version bytes are displayed as BCD-style `high.low` when both nibbles are decimal;
 otherwise the raw hexadecimal byte is shown.
@@ -161,3 +190,50 @@ captures or equivalent evidence from the exact hardware revision and regression
 vectors in the protocol tests.
 
 See [Adding models](adding-models.md).
+
+## Profile verification and write authorization
+
+### Verified profiles
+
+A device is marked as *verified* when it meets all of the following:
+
+1. Advertised name matches a known hardware family pattern.
+2. Active GATT probe confirms the expected service UUID, notification, and write characteristics.
+3. The device returns a valid status frame that passes header, length, checksum, and payload validation.
+4. The hardware revision signature (e.g., `hardware_version=1.2`, `raw_hardware_version=0x12`) matches a known verified revision.
+
+Only verified profiles are permitted to accept **output and settings write commands**. Verified devices can issue output control and settings updates to change power-station behavior.
+
+### Experimental profiles
+
+Devices that pass steps 1–3 above but either:
+
+- Cannot be matched to a known verified hardware revision, or
+- Are matched to a protocol family candidate without full write capability validation
+
+are marked as *experimental* and operate in **read-only mode**. Telemetry entities (battery, power, remaining time, RSSI) are exposed. Writable control entities (output enable, settings) are not created.
+
+### Rejected profiles
+
+Devices that are known to use an incompatible protocol are rejected entirely. Setup is stopped before a persistent config entry is created.
+
+### Why profiles control write access
+
+The protocol provides no cryptographic authentication. Write authorization depends on:
+
+1. **Verified hardware identity**: The exact hardware revision must be documented and tested.
+2. **Protocol stability**: The meaning of flag bits, reserved fields, and payload layout must be understood for safe read-modify-write operations.
+3. **Semantic constraints**: Each verified profile has documented constraints on valid state transitions and flag combinations (e.g., unknown status bits trigger write rejection).
+
+Write access is not determined by advertised name or service discovery alone. A device that advertises `ALLPOWERS R600` but has an unverified hardware revision remains read-only.
+
+### Capability matrix
+
+| Profile | Read telemetry | Write output | Write settings |
+|---|---|---|---|
+| Verified R600 (hw 1.2) | ✓ | ✓ | ✓ |
+| R600 unverified revision | ✓ | ✗ | ✗ |
+| AP S* experimental | ✓ | ✗ | ✗ |
+| Generic ALLPOWERS | ✓ | ✗ | ✗ |
+| Service UUID candidate | ✓ | ✗ | ✗ |
+| Rejected (S500, S700 V2) | ✗ | ✗ | ✗ |
