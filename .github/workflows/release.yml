@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
 
 permissions:
@@ -48,29 +46,22 @@ jobs:
         if: steps.release.outputs.release_created == 'true'
         run: python scripts/build_release.py --clean
 
+      - name: Validate release metadata and checksum
+        if: steps.release.outputs.release_created == 'true'
+        run: >-
+          python scripts/validate_release_metadata.py
+          --tag "${{ steps.release.outputs.tag_name }}"
+          --zip-path dist/allpowers_ble.zip
+          --checksum-path dist/allpowers_ble.zip.sha256
+          --write-checksum
+          --verify-checksum
+
       - name: Upload HACS asset
         if: steps.release.outputs.release_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           gh release upload "${{ steps.release.outputs.tag_name }}"
-          dist/allpowers_ble.zip --clobber
-
-  tagged-release:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - name: Validate version and build asset
-        run: |
-          python scripts/check_version.py "${GITHUB_REF_NAME}"
-          python scripts/build_release.py --clean
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/allpowers_ble.zip
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          dist/allpowers_ble.zip
+          dist/allpowers_ble.zip.sha256
+          --clobber

@@ -37,6 +37,7 @@
 make clean
 make all
 python scripts/build_release.py --clean
+python scripts/validate_release_metadata.py --tag X.Y.Z --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 python scripts/validate_repository.py
 python scripts/check_version.py X.Y.Z
 ```
@@ -46,6 +47,7 @@ Inspect the archive:
 ```bash
 unzip -l dist/allpowers_ble.zip
 sha256sum dist/allpowers_ble.zip
+sha256sum --check dist/allpowers_ble.zip.sha256
 ```
 
 `manifest.json` must be at archive root and no cache file may be present.
@@ -61,6 +63,9 @@ sha256sum dist/allpowers_ble.zip
 
 ## Publishing
 
-For the initial `0.1.0`, push the matching tag; the tag job creates the GitHub
-release and attaches `allpowers_ble.zip`. Thereafter, merge the Release Please pull
-request to create semantic releases and the HACS asset automatically.
+Release publication is handled only by Release Please on `main`.
+
+- Use CI or workflow-dispatch dry-run paths for release validation without
+  creating stable tags.
+- When Release Please creates a release, both `allpowers_ble.zip` and
+  `allpowers_ble.zip.sha256` must be uploaded as release assets.

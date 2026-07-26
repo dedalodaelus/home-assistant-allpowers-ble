@@ -89,6 +89,23 @@ jobs:
       - name: Build HACS release archive
         run: python scripts/build_release.py --clean
 
+      - name: Release metadata dry-run (non-publishing)
+        run: |
+          VERSION="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("custom_components/allpowers_ble/manifest.json")
+          print(json.loads(manifest.read_text(encoding="utf-8"))["version"])
+          PY
+          )"
+          python scripts/validate_release_metadata.py \
+            --tag "$VERSION" \
+            --zip-path dist/allpowers_ble.zip \
+            --checksum-path dist/allpowers_ble.zip.sha256 \
+            --write-checksum \
+            --verify-checksum
+
       - name: Validate archive layout
         run: python scripts/validate_repository.py
 
@@ -96,6 +113,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: allpowers_ble-${{ github.sha }}
-          path: dist/allpowers_ble.zip
+          path: |
+            dist/allpowers_ble.zip
+            dist/allpowers_ble.zip.sha256
           if-no-files-found: error
           retention-days: 14
