@@ -57,7 +57,7 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml
 
-      - name: Real Home Assistant import smoke test
+      - name: Real Home Assistant lifecycle harness (gating lane)
         env:
           USE_REAL_HOMEASSISTANT: "1"
         run: pytest tests/homeassistant

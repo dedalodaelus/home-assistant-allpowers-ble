@@ -41,18 +41,19 @@ USE_REAL_HOMEASSISTANT=0 pytest \
   --cov-report=xml
 ```
 
-## Real Home Assistant smoke test
+## Real Home Assistant lifecycle harness
 
-CI installs the pinned Home Assistant release and imports every Home
-Assistant-facing module without stubs:
+CI installs the pinned Home Assistant release and runs lifecycle-oriented
+integration tests against real Home Assistant APIs (config entries, registries,
+entity platforms, reload/unload behavior, service calls, and diagnostics):
 
 ```bash
 USE_REAL_HOMEASSISTANT=1 pytest tests/homeassistant
 ```
 
-This catches renamed or removed imports while keeping device-independent tests
-fast. Hardware-in-the-loop validation remains necessary before marking another
-model verified.
+The `USE_REAL_HOMEASSISTANT=1` lane is the repository's gating compatibility
+lane for Home Assistant-facing contracts. Hardware-in-the-loop validation remains
+necessary before marking another model verified.
 
 ## Static analysis
 
