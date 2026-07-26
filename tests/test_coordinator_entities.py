@@ -15,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 from custom_components.allpowers_ble import (
     binary_sensor,
     button,
+    coordinator as coordinator_module,
     number,
     select,
     sensor,
@@ -47,6 +48,47 @@ def assert_command_error(
     assert isinstance(error.__cause__, cause)
 
 
+class _RegistryDevice:
+    """Tiny mutable record emulating Home Assistant device entries."""
+
+    def __init__(
+        self, device_id: str, *, hw_version: str | None, sw_version: str | None
+    ) -> None:
+        self.id = device_id
+        self.hw_version = hw_version
+        self.sw_version = sw_version
+
+
+class _RegistryStub:
+    """Small device-registry stub supporting the coordinator contract."""
+
+    def __init__(self, devices_by_address: dict[str, _RegistryDevice]) -> None:
+        self._devices_by_address = devices_by_address
+        self.updates: list[tuple[str, dict[str, str]]] = []
+
+    def async_get_device(
+        self,
+        *,
+        identifiers: set[tuple[str, str]],
+        connections: set[tuple[str, str]],
+    ) -> _RegistryDevice | None:
+        del connections
+        _, address = next(iter(identifiers))
+        return self._devices_by_address.get(address)
+
+    def async_update_device(self, device_id: str, **kwargs: str) -> _RegistryDevice:
+        self.updates.append((device_id, dict(kwargs)))
+        for device in self._devices_by_address.values():
+            if device.id != device_id:
+                continue
+            if "hw_version" in kwargs:
+                device.hw_version = kwargs["hw_version"]
+            if "sw_version" in kwargs:
+                device.sw_version = kwargs["sw_version"]
+            return device
+        raise AssertionError(f"Unexpected device_id update: {device_id}")
+
+
 @pytest.mark.asyncio
 async def test_coordinator_lifecycle_and_push_updates() -> None:
     entry, client, coordinator, _ = configured_entry()
@@ -76,6 +118,179 @@ async def test_coordinator_lifecycle_and_push_updates() -> None:
     assert client.stopped
     assert client.callback is None
     assert entry.runtime_data.coordinator is coordinator
+
+
+def test_validated_registry_version_accepts_only_bcd_and_non_zero() -> None:
+    assert coordinator_module._validated_registry_version("1.2", 0x12) == "1.2"
+    assert coordinator_module._validated_registry_version(" 3.4 ", 0x34) == "3.4"
+    assert coordinator_module._validated_registry_version("", 0x12) is None
+    assert coordinator_module._validated_registry_version(None, 0x12) is None
+    assert coordinator_module._validated_registry_version("0xAF", 0xAF) is None
+    assert coordinator_module._validated_registry_version("0.0", 0x00) is None
+
+
+def test_coordinator_registry_refresh_returns_early_without_address_or_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, client, coordinator, _ = configured_entry()
+
+    entry.data["address"] = ""
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings=settings(),
+            settings_monotonic=monotonic(),
+        )
+    )
+
+    registry = _RegistryStub({})
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_get",
+        lambda hass: registry,
+        raising=False,
+    )
+    entry.data["address"] = ADDRESS
+    coordinator._async_refresh_device_registry_metadata()
+    assert registry.updates == []
+
+
+def test_coordinator_refreshes_registry_metadata_once_per_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = replace(snapshot(), settings=None, settings_monotonic=None)
+    entry, client, _, _ = configured_entry(state=start)
+    registry = _RegistryStub(
+        {
+            ADDRESS: _RegistryDevice("dev-1", hw_version=None, sw_version=None),
+        }
+    )
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_get",
+        lambda hass: registry,
+        raising=False,
+    )
+
+    client.set_snapshot(
+        replace(
+            start,
+            settings=settings(),
+            settings_monotonic=monotonic(),
+        )
+    )
+    assert registry.updates == [("dev-1", {"hw_version": "1.2", "sw_version": "3.4"})]
+
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            rssi=-70,
+        )
+    )
+    assert len(registry.updates) == 1
+
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings=settings(
+                hardware_version="1.3",
+                firmware_version="3.5",
+                raw_hardware_version=0x13,
+                raw_firmware_version=0x35,
+            ),
+            settings_monotonic=monotonic(),
+        )
+    )
+    assert registry.updates[-1] == (
+        "dev-1",
+        {"hw_version": "1.3", "sw_version": "3.5"},
+    )
+
+
+def test_coordinator_does_not_overwrite_valid_registry_values_with_invalid_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, client, _, _ = configured_entry()
+    registry = _RegistryStub(
+        {
+            ADDRESS: _RegistryDevice("dev-1", hw_version="1.2", sw_version="3.4"),
+        }
+    )
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_get",
+        lambda hass: registry,
+        raising=False,
+    )
+
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings=settings(
+                hardware_version="0xAF",
+                firmware_version="0xFF",
+                raw_hardware_version=0xAF,
+                raw_firmware_version=0xFF,
+            ),
+            settings_monotonic=monotonic(),
+        )
+    )
+    assert registry.updates == []
+
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings=settings(
+                hardware_version="0xAF",
+                firmware_version="3.5",
+                raw_hardware_version=0xAF,
+                raw_firmware_version=0x35,
+            ),
+            settings_monotonic=monotonic(),
+        )
+    )
+    assert registry.updates == [("dev-1", {"sw_version": "3.5"})]
+
+
+def test_coordinator_registry_refresh_is_isolated_per_entry_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry_a, client_a, _, _ = configured_entry()
+    entry_b, client_b, _, _ = configured_entry()
+    entry_b.data["address"] = "11:22:33:44:55:66"
+    registry = _RegistryStub(
+        {
+            ADDRESS: _RegistryDevice("dev-a", hw_version=None, sw_version=None),
+            "11:22:33:44:55:66": _RegistryDevice(
+                "dev-b", hw_version=None, sw_version=None
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_get",
+        lambda hass: registry,
+        raising=False,
+    )
+
+    client_a.set_snapshot(replace(client_a.snapshot(), settings=settings()))
+    assert registry.updates == [("dev-a", {"hw_version": "1.2", "sw_version": "3.4"})]
+
+    client_b.set_snapshot(
+        replace(
+            client_b.snapshot(),
+            settings=settings(
+                hardware_version="2.1",
+                firmware_version="4.0",
+                raw_hardware_version=0x21,
+                raw_firmware_version=0x40,
+            ),
+        )
+    )
+    assert registry.updates[-1] == (
+        "dev-b",
+        {"hw_version": "2.1", "sw_version": "4.0"},
+    )
 
 
 def test_coordinator_rejects_cached_or_stale_state() -> None:
