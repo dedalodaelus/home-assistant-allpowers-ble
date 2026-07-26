@@ -76,6 +76,16 @@ for diagnostics even when they are not trusted for writes.
 
 ## Security and trust model
 
+## Entity semantics
+
+Binary sensors for power flow use measured power direction only:
+
+- `Input active`: `input_power_w > 0`
+- `Output active`: `output_power_w > 0`
+
+These entities do not claim battery charging/discharging direction because the
+current protocol evidence does not provide a verified battery-flow field.
+
 ### Why profile verification matters for write access
 
 The BLE protocol used by ALLPOWERS devices does not provide cryptographic device

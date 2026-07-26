@@ -63,7 +63,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[AllpowersBinarySensorDescription, ...] = (
     _binary_sensor_description(
         key="charging",
         translation_key="charging",
-        device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
+        device_class=BinarySensorDeviceClass.POWER,
         value_fn=lambda data, coordinator: (
             data.status.input_power_w > 0 if data.status else None
         ),

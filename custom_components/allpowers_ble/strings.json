@@ -33,7 +33,7 @@
         "name": "AC output"
       },
       "charging": {
-        "name": "Charging"
+        "name": "Input active"
       },
       "connected": {
         "name": "Connected"
@@ -42,7 +42,7 @@
         "name": "DC output"
       },
       "discharging": {
-        "name": "Discharging"
+        "name": "Output active"
       },
       "light_output": {
         "name": "Light output"

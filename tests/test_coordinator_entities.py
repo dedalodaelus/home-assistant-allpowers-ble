@@ -30,6 +30,7 @@ from tests.helpers import (
     disconnected_snapshot,
     settings,
     snapshot,
+    status,
 )
 
 
@@ -196,6 +197,53 @@ async def test_entities_become_unavailable_when_data_is_stale() -> None:
         if entity.entity_description.key == "charging"
     )
     assert not charging.available
+
+
+@pytest.mark.asyncio
+async def test_binary_input_output_active_semantics_edge_cases() -> None:
+    cases = [
+        (0, 0, False, False),
+        (1, 0, True, False),
+        (0, 1, False, True),
+        (250, 120, True, True),
+    ]
+
+    for (
+        input_power,
+        output_power,
+        expected_input_active,
+        expected_output_active,
+    ) in cases:
+        entry, _, _, _ = configured_entry(
+            state=snapshot(
+                status_data=status(
+                    input_power_w=input_power,
+                    output_power_w=output_power,
+                )
+            )
+        )
+        binary_entities: list[Any] = []
+        await binary_sensor.async_setup_entry(
+            None, entry, lambda entities: binary_entities.extend(entities)
+        )
+        by_key = {entity.entity_description.key: entity for entity in binary_entities}
+        assert by_key["charging"].is_on is expected_input_active
+        assert by_key["discharging"].is_on is expected_output_active
+        assert by_key["charging"].available
+        assert by_key["discharging"].available
+
+    entry, _, _, _ = configured_entry(
+        state=replace(snapshot(), status=None, status_monotonic=None)
+    )
+    binary_entities = []
+    await binary_sensor.async_setup_entry(
+        None, entry, lambda entities: binary_entities.extend(entities)
+    )
+    by_key = {entity.entity_description.key: entity for entity in binary_entities}
+    assert by_key["charging"].is_on is None
+    assert by_key["discharging"].is_on is None
+    assert not by_key["charging"].available
+    assert not by_key["discharging"].available
 
 
 @pytest.mark.asyncio

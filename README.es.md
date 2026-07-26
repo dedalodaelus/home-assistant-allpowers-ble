@@ -96,7 +96,7 @@ permanente a uno concreto.
 | Plataforma | Entidades |
 |---|---|
 | Sensor | Batería, potencia de entrada, potencia de salida, tiempo restante, RSSI, versiones, reconexiones, errores de protocolo y reinicios del watchdog |
-| Sensor binario | Conectado, telemetría disponible, ajustes disponibles, cargando, descargando y estado de salidas |
+| Sensor binario | Conectado, telemetría disponible, ajustes disponibles, entrada activa, salida activa y estado de salidas |
 | Interruptor | Salida CA, salida CC, luz, modo ECO y cargador de coche experimental |
 | Selector | Modo de trabajo y tiempo de apagado ECO |
 | Botón | Actualizar estado, reconectar y enviar keepalive de ajustes |
