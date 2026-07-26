@@ -266,8 +266,11 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
     for error in (DeviceNotFoundError("missing"), RuntimeError("boom")):
         another = make_client()
 
-        async def fail(error: Exception = error) -> None:
-            another._stop_event.set()
+        async def fail(
+            error: Exception = error,
+            another_client: AllpowersBLEClient = another,
+        ) -> None:
+            another_client._stop_event.set()
             raise error
 
         monkeypatch.setattr(another, "_connect_once", fail)
@@ -348,7 +351,9 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
     assert client.snapshot().connected
     assert fake.notification_callback is not None
     assert fake.writes[-1] == client_module.encode_status_request()
-    assert captured["ble_device_callback"] == client._fresh_ble_device
+    callback = captured["ble_device_callback"]
+    assert callable(callback)
+    assert isinstance(callback(), FakeDevice)
     assert client.snapshot().statistics.successful_connections == 1
 
     missing = make_client()
@@ -986,7 +991,19 @@ async def test_probe_success_and_cleanup(
     fake = ProbeClient([settings_frame, status_frame])
 
     async def establish(*args: Any, **kwargs: Any) -> ProbeClient:
-        del args, kwargs
+        del args
+        callback = kwargs["ble_device_callback"]
+        monkeypatch.setattr(
+            client_module.bluetooth,
+            "async_ble_device_from_address",
+            lambda *args, **kwargs: None,
+        )
+        assert isinstance(callback(), FakeDevice)
+        monkeypatch.setattr(
+            client_module.bluetooth,
+            "async_ble_device_from_address",
+            lambda *args, **kwargs: FakeDevice(),
+        )
         return fake
 
     monkeypatch.setattr(client_module, "establish_connection", establish)

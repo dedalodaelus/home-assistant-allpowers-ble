@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import struct
 import sys
+import tomllib
 from typing import Any
 from zipfile import ZipFile
 
@@ -68,6 +69,16 @@ RELEASE_MAIN_IF_GUARD = re.compile(
     r"^\s*if:\s*github\.ref\s*==\s*['\"]refs/heads/main['\"]\s*$",
     re.MULTILINE,
 )
+BLOCKED_RUFF_IGNORE_RULES = {"ALL"}
+BLOCKED_REPO_CODE_GLOBS = {
+    "*",
+    "custom_components",
+    "custom_components.*",
+    "scripts",
+    "scripts.*",
+    "tests",
+    "tests.*",
+}
 
 
 def normalize_markdown_anchor(value: str) -> str:
@@ -360,6 +371,100 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             errors.append("release-please job must remain guarded to refs/heads/main")
 
 
+def _module_list(value: Any) -> list[str]:
+    """Normalize mypy module override values to a string list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def validate_static_analysis_contract(errors: list[str]) -> None:
+    """Reject broad static-analysis ignores that hide integration-owned code."""
+    pyproject_path = ROOT / "pyproject.toml"
+    try:
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as ex:
+        errors.append(f"failed reading pyproject.toml for static-analysis checks: {ex}")
+        return
+
+    tool_config = pyproject.get("tool")
+    if not isinstance(tool_config, dict):
+        errors.append("pyproject.toml must define a [tool] table")
+        return
+
+    mypy_config = tool_config.get("mypy")
+    if not isinstance(mypy_config, dict):
+        errors.append("pyproject.toml must define a [tool.mypy] table")
+        return
+
+    if mypy_config.get("ignore_missing_imports") is True:
+        errors.append(
+            "tool.mypy.ignore_missing_imports must stay false; "
+            "use explicit per-module overrides"
+        )
+    if mypy_config.get("follow_imports") == "skip":
+        errors.append(
+            "tool.mypy.follow_imports must not be 'skip'; "
+            "integration-owned imports must stay type-checked"
+        )
+
+    overrides = mypy_config.get("overrides", [])
+    if isinstance(overrides, dict):
+        overrides = [overrides]
+    if not isinstance(overrides, list):
+        errors.append("tool.mypy.overrides must be a table or array of tables")
+        overrides = []
+
+    for index, override in enumerate(overrides, start=1):
+        if not isinstance(override, dict):
+            errors.append(f"tool.mypy.overrides entry {index} must be a table")
+            continue
+        if override.get("ignore_missing_imports") is not True:
+            continue
+        for module in _module_list(override.get("module")):
+            if module in BLOCKED_REPO_CODE_GLOBS:
+                errors.append(
+                    "tool.mypy.overrides uses ignore_missing_imports on "
+                    f"integration-owned scope {module!r} (entry {index})"
+                )
+
+    ruff_config = tool_config.get("ruff")
+    if not isinstance(ruff_config, dict):
+        return
+    lint_config = ruff_config.get("lint")
+    if not isinstance(lint_config, dict):
+        return
+
+    ignored_rules = lint_config.get("ignore", [])
+    if isinstance(ignored_rules, str):
+        ignored_rules = [ignored_rules]
+    if isinstance(ignored_rules, list):
+        forbidden = sorted(
+            rule
+            for rule in ignored_rules
+            if isinstance(rule, str) and rule in BLOCKED_RUFF_IGNORE_RULES
+        )
+        if forbidden:
+            errors.append(
+                f"tool.ruff.lint.ignore contains forbidden broad ignores: {forbidden}"
+            )
+
+    per_file_ignores = lint_config.get("per-file-ignores", {})
+    if not isinstance(per_file_ignores, dict):
+        errors.append("tool.ruff.lint.per-file-ignores must be a table")
+        return
+    for pattern in per_file_ignores:
+        if not isinstance(pattern, str):
+            continue
+        if pattern in {"*", "custom_components/*", "custom_components/**"}:
+            errors.append(
+                "tool.ruff.lint.per-file-ignores must not disable checks "
+                f"for integration code via pattern {pattern!r}"
+            )
+
+
 def validate_release_if_present(errors: list[str]) -> None:
     """Verify the HACS release archive layout when it has been built."""
     archive_path = ROOT / "dist" / "allpowers_ble.zip"
@@ -386,6 +491,7 @@ def main() -> int:
     validate_clean_tree(errors)
     validate_markdown_links_and_headings(errors)
     validate_branch_workflow_contract(errors)
+    validate_static_analysis_contract(errors)
     validate_release_if_present(errors)
 
     for source in sorted(ROOT.rglob("*.py")):

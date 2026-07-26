@@ -452,9 +452,14 @@ async def test_binary_input_output_active_semantics_edge_cases() -> None:
             )
         )
         binary_entities: list[Any] = []
-        await binary_sensor.async_setup_entry(
-            None, entry, lambda entities: binary_entities.extend(entities)
-        )
+
+        def add_entities(
+            entities: list[Any],
+            bucket: list[Any] = binary_entities,
+        ) -> None:
+            bucket.extend(entities)
+
+        await binary_sensor.async_setup_entry(None, entry, add_entities)
         by_key = {entity.entity_description.key: entity for entity in binary_entities}
         assert by_key["charging"].is_on is expected_input_active
         assert by_key["discharging"].is_on is expected_output_active
