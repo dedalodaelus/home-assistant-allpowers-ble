@@ -10,6 +10,8 @@
 - `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
   and CodeQL checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
+- Third-party GitHub Actions are pinned to immutable commit SHAs and updated via
+  Dependabot pull requests.
 
 ## Branch workflow and promotion
 
