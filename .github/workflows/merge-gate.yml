@@ -40,12 +40,34 @@ jobs:
             const baseRef = pr.base?.ref || "";
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
+            const prAuthorLogin = pr.user?.login || "";
+            const prAuthorType = pr.user?.type || "";
             const isHotfixBranch = /^hotfix\//.test(headRef);
+            const isReleasePleaseBranch = /^release-please--/.test(headRef);
+            const releasePleaseAllowedBots = new Set([
+              "github-actions[bot]",
+              "release-please[bot]",
+            ]);
+            const isReleasePleaseBotAuthor =
+              prAuthorType === "Bot" && releasePleaseAllowedBots.has(prAuthorLogin);
 
-            // Policy: PRs to main are only allowed from devel or hotfix/* branches.
-            if (baseRef === "main" && headRef !== "devel" && !isHotfixBranch) {
+            // Policy: PRs to main are only allowed from devel, hotfix/*, or release-please branches.
+            if (
+              baseRef === "main"
+              && headRef !== "devel"
+              && !isHotfixBranch
+              && !isReleasePleaseBranch
+            ) {
               core.setFailed(
-                `PRs targeting main must come from 'devel' or 'hotfix/*'. Current source: '${headRef}'.`
+                `PRs targeting main must come from 'devel', 'hotfix/*', or 'release-please--*'. Current source: '${headRef}'.`
+              );
+              return;
+            }
+
+            // Policy: release-please PRs to main must be opened by an approved bot account.
+            if (baseRef === "main" && isReleasePleaseBranch && !isReleasePleaseBotAuthor) {
+              core.setFailed(
+                `PRs from 'release-please--*' to main must be authored by an approved bot. Current author: '${prAuthorLogin}' (${prAuthorType || "unknown"}).`
               );
               return;
             }
@@ -93,7 +115,13 @@ jobs:
             const isFeatureToDevel = baseRef === "devel";
             const isPromotionToMain = baseRef === "main";
 
-            if (touchesChangelog && (isFeatureToDevel || isPromotionToMain)) {
+            if (
+              touchesChangelog
+              && (
+                isFeatureToDevel
+                || (isPromotionToMain && !isReleasePleaseBranch)
+              )
+            ) {
               core.setFailed(
                 "CHANGELOG.md is managed by release-please and cannot be modified in PRs to devel or main."
               );
