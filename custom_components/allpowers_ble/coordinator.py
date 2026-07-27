@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from time import monotonic
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.config_entries import ConfigEntry
@@ -18,6 +18,9 @@ from .const import DOMAIN
 from .client import AllpowersBLEClient
 from .models import AllpowersSnapshot
 from .options import ConnectionOptions
+
+if TYPE_CHECKING:
+    from .repairs import AllpowersRepairsManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +56,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             always_update=False,
         )
         self.client = client
+        self._repairs_manager: AllpowersRepairsManager | None = None
         self.client.set_update_callback(self._handle_client_update)
         self.async_set_updated_data(client.snapshot())
 
@@ -66,8 +70,14 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
 
     async def async_shutdown(self) -> None:
         """Stop the active client and release callbacks."""
+        if self._repairs_manager is not None:
+            self._repairs_manager.clear()
         self.client.set_update_callback(None)
         await self.client.async_stop()
+
+    def set_repairs_manager(self, manager: AllpowersRepairsManager) -> None:
+        """Attach entry-scoped Repairs manager."""
+        self._repairs_manager = manager
 
     async def async_apply_options(self, options: ConnectionOptions) -> None:
         """Apply config-entry options live."""
@@ -83,6 +93,11 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
     def _handle_client_update(self) -> None:
         self.async_set_updated_data(self.client.snapshot())
         self._async_refresh_device_registry_metadata()
+        if self._repairs_manager is not None:
+            self._repairs_manager.evaluate(
+                self.data,
+                status_is_fresh=self.status_is_fresh,
+            )
 
     @callback
     def _async_refresh_device_registry_metadata(self) -> None:

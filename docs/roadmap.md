@@ -2,7 +2,7 @@
 
 ## Current release scope
 
-Version 0.1.x focuses on a safe, maintainable R600 implementation:
+Version 0.3.x focuses on a safe, maintainable R600 implementation:
 
 - discovery and active protocol validation;
 - local adapter and ESPHome Bluetooth Proxy transport;
@@ -45,8 +45,8 @@ import smoke test in CI. Behavioral API changes may still require adaptation.
 2. Add hardware-in-the-loop regression tooling for long-duration reconnect and
    proxy-failover testing.
 3. Expand decoded telemetry only when packet meaning is verified.
-4. Add Repairs issues for persistent no-route or watchdog conditions if those can
-   be made actionable without noise.
+4. Extend Repairs coverage only when new persistent conditions have a deterministic
+   user action and automatic dismissal criteria.
 5. Consider extracting the pure protocol package when a second integration or tool
    needs it.
 6. Evaluate Bluetooth connection-slot coordination metrics as Home Assistant APIs

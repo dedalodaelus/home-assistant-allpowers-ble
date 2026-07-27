@@ -275,6 +275,17 @@ logger:
 
 Consulta [Resolución de problemas](docs/troubleshooting.md).
 
+## Repairs de Home Assistant
+
+La integración crea Repairs solo para condiciones persistentes y accionables,
+y los cierra automáticamente cuando se recuperan:
+
+- `persistent_no_route` tras fallos repetidos sin ruta conectable.
+- `repeated_watchdog_resets` tras reconexiones repetidas por watchdog.
+- `invalid_migrated_options` cuando no se pueden migrar con seguridad opciones legacy.
+
+Las reconexiones transitorias no crean Repairs.
+
 ## Desarrollo
 
 ```bash

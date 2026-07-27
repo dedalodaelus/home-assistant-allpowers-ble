@@ -16,8 +16,10 @@ from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     CONF_DEVICE_NAME,
+    DOMAIN,
 )
 from .options import ConnectionOptions
+from .repairs import ISSUE_INVALID_MIGRATION, AllpowersRepairsManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
         entry.version == CONFIG_ENTRY_VERSION
         and entry.minor_version == CONFIG_ENTRY_MINOR_VERSION
     ):
+        _delete_migration_issue(hass, entry)
         return True
 
     if entry.version == 1 and entry.minor_version == 0:
@@ -60,6 +63,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
                 entry.entry_id,
                 ex,
             )
+            _create_migration_issue(hass, entry)
             return False
 
         migrated_data = dict(entry.data)
@@ -81,6 +85,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
             CONFIG_ENTRY_VERSION,
             CONFIG_ENTRY_MINOR_VERSION,
         )
+        _delete_migration_issue(hass, entry)
         return True
 
     _LOGGER.error(
@@ -119,6 +124,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         options=options,
     )
     coordinator = AllpowersCoordinator(hass, entry, client)
+    initial_snapshot = client.snapshot()
+    repairs = AllpowersRepairsManager(
+        hass,
+        entry_id=entry.entry_id,
+        entry_title=entry.title,
+        initial_snapshot=initial_snapshot,
+    )
+    coordinator.set_repairs_manager(repairs)
+    repairs.evaluate(initial_snapshot, status_is_fresh=initial_snapshot.connected)
 
     def _advertisement_callback(service_info: Any, change: Any) -> None:
         del change
@@ -173,3 +187,39 @@ async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -
     if unloaded:
         await entry.runtime_data.coordinator.async_shutdown()
     return unloaded
+
+
+def _migration_issue_id(entry: AllpowersConfigEntry) -> str:
+    return f"{entry.entry_id}_{ISSUE_INVALID_MIGRATION}"
+
+
+def _create_migration_issue(hass: HomeAssistant, entry: AllpowersConfigEntry) -> None:
+    try:
+        from homeassistant.helpers import issue_registry as ir
+    except ModuleNotFoundError:
+        return
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        _migration_issue_id(entry),
+        issue_domain=DOMAIN,
+        is_fixable=True,
+        is_persistent=True,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=ISSUE_INVALID_MIGRATION,
+        translation_placeholders={"entry_title": entry.title},
+        learn_more_url=(
+            "https://github.com/dedalodaelus/home-assistant-allpowers-ble"
+            "/blob/main/docs/troubleshooting.md#home-assistant-repairs"
+        ),
+    )
+
+
+def _delete_migration_issue(hass: HomeAssistant, entry: AllpowersConfigEntry) -> None:
+    try:
+        from homeassistant.helpers import issue_registry as ir
+    except ModuleNotFoundError:
+        return
+
+    ir.async_delete_issue(hass, DOMAIN, _migration_issue_id(entry))

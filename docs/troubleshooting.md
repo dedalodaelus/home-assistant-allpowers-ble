@@ -73,6 +73,20 @@ requires fresh settings.
   `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
   Those counters are session-scoped diagnostics and can reset after reloads or reconnects.
 
+## Home Assistant Repairs
+
+The integration creates low-noise Home Assistant Repairs only for persistent,
+actionable conditions and dismisses them automatically after recovery:
+
+- `persistent_no_route`: created only after repeated no-route failures where no
+  connectable Bluetooth path is available.
+- `repeated_watchdog_resets`: created only after repeated watchdog reconnects
+  and dismissed once telemetry is fresh again.
+- `invalid_migrated_options`: created when a legacy entry cannot be migrated due
+  to invalid option relationships and dismissed after successful migration.
+
+Normal transient reconnects do not create Repairs.
+
 ## Aggressive timing causes proxy instability
 
 Very small status or keepalive intervals can saturate the local adapter or an

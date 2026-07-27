@@ -9,6 +9,7 @@ import pytest
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 
 import custom_components.allpowers_ble as integration
 from custom_components.allpowers_ble import client as client_module
@@ -17,6 +18,7 @@ from custom_components.allpowers_ble.const import INITIAL_DATA_TIMEOUT
 from custom_components.allpowers_ble.options import ConnectionOptions
 
 from tests.helpers import ADDRESS, FakeHass
+from tests.helpers import snapshot as build_snapshot
 
 
 class SetupClient:
@@ -27,10 +29,14 @@ class SetupClient:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.advertisements: list[Any] = []
+        self._snapshot = build_snapshot()
         SetupClient.instances.append(self)
 
     def update_advertisement(self, service_info: Any) -> None:
         self.advertisements.append(service_info)
+
+    def snapshot(self):
+        return self._snapshot
 
 
 class SetupCoordinator:
@@ -46,6 +52,7 @@ class SetupCoordinator:
         self.started = False
         self.shutdown_calls = 0
         self.applied: list[ConnectionOptions] = []
+        self.repairs = None
         SetupCoordinator.instances.append(self)
 
     async def async_start(self) -> None:
@@ -61,6 +68,9 @@ class SetupCoordinator:
 
     async def async_apply_options(self, options: ConnectionOptions) -> None:
         self.applied.append(options)
+
+    def set_repairs_manager(self, manager: Any) -> None:
+        self.repairs = manager
 
 
 @pytest.fixture(autouse=True)
@@ -261,11 +271,29 @@ async def test_migrate_entry_is_idempotent_after_first_successful_migration() ->
 async def test_migrate_entry_rejects_invalid_legacy_options() -> None:
     hass = FakeHass()
     entry = make_legacy_entry(options={"settings_keepalive": "invalid"})
+    issue_id = f"{entry.entry_id}_invalid_migrated_options"
 
     assert not await integration.async_migrate_entry(hass, entry)
     assert entry.version == 1
     assert entry.minor_version == 0
     assert not hass.config_entries.updates
+    assert ir.async_get(hass).async_get_issue(integration.DOMAIN, issue_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_success_clears_invalid_options_repair() -> None:
+    hass = FakeHass()
+    invalid_entry = make_legacy_entry(options={"settings_keepalive": "invalid"})
+    valid_entry = make_legacy_entry(options=ConnectionOptions().as_dict())
+    issue_id = f"{invalid_entry.entry_id}_invalid_migrated_options"
+
+    assert not await integration.async_migrate_entry(hass, invalid_entry)
+    assert ir.async_get(hass).async_get_issue(integration.DOMAIN, issue_id) is not None
+
+    valid_entry.entry_id = invalid_entry.entry_id
+    valid_entry.title = invalid_entry.title
+    assert await integration.async_migrate_entry(hass, valid_entry)
+    assert ir.async_get(hass).async_get_issue(integration.DOMAIN, issue_id) is None
 
 
 @pytest.mark.asyncio

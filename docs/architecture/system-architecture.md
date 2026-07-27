@@ -7,14 +7,15 @@ stations. It discovers a station, validates that it speaks the expected BLE
 protocol, maintains a local GATT session, converts protocol notifications into
 Home Assistant entities, and exposes a deliberately constrained set of controls.
 
-This document describes the as-is architecture observed on `main` on 2026-07-26.
-The integration manifest reports version `0.2.0`.
+This document describes the as-is architecture observed on `devel` on 2026-07-28.
+The architecture documentation target release is `0.3.1`.
 
 ## 2. Scope and non-goals
 
 ### In scope
 
 - Home Assistant discovery, config entries, entities, diagnostics, and options.
+- Home Assistant Repairs for persistent, actionable transport/configuration failures.
 - Home Assistant Bluetooth routing through a local adapter or a connectable
   ESPHome Bluetooth Proxy.
 - GATT session ownership, reconnection, watchdogs, and notification handling.
@@ -115,6 +116,7 @@ flowchart TB
         CE[Config entry lifecycle]
         ENT[CoordinatorEntity platforms]
         DIAGAPI[Diagnostics API]
+        REPAIRSAPI[Issue registry and Repairs]
     end
 
     subgraph INTEGRATION[custom_components/allpowers_ble]
@@ -125,6 +127,7 @@ flowchart TB
         POLICY[model_support.py]
         OPTIONS[options.py]
         DIAG[diagnostics.py]
+        REPAIRS[repairs.py]
         BASE[entity.py and platform modules]
 
         subgraph PROTOCOL[protocol package]
@@ -151,8 +154,10 @@ flowchart TB
     COORD --> BASE
     BASE --> ENT
     COORD --> DIAG
+    COORD --> REPAIRS
     POLICY --> DIAG
     DIAG --> DIAGAPI
+    REPAIRS --> REPAIRSAPI
 ```
 
 ## 7. Module responsibilities
@@ -167,6 +172,7 @@ flowchart TB
 | `model_support.py` | Device classification and immutable per-profile capability flags. |
 | `options.py` | Home Assistant-independent defaults, types, range checks, and cross-field validation. |
 | `models.py` | Immutable integration snapshot and connection-statistic models. |
+| `repairs.py` | Entry-scoped persistent/debounced Repairs for actionable no-route, repeated watchdog, and invalid-migration states. |
 | `protocol/codec.py` | Frame validation, incremental stream recovery, packet decoding, command encoding, and bit-preserving mutation. |
 | `protocol/models.py` | Immutable protocol values and enums. |
 | `protocol/semantics.py` | Profile-specific checks that decide whether decoded state can authorize a write. |
@@ -419,6 +425,10 @@ flags. Before export, the integration removes or replaces:
 - device-provided names;
 - config-entry titles and stored device labels;
 - sensitive details embedded in the last error while retaining an error category.
+
+Repairs complement diagnostics with low-noise, persistent, user-actionable
+issues for conditions that are both deterministic and recoverable. Transient BLE
+events are intentionally excluded.
 
 The test strategy covers protocol vectors, stream recovery, option relationships,
 client transactions, route loss, session races, watchdogs, config flow, entities,

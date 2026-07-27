@@ -292,6 +292,17 @@ logger:
 Remove verbose logging after collecting the relevant failure because Bluetooth
 logs can be large. See [Troubleshooting](docs/troubleshooting.md).
 
+## Home Assistant Repairs
+
+The integration creates Repairs only for persistent actionable conditions and
+dismisses them automatically on recovery:
+
+- `persistent_no_route` after repeated no-route failures.
+- `repeated_watchdog_resets` after repeated watchdog reconnects.
+- `invalid_migrated_options` when legacy options cannot be migrated safely.
+
+Transient reconnects do not create Repairs.
+
 ## Architecture
 
 ```mermaid

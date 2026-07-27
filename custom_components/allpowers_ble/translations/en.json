@@ -199,5 +199,19 @@
       "message": "The device did not confirm the previous command yet. Wait for a fresh update and retry."
     }
   },
+  "issues": {
+    "invalid_migrated_options": {
+      "description": "The migrated options for {entry_title} are invalid and this entry cannot be loaded safely. Reconfigure the integration entry and keep the default option relationships (`status_interval` < `stale_timeout` < `watchdog_timeout`).",
+      "title": "Invalid migrated options in {entry_title}"
+    },
+    "persistent_no_route": {
+      "description": "Home Assistant cannot find a connectable Bluetooth route for {entry_title} after multiple retries. Check Bluetooth Proxy connectivity, adapter availability, and ensure no other app keeps the station connected.",
+      "title": "No connectable Bluetooth route for {entry_title}"
+    },
+    "repeated_watchdog_resets": {
+      "description": "The integration had to reconnect {entry_title} repeatedly due to telemetry/transport watchdog resets. Improve BLE signal quality, avoid aggressive timing values, and verify only one active BLE client controls the station.",
+      "title": "Repeated watchdog reconnects for {entry_title}"
+    }
+  },
   "title": "ALLPOWERS BLE"
 }

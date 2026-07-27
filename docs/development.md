@@ -105,8 +105,8 @@ The validator checks:
 
 ```bash
 python scripts/build_release.py --clean
-python scripts/check_version.py 0.1.0
-python scripts/validate_release_metadata.py --tag 0.1.0 --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
+python scripts/check_version.py X.Y.Z
+python scripts/validate_release_metadata.py --tag X.Y.Z --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 ```
 
 The builder sorts files, normalizes timestamps and permissions, excludes caches,
