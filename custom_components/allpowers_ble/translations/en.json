@@ -1,14 +1,17 @@
 {
   "config": {
     "abort": {
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
       "no_devices_found": "No compatible connectable ALLPOWERS device was found. Confirm that the device is powered on and visible to a Bluetooth proxy or local adapter.",
       "not_connectable": "The discovery source cannot make active Bluetooth connections. Use a connectable ESPHome Bluetooth proxy or a supported local adapter.",
       "not_supported": "This ALLPOWERS model uses an unsupported protocol revision."
     },
     "error": {
+      "already_configured": "This Bluetooth address is already configured in another ALLPOWERS BLE entry.",
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
       "connect_timeout": "Connection setup exceeded the probe timeout before a BLE session could be established.",
       "gatt_unavailable": "The device connected but the required ALLPOWERS GATT service or characteristics were unavailable.",
+      "not_supported": "The selected device is not compatible with this integration.",
       "notify_failed": "The device connected but notification setup failed before telemetry could be validated.",
       "timeout": "The device connected but did not return a valid status frame before the timeout.",
       "unknown": "Unexpected error while validating the device. Check the logs for details."
@@ -24,6 +27,14 @@
         },
         "description": "Select a compatible device currently visible to a connectable Bluetooth adapter or ESPHome Bluetooth proxy.",
         "title": "Select ALLPOWERS device"
+      },
+      "reconfigure": {
+        "data": {
+          "address": "Bluetooth address",
+          "device_name": "Display name"
+        },
+        "description": "Update supported entry-level values and validate the selected device before applying changes.",
+        "title": "Reconfigure ALLPOWERS BLE"
       }
     }
   },

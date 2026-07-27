@@ -18,6 +18,17 @@ open a GATT connection.
 - Avoid relying only on a proxy that is isolated by VLAN or firewall rules.
 - Restart the station's Bluetooth function before restarting all of Home Assistant.
 
+## Device address or display name changed
+
+Do not remove and recreate the entry unless recovery requires it.
+
+- Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure**.
+- Reconfigure is for mutable entry data only: Bluetooth address and display name.
+- The flow runs the same active probe contract before applying changes.
+- If the selected address is already owned by another entry, the change is rejected.
+
+Use **Options** only for runtime timing and keepalive values.
+
 ## Setup times out after connecting
 
 The GATT connection opened, but no checksum-valid status frame arrived.
