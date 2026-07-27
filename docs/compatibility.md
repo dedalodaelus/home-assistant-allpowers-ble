@@ -140,6 +140,11 @@ Contributing a new unverified device that merely exposes the FFF0 service will
 not enable writes. The integration distinguishes between "device is working" and
 "device is safe to write to."
 
+When a verified capability profile is discovered later from settings telemetry,
+the integration adds writable control entities exactly once without requiring a
+config-entry reload. If capabilities later downgrade to read-only, existing
+control entities remain in the registry but become unavailable.
+
 ### Trust boundary assumptions
 
 Write authorization assumes:

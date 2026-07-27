@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.core import callback
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -39,12 +40,29 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE selects."""
     del hass
-    support = runtime_model_support(entry.runtime_data.coordinator)
-    if not support.capabilities.write_settings_controls:
-        return
-    async_add_entities(
-        (AllpowersWorkModeSelect(entry), AllpowersEcoTimeoutSelect(entry))
-    )
+    coordinator = entry.runtime_data.coordinator
+    added_keys: set[str] = set()
+
+    @callback
+    def _async_add_supported_selects() -> None:
+        support = runtime_model_support(coordinator)
+        if not support.capabilities.write_settings_controls:
+            return
+
+        entities: list[SelectEntity] = []
+        if "work_mode" not in added_keys:
+            added_keys.add("work_mode")
+            entities.append(AllpowersWorkModeSelect(entry))
+        if "eco_timeout" not in added_keys:
+            added_keys.add("eco_timeout")
+            entities.append(AllpowersEcoTimeoutSelect(entry))
+        if entities:
+            async_add_entities(tuple(entities))
+
+    _async_add_supported_selects()
+    add_listener = getattr(coordinator, "async_add_listener", None)
+    if callable(add_listener):
+        entry.async_on_unload(add_listener(_async_add_supported_selects))
 
 
 class AllpowersWorkModeSelect(AllpowersSettingsControlEntity, SelectEntity):

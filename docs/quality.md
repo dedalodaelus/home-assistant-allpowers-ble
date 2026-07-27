@@ -18,6 +18,10 @@ Silver, Gold, or Platinum scores to this repository.
 | Diagnostics/setup | Redaction, serialization, initial readiness, entry unload, Home Assistant stop |
 | Real HA lifecycle harness | Runs config-entry lifecycle, registry updates, diagnostics, and service/entity actions against the pinned Home Assistant package in CI |
 
+Lifecycle tests also verify status-before-settings and settings-before-status
+ordering, one-time dynamic control-entity registration, and capability downgrade
+availability transitions.
+
 The repository sets a coverage failure threshold of 98 percent with branch coverage
 enabled. New code should test behavior and failure modes rather than adding lines
 only to satisfy the metric.
