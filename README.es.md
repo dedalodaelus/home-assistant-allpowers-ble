@@ -207,6 +207,36 @@ Para retirar la integración limpiamente:
 Si planeas reinstalar, guarda antes un diagnóstico saneado para comparar historial
 de ruta y detección de modelo tras la recuperación.
 
+## Contrato de comunicación y clase IoT
+
+El manifiesto declara `iot_class: local_polling` porque la operación normal
+depende de solicitudes periódicas locales de estado y, al mismo tiempo,
+consume notificaciones push.
+
+- Ruta de polling: el cliente envía una solicitud de estado cada
+   `status_interval` configurado.
+- Ruta push: las notificaciones de estado y ajustes pueden llegar en cualquier
+   momento y actualizan entidades sin esperar a la siguiente solicitud.
+- Ruta de recuperación: el tráfico de watchdog y reconexión solo recupera la
+   salud del transporte, no acelera el polling normal.
+
+La base de evidencia y justificación de esta clasificación está trazada en la
+issue #55 y en la decisión de arquitectura 0003.
+
+Cada operación periódica tiene disparador y límite inferior explícitos:
+
+| Operación periódica | Disparador | Valor inicial | Límite inferior |
+|---|---|---:|---:|
+| Solicitud de estado | Sesión conectada y sin solicitud en el intervalo | 20 s | 10 s |
+| Keepalive de ajustes (opcional) | Activado y sin keepalive en el intervalo (más un envío inicial tras ajustes frescos) | 540 s | 60 s |
+| Reintento de reconexión con backoff | Fallo de conexión o desconexión | 1 s inicial, tope 60 s | Piso de jitter 0 s, mínimo configurable del tope 5 s |
+| Reconexión por watchdog de telemetría | Sin telemetría fresca en la ventana watchdog | 45 s | Debe ser mayor que stale timeout |
+| Reconexión por watchdog de transporte | Sin paquetes BLE en la ventana watchdog | 45 s | Debe ser mayor que stale timeout |
+
+Intervalos agresivos pueden saturar el adaptador local o la capacidad de
+conexión del Bluetooth Proxy, especialmente con varios dispositivos. Mantén los
+valores por defecto salvo que tengas una razón medida para ajustarlos.
+
 ## Opciones
 
 | Opción | Valor inicial | Restricción |
