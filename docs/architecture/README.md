@@ -5,8 +5,8 @@ Home Assistant integration.
 
 ## Baseline and intent
 
-- Repository baseline: `main`, reviewed on 2026-07-26.
-- Integration version observed in `manifest.json`: `0.2.0`.
+- Repository baseline: `devel`, reviewed on 2026-07-28.
+- Documentation target release: `0.3.1`.
 - Scope: as-is architecture and architecturally significant decisions.
 - Change type: documentation only. No runtime behavior is changed.
 

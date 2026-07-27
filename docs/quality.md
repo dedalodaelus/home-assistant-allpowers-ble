@@ -15,6 +15,7 @@ Silver, Gold, or Platinum scores to this repository.
 | Transport runtime | Route loss, connection retry, GATT validation, notification handling, watchdog, keepalive, shutdown, cancellation |
 | Config flow | Discovery, duplicates, unsupported models, active probe outcomes, manual selection, options errors |
 | Coordinator/entities | Fresh/stale/disconnected availability, values, controls, service errors, live options |
+| Repairs | Persistence thresholds, deduplication, deterministic dismissal, reload/unload cleanup, multi-entry isolation |
 | Diagnostics/setup | Redaction, serialization, initial readiness, entry unload, Home Assistant stop |
 | Real HA lifecycle harness | Runs config-entry lifecycle, registry updates, diagnostics, and service/entity actions against the pinned Home Assistant package in CI |
 
@@ -59,6 +60,7 @@ Config-flow readiness has an additional strict gate: CI runs
 - Unknown settings bits are preserved.
 - Background tasks are named, owned, canceled, and awaited.
 - Diagnostics redact the Bluetooth address.
+- Repairs are emitted only for persistent actionable states and are dismissed automatically on deterministic recovery.
 - Translations and diagnostics are included from the initial release.
 
 ## Remaining validation boundary

@@ -115,6 +115,12 @@ class NumberMode(_StrEnum):
     BOX = "box"
 
 
+class IssueSeverity(_StrEnum):
+    CRITICAL = "critical"
+    ERROR = "error"
+    WARNING = "warning"
+
+
 @dataclass(frozen=True, kw_only=True)
 class _EntityDescription:
     key: str
@@ -510,6 +516,48 @@ def _time_tracker_timestamp() -> float:
     return _utcnow().timestamp()
 
 
+@dataclass
+class _IssueRecord:
+    issue_id: str
+    translation_key: str
+
+
+class _IssueRegistry:
+    def __init__(self) -> None:
+        self.issues: dict[tuple[str, str], _IssueRecord] = {}
+
+    def async_get_issue(self, domain: str, issue_id: str) -> _IssueRecord | None:
+        return self.issues.get((domain, issue_id))
+
+
+_ISSUES = _IssueRegistry()
+
+
+def _issue_async_get(hass: Any) -> _IssueRegistry:
+    del hass
+    return _ISSUES
+
+
+def _issue_async_create_issue(
+    hass: Any,
+    domain: str,
+    issue_id: str,
+    *,
+    translation_key: str,
+    **kwargs: Any,
+) -> None:
+    del hass, kwargs
+    _ISSUES.issues[(domain, issue_id)] = _IssueRecord(
+        issue_id=issue_id,
+        translation_key=translation_key,
+    )
+
+
+def _issue_async_delete_issue(hass: Any, domain: str, issue_id: str) -> None:
+    del hass
+    _ISSUES.issues.pop((domain, issue_id), None)
+
+
 def install() -> None:
     """Install all dependency stubs into ``sys.modules``."""
     bleak = ModuleType("bleak")
@@ -610,6 +658,12 @@ def install() -> None:
     update_coordinator.CoordinatorEntity = CoordinatorEntity
     update_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
 
+    issue_registry = ModuleType("homeassistant.helpers.issue_registry")
+    issue_registry.IssueSeverity = IssueSeverity
+    issue_registry.async_get = _issue_async_get
+    issue_registry.async_create_issue = _issue_async_create_issue
+    issue_registry.async_delete_issue = _issue_async_delete_issue
+
     event = ModuleType("homeassistant.helpers.event")
     event.time_tracker_utcnow = _utcnow
     event.time_tracker_timestamp = _time_tracker_timestamp
@@ -707,6 +761,7 @@ def install() -> None:
             "homeassistant.helpers.entity_platform": entity_platform,
             "homeassistant.helpers.device_registry": device_registry,
             "homeassistant.helpers.update_coordinator": update_coordinator,
+            "homeassistant.helpers.issue_registry": issue_registry,
             "homeassistant.helpers.event": event,
             "homeassistant.util": util,
             "homeassistant.util.dt": util_dt,

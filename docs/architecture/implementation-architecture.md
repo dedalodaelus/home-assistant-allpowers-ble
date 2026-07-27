@@ -20,6 +20,7 @@ flowchart TB
         CF[Config flow and active probe]
         ENT[Entity platforms]
         DIA[Diagnostics]
+    REP[Repairs]
         CO[AllpowersCoordinator]
         BT[Bluetooth integration]
     end
@@ -41,6 +42,7 @@ flowchart TB
     CF --> DEC
     ENT --> CO
     DIA --> CO
+    REP --> CO
     CO <--> CL
     CL --> BT
     BT --> LOCAL
@@ -66,6 +68,7 @@ flowchart TB
 | `entity.py` | Device metadata and freshness-based availability classes. |
 | Platform modules | Home Assistant entities and service error translation. |
 | `diagnostics.py` | Redacted entry/device diagnostics. |
+| `repairs.py` | Entry-scoped Repairs with persistence thresholds, deduplication, and automatic dismissal. |
 
 ## Setup sequence
 
@@ -238,6 +241,9 @@ idempotent shutdown path.
   `HomeAssistantError`.
 - Initial setup raises `ConfigEntryNotReady` when a route exists but valid telemetry
   is not yet available, allowing Home Assistant to retry.
+- Persistent actionable failures are surfaced through one Repair per
+  config-entry and issue type, then dismissed automatically when the
+  deterministic recovery condition is met.
 
 ## Persistence
 

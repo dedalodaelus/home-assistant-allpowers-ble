@@ -31,6 +31,7 @@ decision date.
 | [0013](0013-persist-only-configuration-and-validated-options.md) | Accepted | 2026-07-26 | Persist only configuration and validated options. |
 | [0014](0014-apply-runtime-options-without-reloading-the-entry.md) | Accepted | 2026-07-26 | Apply runtime options without reloading the config entry. |
 | [0015](0015-redact-device-identifiers-from-diagnostics.md) | Accepted | 2026-07-26 | Redact device identifiers from exported diagnostics. |
+| [0016](0016-emit-persistent-repairs-only-for-actionable-failures.md) | Accepted | 2026-07-28 | Emit persistent Repairs only for actionable failures. |
 
 ## Relationship map
 
@@ -52,6 +53,7 @@ flowchart TB
     A13[0013 Persist only config and options]
     A14[0014 Live option application]
     A15[0015 Diagnostic redaction]
+    A16[0016 Persistent actionable Repairs]
 
     A0 --> A1
     A0 --> A5
@@ -72,6 +74,10 @@ flowchart TB
     A10 --> A11
     A13 --> A14
     A7 --> A15
+    A7 --> A16
+    A13 --> A16
+    A14 --> A16
+    A15 --> A16
 ```
 
 ## Governance
