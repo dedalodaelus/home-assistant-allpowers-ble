@@ -72,33 +72,24 @@ jobs:
               return;
             }
 
-            // Best-effort policy: hotfix branches targeting main should be cut from main,
-            // not from devel. When devel and main diverge, reject hotfix heads that include devel.
+            // Policy: hotfix branches targeting main must be based on main.
+            // A valid hotfix head must be equal to or ahead of main in commit ancestry.
             if (baseRef === "main" && isHotfixBranch) {
-              const mainVsDevel = await github.rest.repos.compareCommits({
+              const mainVsHotfix = await github.rest.repos.compareCommits({
                 owner,
                 repo,
                 base: "main",
-                head: "devel",
+                head: headSha,
               });
 
-              if (mainVsDevel.data.status !== "identical") {
-                const develVsHotfix = await github.rest.repos.compareCommits({
-                  owner,
-                  repo,
-                  base: "devel",
-                  head: headSha,
-                });
-
-                if (
-                  develVsHotfix.data.status === "ahead"
-                  || develVsHotfix.data.status === "identical"
-                ) {
-                  core.setFailed(
-                    `Hotfix branch '${headRef}' appears to be based on 'devel'. Create hotfix branches from 'main'.`
-                  );
-                  return;
-                }
+              if (
+                mainVsHotfix.data.status !== "ahead"
+                && mainVsHotfix.data.status !== "identical"
+              ) {
+                core.setFailed(
+                  `Hotfix branch '${headRef}' must be based on 'main'. Create hotfix branches from 'main'.`
+                );
+                return;
               }
             }
 
