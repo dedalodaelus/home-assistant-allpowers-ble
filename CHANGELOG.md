@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.0...0.3.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **ci:** allow CHANGELOG.md in main-to-devel sync PRs ([#113](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/113)) ([40e08e3](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/40e08e31ee02a711adee72e3fb627891ca86890a))
+* **merge-gate:** simplify CHANGELOG.md edit policy for devel branch ([18766bf](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/18766bf3fd4281842b7e2bb8520287a36b4441ad))
+
 ## [0.3.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.2.0...0.3.0) (2026-07-27)
 
 
