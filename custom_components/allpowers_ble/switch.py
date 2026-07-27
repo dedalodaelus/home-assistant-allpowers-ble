@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
+from homeassistant.core import callback
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -112,23 +113,37 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE switches."""
     del hass
-    support = runtime_model_support(entry.runtime_data.coordinator)
+    coordinator = entry.runtime_data.coordinator
+    added_keys: set[str] = set()
 
-    descriptions = tuple(
-        description
-        for description in SWITCH_DESCRIPTIONS
-        if (
-            support.capabilities.write_settings_controls
-            if description.settings_control
-            else support.capabilities.write_output_controls
+    @callback
+    def _async_add_supported_switches() -> None:
+        support = runtime_model_support(coordinator)
+        new_descriptions = tuple(
+            description
+            for description in SWITCH_DESCRIPTIONS
+            if description.key not in added_keys
+            and (
+                support.capabilities.write_settings_controls
+                if description.settings_control
+                else support.capabilities.write_output_controls
+            )
         )
-    )
-    async_add_entities(
-        AllpowersSettingsSwitch(entry, description)
-        if description.settings_control
-        else AllpowersOutputSwitch(entry, description)
-        for description in descriptions
-    )
+        if not new_descriptions:
+            return
+
+        added_keys.update(description.key for description in new_descriptions)
+        async_add_entities(
+            AllpowersSettingsSwitch(entry, description)
+            if description.settings_control
+            else AllpowersOutputSwitch(entry, description)
+            for description in new_descriptions
+        )
+
+    _async_add_supported_switches()
+    add_listener = getattr(coordinator, "async_add_listener", None)
+    if callable(add_listener):
+        entry.async_on_unload(add_listener(_async_add_supported_switches))
 
 
 class _AllpowersSwitchMixin:

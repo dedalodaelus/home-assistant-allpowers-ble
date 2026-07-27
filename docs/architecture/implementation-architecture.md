@@ -143,6 +143,11 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
 - Freshness transitions are emitted even when no new BLE notification arrives.
 - Cached data remains available to diagnostics, but cannot authorize writes after
   disconnect or expiry.
+- Control platforms subscribe to coordinator updates and add newly authorized
+  writable entities exactly once when revision-verified capabilities become
+  available after setup.
+- Capability downgrades do not remove registered entities; they transition to
+  unavailable through normal availability checks.
 
 ## Safe command construction
 

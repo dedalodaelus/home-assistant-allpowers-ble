@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -718,6 +718,50 @@ async def test_buttons_send_commands_and_wrap_errors() -> None:
 
     client.set_snapshot(disconnected_snapshot())
     assert not refresh.available
+
+
+@pytest.mark.asyncio
+async def test_control_platform_setup_listeners_are_registered_and_idempotent() -> None:
+    """Dynamic control setup listeners should register and avoid duplicate entities."""
+    entry, _, coordinator, _ = configured_entry()
+
+    listeners: list[Callable[[], None]] = []
+    unregistered: list[bool] = []
+
+    def _async_add_listener(callback_fn: Callable[[], None]) -> Callable[[], None]:
+        listeners.append(callback_fn)
+        return lambda: unregistered.append(True)
+
+    coordinator.async_add_listener = _async_add_listener  # type: ignore[attr-defined]
+
+    switch_entities: list[Any] = []
+    await switch.async_setup_entry(
+        None, entry, lambda values: switch_entities.extend(values)
+    )
+    select_entities: list[Any] = []
+    await select.async_setup_entry(
+        None, entry, lambda values: select_entities.extend(values)
+    )
+    button_entities: list[Any] = []
+    await button.async_setup_entry(
+        None, entry, lambda values: button_entities.extend(values)
+    )
+
+    assert len(listeners) == 3
+    assert len(switch_entities) == 5
+    assert len(select_entities) == 2
+    assert len(button_entities) == 3
+
+    for callback_fn in listeners:
+        callback_fn()
+
+    assert len(switch_entities) == 5
+    assert len(select_entities) == 2
+    assert len(button_entities) == 3
+
+    for unregister in entry._unload_callbacks:  # type: ignore[attr-defined]
+        unregister()
+    assert len(unregistered) == 3
 
 
 @pytest.mark.asyncio
