@@ -124,6 +124,26 @@ connectable `BLEDevice`. This permits failover between local adapters and Blueto
 proxies. Exponential backoff is capped by the configured maximum delay and adds
 bounded jitter to reduce synchronized reconnect spikes across multiple devices.
 
+## Runtime traffic contract and IoT class
+
+The integration is classified as `local_polling` because normal runtime behavior
+combines periodic local status requests with asynchronous BLE notifications.
+
+- Polling traffic: status requests are scheduled by `status_interval`.
+- Push traffic: status/settings notifications update state whenever frames arrive.
+- Recovery traffic: watchdog reconnects and reconnect backoff recover transport
+  health and are separate from normal polling cadence.
+
+Evidence and rationale are documented in issue #55 and decision 0003.
+
+| Operation | Trigger | Default | Lower bound |
+|---|---|---:|---:|
+| Status request loop | Connected and no request in `status_interval` | 20 s | 10 s |
+| Settings keepalive loop | Enabled and due (plus one initial send with fresh settings) | 540 s | 60 s |
+| Reconnect retry backoff | Connect/disconnect failure | 1 s initial, cap 60 s | 0 s jitter floor, 5 s minimum cap |
+| Telemetry watchdog reconnect | No fresh status for `watchdog_timeout` | 45 s | `watchdog_timeout > stale_timeout` |
+| Transport watchdog reconnect | No packet for `watchdog_timeout` | 45 s | `watchdog_timeout > stale_timeout` |
+
 ## Data freshness
 
 A live GATT socket is not sufficient proof that telemetry is current. The client

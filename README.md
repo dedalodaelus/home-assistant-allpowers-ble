@@ -216,6 +216,35 @@ To remove the integration cleanly:
 If you plan to reinstall, keep a sanitized diagnostics export before removal so
 route and model-detection history can be compared after recovery.
 
+## Communication contract and IoT class
+
+The manifest declares `iot_class: local_polling` because normal operation depends
+on periodic local status requests while still consuming push notifications.
+
+- Polling path: the client sends a status-request frame every configured
+   `status_interval`.
+- Push path: status and settings notifications can arrive at any time and update
+   entity state without waiting for the next request.
+- Recovery path: watchdog and reconnect traffic exists only to recover transport
+   health, not to increase normal polling cadence.
+
+The rationale and evidence baseline for this classification is tracked in issue
+#55 and architecture decision 0003.
+
+Every periodic operation has an explicit trigger and lower bound:
+
+| Periodic operation | Trigger | Default | Lower bound |
+|---|---|---:|---:|
+| Status request | Connected session and no request in interval | 20 s | 10 s |
+| Settings keepalive (optional) | Enabled and no keepalive in interval (plus one initial send after fresh settings) | 540 s | 60 s |
+| Reconnect backoff retry | Connection failure or disconnect | 1 s initial, capped at 60 s | 0 s jitter floor, 5 s configurable cap minimum |
+| Telemetry watchdog reconnect | No fresh status telemetry in watchdog window | 45 s | Must be greater than stale timeout |
+| Transport watchdog reconnect | No BLE packet in watchdog window | 45 s | Must be greater than stale timeout |
+
+Aggressive intervals can overload local adapters or Bluetooth Proxy connection
+capacity, especially with multiple devices. Keep defaults unless you have a
+measured reason to tune them.
+
 ## Runtime options
 
 Defaults are deliberately conservative and match observed R600 behavior.
