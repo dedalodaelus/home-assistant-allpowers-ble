@@ -1,4 +1,4 @@
-homeassistant==2026.7.3
+homeassistant==2026.7.4
 # Required by homeassistant.components.usb import path pulled by bluetooth.
 aiousbwatcher>=1.1.2
 serialx>=1.8.2
