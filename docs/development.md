@@ -39,20 +39,28 @@ USE_REAL_HOMEASSISTANT=0 pytest \
   --cov-branch \
   --cov-report=term-missing \
   --cov-report=xml
+
+# Dedicated config-flow gate (must stay at 100% line+branch coverage)
+USE_REAL_HOMEASSISTANT=0 pytest tests/test_config_flow.py \
+  --cov=custom_components.allpowers_ble.config_flow \
+  --cov-branch \
+  --cov-report=term-missing \
+  --cov-fail-under=100
 ```
 
-## Real Home Assistant smoke test
+## Real Home Assistant lifecycle harness
 
-CI installs the pinned Home Assistant release and imports every Home
-Assistant-facing module without stubs:
+CI installs the pinned Home Assistant release and runs lifecycle-oriented
+integration tests against real Home Assistant APIs (config entries, registries,
+entity platforms, reload/unload behavior, service calls, and diagnostics):
 
 ```bash
 USE_REAL_HOMEASSISTANT=1 pytest tests/homeassistant
 ```
 
-This catches renamed or removed imports while keeping device-independent tests
-fast. Hardware-in-the-loop validation remains necessary before marking another
-model verified.
+The `USE_REAL_HOMEASSISTANT=1` lane is the repository's gating compatibility
+lane for Home Assistant-facing contracts. Hardware-in-the-loop validation remains
+necessary before marking another model verified.
 
 ## Static analysis
 
@@ -62,6 +70,17 @@ ruff check custom_components scripts tests
 mypy custom_components/allpowers_ble
 pylint --errors-only custom_components/allpowers_ble
 ```
+
+Static-analysis policy:
+
+- Ruff enforces correctness and bug-risk findings (`E4`, `E7`, `E9`, `F`, `B`).
+- Mypy runs with `follow_imports = normal` and no global `ignore_missing_imports`.
+- Missing-import allowances must remain explicit and limited to external libraries.
+- Pylint remains error-focused to keep only non-redundant runtime-safety checks.
+- Pre-commit hooks are mandatory before push and are re-checked in CI.
+
+Any new ignore must document why the check is noisy, why the scope is minimal, and
+why moving the exception to test-only code is not possible.
 
 `make all` runs the standard local sequence.
 
@@ -87,6 +106,7 @@ The validator checks:
 ```bash
 python scripts/build_release.py --clean
 python scripts/check_version.py 0.1.0
+python scripts/validate_release_metadata.py --tag 0.1.0 --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 ```
 
 The builder sorts files, normalizes timestamps and permissions, excludes caches,
@@ -97,14 +117,15 @@ prints a SHA-256 digest.
 
 Conventional commits feed Release Please. Merging its release pull request updates
 the changelog and manifest version, creates a GitHub release, builds
-`allpowers_ble.zip`, and uploads the HACS asset.
+`allpowers_ble.zip`, and uploads the HACS asset with checksum.
 
 A release is valid only when:
 
 - the tag, manifest version, and Release Please manifest agree;
 - CI, HACS, and Hassfest succeed;
-- the release contains `allpowers_ble.zip`;
+- the release contains `allpowers_ble.zip` and `allpowers_ble.zip.sha256`;
 - the ZIP has `manifest.json` at archive root;
+- the checksum file matches the published ZIP digest;
 - compatibility claims match tested hardware.
 
 ## Manual Home Assistant development

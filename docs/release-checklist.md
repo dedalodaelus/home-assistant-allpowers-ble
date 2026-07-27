@@ -6,9 +6,23 @@
 - Topics: `home-assistant`, `hacs`, `custom-component`, `bluetooth`, `ble`,
   `esphome-bluetooth-proxy`, and `allpowers`.
 - Vulnerability reporting enabled.
-- Branch protection requires CI, HACS, Hassfest, conventional title, and dependency
-  review checks.
+- Branch protection/ruleset requires exactly one status check: `Merge gate`.
+- `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
+  and CodeQL checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
+- Third-party GitHub Actions are pinned to immutable commit SHAs and updated via
+  Dependabot pull requests.
+
+## Branch workflow and promotion
+
+- Day-to-day work merges into `devel` through reviewed pull requests.
+- Promotion into `main` happens through reviewed pull requests from `devel`.
+- Urgent production fixes may target `main` only from `hotfix/*` branches cut
+  from `main`, then must be propagated back to `devel`.
+- Release Please runs only on `main` and remains the single writer for
+  `CHANGELOG.md` and release tags.
+- Dependabot pull requests target `devel`.
+- Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 
 ## Code and metadata
 
@@ -25,6 +39,7 @@
 make clean
 make all
 python scripts/build_release.py --clean
+python scripts/validate_release_metadata.py --tag X.Y.Z --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 python scripts/validate_repository.py
 python scripts/check_version.py X.Y.Z
 ```
@@ -34,6 +49,7 @@ Inspect the archive:
 ```bash
 unzip -l dist/allpowers_ble.zip
 sha256sum dist/allpowers_ble.zip
+sha256sum --check dist/allpowers_ble.zip.sha256
 ```
 
 `manifest.json` must be at archive root and no cache file may be present.
@@ -49,6 +65,9 @@ sha256sum dist/allpowers_ble.zip
 
 ## Publishing
 
-For the initial `0.1.0`, push the matching tag; the tag job creates the GitHub
-release and attaches `allpowers_ble.zip`. Thereafter, merge the Release Please pull
-request to create semantic releases and the HACS asset automatically.
+Release publication is handled only by Release Please on `main`.
+
+- Use CI or workflow-dispatch dry-run paths for release validation without
+  creating stable tags.
+- When Release Please creates a release, both `allpowers_ble.zip` and
+  `allpowers_ble.zip.sha256` must be uploaded as release assets.

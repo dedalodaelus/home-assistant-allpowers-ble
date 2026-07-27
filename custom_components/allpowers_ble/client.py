@@ -319,6 +319,7 @@ class AllpowersBLEClient:
         light: bool | None = None,
     ) -> None:
         async with self._operation_lock:
+            self._require_output_write_capability_unlocked()
             current_dc, current_ac, current_light = self._safe_output_snapshot()
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
@@ -374,6 +375,7 @@ class AllpowersBLEClient:
         eco_timeout_hours: int | None = None,
     ) -> None:
         async with self._operation_lock:
+            self._require_settings_write_capability_unlocked()
             current = self._safe_settings_snapshot()
             target = updated_settings(
                 current,
@@ -400,6 +402,7 @@ class AllpowersBLEClient:
     async def async_send_settings_keepalive(self) -> None:
         """Re-send the current settings snapshot to keep vendor state alive."""
         async with self._operation_lock:
+            self._require_settings_keepalive_capability_unlocked()
             current = self._safe_settings_snapshot()
             await self._write_frame_unlocked(encode_settings_control(current))
             now = self._loop_time()
@@ -508,6 +511,34 @@ class AllpowersBLEClient:
             raw_hardware_version=settings.raw_hardware_version if settings else None,
         )
 
+    def _require_output_write_capability_unlocked(self) -> None:
+        """Reject output writes when the active model profile is read-only."""
+        support = self._runtime_model_support()
+        if support.capabilities.write_output_controls:
+            return
+        raise StateUnavailableError(
+            f"Unsupported output command for active model profile: {support.profile}"
+        )
+
+    def _require_settings_write_capability_unlocked(self) -> None:
+        """Reject settings writes when the active model profile is read-only."""
+        support = self._runtime_model_support()
+        if support.capabilities.write_settings_controls:
+            return
+        raise StateUnavailableError(
+            f"Unsupported settings command for active model profile: {support.profile}"
+        )
+
+    def _require_settings_keepalive_capability_unlocked(self) -> None:
+        """Reject keepalive writes when the active model profile disallows them."""
+        support = self._runtime_model_support()
+        if support.capabilities.write_settings_keepalive:
+            return
+        raise StateUnavailableError(
+            "Unsupported settings keepalive command for active model profile: "
+            f"{support.profile}"
+        )
+
     async def _connection_loop(self) -> None:
         delay = 1.0
         ever_connected = False
@@ -561,6 +592,9 @@ class AllpowersBLEClient:
                 f"{self.address}"
             )
 
+        def fresh_device_for_retry() -> BLEDevice:
+            return self._fresh_ble_device() or device
+
         support = identify_model(self._advertised_name)
         if not support.supported:
             raise UnsupportedDeviceError(support.reason or "Unsupported model")
@@ -571,7 +605,7 @@ class AllpowersBLEClient:
             self._advertised_name,
             disconnected_callback=self._make_disconnected_callback(session_generation),
             max_attempts=3,
-            ble_device_callback=self._fresh_ble_device,
+            ble_device_callback=fresh_device_for_retry,
             use_services_cache=True,
         )
         try:
@@ -1143,6 +1177,9 @@ async def async_probe_device(
             f"No connectable Bluetooth adapter or proxy can reach {normalized_address}"
         )
 
+    def fresh_device_for_retry() -> BLEDevice:
+        return fresh_device() or device
+
     deadline = monotonic() + timeout
 
     def remaining(stage: str) -> float:
@@ -1156,7 +1193,7 @@ async def async_probe_device(
                 device,
                 advertised_name,
                 max_attempts=3,
-                ble_device_callback=fresh_device,
+                ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
     except TimeoutError as ex:

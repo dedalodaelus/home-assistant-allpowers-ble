@@ -213,6 +213,11 @@ A device is marked as *verified* when it meets all of the following:
 
 Only verified profiles are permitted to accept **output and settings write commands**. Verified devices can issue output control and settings updates to change power-station behavior.
 
+At runtime, the BLE client re-evaluates revision-aware profile capabilities for
+every write inside the operation lock. Output, settings, and settings-keepalive
+commands are rejected at the transport boundary when the active profile does not
+explicitly authorize that command category.
+
 ### Experimental profiles
 
 Devices that pass steps 1–3 above but either:
@@ -246,3 +251,6 @@ Write access is not determined by advertised name or service discovery alone. A 
 | Generic ALLPOWERS | ✓ | ✗ | ✗ |
 | Service UUID candidate | ✓ | ✗ | ✗ |
 | Rejected (S500, S700 V2) | ✗ | ✗ | ✗ |
+
+Settings keepalive follows the same capability boundary and is writable only for
+profiles that expose `write_settings_keepalive`.

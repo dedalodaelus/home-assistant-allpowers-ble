@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.const import EntityCategory
+from homeassistant.core import callback
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -23,14 +24,31 @@ async def async_setup_entry(
 ) -> None:
     """Set up ALLPOWERS BLE buttons."""
     del hass
-    support = runtime_model_support(entry.runtime_data.coordinator)
+    coordinator = entry.runtime_data.coordinator
+    added_keys: set[str] = set()
     entities: list[ButtonEntity] = [
         AllpowersRefreshButton(entry),
         AllpowersReconnectButton(entry),
     ]
-    if support.capabilities.write_settings_keepalive:
-        entities.append(AllpowersSettingsKeepaliveButton(entry))
+
+    added_keys.update({"refresh", "reconnect"})
+
+    @callback
+    def _async_add_supported_buttons() -> None:
+        support = runtime_model_support(coordinator)
+        if not support.capabilities.write_settings_keepalive:
+            return
+        if "settings_keepalive" in added_keys:
+            return
+
+        added_keys.add("settings_keepalive")
+        async_add_entities((AllpowersSettingsKeepaliveButton(entry),))
+
     async_add_entities(tuple(entities))
+    _async_add_supported_buttons()
+    add_listener = getattr(coordinator, "async_add_listener", None)
+    if callable(add_listener):
+        entry.async_on_unload(add_listener(_async_add_supported_buttons))
 
 
 class AllpowersRefreshButton(AllpowersEntity, ButtonEntity):

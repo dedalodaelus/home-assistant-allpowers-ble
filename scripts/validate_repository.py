@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import struct
 import sys
+import tomllib
 from typing import Any
 from zipfile import ZipFile
 
@@ -29,6 +30,7 @@ REQUIRED_REPOSITORY_FILES = {
     "SECURITY.md",
     "hacs.json",
     "pyproject.toml",
+    "scripts/validate_release_metadata.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
@@ -60,6 +62,28 @@ README_REQUIRED_HEADINGS = {
 }
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+DEPENDABOT_TARGET_BRANCH = re.compile(r"^\s*target-branch:\s*(\S+)\s*$", re.MULTILINE)
+RELEASE_MAIN_PUSH_BRANCH = re.compile(
+    r"^\s*branches:\s*\n\s*-\s*main\s*$", re.MULTILINE
+)
+RELEASE_MAIN_IF_GUARD = re.compile(
+    r"^\s*if:\s*github\.ref\s*==\s*['\"]refs/heads/main['\"]\s*$",
+    re.MULTILINE,
+)
+RELEASE_TAG_TRIGGER = re.compile(r"^\s*tags:\s*$", re.MULTILINE)
+RELEASE_TAGGED_JOB = re.compile(r"^\s*tagged-release:\s*$", re.MULTILINE)
+RELEASE_METADATA_VALIDATION_STEP = re.compile(r"scripts/validate_release_metadata\.py")
+RELEASE_CHECKSUM_ASSET = re.compile(r"dist/allpowers_ble\.zip\.sha256")
+BLOCKED_RUFF_IGNORE_RULES = {"ALL"}
+BLOCKED_REPO_CODE_GLOBS = {
+    "*",
+    "custom_components",
+    "custom_components.*",
+    "scripts",
+    "scripts.*",
+    "tests",
+    "tests.*",
+}
 
 
 def normalize_markdown_anchor(value: str) -> str:
@@ -318,6 +342,146 @@ def validate_markdown_links_and_headings(errors: list[str]) -> None:
                     )
 
 
+def validate_branch_workflow_contract(errors: list[str]) -> None:
+    """Enforce repository branch workflow invariants used by CI/release."""
+    try:
+        dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+    except OSError as ex:
+        errors.append(f"failed reading .github/dependabot.yml: {ex}")
+        dependabot = ""
+
+    if dependabot:
+        targets = DEPENDABOT_TARGET_BRANCH.findall(dependabot)
+        if not targets:
+            errors.append("dependabot.yml must define at least one target-branch")
+        for index, target in enumerate(targets, start=1):
+            if target != "devel":
+                errors.append(
+                    "dependabot target-branch must be devel "
+                    f"(entry {index} is {target!r})"
+                )
+
+    try:
+        release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+    except OSError as ex:
+        errors.append(f"failed reading .github/workflows/release.yml: {ex}")
+        release_workflow = ""
+
+    if release_workflow:
+        if RELEASE_MAIN_PUSH_BRANCH.search(release_workflow) is None:
+            errors.append("release workflow must trigger push branch on main")
+        if RELEASE_MAIN_IF_GUARD.search(release_workflow) is None:
+            errors.append("release-please job must remain guarded to refs/heads/main")
+        if RELEASE_TAG_TRIGGER.search(release_workflow) is not None:
+            errors.append("release workflow must not publish from pushed tags")
+        if RELEASE_TAGGED_JOB.search(release_workflow) is not None:
+            errors.append("release workflow must not define a tagged-release job")
+        if RELEASE_METADATA_VALIDATION_STEP.search(release_workflow) is None:
+            errors.append(
+                "release workflow must validate release metadata before upload"
+            )
+        if RELEASE_CHECKSUM_ASSET.search(release_workflow) is None:
+            errors.append(
+                "release workflow must upload checksum asset for allpowers_ble.zip"
+            )
+
+
+def _module_list(value: Any) -> list[str]:
+    """Normalize mypy module override values to a string list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def validate_static_analysis_contract(errors: list[str]) -> None:
+    """Reject broad static-analysis ignores that hide integration-owned code."""
+    pyproject_path = ROOT / "pyproject.toml"
+    try:
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as ex:
+        errors.append(f"failed reading pyproject.toml for static-analysis checks: {ex}")
+        return
+
+    tool_config = pyproject.get("tool")
+    if not isinstance(tool_config, dict):
+        errors.append("pyproject.toml must define a [tool] table")
+        return
+
+    mypy_config = tool_config.get("mypy")
+    if not isinstance(mypy_config, dict):
+        errors.append("pyproject.toml must define a [tool.mypy] table")
+        return
+
+    if mypy_config.get("ignore_missing_imports") is True:
+        errors.append(
+            "tool.mypy.ignore_missing_imports must stay false; "
+            "use explicit per-module overrides"
+        )
+    if mypy_config.get("follow_imports") == "skip":
+        errors.append(
+            "tool.mypy.follow_imports must not be 'skip'; "
+            "integration-owned imports must stay type-checked"
+        )
+
+    overrides = mypy_config.get("overrides", [])
+    if isinstance(overrides, dict):
+        overrides = [overrides]
+    if not isinstance(overrides, list):
+        errors.append("tool.mypy.overrides must be a table or array of tables")
+        overrides = []
+
+    for index, override in enumerate(overrides, start=1):
+        if not isinstance(override, dict):
+            errors.append(f"tool.mypy.overrides entry {index} must be a table")
+            continue
+        if override.get("ignore_missing_imports") is not True:
+            continue
+        for module in _module_list(override.get("module")):
+            if module in BLOCKED_REPO_CODE_GLOBS:
+                errors.append(
+                    "tool.mypy.overrides uses ignore_missing_imports on "
+                    f"integration-owned scope {module!r} (entry {index})"
+                )
+
+    ruff_config = tool_config.get("ruff")
+    if not isinstance(ruff_config, dict):
+        return
+    lint_config = ruff_config.get("lint")
+    if not isinstance(lint_config, dict):
+        return
+
+    ignored_rules = lint_config.get("ignore", [])
+    if isinstance(ignored_rules, str):
+        ignored_rules = [ignored_rules]
+    if isinstance(ignored_rules, list):
+        forbidden = sorted(
+            rule
+            for rule in ignored_rules
+            if isinstance(rule, str) and rule in BLOCKED_RUFF_IGNORE_RULES
+        )
+        if forbidden:
+            errors.append(
+                f"tool.ruff.lint.ignore contains forbidden broad ignores: {forbidden}"
+            )
+
+    per_file_ignores = lint_config.get("per-file-ignores", {})
+    if not isinstance(per_file_ignores, dict):
+        errors.append("tool.ruff.lint.per-file-ignores must be a table")
+        return
+    for pattern in per_file_ignores:
+        if not isinstance(pattern, str):
+            continue
+        if pattern in {"*", "custom_components/*", "custom_components/**"}:
+            errors.append(
+                "tool.ruff.lint.per-file-ignores must not disable checks "
+                f"for integration code via pattern {pattern!r}"
+            )
+
+
 def validate_release_if_present(errors: list[str]) -> None:
     """Verify the HACS release archive layout when it has been built."""
     archive_path = ROOT / "dist" / "allpowers_ble.zip"
@@ -343,6 +507,8 @@ def main() -> int:
     validate_text_files(errors)
     validate_clean_tree(errors)
     validate_markdown_links_and_headings(errors)
+    validate_branch_workflow_contract(errors)
+    validate_static_analysis_contract(errors)
     validate_release_if_present(errors)
 
     for source in sorted(ROOT.rglob("*.py")):

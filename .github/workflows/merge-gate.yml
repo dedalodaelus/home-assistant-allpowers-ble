@@ -37,6 +37,69 @@ jobs:
               return;
             }
 
+            const baseRef = pr.base?.ref || "";
+            const headRef = pr.head?.ref || "";
+            const headSha = pr.head.sha;
+            const isHotfixBranch = /^hotfix\//.test(headRef);
+
+            // Policy: PRs to main are only allowed from devel or hotfix/* branches.
+            if (baseRef === "main" && headRef !== "devel" && !isHotfixBranch) {
+              core.setFailed(
+                `PRs targeting main must come from 'devel' or 'hotfix/*'. Current source: '${headRef}'.`
+              );
+              return;
+            }
+
+            // Best-effort policy: hotfix branches targeting main should be cut from main,
+            // not from devel. When devel and main diverge, reject hotfix heads that include devel.
+            if (baseRef === "main" && isHotfixBranch) {
+              const mainVsDevel = await github.rest.repos.compareCommits({
+                owner,
+                repo,
+                base: "main",
+                head: "devel",
+              });
+
+              if (mainVsDevel.data.status !== "identical") {
+                const develVsHotfix = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: "devel",
+                  head: headSha,
+                });
+
+                if (
+                  develVsHotfix.data.status === "ahead"
+                  || develVsHotfix.data.status === "identical"
+                ) {
+                  core.setFailed(
+                    `Hotfix branch '${headRef}' appears to be based on 'devel'. Create hotfix branches from 'main'.`
+                  );
+                  return;
+                }
+              }
+            }
+
+            // Policy: CHANGELOG.md is managed by release-please and must not be edited
+            // in regular development PRs.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
+            const isFeatureToDevel = baseRef === "devel";
+            const isPromotionToMain = baseRef === "main";
+
+            if (touchesChangelog && (isFeatureToDevel || isPromotionToMain)) {
+              core.setFailed(
+                "CHANGELOG.md is managed by release-please and cannot be modified in PRs to devel or main."
+              );
+              return;
+            }
+
             if (pr.draft) {
               core.info("Draft PR detected. Skipping strict gate until ready for review.");
               return;
@@ -50,10 +113,11 @@ jobs:
               "Review dependency changes",
               "Analyze Python",
             ];
+            const acceptedConclusions = new Set(["success", "neutral", "skipped"]);
 
-            const headSha = pr.head.sha;
             const pollIntervalMs = 15000;
-            const timeoutMs = 45 * 60 * 1000;
+            const timeoutMs = 30 * 60 * 1000;
+            const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
             function formatRunsMap(checkRuns) {
@@ -100,7 +164,7 @@ jobs:
                   continue;
                 }
 
-                if (run.conclusion !== "success") {
+                if (!acceptedConclusions.has(run.conclusion || "")) {
                   failed.push(`${checkName} (${run.conclusion || "unknown"})`);
                 }
               }
@@ -112,6 +176,17 @@ jobs:
 
               if (failed.length) {
                 core.setFailed(`Required checks failed: ${failed.join("; ")}`);
+                return;
+              }
+
+              // Fail early with actionable context when expected checks do not appear.
+              if (missing.length && elapsed >= missingChecksGraceMs) {
+                const discoveredChecks = [...latestByName.keys()].sort();
+                core.setFailed(
+                  `Missing required checks after ${Math.floor(missingChecksGraceMs / 60000)} minutes: `
+                  + `${missing.join(", ")}. Discovered checks: ${discoveredChecks.join(", ") || "none"}. `
+                  + "If checks were renamed, update requiredChecks in .github/workflows/merge-gate.yml."
+                );
                 return;
               }
 

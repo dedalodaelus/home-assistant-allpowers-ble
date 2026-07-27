@@ -79,12 +79,14 @@ def make_client(
     *,
     name: str = "ALLPOWERS R600",
 ) -> AllpowersBLEClient:
-    return AllpowersBLEClient(
+    client = AllpowersBLEClient(
         hass=FakeHass(),  # type: ignore[arg-type]
         address="aa:bb:cc:dd:ee:ff",
         advertised_name=name,
         options=options or ConnectionOptions(),
     )
+    client._settings = settings()
+    return client
 
 
 def connect_fake(client: AllpowersBLEClient) -> FakeClient:
@@ -93,6 +95,7 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
     client._active_session_generation = 1
+    client._settings = settings()
     client._connected_monotonic = monotonic()
     return fake
 
@@ -263,8 +266,11 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
     for error in (DeviceNotFoundError("missing"), RuntimeError("boom")):
         another = make_client()
 
-        async def fail(error: Exception = error) -> None:
-            another._stop_event.set()
+        async def fail(
+            error: Exception = error,
+            another_client: AllpowersBLEClient = another,
+        ) -> None:
+            another_client._stop_event.set()
             raise error
 
         monkeypatch.setattr(another, "_connect_once", fail)
@@ -345,7 +351,9 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
     assert client.snapshot().connected
     assert fake.notification_callback is not None
     assert fake.writes[-1] == client_module.encode_status_request()
-    assert captured["ble_device_callback"] == client._fresh_ble_device
+    callback = captured["ble_device_callback"]
+    assert callable(callback)
+    assert isinstance(callback(), FakeDevice)
     assert client.snapshot().statistics.successful_connections == 1
 
     missing = make_client()
@@ -653,6 +661,159 @@ async def test_maintenance_watchdog_and_status_request(
 
     monkeypatch.setattr(requester, "async_request_status", fail_request)
     await requester._maintenance_loop()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_status_request_respects_configured_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(status_interval=30, watchdog_timeout=300)
+    client = make_client(options)
+    client._connected = True
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 100.0
+    now = 120.0
+    status_requests = 0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def request_status() -> None:
+        nonlocal status_requests
+        status_requests += 1
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "async_request_status", request_status)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert status_requests == 0
+    assert waits == [pytest.approx(10.0)]
+
+    due_client = make_client(options)
+    due_client._connected = True
+    due_client._connected_monotonic = 100.0
+    due_client._status_monotonic = 100.0
+    due_client._last_packet_monotonic = 100.0
+    due_client._last_status_request_monotonic = 100.0
+    due_now = 130.0
+    due_requests = 0
+    due_waits: list[float | None] = []
+
+    def due_loop_time() -> float:
+        return due_now
+
+    async def due_request_status() -> None:
+        nonlocal due_requests
+        due_requests += 1
+
+    async def due_wait_for_wakeup(timeout: float | None) -> None:
+        due_waits.append(timeout)
+        due_client._stop_event.set()
+
+    due_client._loop_time = due_loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(due_client, "async_request_status", due_request_status)
+    monkeypatch.setattr(
+        due_client,
+        "_wait_for_maintenance_wakeup",
+        due_wait_for_wakeup,
+    )
+
+    await due_client._maintenance_loop()
+
+    assert due_requests == 1
+    assert due_waits == [pytest.approx(0.001)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_settings_keepalive_respects_configured_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=300,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    client._connected = True
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 110.0
+    client._settings = settings()
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 150.0
+    keepalive_sends = 0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def send_keepalive() -> None:
+        nonlocal keepalive_sends
+        keepalive_sends += 1
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "async_send_settings_keepalive", send_keepalive)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert keepalive_sends == 0
+    assert waits == [pytest.approx(10.0)]
+
+    due_client = make_client(options)
+    due_client._connected = True
+    due_client._connected_monotonic = 100.0
+    due_client._status_monotonic = 100.0
+    due_client._last_packet_monotonic = 100.0
+    due_client._last_status_request_monotonic = 110.0
+    due_client._settings = settings()
+    due_client._settings_monotonic = 100.0
+    due_client._last_settings_keepalive_monotonic = 100.0
+    due_client._initial_settings_keepalive_pending = False
+    due_now = 160.0
+    due_keepalive_sends = 0
+    due_waits: list[float | None] = []
+
+    def due_loop_time() -> float:
+        return due_now
+
+    async def due_send_keepalive() -> None:
+        nonlocal due_keepalive_sends
+        due_keepalive_sends += 1
+
+    async def due_wait_for_wakeup(timeout: float | None) -> None:
+        due_waits.append(timeout)
+        due_client._stop_event.set()
+
+    due_client._loop_time = due_loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(due_client, "async_send_settings_keepalive", due_send_keepalive)
+    monkeypatch.setattr(
+        due_client,
+        "_wait_for_maintenance_wakeup",
+        due_wait_for_wakeup,
+    )
+
+    await due_client._maintenance_loop()
+
+    assert due_keepalive_sends == 1
+    assert due_waits == [pytest.approx(0.001)]
 
 
 def test_next_maintenance_deadline_prefers_earliest_deadline() -> None:
@@ -983,7 +1144,19 @@ async def test_probe_success_and_cleanup(
     fake = ProbeClient([settings_frame, status_frame])
 
     async def establish(*args: Any, **kwargs: Any) -> ProbeClient:
-        del args, kwargs
+        del args
+        callback = kwargs["ble_device_callback"]
+        monkeypatch.setattr(
+            client_module.bluetooth,
+            "async_ble_device_from_address",
+            lambda *args, **kwargs: None,
+        )
+        assert isinstance(callback(), FakeDevice)
+        monkeypatch.setattr(
+            client_module.bluetooth,
+            "async_ble_device_from_address",
+            lambda *args, **kwargs: FakeDevice(),
+        )
         return fake
 
     monkeypatch.setattr(client_module, "establish_connection", establish)

@@ -67,7 +67,7 @@ SECTION_ADVANCED_TIMING = "advanced_timing"
 SECTION_EXPERIMENTAL_CONTROLS = "experimental_controls"
 
 
-class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
+class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle discovery and setup of one ALLPOWERS BLE device."""
 
     VERSION = CONFIG_ENTRY_VERSION
@@ -76,6 +76,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
+        self._probe_error: str | None = None
 
     @staticmethod
     @callback
@@ -120,7 +121,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
             result = await self._async_probe_and_create(self._discovery_info)
             if result is not None:
                 return result
-            errors["base"] = self.context.pop("probe_error", "unknown")
+            errors["base"] = self._probe_error or "unknown"
 
         self._set_confirm_only()
         return self.async_show_form(
@@ -145,7 +146,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
             result = await self._async_probe_and_create(discovery_info)
             if result is not None:
                 return result
-            errors["base"] = self.context.pop("probe_error", "unknown")
+            errors["base"] = self._probe_error or "unknown"
 
         await bluetooth.async_request_active_scan(self.hass)
         self._discover_candidates()
@@ -202,31 +203,33 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
             return self.async_abort(reason="not_supported")
         except DeviceNotFoundError as ex:
             _LOGGER.debug("No connectable path during setup: %s", ex)
-            self.context["probe_error"] = "cannot_connect"
+            self._probe_error = "cannot_connect"
             return None
         except ProbeConnectionTimeoutError as ex:
             _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
-            self.context["probe_error"] = "connect_timeout"
+            self._probe_error = "connect_timeout"
             return None
         except ProbeGattValidationError as ex:
             _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
-            self.context["probe_error"] = "gatt_unavailable"
+            self._probe_error = "gatt_unavailable"
             return None
         except ProbeNotificationSetupError as ex:
             _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
-            self.context["probe_error"] = "notify_failed"
+            self._probe_error = "notify_failed"
             return None
         except ProbeStatusTimeoutError:
-            self.context["probe_error"] = "timeout"
+            self._probe_error = "timeout"
             return None
         except BLEAK_RETRY_EXCEPTIONS as ex:
             _LOGGER.debug("Bluetooth probe failed: %s", ex, exc_info=True)
-            self.context["probe_error"] = "cannot_connect"
+            self._probe_error = "cannot_connect"
             return None
         except Exception:
             _LOGGER.exception("Unexpected error while probing ALLPOWERS BLE")
-            self.context["probe_error"] = "unknown"
+            self._probe_error = "unknown"
             return None
+
+        self._probe_error = None
 
         await self.async_set_unique_id(address, raise_on_progress=False)
         self._abort_if_unique_id_configured()
@@ -244,7 +247,6 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
 class AllpowersOptionsFlow(OptionsFlow):
     """Manage connection health and experimental settings."""
 
-    @override
     async def async_step_init(
         self,
         user_input: dict[str, Any] | None = None,

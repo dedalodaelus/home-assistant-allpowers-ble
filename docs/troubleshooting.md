@@ -73,6 +73,16 @@ requires fresh settings.
   `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
   Those counters are session-scoped diagnostics and can reset after reloads or reconnects.
 
+## Aggressive timing causes proxy instability
+
+Very small status or keepalive intervals can saturate the local adapter or an
+ESPHome Bluetooth Proxy when multiple devices compete for active BLE sessions.
+
+- Keep `status_interval` at 20 seconds unless you have measured need.
+- Keep settings keepalive disabled unless settings freshness is required.
+- Increase intervals before increasing watchdog timeout.
+- Prefer one stable connectable route over many marginal proxies.
+
 ## Enabling logs
 
 ```yaml

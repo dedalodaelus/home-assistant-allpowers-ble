@@ -138,12 +138,15 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    notificación antes de reutilizar ese estado para otra escritura.
 4. Las transacciones pendientes y la frescura se invalidan al desconectar o
    iniciar otra sesión GATT.
-5. Si no existe una instantánea segura, la escritura se rechaza en vez de adivinar.
+5. El cliente BLE aplica capacidades de escritura por perfil y revisión en el
+   borde de transporte para salidas, ajustes y keepalive de ajustes.
+6. Si no existe una instantánea segura o el perfil activo no autoriza la
+   operación, la escritura se rechaza en vez de adivinar.
 
 Cualquier garantía futura de seguridad en escritura debe apoyarse en evidencia
 capturada del hardware objetivo y en pruebas de regresión equivalentes.
 
-Consulta [Arquitectura](docs/architecture.md) y [Protocolo](docs/protocol.md).
+Consulta [Arquitectura](docs/architecture/README.md) y [Protocolo](docs/protocol.md).
 
 ## Ejemplos de automatización conservadora
 
@@ -203,6 +206,36 @@ Para retirar la integración limpiamente:
 
 Si planeas reinstalar, guarda antes un diagnóstico saneado para comparar historial
 de ruta y detección de modelo tras la recuperación.
+
+## Contrato de comunicación y clase IoT
+
+El manifiesto declara `iot_class: local_polling` porque la operación normal
+depende de solicitudes periódicas locales de estado y, al mismo tiempo,
+consume notificaciones push.
+
+- Ruta de polling: el cliente envía una solicitud de estado cada
+   `status_interval` configurado.
+- Ruta push: las notificaciones de estado y ajustes pueden llegar en cualquier
+   momento y actualizan entidades sin esperar a la siguiente solicitud.
+- Ruta de recuperación: el tráfico de watchdog y reconexión solo recupera la
+   salud del transporte, no acelera el polling normal.
+
+La base de evidencia y justificación de esta clasificación está trazada en la
+issue #55 y en la decisión de arquitectura 0003.
+
+Cada operación periódica tiene disparador y límite inferior explícitos:
+
+| Operación periódica | Disparador | Valor inicial | Límite inferior |
+|---|---|---:|---:|
+| Solicitud de estado | Sesión conectada y sin solicitud en el intervalo | 20 s | 10 s |
+| Keepalive de ajustes (opcional) | Activado y sin keepalive en el intervalo (más un envío inicial tras ajustes frescos) | 540 s | 60 s |
+| Reintento de reconexión con backoff | Fallo de conexión o desconexión | 1 s inicial, tope 60 s | Piso de jitter 0 s, mínimo configurable del tope 5 s |
+| Reconexión por watchdog de telemetría | Sin telemetría fresca en la ventana watchdog | 45 s | Debe ser mayor que stale timeout |
+| Reconexión por watchdog de transporte | Sin paquetes BLE en la ventana watchdog | 45 s | Debe ser mayor que stale timeout |
+
+Intervalos agresivos pueden saturar el adaptador local o la capacidad de
+conexión del Bluetooth Proxy, especialmente con varios dispositivos. Mantén los
+valores por defecto salvo que tengas una razón medida para ajustarlos.
 
 ## Opciones
 
@@ -274,7 +307,11 @@ Assistant.
 
 Las releases se promueven mediante pull requests revisadas desde `devel` hacia
 `main`, con validación de CI, validación de repositorio y revisión de documentación
-de seguridad antes de publicar. Los objetivos de calidad describen evidencia y
+de seguridad antes de publicar. Las correcciones urgentes de producción pueden
+apuntar a `main` solo desde ramas `hotfix/*` creadas desde `main`, y después deben
+propagarse de vuelta a `devel`. Los objetivos de calidad describen evidencia y
 pruebas actuales; no suponen un programa formal de certificación de Home Assistant.
+
+No se permiten commits directos sobre `devel` ni sobre `main`. Las pull requests hacia `main` solo se permiten desde `devel` o desde ramas `hotfix/*` creadas desde `main`.
 
 Licencia MIT. Consulta [LICENSE](LICENSE).

@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -452,9 +452,14 @@ async def test_binary_input_output_active_semantics_edge_cases() -> None:
             )
         )
         binary_entities: list[Any] = []
-        await binary_sensor.async_setup_entry(
-            None, entry, lambda entities: binary_entities.extend(entities)
-        )
+
+        def add_entities(
+            entities: list[Any],
+            bucket: list[Any] = binary_entities,
+        ) -> None:
+            bucket.extend(entities)
+
+        await binary_sensor.async_setup_entry(None, entry, add_entities)
         by_key = {entity.entity_description.key: entity for entity in binary_entities}
         assert by_key["charging"].is_on is expected_input_active
         assert by_key["discharging"].is_on is expected_output_active
@@ -511,6 +516,17 @@ async def test_switches_send_commands_and_wrap_safety_errors() -> None:
         cause=StateUnavailableError,
     )
 
+    client.errors["set_ac"] = StateUnavailableError(
+        "Unsupported output command for active model profile: r600-unverified-revision"
+    )
+    with pytest.raises(HomeAssistantError) as error_info:
+        await by_key["ac_output"].async_turn_on()
+    assert_command_error(
+        error_info,
+        key="command_unsupported",
+        cause=StateUnavailableError,
+    )
+
     client.errors["set_eco"] = NotConnectedError("offline")
     with pytest.raises(HomeAssistantError) as error_info:
         await by_key["eco_mode"].async_turn_on()
@@ -540,6 +556,39 @@ async def test_switches_send_commands_and_wrap_safety_errors() -> None:
     with pytest.raises(HomeAssistantError) as error_info:
         await by_key["car_charger"].async_turn_off()
     assert_command_error(error_info, key="command_transport", cause=RuntimeError)
+
+
+@pytest.mark.asyncio
+async def test_runtime_profile_downgrade_disables_all_switch_controls() -> None:
+    entry, client, _, _ = configured_entry()
+    entities: list[Any] = []
+    await switch.async_setup_entry(None, entry, lambda values: entities.extend(values))
+    by_key = {entity.entity_description.key: entity for entity in entities}
+
+    assert by_key["ac_output"].available
+    assert by_key["dc_output"].available
+    assert by_key["light"].available
+    assert by_key["eco_mode"].available
+    assert not by_key["car_charger"].available
+
+    enabled = ConnectionOptions(enable_car_charger=True)
+    await entry.runtime_data.coordinator.async_apply_options(enabled)
+    assert by_key["car_charger"].available
+
+    downgraded = replace(
+        client.snapshot(),
+        settings=settings(hardware_version="1.0", raw_hardware_version=0x10),
+        status=status(),
+        status_monotonic=monotonic(),
+        settings_monotonic=monotonic(),
+    )
+    client.set_snapshot(downgraded)
+
+    assert not by_key["ac_output"].available
+    assert not by_key["dc_output"].available
+    assert not by_key["light"].available
+    assert not by_key["eco_mode"].available
+    assert not by_key["car_charger"].available
 
 
 @pytest.mark.asyncio
@@ -669,6 +718,50 @@ async def test_buttons_send_commands_and_wrap_errors() -> None:
 
     client.set_snapshot(disconnected_snapshot())
     assert not refresh.available
+
+
+@pytest.mark.asyncio
+async def test_control_platform_setup_listeners_are_registered_and_idempotent() -> None:
+    """Dynamic control setup listeners should register and avoid duplicate entities."""
+    entry, _, coordinator, _ = configured_entry()
+
+    listeners: list[Callable[[], None]] = []
+    unregistered: list[bool] = []
+
+    def _async_add_listener(callback_fn: Callable[[], None]) -> Callable[[], None]:
+        listeners.append(callback_fn)
+        return lambda: unregistered.append(True)
+
+    coordinator.async_add_listener = _async_add_listener  # type: ignore[attr-defined]
+
+    switch_entities: list[Any] = []
+    await switch.async_setup_entry(
+        None, entry, lambda values: switch_entities.extend(values)
+    )
+    select_entities: list[Any] = []
+    await select.async_setup_entry(
+        None, entry, lambda values: select_entities.extend(values)
+    )
+    button_entities: list[Any] = []
+    await button.async_setup_entry(
+        None, entry, lambda values: button_entities.extend(values)
+    )
+
+    assert len(listeners) == 3
+    assert len(switch_entities) == 5
+    assert len(select_entities) == 2
+    assert len(button_entities) == 3
+
+    for callback_fn in listeners:
+        callback_fn()
+
+    assert len(switch_entities) == 5
+    assert len(select_entities) == 2
+    assert len(button_entities) == 3
+
+    for unregister in entry._unload_callbacks:  # type: ignore[attr-defined]
+        unregister()
+    assert len(unregistered) == 3
 
 
 @pytest.mark.asyncio
