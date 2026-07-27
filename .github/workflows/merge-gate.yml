@@ -105,11 +105,12 @@ jobs:
             const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
             const isFeatureToDevel = baseRef === "devel";
             const isPromotionToMain = baseRef === "main";
+            const isMainToDevelSync = baseRef === "devel" && headRef === "main";
 
             if (
               touchesChangelog
               && (
-                isFeatureToDevel
+                (isFeatureToDevel && !isMainToDevelSync)
                 || (isPromotionToMain && !isReleasePleaseBranch)
               )
             ) {
