@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.2.0...0.3.0) (2026-07-27)
+
+
+### Features
+
+* **ci:** add real Home Assistant lifecycle harness tests ([#101](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/101)) ([5f06d81](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/5f06d81702271e0ad2cf34436e75cc27b4f8fce4))
+
+
+### Bug Fixes
+
+* **ci:** allow release-please to main only for bot authors ([#109](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/109)) ([4a792c4](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/4a792c454277aa9c7ee44e69a76666e0310c5c03))
+* **ci:** enforce devel/main promotion and hotfix PR policy ([#98](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/98)) ([f448825](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/f4488257edf81144dade637b3d319f5797610fc1))
+* **ci:** harden merge-gate as single required ruleset check ([#99](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/99)) ([3bf6e58](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/3bf6e58afc0b2cfaa8f6382348d9808b9430e9ab)), closes [#47](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/47)
+* **ci:** harden release metadata validation and publication flow ([#103](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/103)) ([51f986a](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/51f986adeddbd19572f5fc995f03ef23b6a5e6d4)), closes [#49](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/49)
+* **ci:** pin third-party actions and reduce workflow permissions ([#104](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/104)) ([0520f64](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/0520f64dab61ec0ce6bf733cc26fc9a1abe1c3ca))
+* **client:** enforce capability guards for runtime writes ([#97](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/97)) ([aba01e9](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/aba01e92b01d5974dee4d2ba9bd7a45e2ae5c3e5))
+* **entities:** add dynamic control entities after capability upgrades ([#105](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/105)) ([6ced2fc](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/6ced2fc27abac15ea2b857c0f027f70f62e22925)), closes [#93](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/93)
+* harden static-analysis baseline and enforce pre-commit parity ([#100](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/100)) ([8dfe44f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/8dfe44f137d9fdcb04252af10ef5457a2d891d6e))
+
 ## [0.2.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.1.6...0.2.0) (2026-07-26)
 
 
