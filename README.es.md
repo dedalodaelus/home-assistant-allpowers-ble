@@ -252,6 +252,19 @@ valores por defecto salvo que tengas una razón medida para ajustarlos.
 
 Los cambios de opciones se aplican en caliente, sin recargar la integración.
 
+## Reconfiguracion de la entrada
+
+Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
+cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
+
+- Campos reconfigurables: direccion Bluetooth y nombre visible.
+- La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
+- Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
+- Si cancelas el flujo, la entrada no se modifica.
+
+Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
+keepalive). No uses reconfiguracion para esos valores opcionales.
+
 ## Diagnósticos
 
 Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes del

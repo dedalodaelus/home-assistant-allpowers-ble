@@ -262,6 +262,19 @@ Defaults are deliberately conservative and match observed R600 behavior.
 
 Options are applied live. A full integration reload is not required.
 
+## Reconfigure entry data
+
+Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
+need to update entry-level setup data without removing the integration entry.
+
+- Supported reconfigure fields: Bluetooth address and display name.
+- Reconfigure performs an active probe before applying changes.
+- Duplicate targets are rejected to preserve one-entry-per-device behavior.
+- If you cancel the flow, no entry data is changed.
+
+Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
+settings). Do not use reconfigure for those option values.
+
 ## Diagnostics and logging
 
 Download diagnostics from the integration or device page in Home Assistant. The

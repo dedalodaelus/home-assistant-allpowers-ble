@@ -1,14 +1,17 @@
 {
   "config": {
     "abort": {
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
       "no_devices_found": "No se encontró ningún dispositivo ALLPOWERS compatible y conectable. Comprueba que esté encendido y visible para un proxy Bluetooth o un adaptador local.",
       "not_connectable": "La fuente de descubrimiento no permite conexiones Bluetooth activas. Usa un proxy Bluetooth ESPHome conectable o un adaptador local compatible.",
       "not_supported": "Este modelo ALLPOWERS utiliza una revisión de protocolo no compatible."
     },
     "error": {
+      "already_configured": "Esta dirección Bluetooth ya está configurada en otra entrada de ALLPOWERS BLE.",
       "cannot_connect": "No se pudo conectar mediante ningún adaptador o proxy Bluetooth disponible.",
       "connect_timeout": "La fase de conexión superó el tiempo límite del probe antes de establecer una sesión BLE.",
       "gatt_unavailable": "El dispositivo se conectó, pero el servicio o las características GATT requeridas por ALLPOWERS no estaban disponibles.",
+      "not_supported": "El dispositivo seleccionado no es compatible con esta integración.",
       "notify_failed": "El dispositivo se conectó, pero la suscripción a notificaciones falló antes de validar la telemetría.",
       "timeout": "El dispositivo se conectó, pero no devolvió una trama de estado válida antes del tiempo límite.",
       "unknown": "Se produjo un error inesperado al validar el dispositivo. Consulta los registros para obtener más información."
@@ -24,6 +27,14 @@
         },
         "description": "Selecciona un dispositivo compatible visible para un adaptador Bluetooth conectable o un proxy Bluetooth ESPHome.",
         "title": "Seleccionar dispositivo ALLPOWERS"
+      },
+      "reconfigure": {
+        "data": {
+          "address": "Direccion Bluetooth",
+          "device_name": "Nombre visible"
+        },
+        "description": "Actualiza valores de entrada compatibles y valida activamente el dispositivo seleccionado antes de aplicar cambios.",
+        "title": "Reconfigurar ALLPOWERS BLE"
       }
     }
   },

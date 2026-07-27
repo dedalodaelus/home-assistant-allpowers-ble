@@ -230,9 +230,18 @@ class _FlowBase:
     def _abort_if_unique_id_configured(self) -> None:
         return None
 
+    def _abort_if_unique_id_mismatch(self) -> None:
+        return None
+
     def _async_current_ids(self, *, include_ignore: bool) -> set[str]:
         del include_ignore
         return set()
+
+    def _get_reconfigure_entry(self) -> ConfigEntry[Any]:
+        entry = getattr(self, "_reconfigure_entry", None)
+        if entry is None:
+            raise RuntimeError("Reconfigure entry is not set")
+        return entry
 
     def _set_confirm_only(self) -> None:
         self.confirm_only = True
@@ -267,6 +276,26 @@ class _FlowBase:
         if options is not None:
             result["options"] = dict(options)
         return result
+
+    def async_update_reload_and_abort(
+        self,
+        entry: ConfigEntry[Any],
+        *,
+        data_updates: Mapping[str, Any] | None = None,
+        options_updates: Mapping[str, Any] | None = None,
+        reason: str = "reconfigure_successful",
+        reload_even_if_entry_is_unchanged: bool = True,
+    ) -> dict[str, Any]:
+        del reload_even_if_entry_is_unchanged
+        if data_updates is not None:
+            merged_data = dict(entry.data)
+            merged_data.update(data_updates)
+            self.hass.config_entries.async_update_entry(entry, data=merged_data)
+        if options_updates is not None:
+            merged_options = dict(entry.options)
+            merged_options.update(options_updates)
+            self.hass.config_entries.async_update_entry(entry, options=merged_options)
+        return self.async_abort(reason=reason)
 
 
 class ConfigFlow(_FlowBase):
