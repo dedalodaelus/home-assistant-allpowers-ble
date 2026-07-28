@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.0.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.1...1.0.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* project reaches stable 1.0.0 contract
+
+### Features
+
+* add HIL qualification gate and runbook ([#125](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/125)) ([df4a85f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/df4a85fd9c7a251bef6836a1b5e94337abd1ccd6)), closes [#54](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/54)
+* add persistent Home Assistant Repairs for actionable BLE failures ([#122](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/122)) ([b8ecd32](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/b8ecd3266ff3a5d84e948733500c76060ae0ad3b)), closes [#53](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/53)
+* **config-flow:** add reconfigure flow for mutable entry updates ([#123](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/123)) ([d91638c](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/d91638c48f3d7412817a6c6e548c27fbef1dce81)), closes [#52](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/52)
+
+
+### Bug Fixes
+
+* **ci:** allow main-&gt;devel changelog sync in merge gate ([#121](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/121)) ([792b6c3](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/792b6c35b3b95028ce8b0dcb63872c7312d48c2f))
+* formalize 1.0 quality readiness contract ([#126](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/126)) ([3f16c26](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/3f16c261b6b71223edd010e97a04df80358aefb5)), closes [#55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55)
+
+
+### Miscellaneous Chores
+
+* declare stable 1.0 line ([24e58af](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/24e58afc94eb57da41d802524cfbe296d1ca2af5))
+
 ## [0.3.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.0...0.3.1) (2026-07-27)
 
 
