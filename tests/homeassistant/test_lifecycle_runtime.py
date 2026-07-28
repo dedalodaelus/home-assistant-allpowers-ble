@@ -200,7 +200,7 @@ async def test_setup_options_reload_unload_and_diagnostics(
 
     devices = dr.async_get(hass).devices.get_devices_for_config_entry_id(entry.entry_id)
     assert devices
-    assert devices[0].hw_version == "1.2"
+    assert devices[0].hw_version == "0.3"
     assert devices[0].sw_version == "3.4"
 
     callback, _ = bluetooth_callbacks[0]

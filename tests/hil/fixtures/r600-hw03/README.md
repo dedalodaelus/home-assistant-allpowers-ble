@@ -1,6 +1,6 @@
-# R600 HW12 HIL fixture lane
+# R600 HW03 HIL fixture lane
 
-This folder stores sanitized hardware evidence for revision `R600 hw=1.2 raw=0x12`.
+This folder stores sanitized hardware evidence for revision `R600 hw=0.3 raw=0x03`.
 
 ## Privacy rules
 

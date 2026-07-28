@@ -35,7 +35,7 @@ componente ESPHome específico para la estación.
 
 | Modelo o anuncio | Estado | Observaciones |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) con firma de revisión verificada (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verificado | Objetivo principal de desarrollo y protocolo con controles de escritura habilitados. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) con firma de revisión verificada (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verificado | Objetivo principal de desarrollo y protocolo con controles de escritura habilitados. |
 | AP S300 y unidades similares `AP S*` | Experimental de solo lectura | Solo se aceptan tras una prueba activa GATT y de protocolo. Se exponen entidades de telemetría, pero no controles de escritura. |
 | AP S500 / AP S700 V2 | Rechazado | Utilizan una revisión de protocolo diferente. |
 | Anuncio genérico `ALLPOWERS*` o servicio FFF0 | Experimental de solo lectura | La configuración continúa únicamente si la validación de protocolo termina correctamente. Se expone telemetría, pero no controles de escritura. |

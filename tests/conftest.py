@@ -52,5 +52,5 @@ def settings_frame(notification_builder: Callable[[int, bytes], bytes]) -> bytes
     """Return settings with unknown bits that writes must preserve."""
     return notification_builder(
         0x03,
-        bytes((0xB5, 4, 0xAA, 0x55, 0x12, 0xAF)),
+        bytes((0xB5, 4, 0xAA, 0x55, 0x03, 0xAF)),
     )

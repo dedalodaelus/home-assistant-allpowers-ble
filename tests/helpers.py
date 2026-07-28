@@ -49,10 +49,10 @@ def settings(**changes: Any) -> SettingsData:
         "work_mode": WorkMode.STANDARD,
         "car_charger_enabled": False,
         "eco_timeout_hours": 4,
-        "hardware_version": "1.2",
+        "hardware_version": "0.3",
         "firmware_version": "3.4",
         "raw_flags": 0xA3,
-        "raw_hardware_version": 0x12,
+        "raw_hardware_version": 0x03,
         "raw_firmware_version": 0x34,
     }
     values.update(changes)

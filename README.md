@@ -39,7 +39,7 @@ required on the power station side.
 
 | Model / advertisement | Status | Notes |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=1.2`, `raw_hardware_version=0x12`) | Verified | Primary development and protocol target with writable controls enabled. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Primary development and protocol target with writable controls enabled. |
 | AP S300 and similar `AP S*` units | Experimental read-only | Accepted only after an active GATT and protocol probe. Telemetry entities are exposed, but writable controls remain disabled. |
 | AP S500 / AP S700 V2 family | Rejected | Known to use a different protocol revision. |
 | Generic `ALLPOWERS*` or FFF0 advertisement | Experimental read-only | Setup proceeds only after protocol validation. Telemetry is exposed, but writable controls remain disabled. |
