@@ -34,6 +34,8 @@ REQUIRED_REPOSITORY_FILES = {
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
+    "brand/dark_icon.png",
+    "brand/dark_icon@2x.png",
     "brand/icon.png",
     "brand/icon@2x.png",
     "config_flow.py",
@@ -222,6 +224,8 @@ def validate_json_contracts(errors: list[str]) -> None:
 def validate_brand(errors: list[str]) -> None:
     """Check local Home Assistant brand asset dimensions."""
     expected = {
+        INTEGRATION_DIR / "brand" / "dark_icon.png": (256, 256),
+        INTEGRATION_DIR / "brand" / "dark_icon@2x.png": (512, 512),
         INTEGRATION_DIR / "brand" / "icon.png": (256, 256),
         INTEGRATION_DIR / "brand" / "icon@2x.png": (512, 512),
     }

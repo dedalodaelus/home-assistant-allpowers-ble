@@ -8,6 +8,14 @@
 
 [Español](README.es.md)
 
+<p align="center">
+  <img
+    src="docs/assets/branding/readme-banner.png"
+    alt="ALLPOWERS BLE community integration for Home Assistant"
+    width="720"
+  >
+</p>
+
 A local Home Assistant custom integration for compatible ALLPOWERS portable power
 stations. It connects through Home Assistant's Bluetooth stack, so the same
 integration works with a local Bluetooth adapter or a connectable ESPHome
