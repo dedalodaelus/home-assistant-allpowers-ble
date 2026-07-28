@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.0.0...1.1.0) (2026-07-28)
+
+
+### Features
+
+* **branding:** refresh integration assets and add dark theme icons ([#132](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/132)) ([0e497ad](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/0e497ad0ff838df3a56a90b5e44e334d77cf8f44))
+
+
+### Bug Fixes
+
+* **model-support:** replace verified R600 signature with hw 0.3 ([#130](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/130)) ([34aa40d](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/34aa40d8c95382bd729cef19abbbc76e665afd47)), closes [#129](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/129)
+
 ## [1.0.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.1...1.0.0) (2026-07-28)
 
 
