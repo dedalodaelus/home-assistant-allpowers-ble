@@ -1,0 +1,2 @@
+{"route":"local_adapter","scenario":"golden_vector_replay","direction":"notify","frame_hex":"AA550E00107A0102005A6BC1000000","verdict":"ok","device":"REDACTED","timestamp":"REDACTED"}
+{"route":"local_adapter","scenario":"reconnect_failover","direction":"notify","frame_hex":"AA550E00107A0102005A6BC1000000","verdict":"reconnect","device":"REDACTED","timestamp":"REDACTED"}

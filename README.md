@@ -47,6 +47,9 @@ required on the power station side.
 See [Compatibility](docs/compatibility.md) before reporting another model as
 supported.
 
+For real hardware qualification workflow, see
+[HIL qualification runbook](docs/hil-qualification.md).
+
 ## Requirements
 
 - Home Assistant **2026.7.0 or newer**.

@@ -89,6 +89,14 @@ Update the compatibility matrix, entity table, protocol notes, diagnostics, test
 and changelog. State whether support is verified or experimental and identify the
 specific hardware revision.
 
+For verified write-capable profiles, also:
+
+- add sanitized HIL captures under `tests/hil/fixtures/<revision-id>/`;
+- update `tests/hil/qualification_matrix.json` for local-adapter and active-proxy
+  routes, scenarios, and write-capability status;
+- run `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`
+  before requesting stable promotion.
+
 ## 9. Validate on failure paths
 
 Test unplugged proxies, route changes, Bluetooth restarts, stale telemetry, partial

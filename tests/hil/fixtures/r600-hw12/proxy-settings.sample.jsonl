@@ -1,0 +1,2 @@
+{"route":"active_proxy","scenario":"upgrade_reload","direction":"notify","frame_hex":"AA550C0011440106004B5C2A80","verdict":"ok","device":"REDACTED","timestamp":"REDACTED"}
+{"route":"active_proxy","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"AA5509002144000000006A","verdict":"ok","device":"REDACTED","timestamp":"REDACTED"}

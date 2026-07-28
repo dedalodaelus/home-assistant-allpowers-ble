@@ -62,6 +62,13 @@ sha256sum --check dist/allpowers_ble.zip.sha256
 - Re-test settings preservation when settings changed.
 - Re-test reconnect, Home Assistant restart, and proxy route change.
 - Run without unexplained protocol or watchdog errors for a representative period.
+- Update `tests/hil/qualification_matrix.json` for every verified hardware revision.
+- Include sanitized fixtures under `tests/hil/fixtures/<revision-id>/` for both
+  `local_adapter` and `active_proxy` lanes.
+- Run `python scripts/validate_hil_qualification.py` before opening the release PR.
+- For stable promotion where HIL is mandatory, enforce the gate with
+  `REQUIRE_HIL_STABLE_GATE=true` and run
+  `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`.
 
 ## Publishing
 
