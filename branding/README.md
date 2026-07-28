@@ -18,16 +18,16 @@ large files in the repository history.
 ## Packaging flow
 
 1. Keep `source/*-master.png` as the canonical raster masters.
-2. Export the integration brand assets declared in `manifest.json`:
+2. Export the integration brand assets declared in `assets-manifest.json`:
    - `custom_components/allpowers_ble/brand/icon.png` (256x256)
    - `custom_components/allpowers_ble/brand/icon@2x.png` (512x512)
    - `custom_components/allpowers_ble/brand/dark_icon.png` (256x256)
    - `custom_components/allpowers_ble/brand/dark_icon@2x.png` (512x512)
    - `custom_components/allpowers_ble/brand/logo.png` (640x256)
    - `custom_components/allpowers_ble/brand/logo@2x.png` (1280x512)
-3. Export documentation assets declared in `manifest.json`:
+3. Export documentation assets declared in `assets-manifest.json`:
    - `docs/assets/branding/readme-banner.png` (1500x500)
    - `docs/assets/branding/social-preview.png` (1280x640)
 4. Run `python scripts/validate_repository.py` to verify required files and icon
    dimensions before committing.
-5. Keep `manifest.json` aligned with any future filename or resolution change.
+5. Keep `assets-manifest.json` aligned with any future filename or resolution change.
