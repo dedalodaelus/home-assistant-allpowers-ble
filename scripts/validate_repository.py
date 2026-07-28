@@ -62,6 +62,19 @@ README_REQUIRED_HEADINGS = {
 }
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+QUALITY_CONTRACT_HEADING = "## 1.0 readiness contract"
+QUALITY_CADENCE_HEADING = "## Stable release review cadence"
+QUALITY_TABLE_COLUMNS = (
+    "Criterion",
+    "How it is measured",
+    "Evidence",
+    "Status",
+    "Blocking issues",
+)
+QUALITY_ALLOWED_STATUSES = {"Done", "Blocked", "N/A"}
+QUALITY_ISSUE_REFERENCE = re.compile(
+    r"(?:#\d+|https://github\.com/[^/\s]+/[^/\s]+/issues/\d+)"
+)
 DEPENDABOT_TARGET_BRANCH = re.compile(r"^\s*target-branch:\s*(\S+)\s*$", re.MULTILINE)
 RELEASE_MAIN_PUSH_BRANCH = re.compile(
     r"^\s*branches:\s*\n\s*-\s*main\s*$", re.MULTILINE
@@ -342,6 +355,103 @@ def validate_markdown_links_and_headings(errors: list[str]) -> None:
                     )
 
 
+def validate_quality_readiness_contract(errors: list[str]) -> None:
+    """Validate measurable quality readiness criteria and blocker references."""
+    path = ROOT / "docs" / "quality.md"
+    try:
+        markdown = path.read_text(encoding="utf-8")
+    except OSError as ex:
+        errors.append(f"failed reading docs/quality.md: {ex}")
+        return
+
+    if QUALITY_CONTRACT_HEADING not in markdown:
+        errors.append(
+            "docs/quality.md must define a '## 1.0 readiness contract' section"
+        )
+        return
+    if QUALITY_CADENCE_HEADING not in markdown:
+        errors.append(
+            "docs/quality.md must define a '## Stable release review cadence' section"
+        )
+
+    lines = markdown.splitlines()
+    heading_index = lines.index(QUALITY_CONTRACT_HEADING)
+    table_lines: list[str] = []
+    for line in lines[heading_index + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.startswith("|"):
+            table_lines.append(line)
+
+    if len(table_lines) < 3:
+        errors.append("docs/quality.md readiness contract must include a table")
+        return
+
+    header = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+    if tuple(header) != QUALITY_TABLE_COLUMNS:
+        errors.append(
+            "docs/quality.md readiness table columns must be exactly: "
+            + ", ".join(QUALITY_TABLE_COLUMNS)
+        )
+        return
+
+    for row_number, raw_row in enumerate(table_lines[2:], start=1):
+        cells = [cell.strip() for cell in raw_row.strip("|").split("|")]
+        if len(cells) != len(QUALITY_TABLE_COLUMNS):
+            errors.append(
+                "docs/quality.md readiness row has wrong column count: "
+                f"row {row_number}"
+            )
+            continue
+
+        row = dict(zip(QUALITY_TABLE_COLUMNS, cells, strict=True))
+        criterion = row["Criterion"]
+        measure = row["How it is measured"]
+        evidence = row["Evidence"]
+        status = row["Status"]
+        blocking = row["Blocking issues"]
+
+        if not criterion.startswith("IQS-"):
+            errors.append(
+                "docs/quality.md readiness rows must use IQS-* criterion ids: "
+                f"{criterion!r}"
+            )
+        if not measure or measure == "-":
+            errors.append(
+                "docs/quality.md readiness rows must define a measurable check: "
+                f"{criterion!r}"
+            )
+        if "](" not in evidence:
+            errors.append(
+                "docs/quality.md readiness rows must include evidence links: "
+                f"{criterion!r}"
+            )
+        if status not in QUALITY_ALLOWED_STATUSES:
+            errors.append(
+                "docs/quality.md readiness status must be one of "
+                f"{sorted(QUALITY_ALLOWED_STATUSES)}; got {status!r} in {criterion!r}"
+            )
+        if status == "Blocked":
+            if (
+                QUALITY_ISSUE_REFERENCE.search(blocking) is None
+                and "](" not in blocking
+            ):
+                errors.append(
+                    "blocked readiness rows must reference an issue or evidence: "
+                    f"{criterion!r}"
+                )
+        elif blocking not in {"", "-", "None", "Not applicable by scope"}:
+            if (
+                QUALITY_ISSUE_REFERENCE.search(blocking) is None
+                and "](" not in blocking
+            ):
+                errors.append(
+                    "non-blocked readiness rows may only use issue/evidence references "
+                    "or explicit empty values: "
+                    f"{criterion!r}"
+                )
+
+
 def validate_branch_workflow_contract(errors: list[str]) -> None:
     """Enforce repository branch workflow invariants used by CI/release."""
     try:
@@ -506,6 +616,7 @@ def main() -> int:
     validate_brand(errors)
     validate_text_files(errors)
     validate_clean_tree(errors)
+    validate_quality_readiness_contract(errors)
     validate_markdown_links_and_headings(errors)
     validate_branch_workflow_contract(errors)
     validate_static_analysis_contract(errors)

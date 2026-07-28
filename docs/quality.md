@@ -1,8 +1,45 @@
-# Quality and test strategy
+# Quality and 1.0 readiness contract
 
 This project applies current Home Assistant integration patterns but remains a
 community custom integration. Home Assistant does not assign official Bronze,
 Silver, Gold, or Platinum scores to this repository.
+
+The readiness contract below is an internal release gate for this repository.
+It documents measurable criteria for `devel` to `main` stable promotion and does
+not claim Home Assistant Core certification.
+
+## 1.0 readiness contract
+
+Each criterion is measurable and links to evidence. Any unmet criterion must be
+marked as `Blocked` with an issue reference, or `N/A` with an explicit rationale.
+
+| Criterion | How it is measured | Evidence | Status | Blocking issues |
+|---|---|---|---|---|
+| IQS-01 custom integration scope is explicit | `README.md` and roadmap state this is a community custom integration and not Home Assistant Core certification | [README project status](../README.md#project-status), [Roadmap quality flow](roadmap.md#release-and-quality-flow) | Done | None |
+| IQS-02 rule-by-rule quality contract is maintained | This section exists with measurable criteria, evidence links, and explicit status per criterion | [Quality contract](#10-readiness-contract), [Repository validator](../scripts/validate_repository.py) | Done | None |
+| IQS-03 lifecycle, reconfigure, and repairs behavior is regression-tested | CI executes lifecycle, config-flow, and repairs tests and enforces coverage thresholds | [Lifecycle tests](../tests/homeassistant/test_lifecycle_runtime.py), [Config flow tests](../tests/test_config_flow.py), [Repairs tests](../tests/test_repairs.py), [CI workflow](../.github/workflows/ci.yml) | Done | None |
+| IQS-04 diagnostics redaction and repository safety checks are enforced | Diagnostics tests and repository checks verify redaction, required files, metadata, and static-analysis contracts | [Diagnostics tests](../tests/test_diagnostics.py), [Repository validator](../scripts/validate_repository.py) | Done | None |
+| IQS-05 hardware qualification evidence exists for verified revisions | Qualification matrix and sanitized fixtures are present and validated in CI | [Qualification matrix](../tests/hil/qualification_matrix.json), [HIL runbook](hil-qualification.md), [HIL validator](../scripts/validate_hil_qualification.py) | Done | None |
+| IQS-06 stable promotion is blocked until release blockers are cleared | Stable milestone close requires zero open `release-blocker` issues and all criteria marked `Done` or justified `N/A` | [Release checklist](release-checklist.md), [Merge gate workflow](../.github/workflows/merge-gate.yml), [Issue #55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55) | Done | None |
+| IQS-07 Home Assistant Core maintainership requirement | Not applicable to this repository because it is intentionally distributed as a custom integration through HACS/manual install | [README project status](../README.md#project-status), [Roadmap quality flow](roadmap.md#release-and-quality-flow) | N/A | Not applicable by scope |
+
+## Stable release review cadence
+
+The readiness contract is reviewed on every stable promotion PR from `devel` to
+`main`.
+
+Required review actions for each stable promotion:
+
+- confirm every readiness criterion remains `Done` or justified `N/A`;
+- verify no open `release-blocker` issues remain;
+- update evidence links if files/tests/workflows moved;
+- update roadmap release notes using the same criterion IDs.
+
+## Roadmap alignment
+
+Milestone completion and roadmap readiness statements must use the same criteria
+defined in this document. If roadmap text claims readiness, it must reference
+the matching `IQS-*` criterion and evidence.
 
 ## Automated test layers
 
