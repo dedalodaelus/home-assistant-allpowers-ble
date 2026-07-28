@@ -384,7 +384,8 @@ CI validation, repository validation, and safety-documentation updates before
 publication. Urgent production fixes may target `main` only from `hotfix/*`
 branches cut from `main`, and then must be propagated back to `devel`.
 Quality goals describe current evidence and tests, not a formal Home Assistant
-certification program.
+certification program. Version 1.0 readiness criteria are tracked in
+`docs/quality.md` and reviewed on every stable promotion.
 
 Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 

@@ -56,7 +56,13 @@ import smoke test in CI. Behavioral API changes may still require adaptation.
 
 - Changes land on `devel` with CI, lint, typing, and repository checks.
 - Milestone releases are promoted from `devel` to `main` through reviewed pull requests.
+- Version 1.0 readiness is evaluated with the rule-by-rule contract in
+   `docs/quality.md` (`IQS-*` criteria).
+- A milestone cannot be declared complete while any `IQS-*` criterion is `Blocked`
+   or while any `release-blocker` issue remains open.
 - Documentation guarantees are updated only when matching code and tests are already merged.
+- Stable promotion notes and milestone-completion notes must cite the same
+   `IQS-*` criteria used by the quality contract.
 - This project tracks practical quality targets for a community integration; it does
    not claim official Home Assistant Core certification tiers.
 
