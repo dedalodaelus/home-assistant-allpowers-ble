@@ -6,6 +6,14 @@
 
 [English](README.md)
 
+<p align="center">
+  <img
+    src="docs/assets/branding/readme-banner.png"
+    alt="ALLPOWERS BLE community integration for Home Assistant"
+    width="720"
+  >
+</p>
+
 Integración local de Home Assistant para estaciones de energía portátiles
 ALLPOWERS compatibles. Utiliza la pila Bluetooth oficial de Home Assistant, por lo
 que funciona tanto con un adaptador local como mediante un **Bluetooth Proxy de
