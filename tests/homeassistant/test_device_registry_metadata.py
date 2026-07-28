@@ -56,9 +56,9 @@ async def test_device_registry_metadata_refreshes_when_settings_arrive(
         replace(
             client.snapshot(),
             settings=settings(
-                hardware_version="1.2",
+                hardware_version="0.3",
                 firmware_version="3.4",
-                raw_hardware_version=0x12,
+                raw_hardware_version=0x03,
                 raw_firmware_version=0x34,
             ),
         )
@@ -66,7 +66,7 @@ async def test_device_registry_metadata_refreshes_when_settings_arrive(
 
     updated = registry.async_get(device.id)
     assert updated is not None
-    assert updated.hw_version == "1.2"
+    assert updated.hw_version == "0.3"
     assert updated.sw_version == "3.4"
 
     client.set_snapshot(
@@ -83,7 +83,7 @@ async def test_device_registry_metadata_refreshes_when_settings_arrive(
 
     unchanged = registry.async_get(device.id)
     assert unchanged is not None
-    assert unchanged.hw_version == "1.2"
+    assert unchanged.hw_version == "0.3"
     assert unchanged.sw_version == "3.4"
 
     await coordinator.async_shutdown()

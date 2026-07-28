@@ -26,7 +26,7 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     assert payload["entry"]["options"]["status_interval"] == 20
     assert payload["model_support"]["model"] == "R600"
     assert payload["model_support"]["classification"] == "verified"
-    assert payload["model_support"]["profile"] == "r600-hw-1.2"
+    assert payload["model_support"]["profile"] == "r600-hw-0.3"
     assert payload["model_support"]["capabilities"]["write_output_controls"]
     assert payload["snapshot"]["advertised_name"] == "**REDACTED_NAME**"
     assert payload["snapshot"]["last_error"] == {

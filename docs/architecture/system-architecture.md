@@ -333,15 +333,15 @@ flowchart TD
 
     CAND --> PROBE
     PROBE --> PROFILE
-    PROFILE -->|R600 hardware 1.2 and raw 0x12| VERIFIED
+    PROFILE -->|R600 hardware 0.3 and raw 0x03| VERIFIED
     PROFILE -->|unverified R600, AP S candidate, generic candidate| EXP
     PROFILE -->|known incompatible S500 or S700 family| REJECT
 ```
 
-Capability flags are data, not scattered name checks. The verified R600 hardware
-signature can read telemetry and use output/settings writes. Unverified candidates
-remain telemetry-only. Known incompatible families are rejected explicitly before
-broad name or service-UUID matches.
+Capability flags are data, not scattered name checks. Verified R600 hardware
+signatures can read telemetry and use output/settings writes. Unverified
+candidates remain telemetry-only. Known incompatible families are rejected
+explicitly before broad name or service-UUID matches.
 
 ## 14. Concurrency and ownership
 

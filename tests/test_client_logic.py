@@ -48,10 +48,10 @@ def _settings(**changes: object) -> SettingsData:
         "work_mode": WorkMode.MUTE,
         "car_charger_enabled": False,
         "eco_timeout_hours": 2,
-        "hardware_version": "1.2",
+        "hardware_version": "0.3",
         "firmware_version": "1.1",
         "raw_flags": 0xA0,
-        "raw_hardware_version": 0x12,
+        "raw_hardware_version": 0x03,
         "raw_firmware_version": 0x11,
     }
     values.update(changes)
@@ -191,7 +191,7 @@ async def test_output_command_requires_fresh_status() -> None:
 @pytest.mark.asyncio
 async def test_output_command_rejects_unknown_status_bits_on_verified_profile() -> None:
     client, _ = _connected_client()
-    client._settings = _settings(hardware_version="1.2", raw_hardware_version=0x12)
+    client._settings = _settings(hardware_version="0.3", raw_hardware_version=0x03)
     client._settings_monotonic = asyncio.get_running_loop().time()
     client._status = _status(raw_flags=0x14)
     client._status_monotonic = asyncio.get_running_loop().time()
@@ -232,14 +232,14 @@ async def test_consecutive_settings_commands_handle_contradictory_and_duplicate_
 
     contradictory = notification_builder(
         0x03,
-        bytes((0xA1, 2, 0x00, 0x00, 0x12, 0x11)),
+        bytes((0xA1, 2, 0x00, 0x00, 0x03, 0x11)),
     )
     client._notification_handler(FakeCharacteristic(), bytearray(contradictory))
     assert client._pending_settings_transaction is not None
 
     matching = notification_builder(
         0x03,
-        bytes((0xA5, 2, 0x00, 0x00, 0x12, 0x11)),
+        bytes((0xA5, 2, 0x00, 0x00, 0x03, 0x11)),
     )
     client._notification_handler(FakeCharacteristic(), bytearray(matching))
     assert client._pending_settings_transaction is None
@@ -297,8 +297,8 @@ async def test_settings_command_rejects_reserved_work_mode_on_verified_profile()
 ):
     client, _ = _connected_client()
     client._settings = _settings(
-        hardware_version="1.2",
-        raw_hardware_version=0x12,
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
         work_mode=None,
     )
     client._settings_monotonic = asyncio.get_running_loop().time()
@@ -313,8 +313,8 @@ async def test_settings_command_rejects_unsupported_timeout_on_verified_profile(
 ):
     client, _ = _connected_client()
     client._settings = _settings(
-        hardware_version="1.2",
-        raw_hardware_version=0x12,
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
         eco_timeout_hours=9,
     )
     client._settings_monotonic = asyncio.get_running_loop().time()
@@ -381,7 +381,7 @@ async def test_runtime_profile_downgrade_blocks_subsequent_writes() -> None:
     now = asyncio.get_running_loop().time()
     client._status = _status()
     client._status_monotonic = now
-    client._settings = _settings(hardware_version="1.2", raw_hardware_version=0x12)
+    client._settings = _settings(hardware_version="0.3", raw_hardware_version=0x03)
     client._settings_monotonic = now
 
     await client.async_set_ac(True)

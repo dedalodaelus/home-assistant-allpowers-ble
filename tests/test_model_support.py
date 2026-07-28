@@ -1,19 +1,30 @@
 """Tests for conservative model-family detection."""
 
+import pytest
+
 from custom_components.allpowers_ble.model_support import identify_model
 
 
-def test_r600_is_verified() -> None:
+@pytest.mark.parametrize(
+    ("hardware_version", "raw_hardware_version", "expected_profile"),
+    (("0.3", 0x03, "r600-hw-0.3"),),
+)
+def test_r600_is_verified(
+    hardware_version: str,
+    raw_hardware_version: int,
+    expected_profile: str,
+) -> None:
     support = identify_model(
         "ALLPOWERS R600",
-        hardware_version="1.2",
-        raw_hardware_version=0x12,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
     )
 
     assert support.model == "R600"
     assert support.supported is True
     assert support.verified is True
     assert support.classification == "verified"
+    assert support.profile == expected_profile
     assert support.capabilities.write_output_controls is True
     assert support.capabilities.write_settings_controls is True
     assert support.reason is None

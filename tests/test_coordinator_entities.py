@@ -179,7 +179,7 @@ def test_coordinator_refreshes_registry_metadata_once_per_change(
             settings_monotonic=monotonic(),
         )
     )
-    assert registry.updates == [("dev-1", {"hw_version": "1.2", "sw_version": "3.4"})]
+    assert registry.updates == [("dev-1", {"hw_version": "0.3", "sw_version": "3.4"})]
 
     client.set_snapshot(
         replace(
@@ -213,7 +213,7 @@ def test_coordinator_does_not_overwrite_valid_registry_values_with_invalid_versi
     entry, client, _, _ = configured_entry()
     registry = _RegistryStub(
         {
-            ADDRESS: _RegistryDevice("dev-1", hw_version="1.2", sw_version="3.4"),
+            ADDRESS: _RegistryDevice("dev-1", hw_version="0.3", sw_version="3.4"),
         }
     )
     monkeypatch.setattr(
@@ -274,7 +274,7 @@ def test_coordinator_registry_refresh_is_isolated_per_entry_address(
     )
 
     client_a.set_snapshot(replace(client_a.snapshot(), settings=settings()))
-    assert registry.updates == [("dev-a", {"hw_version": "1.2", "sw_version": "3.4"})]
+    assert registry.updates == [("dev-a", {"hw_version": "0.3", "sw_version": "3.4"})]
 
     client_b.set_snapshot(
         replace(
@@ -328,7 +328,7 @@ async def test_entity_setup_and_state_values() -> None:
         "output_power": 150,
         "remaining_time": 120,
         "rssi": -61,
-        "hardware_version": "1.2",
+        "hardware_version": "0.3",
         "firmware_version": "3.4",
         "reconnects": 1,
         "parser_discards": 3,
@@ -387,7 +387,7 @@ async def test_entity_setup_and_state_values() -> None:
     assert device_info.identifiers == {("allpowers_ble", ADDRESS)}
     assert device_info.connections == {("bluetooth", ADDRESS)}
     assert device_info.model == "R600"
-    assert device_info.hw_version == "1.2"
+    assert device_info.hw_version == "0.3"
     assert device_info.sw_version == "3.4"
     assert coordinator.data.status is not None
 
