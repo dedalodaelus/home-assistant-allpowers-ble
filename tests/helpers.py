@@ -198,6 +198,7 @@ class FakeConfigEntriesManager:
         self.updates: list[tuple[ConfigEntry[Any], dict[str, Any]]] = []
         self.forwarded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
         self.unloaded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
+        self.entries: list[ConfigEntry[Any]] = []
         self.unload_result = True
 
     def async_update_entry(
@@ -208,6 +209,8 @@ class FakeConfigEntriesManager:
         options: dict[str, Any] | None = None,
         version: int | None = None,
         minor_version: int | None = None,
+        unique_id: str | None = None,
+        title: str | None = None,
     ) -> None:
         if data is not None:
             entry.data = dict(data)
@@ -218,6 +221,14 @@ class FakeConfigEntriesManager:
             entry.version = version
         if minor_version is not None:
             entry.minor_version = minor_version
+        if unique_id is not None:
+            entry.unique_id = unique_id
+        if title is not None:
+            entry.title = title
+
+    def async_entries(self, domain: str | None = None) -> list[ConfigEntry[Any]]:
+        del domain
+        return list(self.entries)
 
     async def async_forward_entry_setups(
         self,

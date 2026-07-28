@@ -47,6 +47,9 @@ required on the power station side.
 See [Compatibility](docs/compatibility.md) before reporting another model as
 supported.
 
+For real hardware qualification workflow, see
+[HIL qualification runbook](docs/hil-qualification.md).
+
 ## Requirements
 
 - Home Assistant **2026.7.0 or newer**.
@@ -262,6 +265,19 @@ Defaults are deliberately conservative and match observed R600 behavior.
 
 Options are applied live. A full integration reload is not required.
 
+## Reconfigure entry data
+
+Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
+need to update entry-level setup data without removing the integration entry.
+
+- Supported reconfigure fields: Bluetooth address and display name.
+- Reconfigure performs an active probe before applying changes.
+- Duplicate targets are rejected to preserve one-entry-per-device behavior.
+- If you cancel the flow, no entry data is changed.
+
+Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
+settings). Do not use reconfigure for those option values.
+
 ## Diagnostics and logging
 
 Download diagnostics from the integration or device page in Home Assistant. The
@@ -291,6 +307,17 @@ logger:
 
 Remove verbose logging after collecting the relevant failure because Bluetooth
 logs can be large. See [Troubleshooting](docs/troubleshooting.md).
+
+## Home Assistant Repairs
+
+The integration creates Repairs only for persistent actionable conditions and
+dismisses them automatically on recovery:
+
+- `persistent_no_route` after repeated no-route failures.
+- `repeated_watchdog_resets` after repeated watchdog reconnects.
+- `invalid_migrated_options` when legacy options cannot be migrated safely.
+
+Transient reconnects do not create Repairs.
 
 ## Architecture
 
@@ -357,7 +384,8 @@ CI validation, repository validation, and safety-documentation updates before
 publication. Urgent production fixes may target `main` only from `hotfix/*`
 branches cut from `main`, and then must be propagated back to `devel`.
 Quality goals describe current evidence and tests, not a formal Home Assistant
-certification program.
+certification program. Version 1.0 readiness criteria are tracked in
+`docs/quality.md` and reviewed on every stable promotion.
 
 Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 

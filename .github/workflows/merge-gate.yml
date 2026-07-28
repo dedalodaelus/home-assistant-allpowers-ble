@@ -1,6 +1,8 @@
+# Centralized PR gate: enforces branch policy + required checks in one workflow.
 name: Merge gate
 
 on:
+  # Trigger on PR lifecycle events where policy/check status can change.
   pull_request:
     types:
       - opened
@@ -8,35 +10,43 @@ on:
       - synchronize
       - ready_for_review
 
+# Minimum privileges for reading PR/check state.
 permissions:
   contents: read
   checks: read
   pull-requests: read
 
 concurrency:
+  # Keep one active run per PR and cancel obsolete runs after new pushes.
   group: merge-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   gate:
+    # Single required job that aggregates policy checks and CI check conclusions.
     name: Gate all required checks
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    env:
+      REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
       - name: Wait for required checks on PR head
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // Resolve repository/PR context from the event payload.
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const pr = context.payload.pull_request;
 
+            // Hard stop: this workflow is only meaningful for pull_request events.
             if (!pr) {
               core.setFailed("This workflow only supports pull_request events.");
               return;
             }
 
+            // Capture refs + author data used by branch and bot-policy checks.
             const baseRef = pr.base?.ref || "";
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
@@ -75,6 +85,7 @@ jobs:
             // Policy: hotfix branches targeting main must be based on main.
             // A valid hotfix head must be equal to or ahead of main in commit ancestry.
             if (baseRef === "main" && isHotfixBranch) {
+              // Compare main against the hotfix head SHA to confirm ancestry direction.
               const mainVsHotfix = await github.rest.repos.compareCommits({
                 owner,
                 repo,
@@ -95,6 +106,7 @@ jobs:
 
             // Policy: CHANGELOG.md is managed by release-please and must not be edited
             // in regular development PRs.
+            // Exception: allow main -> devel sync PRs to carry changelog updates.
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner,
               repo,
@@ -105,11 +117,12 @@ jobs:
             const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
             const isFeatureToDevel = baseRef === "devel";
             const isPromotionToMain = baseRef === "main";
+            const isMainToDevelSync = baseRef === "devel" && headRef === "main";
 
             if (
               touchesChangelog
               && (
-                isFeatureToDevel
+                (isFeatureToDevel && !isMainToDevelSync)
                 || (isPromotionToMain && !isReleasePleaseBranch)
               )
             ) {
@@ -119,11 +132,13 @@ jobs:
               return;
             }
 
+            // Draft PRs skip strict gate until marked ready for review.
             if (pr.draft) {
               core.info("Draft PR detected. Skipping strict gate until ready for review.");
               return;
             }
 
+            // Required check names must match GitHub check-run names exactly.
             const requiredChecks = [
               "Python, tests, and release validation",
               "HACS validation",
@@ -132,13 +147,22 @@ jobs:
               "Review dependency changes",
               "Analyze Python",
             ];
+            const requireHilStableGate =
+              String(process.env.REQUIRE_HIL_STABLE_GATE || "").toLowerCase() === "true";
+            if (baseRef === "main" && requireHilStableGate) {
+              requiredChecks.push("HIL qualification (opt-in)");
+              core.info("REQUIRE_HIL_STABLE_GATE=true; enforcing HIL qualification check.");
+            }
+            // Accepted terminal conclusions for required checks.
             const acceptedConclusions = new Set(["success", "neutral", "skipped"]);
 
+            // Polling/timing controls for check-run discovery and completion.
             const pollIntervalMs = 15000;
             const timeoutMs = 30 * 60 * 1000;
             const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
+            // Keep only the latest run per check name (re-runs may create duplicates).
             function formatRunsMap(checkRuns) {
               const map = new Map();
               for (const run of checkRuns) {
@@ -150,6 +174,7 @@ jobs:
               return map;
             }
 
+            // Poll until all required checks are completed/accepted, or fail fast on policy.
             while (true) {
               const elapsed = Date.now() - start;
               if (elapsed > timeoutMs) {
@@ -157,6 +182,7 @@ jobs:
                 return;
               }
 
+              // Pull latest check-runs for the exact PR head commit.
               const response = await github.rest.checks.listForRef({
                 owner,
                 repo,
@@ -171,6 +197,7 @@ jobs:
               const pending = [];
               const failed = [];
 
+              // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
                 const run = latestByName.get(checkName);
                 if (!run) {
@@ -188,11 +215,13 @@ jobs:
                 }
               }
 
+              // Diagnostic logging to simplify gate troubleshooting in Actions UI.
               core.info(`Head SHA: ${headSha}`);
               if (missing.length) core.info(`Missing: ${missing.join(", ")}`);
               if (pending.length) core.info(`Pending: ${pending.join(", ")}`);
               if (failed.length) core.info(`Failed: ${failed.join(", ")}`);
 
+              // Any terminal non-accepted conclusion fails the gate immediately.
               if (failed.length) {
                 core.setFailed(`Required checks failed: ${failed.join("; ")}`);
                 return;
@@ -209,10 +238,12 @@ jobs:
                 return;
               }
 
+              // Success condition: no missing checks and no pending runs.
               if (missing.length === 0 && pending.length === 0) {
                 core.info("All required checks completed successfully.");
                 return;
               }
 
+              // Continue polling while checks are still being created/executed.
               await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
             }

@@ -252,6 +252,19 @@ valores por defecto salvo que tengas una razón medida para ajustarlos.
 
 Los cambios de opciones se aplican en caliente, sin recargar la integración.
 
+## Reconfiguracion de la entrada
+
+Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
+cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
+
+- Campos reconfigurables: direccion Bluetooth y nombre visible.
+- La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
+- Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
+- Si cancelas el flujo, la entrada no se modifica.
+
+Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
+keepalive). No uses reconfiguracion para esos valores opcionales.
+
 ## Diagnósticos
 
 Los diagnósticos incluyen contadores de conexión, paquetes válidos, descartes del
@@ -274,6 +287,17 @@ logger:
 ```
 
 Consulta [Resolución de problemas](docs/troubleshooting.md).
+
+## Repairs de Home Assistant
+
+La integración crea Repairs solo para condiciones persistentes y accionables,
+y los cierra automáticamente cuando se recuperan:
+
+- `persistent_no_route` tras fallos repetidos sin ruta conectable.
+- `repeated_watchdog_resets` tras reconexiones repetidas por watchdog.
+- `invalid_migrated_options` cuando no se pueden migrar con seguridad opciones legacy.
+
+Las reconexiones transitorias no crean Repairs.
 
 ## Desarrollo
 

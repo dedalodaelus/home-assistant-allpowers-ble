@@ -20,6 +20,7 @@ flowchart TB
         CF[Config flow and active probe]
         ENT[Entity platforms]
         DIA[Diagnostics]
+    REP[Repairs]
         CO[AllpowersCoordinator]
         BT[Bluetooth integration]
     end
@@ -41,6 +42,7 @@ flowchart TB
     CF --> DEC
     ENT --> CO
     DIA --> CO
+    REP --> CO
     CO <--> CL
     CL --> BT
     BT --> LOCAL
@@ -62,10 +64,11 @@ flowchart TB
 | `models.py` | Integration-level snapshots and connection counters. |
 | `options.py` | Home Assistant-independent option defaults and relationship validation. |
 | `coordinator.py` | Push bridge from the BLE client to CoordinatorEntity consumers. |
-| `config_flow.py` | Discovery, candidate filtering, active protocol probe, duplicate prevention, and options flow. |
+| `config_flow.py` | Discovery, candidate filtering, active protocol probe, duplicate prevention, reconfigure flow for mutable entry data, and options flow. |
 | `entity.py` | Device metadata and freshness-based availability classes. |
 | Platform modules | Home Assistant entities and service error translation. |
 | `diagnostics.py` | Redacted entry/device diagnostics. |
+| `repairs.py` | Entry-scoped Repairs with persistence thresholds, deduplication, and automatic dismissal. |
 
 ## Setup sequence
 
@@ -98,6 +101,10 @@ sequenceDiagram
 The config flow does not trust an advertisement alone. It establishes a temporary
 connection, verifies the expected service and characteristics, writes the known
 status request, and waits for a valid decoded status response.
+
+The reconfigure step follows the same active-probe contract before updating
+mutable entry fields (Bluetooth address and display name). It updates the
+existing entry and aborts with success, rather than creating a new entry.
 
 ## Persistent connection state machine
 
@@ -238,6 +245,9 @@ idempotent shutdown path.
   `HomeAssistantError`.
 - Initial setup raises `ConfigEntryNotReady` when a route exists but valid telemetry
   is not yet available, allowing Home Assistant to retry.
+- Persistent actionable failures are surfaced through one Repair per
+  config-entry and issue type, then dismissed automatically when the
+  deterministic recovery condition is met.
 
 ## Persistence
 

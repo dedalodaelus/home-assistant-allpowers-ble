@@ -62,6 +62,9 @@ The `USE_REAL_HOMEASSISTANT=1` lane is the repository's gating compatibility
 lane for Home Assistant-facing contracts. Hardware-in-the-loop validation remains
 necessary before marking another model verified.
 
+For step-by-step real hardware execution and evidence capture, follow
+`docs/hil-qualification.md`.
+
 ## Static analysis
 
 ```bash
@@ -105,8 +108,8 @@ The validator checks:
 
 ```bash
 python scripts/build_release.py --clean
-python scripts/check_version.py 0.1.0
-python scripts/validate_release_metadata.py --tag 0.1.0 --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
+python scripts/check_version.py X.Y.Z
+python scripts/validate_release_metadata.py --tag X.Y.Z --zip-path dist/allpowers_ble.zip --checksum-path dist/allpowers_ble.zip.sha256 --write-checksum --verify-checksum
 ```
 
 The builder sorts files, normalizes timestamps and permissions, excludes caches,

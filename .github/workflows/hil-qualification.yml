@@ -1,0 +1,60 @@
+name: HIL qualification
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      require_pass:
+        description: "Require pass/na in every lane and scenario"
+        type: boolean
+        required: false
+        default: false
+      max_age_days:
+        description: "Maximum evidence age in days when require_pass is true"
+        type: string
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hil-qualification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualification:
+    name: HIL qualification (opt-in)
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Validate HIL evidence and matrix
+        run: |
+          set -euo pipefail
+          ARGS=(scripts/validate_hil_qualification.py)
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.require_pass }}" == "true" ]]; then
+              ARGS+=(--require-pass --max-age-days "${{ inputs.max_age_days }}")
+            fi
+          elif [[ "${{ vars.REQUIRE_HIL_STABLE_GATE }}" == "true" ]]; then
+            ARGS+=(--require-pass --max-age-days 30)
+          fi
+
+          python "${ARGS[@]}"

@@ -18,6 +18,17 @@ open a GATT connection.
 - Avoid relying only on a proxy that is isolated by VLAN or firewall rules.
 - Restart the station's Bluetooth function before restarting all of Home Assistant.
 
+## Device address or display name changed
+
+Do not remove and recreate the entry unless recovery requires it.
+
+- Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure**.
+- Reconfigure is for mutable entry data only: Bluetooth address and display name.
+- The flow runs the same active probe contract before applying changes.
+- If the selected address is already owned by another entry, the change is rejected.
+
+Use **Options** only for runtime timing and keepalive values.
+
 ## Setup times out after connecting
 
 The GATT connection opened, but no checksum-valid status frame arrived.
@@ -72,6 +83,20 @@ requires fresh settings.
 - Review `last_error`, `parser_discards`, `protocol_errors`, `write_errors`, `watchdog_resets`,
   `telemetry_watchdog_resets`, and `transport_watchdog_resets` in diagnostics.
   Those counters are session-scoped diagnostics and can reset after reloads or reconnects.
+
+## Home Assistant Repairs
+
+The integration creates low-noise Home Assistant Repairs only for persistent,
+actionable conditions and dismisses them automatically after recovery:
+
+- `persistent_no_route`: created only after repeated no-route failures where no
+  connectable Bluetooth path is available.
+- `repeated_watchdog_resets`: created only after repeated watchdog reconnects
+  and dismissed once telemetry is fresh again.
+- `invalid_migrated_options`: created when a legacy entry cannot be migrated due
+  to invalid option relationships and dismissed after successful migration.
+
+Normal transient reconnects do not create Repairs.
 
 ## Aggressive timing causes proxy instability
 

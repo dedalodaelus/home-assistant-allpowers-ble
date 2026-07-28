@@ -1,14 +1,17 @@
 {
   "config": {
     "abort": {
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
       "no_devices_found": "No compatible connectable ALLPOWERS device was found. Confirm that the device is powered on and visible to a Bluetooth proxy or local adapter.",
       "not_connectable": "The discovery source cannot make active Bluetooth connections. Use a connectable ESPHome Bluetooth proxy or a supported local adapter.",
       "not_supported": "This ALLPOWERS model uses an unsupported protocol revision."
     },
     "error": {
+      "already_configured": "This Bluetooth address is already configured in another ALLPOWERS BLE entry.",
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
       "connect_timeout": "Bluetooth connection could not be established within the probe timeout.",
       "gatt_unavailable": "The required ALLPOWERS BLE GATT services/characteristics are not available on this device.",
+      "not_supported": "The selected device is not compatible with this integration.",
       "notify_failed": "Could not enable status notifications from the ALLPOWERS device.",
       "timeout": "The device connected but did not return a valid status frame before the timeout.",
       "unknown": "Unexpected error while validating the device. Check the logs for details."
@@ -24,6 +27,14 @@
         },
         "description": "Select a compatible device currently visible to a connectable Bluetooth adapter or ESPHome Bluetooth proxy.",
         "title": "Select ALLPOWERS device"
+      },
+      "reconfigure": {
+        "data": {
+          "address": "Bluetooth address",
+          "device_name": "Display name"
+        },
+        "description": "Update supported entry-level values and validate the selected device before applying changes.",
+        "title": "Reconfigure ALLPOWERS BLE"
       }
     }
   },
@@ -197,6 +208,20 @@
     },
     "command_unconfirmed": {
       "message": "The device did not confirm the previous command yet. Wait for a fresh update and retry."
+    }
+  },
+  "issues": {
+    "invalid_migrated_options": {
+      "description": "The migrated options for {entry_title} are invalid and this entry cannot be loaded safely. Reconfigure the integration entry and keep the default option relationships (`status_interval` < `stale_timeout` < `watchdog_timeout`).",
+      "title": "Invalid migrated options in {entry_title}"
+    },
+    "persistent_no_route": {
+      "description": "Home Assistant cannot find a connectable Bluetooth route for {entry_title} after multiple retries. Check Bluetooth Proxy connectivity, adapter availability, and ensure no other app keeps the station connected.",
+      "title": "No connectable Bluetooth route for {entry_title}"
+    },
+    "repeated_watchdog_resets": {
+      "description": "The integration had to reconnect {entry_title} repeatedly due to telemetry/transport watchdog resets. Improve BLE signal quality, avoid aggressive timing values, and verify only one active BLE client controls the station.",
+      "title": "Repeated watchdog reconnects for {entry_title}"
     }
   },
   "title": "ALLPOWERS BLE"

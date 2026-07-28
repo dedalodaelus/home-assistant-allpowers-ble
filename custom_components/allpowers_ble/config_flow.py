@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, override
+from typing import Any, cast, override
 
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 import voluptuous as vol
@@ -168,6 +168,106 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Handle user-initiated config-entry reconfiguration."""
+        reconfigure_entry = self._get_reconfigure_entry()
+        current_address = str(reconfigure_entry.data.get(CONF_ADDRESS, "")).upper()
+        current_name = str(
+            reconfigure_entry.data.get(CONF_DEVICE_NAME, reconfigure_entry.title)
+        )
+        errors: dict[str, str] = {}
+
+        await bluetooth.async_request_active_scan(self.hass)
+        discovered_devices = self._discover_reconfigure_candidates(reconfigure_entry)
+        if current_address and current_address not in discovered_devices:
+            # Keep the current route selectable when the device is temporarily silent.
+            discovered_devices[current_address] = BluetoothServiceInfoBleak(
+                name=current_name,
+                address=current_address,
+                rssi=0,
+                service_uuids=[SERVICE_UUID],
+                connectable=True,
+                manufacturer_data={},
+                service_data={},
+                source="local",
+                device=cast(Any, None),
+                advertisement=cast(Any, None),
+                time=0,
+                tx_power=None,
+            )
+
+        if user_input is not None:
+            address = str(user_input[CONF_ADDRESS]).upper()
+            device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
+
+            if self._is_address_in_use(reconfigure_entry, address):
+                errors[CONF_ADDRESS] = "already_configured"
+            else:
+                discovery_info = discovered_devices.get(address)
+                if discovery_info is None:
+                    discovery_info = BluetoothServiceInfoBleak(
+                        name=current_name,
+                        address=address,
+                        rssi=0,
+                        service_uuids=[SERVICE_UUID],
+                        connectable=True,
+                        manufacturer_data={},
+                        service_data={},
+                        source="local",
+                        device=cast(Any, None),
+                        advertisement=cast(Any, None),
+                        time=0,
+                        tx_power=None,
+                    )
+                abort_reason = await self._async_probe_candidate(
+                    address=address,
+                    advertised_name=discovery_info.name or current_name,
+                )
+                if abort_reason is not None:
+                    errors["base"] = abort_reason
+                elif self._probe_error is not None:
+                    errors["base"] = self._probe_error
+                else:
+                    entry_title = _entry_title_for_name(device_name, address)
+                    current_unique_id = str(reconfigure_entry.unique_id or "").upper()
+                    if (
+                        current_unique_id != address
+                        or reconfigure_entry.title != entry_title
+                    ):
+                        self.hass.config_entries.async_update_entry(
+                            reconfigure_entry,
+                            unique_id=address,
+                            title=entry_title,
+                        )
+                    return self.async_update_reload_and_abort(
+                        reconfigure_entry,
+                        data_updates={
+                            CONF_ADDRESS: address,
+                            CONF_DEVICE_NAME: device_name,
+                        },
+                        reason="reconfigure_successful",
+                        reload_even_if_entry_is_unchanged=False,
+                    )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ADDRESS, default=current_address): vol.In(
+                        {
+                            address: _display_name(info)
+                            for address, info in discovered_devices.items()
+                        }
+                    ),
+                    vol.Required(CONF_DEVICE_NAME, default=current_name): str,
+                }
+            ),
+            errors=errors,
+        )
+
     @callback
     def _discover_candidates(self) -> None:
         current_ids = {
@@ -186,50 +286,59 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             self._discovered_devices[address] = discovery_info
 
+    @callback
+    def _discover_reconfigure_candidates(
+        self,
+        reconfigure_entry: ConfigEntry[Any],
+    ) -> dict[str, BluetoothServiceInfoBleak]:
+        discovered: dict[str, BluetoothServiceInfoBleak] = {}
+        for discovery_info in bluetooth.async_discovered_service_info(
+            self.hass, connectable=True
+        ):
+            address = discovery_info.address.upper()
+            if not _matches_device(discovery_info):
+                continue
+            if not identify_model(discovery_info.name).supported:
+                continue
+            discovered[address] = discovery_info
+        return discovered
+
+    def _is_address_in_use(
+        self,
+        reconfigure_entry: ConfigEntry[Any],
+        address: str,
+    ) -> bool:
+        config_entries = getattr(self.hass, "config_entries", None)
+        if config_entries is None or not hasattr(config_entries, "async_entries"):
+            return False
+
+        normalized_address = address.upper()
+        for entry in config_entries.async_entries(DOMAIN):
+            if entry.entry_id == reconfigure_entry.entry_id:
+                continue
+            entry_address = str(entry.data.get(CONF_ADDRESS, "")).upper()
+            entry_unique_id = str(entry.unique_id or "").upper()
+            if (
+                entry_address == normalized_address
+                or entry_unique_id == normalized_address
+            ):
+                return True
+        return False
+
     async def _async_probe_and_create(
         self,
         discovery_info: BluetoothServiceInfoBleak,
     ) -> ConfigFlowResult | None:
         address = discovery_info.address.upper()
         name = discovery_info.name or "ALLPOWERS"
-        try:
-            await async_probe_device(
-                self.hass,
-                address=address,
-                advertised_name=name,
-                timeout=INITIAL_CONNECT_TIMEOUT,
-            )
-        except UnsupportedDeviceError:
-            return self.async_abort(reason="not_supported")
-        except DeviceNotFoundError as ex:
-            _LOGGER.debug("No connectable path during setup: %s", ex)
-            self._probe_error = "cannot_connect"
+        abort_reason = await self._async_probe_candidate(
+            address=address,
+            advertised_name=name,
+        )
+        if abort_reason is not None:
+            return self.async_abort(reason=abort_reason)
+        if self._probe_error is not None:
             return None
-        except ProbeConnectionTimeoutError as ex:
-            _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
-            self._probe_error = "connect_timeout"
-            return None
-        except ProbeGattValidationError as ex:
-            _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
-            self._probe_error = "gatt_unavailable"
-            return None
-        except ProbeNotificationSetupError as ex:
-            _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
-            self._probe_error = "notify_failed"
-            return None
-        except ProbeStatusTimeoutError:
-            self._probe_error = "timeout"
-            return None
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            _LOGGER.debug("Bluetooth probe failed: %s", ex, exc_info=True)
-            self._probe_error = "cannot_connect"
-            return None
-        except Exception:
-            _LOGGER.exception("Unexpected error while probing ALLPOWERS BLE")
-            self._probe_error = "unknown"
-            return None
-
-        self._probe_error = None
 
         await self.async_set_unique_id(address, raise_on_progress=False)
         self._abort_if_unique_id_configured()
@@ -242,6 +351,46 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             },
             options=ConnectionOptions().as_dict(),
         )
+
+    async def _async_probe_candidate(
+        self,
+        *,
+        address: str,
+        advertised_name: str,
+    ) -> str | None:
+        """Probe a candidate and map transport/protocol failures to flow errors."""
+        self._probe_error = None
+        try:
+            await async_probe_device(
+                self.hass,
+                address=address,
+                advertised_name=advertised_name,
+                timeout=INITIAL_CONNECT_TIMEOUT,
+            )
+        except UnsupportedDeviceError:
+            self._probe_error = None
+            return "not_supported"
+        except DeviceNotFoundError as ex:
+            _LOGGER.debug("No connectable path during setup: %s", ex)
+            self._probe_error = "cannot_connect"
+        except ProbeConnectionTimeoutError as ex:
+            _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
+            self._probe_error = "connect_timeout"
+        except ProbeGattValidationError as ex:
+            _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
+            self._probe_error = "gatt_unavailable"
+        except ProbeNotificationSetupError as ex:
+            _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
+            self._probe_error = "notify_failed"
+        except ProbeStatusTimeoutError:
+            self._probe_error = "timeout"
+        except BLEAK_RETRY_EXCEPTIONS as ex:
+            _LOGGER.debug("Bluetooth probe failed: %s", ex, exc_info=True)
+            self._probe_error = "cannot_connect"
+        except Exception:
+            _LOGGER.exception("Unexpected error while probing ALLPOWERS BLE")
+            self._probe_error = "unknown"
+        return None
 
 
 class AllpowersOptionsFlow(OptionsFlow):
@@ -535,4 +684,9 @@ def _display_name(discovery_info: BluetoothServiceInfoBleak) -> str:
 def _entry_title(discovery_info: BluetoothServiceInfoBleak) -> str:
     name = discovery_info.name or "ALLPOWERS"
     compact = discovery_info.address.replace(":", "").replace("-", "")
+    return f"{name} {compact[-4:].upper()}"
+
+
+def _entry_title_for_name(name: str, address: str) -> str:
+    compact = address.replace(":", "").replace("-", "")
     return f"{name} {compact[-4:].upper()}"
