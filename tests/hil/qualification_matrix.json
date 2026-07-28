@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-28",
+  "retention": "Store only sanitized captures and summaries. Do not include MAC addresses, serial numbers, Home Assistant IDs, or local topology.",
+  "verified_revisions": [
+    {
+      "id": "r600-hw12",
+      "model": "ALLPOWERS R600",
+      "hardware_version": "1.2",
+      "raw_hardware_version": "0x12",
+      "privacy_review": "pass",
+      "routes": {
+        "local_adapter": {
+          "status": "pending",
+          "last_tested": "1970-01-01",
+          "evidence": [
+            "tests/hil/fixtures/r600-hw12/local-adapter-status.sample.jsonl",
+            "tests/hil/fixtures/r600-hw12/local-adapter-settings.sample.jsonl"
+          ],
+          "notes": "Pending qualification run on a local adapter lane."
+        },
+        "active_proxy": {
+          "status": "pending",
+          "last_tested": "1970-01-01",
+          "evidence": [
+            "tests/hil/fixtures/r600-hw12/proxy-status.sample.jsonl",
+            "tests/hil/fixtures/r600-hw12/proxy-settings.sample.jsonl"
+          ],
+          "notes": "Pending qualification run on an active ESPHome proxy lane."
+        }
+      },
+      "scenarios": {
+        "golden_vector_replay": "pending",
+        "reconnect_failover": "pending",
+        "rapid_consecutive_writes": "pending",
+        "stale_timeout_recovery": "pending",
+        "soak_24h": "pending",
+        "upgrade_reload": "pending",
+        "vendor_app_contention": "pending"
+      },
+      "write_capabilities": {
+        "ac_output": "pending",
+        "dc_output": "pending",
+        "light_output": "pending",
+        "eco_mode": "pending",
+        "work_mode": "pending",
+        "eco_timeout": "pending",
+        "car_charger": "pending"
+      }
+    }
+  ]
+}

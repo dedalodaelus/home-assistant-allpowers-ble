@@ -45,6 +45,24 @@ A commercial model name can cover more than one controller, BLE module, or firmw
 family. A report must include the exact label/revision and advertised name. Do not
 change a rejected family to supported merely because it exposes one matching UUID.
 
+## Verified revision evidence lane
+
+Every profile that remains marked as **Verified** must keep an evidence record in
+`tests/hil/qualification_matrix.json` with:
+
+- a route result for `local_adapter`;
+- a route result for `active_proxy`;
+- scenario status for replay, reconnect/failover, rapid writes, stale/timeout,
+  upgrade/reload, vendor-app contention, and soak;
+- write-capability status for every exposed writable control.
+
+Capture artifacts must stay sanitized and stored under
+`tests/hil/fixtures/<revision-id>/`. Do not publish Bluetooth addresses, serial
+numbers, Home Assistant identifiers, or topology details.
+
+Use the [HIL qualification runbook](hil-qualification.md) for the end-to-end
+capture, matrix update, and validation flow.
+
 ## Reporting a result
 
 Use the public issue forms to report compatibility and bugs:

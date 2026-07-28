@@ -86,6 +86,9 @@ jobs:
       - name: Validate repository
         run: python scripts/validate_repository.py
 
+      - name: Validate HIL qualification matrix
+        run: python scripts/validate_hil_qualification.py
+
       - name: Build HACS release archive
         run: python scripts/build_release.py --clean
 

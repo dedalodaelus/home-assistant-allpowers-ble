@@ -27,6 +27,8 @@ jobs:
     name: Gate all required checks
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    env:
+      REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
       - name: Wait for required checks on PR head
         uses: actions/github-script@v9
@@ -145,6 +147,12 @@ jobs:
               "Review dependency changes",
               "Analyze Python",
             ];
+            const requireHilStableGate =
+              String(process.env.REQUIRE_HIL_STABLE_GATE || "").toLowerCase() === "true";
+            if (baseRef === "main" && requireHilStableGate) {
+              requiredChecks.push("HIL qualification (opt-in)");
+              core.info("REQUIRE_HIL_STABLE_GATE=true; enforcing HIL qualification check.");
+            }
             // Accepted terminal conclusions for required checks.
             const acceptedConclusions = new Set(["success", "neutral", "skipped"]);
 

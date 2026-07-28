@@ -62,6 +62,9 @@ The `USE_REAL_HOMEASSISTANT=1` lane is the repository's gating compatibility
 lane for Home Assistant-facing contracts. Hardware-in-the-loop validation remains
 necessary before marking another model verified.
 
+For step-by-step real hardware execution and evidence capture, follow
+`docs/hil-qualification.md`.
+
 ## Static analysis
 
 ```bash

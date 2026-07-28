@@ -65,6 +65,19 @@ Config-flow readiness has an additional strict gate: CI runs
 
 ## Remaining validation boundary
 
+Hardware qualification evidence is tracked in
+`tests/hil/qualification_matrix.json` with sanitized captures under
+`tests/hil/fixtures/`. CI validates schema and redaction via
+`python scripts/validate_hil_qualification.py` so fixture regressions are visible
+even when hardware is not attached.
+
+The operational procedure for collecting real-device evidence is documented in
+`docs/hil-qualification.md`.
+
+For stable promotions that require HIL evidence, maintainers can enforce the
+`HIL qualification (opt-in)` check by enabling
+`REQUIRE_HIL_STABLE_GATE=true` in repository variables.
+
 ## Deterministic sequence regression fixtures
 
 Transport and command-transaction regressions use deterministic fixtures instead of
