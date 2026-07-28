@@ -1,0 +1,40 @@
+{
+  "repository": "https://github.com/dedalodaelus/home-assistant-allpowers-ble",
+  "branch": "devel",
+  "base_commit_visible": "b8ecd32",
+  "generated_assets": {
+    "custom_components/allpowers_ble/brand/icon.png": [
+      256,
+      256
+    ],
+    "custom_components/allpowers_ble/brand/icon@2x.png": [
+      512,
+      512
+    ],
+    "custom_components/allpowers_ble/brand/logo.png": [
+      640,
+      256
+    ],
+    "custom_components/allpowers_ble/brand/logo@2x.png": [
+      1280,
+      512
+    ],
+    "docs/assets/branding/readme-banner.png": [
+      1500,
+      500
+    ],
+    "docs/assets/branding/social-preview.png": [
+      1280,
+      640
+    ],
+    "custom_components/allpowers_ble/brand/dark_icon.png": [
+      256,
+      256
+    ],
+    "custom_components/allpowers_ble/brand/dark_icon@2x.png": [
+      512,
+      512
+    ]
+  },
+  "small_icon_strategy": "Theme-aware AP + Bluetooth only; no station; no separate B"
+}

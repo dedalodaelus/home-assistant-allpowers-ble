@@ -1,21 +1,21 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-28",
+  "generated_at": "2026-07-29",
   "retention": "Store only sanitized captures and summaries. Do not include MAC addresses, serial numbers, Home Assistant IDs, or local topology.",
   "verified_revisions": [
     {
-      "id": "r600-hw12",
+      "id": "r600-hw03",
       "model": "ALLPOWERS R600",
-      "hardware_version": "1.2",
-      "raw_hardware_version": "0x12",
+      "hardware_version": "0.3",
+      "raw_hardware_version": "0x03",
       "privacy_review": "pass",
       "routes": {
         "local_adapter": {
           "status": "pending",
           "last_tested": "1970-01-01",
           "evidence": [
-            "tests/hil/fixtures/r600-hw12/local-adapter-status.sample.jsonl",
-            "tests/hil/fixtures/r600-hw12/local-adapter-settings.sample.jsonl"
+            "tests/hil/fixtures/r600-hw03/local-adapter-status.sample.jsonl",
+            "tests/hil/fixtures/r600-hw03/local-adapter-settings.sample.jsonl"
           ],
           "notes": "Pending qualification run on a local adapter lane."
         },
@@ -23,8 +23,8 @@
           "status": "pending",
           "last_tested": "1970-01-01",
           "evidence": [
-            "tests/hil/fixtures/r600-hw12/proxy-status.sample.jsonl",
-            "tests/hil/fixtures/r600-hw12/proxy-settings.sample.jsonl"
+            "tests/hil/fixtures/r600-hw03/proxy-status.sample.jsonl",
+            "tests/hil/fixtures/r600-hw03/proxy-settings.sample.jsonl"
           ],
           "notes": "Pending qualification run on an active ESPHome proxy lane."
         }

@@ -5,13 +5,13 @@ from __future__ import annotations
 from .codec import STATUS_AC_MASK, STATUS_DC_MASK, STATUS_LIGHT_MASK, VALID_ECO_TIMEOUTS
 from .models import SettingsData, StatusData
 
-_R600_HW_12_PROFILE = "r600-hw-1.2"
+_R600_HW_03_PROFILE = "r600-hw-0.3"
 _KNOWN_R600_STATUS_MASK = STATUS_DC_MASK | STATUS_AC_MASK | STATUS_LIGHT_MASK
 
 
 def status_write_validation_errors(profile: str, status: StatusData) -> tuple[str, ...]:
     """Return semantic validation errors that should block output writes."""
-    if profile != _R600_HW_12_PROFILE:
+    if profile != _R600_HW_03_PROFILE:
         return ()
 
     errors: list[str] = []
@@ -29,7 +29,7 @@ def settings_write_validation_errors(
     settings: SettingsData,
 ) -> tuple[str, ...]:
     """Return semantic validation errors that should block settings writes."""
-    if profile != _R600_HW_12_PROFILE:
+    if profile != _R600_HW_03_PROFILE:
         return ()
 
     errors: list[str] = []

@@ -30,11 +30,9 @@ FULL_R600_CAPABILITIES = ModelCapabilities(
 )
 
 
-_VERIFIED_R600_REVISIONS = frozenset(
-    {
-        ("1.2", 0x12),
-    }
-)
+_VERIFIED_R600_REVISIONS = {
+    ("0.3", 0x03): "r600-hw-0.3",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,19 +58,19 @@ def identify_model(
     """Identify known protocol families without guessing across incompatible units."""
     normalized = (name or "").strip().upper()
     normalized_hw = (hardware_version or "").strip()
+    revision_profile: str | None = None
+    if normalized_hw and raw_hardware_version is not None:
+        revision_profile = _VERIFIED_R600_REVISIONS.get(
+            (normalized_hw, raw_hardware_version)
+        )
 
-    if (
-        "R600" in normalized
-        and normalized_hw
-        and raw_hardware_version is not None
-        and (normalized_hw, raw_hardware_version) in _VERIFIED_R600_REVISIONS
-    ):
+    if "R600" in normalized and revision_profile is not None:
         return ModelSupport(
             model="R600",
             supported=True,
             verified=True,
             classification="verified",
-            profile="r600-hw-1.2",
+            profile=revision_profile,
             capabilities=FULL_R600_CAPABILITIES,
             evidence=(
                 "Verified R600 profile matched by model family and hardware revision"

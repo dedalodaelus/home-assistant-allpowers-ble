@@ -28,10 +28,10 @@ def _settings(**changes: object) -> SettingsData:
         "work_mode": WorkMode.MUTE,
         "car_charger_enabled": False,
         "eco_timeout_hours": 2,
-        "hardware_version": "1.2",
+        "hardware_version": "0.3",
         "firmware_version": "1.1",
         "raw_flags": 0x00,
-        "raw_hardware_version": 0x12,
+        "raw_hardware_version": 0x03,
         "raw_firmware_version": 0x11,
     }
     values.update(changes)
@@ -39,14 +39,14 @@ def _settings(**changes: object) -> SettingsData:
 
 
 def test_verified_profile_rejects_unknown_status_bits() -> None:
-    errors = status_write_validation_errors("r600-hw-1.2", _status(raw_flags=0x14))
+    errors = status_write_validation_errors("r600-hw-0.3", _status(raw_flags=0x14))
 
     assert errors
     assert "unknown flag bits" in errors[0]
 
 
 def test_verified_profile_rejects_reserved_settings_mode() -> None:
-    errors = settings_write_validation_errors("r600-hw-1.2", _settings(work_mode=None))
+    errors = settings_write_validation_errors("r600-hw-0.3", _settings(work_mode=None))
 
     assert errors
     assert "reserved work mode" in errors[0]
@@ -54,7 +54,7 @@ def test_verified_profile_rejects_reserved_settings_mode() -> None:
 
 def test_verified_profile_rejects_unsupported_eco_timeout() -> None:
     errors = settings_write_validation_errors(
-        "r600-hw-1.2",
+        "r600-hw-0.3",
         _settings(eco_timeout_hours=9),
     )
 

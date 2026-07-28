@@ -101,10 +101,10 @@ Known status masks:
 The raw flags byte is retained in the immutable model for diagnostics and future
 protocol work.
 
-For the verified `r600-hw-1.2` profile, output writes are additionally gated by
-semantic validation: if status contains unknown flag bits outside `0x01`, `0x02`,
-and `0x10`, writes are rejected instead of normalizing potentially unrelated
-output-command bits.
+For the verified `r600-hw-0.3` profile, output writes are additionally gated by
+semantic validation: if status contains unknown flag bits outside `0x01`,
+`0x02`, and `0x10`, writes are rejected instead of normalizing potentially
+unrelated output-command bits.
 
 ## Combined output command
 
@@ -156,7 +156,7 @@ Known settings masks:
 Known work-mode values are 0 (mute), 1 (standard), and 2 (fast). Unknown values are
 kept as `None` rather than coerced to a supported mode.
 
-For the verified `r600-hw-1.2` profile, settings writes are blocked when the
+For the verified `r600-hw-0.3` profile, settings writes are blocked when the
 snapshot carries a reserved work-mode value (`None`) or an unsupported ECO
 timeout. This keeps structural decoding independent from semantic write
 authorization.
@@ -209,7 +209,7 @@ A device is marked as *verified* when it meets all of the following:
 1. Advertised name matches a known hardware family pattern.
 2. Active GATT probe confirms the expected service UUID, notification, and write characteristics.
 3. The device returns a valid status frame that passes header, length, checksum, and payload validation.
-4. The hardware revision signature (e.g., `hardware_version=1.2`, `raw_hardware_version=0x12`) matches a known verified revision.
+4. The hardware revision signature (for example `hardware_version=0.3`, `raw_hardware_version=0x03`) matches a known verified revision.
 
 Only verified profiles are permitted to accept **output and settings write commands**. Verified devices can issue output control and settings updates to change power-station behavior.
 
@@ -245,7 +245,7 @@ Write access is not determined by advertised name or service discovery alone. A 
 
 | Profile | Read telemetry | Write output | Write settings |
 |---|---|---|---|
-| Verified R600 (hw 1.2) | ✓ | ✓ | ✓ |
+| Verified R600 (hw 0.3) | ✓ | ✓ | ✓ |
 | R600 unverified revision | ✓ | ✗ | ✗ |
 | AP S* experimental | ✓ | ✗ | ✗ |
 | Generic ALLPOWERS | ✓ | ✗ | ✗ |
