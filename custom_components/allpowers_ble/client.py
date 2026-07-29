@@ -932,18 +932,7 @@ class AllpowersBLEClient:
                     action_taken = True
 
             if not action_taken:
-                if (
-                    self._last_status_request_monotonic is None
-                    or now - self._last_status_request_monotonic
-                    >= self._options.status_interval
-                ):
-                    try:
-                        await self.async_request_status()
-                    except (NotConnectedError, TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
-                        pass
-                    action_taken = True
-
-                if not action_taken and self._options.settings_keepalive:
+                if self._options.settings_keepalive:
                     should_send_initial = (
                         self._initial_settings_keepalive_pending
                         and self._settings is not None
@@ -971,6 +960,17 @@ class AllpowersBLEClient:
                         ):
                             pass
                         action_taken = True
+
+            if not action_taken and (
+                self._last_status_request_monotonic is None
+                or now - self._last_status_request_monotonic
+                >= self._options.status_interval
+            ):
+                try:
+                    await self.async_request_status()
+                except (NotConnectedError, TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
+                    pass
+                action_taken = True
 
             next_deadline = self._next_maintenance_deadline(now)
             timeout: float | None = 0.001 if action_taken else None
