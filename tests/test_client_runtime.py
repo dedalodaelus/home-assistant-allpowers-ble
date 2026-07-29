@@ -715,6 +715,7 @@ async def test_maintenance_status_request_respects_configured_interval(
     async def due_request_status() -> None:
         nonlocal due_requests
         due_requests += 1
+        due_client._last_status_request_monotonic = due_now
 
     async def due_wait_for_wakeup(timeout: float | None) -> None:
         due_waits.append(timeout)
@@ -798,6 +799,7 @@ async def test_maintenance_settings_keepalive_respects_configured_interval(
     async def due_send_keepalive() -> None:
         nonlocal due_keepalive_sends
         due_keepalive_sends += 1
+        due_client._last_settings_keepalive_monotonic = due_now
 
     async def due_wait_for_wakeup(timeout: float | None) -> None:
         due_waits.append(timeout)
@@ -814,7 +816,91 @@ async def test_maintenance_settings_keepalive_respects_configured_interval(
     await due_client._maintenance_loop()
 
     assert due_keepalive_sends == 1
-    assert due_waits == [pytest.approx(0.001)]
+    assert due_waits == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_sends_real_settings_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=300,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    current_settings = settings()
+    client._settings = current_settings
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 110.0
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 160.0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert fake.writes == [client_module.encode_settings_control(current_settings)]
+    assert client._last_settings_keepalive_monotonic == pytest.approx(now)
+    assert client._last_settings_keepalive_attempt_monotonic is None
+    assert waits == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_refreshes_stale_settings_with_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=20,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 1000.0
+    client._last_packet_monotonic = 1000.0
+    client._last_status_request_monotonic = 995.0
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 1000.0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert fake.writes == [client_module.encode_status_request()]
+    assert client._last_status_request_monotonic == pytest.approx(now)
+    assert client._last_settings_keepalive_monotonic == pytest.approx(100.0)
+    assert client._last_settings_keepalive_attempt_monotonic == pytest.approx(now)
+    assert waits == [pytest.approx(20.0)]
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1164,7 @@ async def test_maintenance_initial_and_periodic_settings_keepalive(
         sends += 1
         client._initial_settings_keepalive_pending = False
         client._last_settings_keepalive_monotonic = monotonic()
+        client._last_settings_keepalive_attempt_monotonic = None
 
     monkeypatch.setattr(client, "async_send_settings_keepalive", send)
     await client._maintenance_loop()
@@ -1101,6 +1188,41 @@ async def test_maintenance_initial_and_periodic_settings_keepalive(
 
     monkeypatch.setattr(client, "async_send_settings_keepalive", fail_send)
     await client._maintenance_loop()
+
+    client._stop_event = IterationStop()  # type: ignore[assignment]
+    client._last_settings_keepalive_monotonic = (
+        monotonic() - options.settings_keepalive_interval - 1
+    )
+    client._last_settings_keepalive_attempt_monotonic = None
+
+    async def fail_direct_send() -> None:
+        raise NotConnectedError("offline")
+
+    monkeypatch.setattr(client, "async_send_settings_keepalive", fail_direct_send)
+    await client._maintenance_loop()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_waits_without_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    client._connected = True
+    client._connected_monotonic = monotonic()
+    client._last_packet_monotonic = monotonic()
+    client._last_status_request_monotonic = monotonic()
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_next_maintenance_deadline", lambda now: None)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert waits == [None]
 
 
 @pytest.mark.asyncio
