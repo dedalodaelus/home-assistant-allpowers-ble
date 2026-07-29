@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.1...1.1.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* **ble:** reduce BLE connection retry latency ([#150](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/150)) ([a949133](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/a949133a0686ccfa6761ced3df34b5e83b58ca7c))
+* **ble:** wake retries from fresh advertisements ([#152](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/152)) ([f4b6244](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/f4b62446e66f3a9cea48725a26ac9222681567ba)), closes [#144](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/144)
+* **client:** back off failed settings keepalives ([#151](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/151)) ([2786d1a](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/2786d1a0f449bb4df3d20ef1e995243cbebf433d))
+
 ## [1.1.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.0...1.1.1) (2026-07-29)
 
 
