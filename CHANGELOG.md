@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.0...1.1.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* prevent automatic settings keepalive starvation ([#146](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/146)) ([d1705a9](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/d1705a9f358a8a0282bf90fbbe9f7a43648d0790)), closes [#140](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/140)
+* skip redundant probe on same-address reconfigure ([#136](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/136)) ([aa23d27](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/aa23d27ad111f571275636cbba3985c05beeb3fb))
+
 ## [1.1.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.0.0...1.1.0) (2026-07-28)
 
 
