@@ -816,6 +816,54 @@ async def test_maintenance_settings_keepalive_respects_configured_interval(
     assert due_waits == [pytest.approx(0.001)]
 
 
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_is_not_starved_by_due_status_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=60,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    client._connected = True
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 100.0
+    client._settings = settings()
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 160.0
+    calls: list[str] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def send_keepalive() -> None:
+        calls.append("keepalive")
+        client._last_settings_keepalive_monotonic = now
+
+    async def request_status() -> None:
+        calls.append("status")
+        client._last_status_request_monotonic = now
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        if len(calls) == 2:
+            client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "async_send_settings_keepalive", send_keepalive)
+    monkeypatch.setattr(client, "async_request_status", request_status)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert calls == ["keepalive", "status"]
+
+
 def test_next_maintenance_deadline_prefers_earliest_deadline() -> None:
     options = ConnectionOptions(
         status_interval=60,

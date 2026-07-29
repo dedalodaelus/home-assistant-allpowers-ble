@@ -222,10 +222,15 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         time=0,
                         tx_power=None,
                     )
-                abort_reason = await self._async_probe_candidate(
-                    address=address,
-                    advertised_name=discovery_info.name or current_name,
-                )
+                abort_reason: str | None = None
+                if not self._can_reuse_active_reconfigure_session(
+                    reconfigure_entry,
+                    address,
+                ):
+                    abort_reason = await self._async_probe_candidate(
+                        address=address,
+                        advertised_name=discovery_info.name or current_name,
+                    )
                 if abort_reason is not None:
                     errors["base"] = abort_reason
                 elif self._probe_error is not None:
@@ -267,6 +272,31 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+
+    def _can_reuse_active_reconfigure_session(
+        self,
+        reconfigure_entry: ConfigEntry[Any],
+        address: str,
+    ) -> bool:
+        """Allow same-address reconfigure when runtime telemetry is already fresh."""
+        current_address = str(reconfigure_entry.data.get(CONF_ADDRESS, "")).upper()
+        if address != current_address:
+            return False
+
+        runtime_data = getattr(reconfigure_entry, "runtime_data", None)
+        coordinator = getattr(runtime_data, "coordinator", None)
+        if coordinator is None:
+            return False
+
+        is_fresh = bool(getattr(coordinator, "status_is_fresh", False))
+        if not is_fresh:
+            return False
+
+        _LOGGER.debug(
+            "Skipping reconfigure probe for %s because the existing session is active",
+            address,
+        )
+        return True
 
     @callback
     def _discover_candidates(self) -> None:

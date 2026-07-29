@@ -797,6 +797,96 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
     ]
 
 
+@pytest.mark.asyncio
+async def test_reconfigure_same_address_reuses_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        options=ConnectionOptions().as_dict(),
+        unique_id=ADDRESS,
+    )
+
+    class _RuntimeData:
+        class coordinator:
+            status_is_fresh = True
+
+    entry.runtime_data = _RuntimeData()
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("probe should not run when active session is reusable")
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [service_info(name="ALLPOWERS R600")],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    result = await flow.async_step_reconfigure(
+        {"address": ADDRESS, "device_name": "Station Patio"}
+    )
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert entry.data["address"] == ADDRESS
+    assert entry.data["device_name"] == "Station Patio"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_same_address_with_stale_session_runs_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        options=ConnectionOptions().as_dict(),
+        unique_id=ADDRESS,
+    )
+
+    class _RuntimeData:
+        class coordinator:
+            status_is_fresh = False
+
+    entry.runtime_data = _RuntimeData()
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    probe_calls = 0
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        nonlocal probe_calls
+        probe_calls += 1
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [service_info(name="ALLPOWERS R600")],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    result = await flow.async_step_reconfigure(
+        {"address": ADDRESS, "device_name": "Station Patio"}
+    )
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert probe_calls == 1
+
+
 def test_discover_reconfigure_candidates_filters_unsupported_and_non_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
