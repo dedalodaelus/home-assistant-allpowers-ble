@@ -354,6 +354,7 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
     callback = captured["ble_device_callback"]
     assert callable(callback)
     assert isinstance(callback(), FakeDevice)
+    assert captured["max_attempts"] == client_module.CONNECTION_ATTEMPTS == 1
     assert client.snapshot().statistics.successful_connections == 1
 
     missing = make_client()

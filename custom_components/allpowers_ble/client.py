@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     COMMAND_REFRESH_DELAY,
+    CONNECTION_ATTEMPTS,
     NOTIFY_UUID,
     SERVICE_UUID,
     WRITE_TIMEOUT,
@@ -604,7 +605,7 @@ class AllpowersBLEClient:
             device,
             self._advertised_name,
             disconnected_callback=self._make_disconnected_callback(session_generation),
-            max_attempts=3,
+            max_attempts=CONNECTION_ATTEMPTS,
             ble_device_callback=fresh_device_for_retry,
             use_services_cache=True,
         )
@@ -1192,7 +1193,7 @@ async def async_probe_device(
                 BleakClientWithServiceCache,
                 device,
                 advertised_name,
-                max_attempts=3,
+                max_attempts=CONNECTION_ATTEMPTS,
                 ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
