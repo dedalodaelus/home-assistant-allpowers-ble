@@ -252,12 +252,13 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         nonlocal disconnects
         disconnects += 1
 
-    async def no_sleep(delay: float) -> None:
-        del delay
+    async def no_wait(*, after_generation: int, timeout: float) -> bool:
+        del after_generation, timeout
+        return False
 
     monkeypatch.setattr(client, "_connect_once", connect)
     monkeypatch.setattr(client, "_disconnect_client", disconnect)
-    monkeypatch.setattr(client, "_sleep_until_retry", no_sleep)
+    monkeypatch.setattr(client, "_wait_for_retry_trigger", no_wait)
     await client._connection_loop()
     assert attempts == 2
     assert disconnects == 2
@@ -277,6 +278,41 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         monkeypatch.setattr(another, "_disconnect_client", disconnect)
         await another._connection_loop()
         assert type(error).__name__ in (another.snapshot().last_error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertisement_triggered", [False, True])
+async def test_failed_connection_retry_trigger_controls_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    advertisement_triggered: bool,
+) -> None:
+    client = make_client(ConnectionOptions(reconnect_max_delay=10))
+    attempts = 0
+    waits: list[tuple[int, float]] = []
+
+    async def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            client._stop_event.set()
+        raise DeviceNotFoundError("missing")
+
+    async def disconnect() -> None:
+        return None
+
+    async def wait(*, after_generation: int, timeout: float) -> bool:
+        waits.append((after_generation, timeout))
+        return advertisement_triggered
+
+    monkeypatch.setattr(client, "_connect_once", fail)
+    monkeypatch.setattr(client, "_disconnect_client", disconnect)
+    monkeypatch.setattr(client, "_wait_for_retry_trigger", wait)
+    monkeypatch.setattr(client, "_retry_delay_with_jitter", lambda delay: delay)
+
+    await client._connection_loop()
+
+    assert attempts == 2
+    assert waits == [(0, 1.0)]
 
 
 def test_retry_delay_with_jitter_is_bounded_and_seeded_per_client() -> None:
@@ -1259,6 +1295,72 @@ async def test_sleep_fresh_device_and_freshness_notifications(
         monotonic() + client.options.settings_stale_timeout + 1
     )
     assert updates == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_wait_is_woken_by_a_fresh_advertisement() -> None:
+    client = make_client()
+    generation = client._advertisement_generation
+    wait = asyncio.create_task(
+        client._wait_for_retry_trigger(
+            after_generation=generation,
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+
+    client.update_advertisement(SimpleNamespace(name=client.advertised_name, rssi=None))
+
+    assert await wait is True
+
+
+@pytest.mark.asyncio
+async def test_retry_wait_handles_immediate_timeout_stop_and_clear_race() -> None:
+    client = make_client()
+    client._advertisement_generation = 2
+    assert await client._wait_for_retry_trigger(
+        after_generation=1,
+        timeout=1,
+    )
+
+    assert not await client._wait_for_retry_trigger(
+        after_generation=2,
+        timeout=0,
+    )
+    assert not await client._wait_for_retry_trigger(
+        after_generation=2,
+        timeout=0.001,
+    )
+
+    stopped = make_client()
+    stop_wait = asyncio.create_task(
+        stopped._wait_for_retry_trigger(
+            after_generation=0,
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+    stopped._stop_event.set()
+    stopped._advertisement_event.set()
+    assert await stop_wait is False
+
+    raced = make_client()
+
+    class AdvertisementOnClear:
+        def clear(self) -> None:
+            raced._advertisement_generation += 1
+
+        async def wait(self) -> None:
+            raise AssertionError("the generation check should avoid waiting")
+
+        def set(self) -> None:
+            return None
+
+    raced._advertisement_event = AdvertisementOnClear()  # type: ignore[assignment]
+    assert await raced._wait_for_retry_trigger(
+        after_generation=0,
+        timeout=1,
+    )
 
 
 class ProbeClient(FakeClient):

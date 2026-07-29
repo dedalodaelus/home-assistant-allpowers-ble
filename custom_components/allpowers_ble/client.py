@@ -148,6 +148,7 @@ class AllpowersBLEClient:
         self._refresh_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
+        self._advertisement_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._maintenance_wakeup = asyncio.Event()
         # One lock owns every operation that mutates or uses the active client.
@@ -155,6 +156,8 @@ class AllpowersBLEClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session_generation_counter = 0
         self._active_session_generation: int | None = None
+        self._advertisement_generation = 0
+        self._retry_after_advertisement_generation = 0
 
         self._connected = False
         self._connected_monotonic: float | None = None
@@ -201,6 +204,9 @@ class AllpowersBLEClient:
 
     def update_advertisement(self, service_info: Any) -> None:
         """Consume a Home Assistant Bluetooth advertisement callback."""
+        self._advertisement_generation += 1
+        self._advertisement_event.set()
+
         changed = False
         name = str(service_info.name or self._advertised_name)
         rssi = int(service_info.rssi) if service_info.rssi is not None else None
@@ -221,6 +227,7 @@ class AllpowersBLEClient:
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
         self._disconnect_event.clear()
+        self._advertisement_event.clear()
         self._maintenance_wakeup.clear()
         self._connection_task = asyncio.create_task(
             self._connection_loop(), name=f"allpowers-ble-{self.address}"
@@ -233,6 +240,7 @@ class AllpowersBLEClient:
         """Stop all tasks and release the Bluetooth connection slot."""
         self._stop_event.set()
         self._disconnect_event.set()
+        self._advertisement_event.set()
         self._maintenance_wakeup.set()
         tasks = [
             task
@@ -300,7 +308,7 @@ class AllpowersBLEClient:
     async def async_reconnect(self, reason: str = "Manual reconnect") -> None:
         """Disconnect now so the connection loop can establish a fresh route."""
         self._last_error = reason
-        self._disconnect_event.set()
+        self._request_disconnect(self._advertisement_generation)
         self._wake_maintenance_loop()
         await self._disconnect_client()
 
@@ -549,8 +557,11 @@ class AllpowersBLEClient:
         ever_connected = False
         while not self._stop_event.is_set():
             self._disconnect_event.clear()
+            established = False
+            retry_after_generation = self._advertisement_generation
             try:
                 await self._connect_once()
+                established = True
                 if ever_connected:
                     self._statistics = replace(
                         self._statistics,
@@ -559,6 +570,10 @@ class AllpowersBLEClient:
                 ever_connected = True
                 delay = 1.0
                 await self._disconnect_event.wait()
+                retry_after_generation = max(
+                    retry_after_generation,
+                    self._retry_after_advertisement_generation,
+                )
             except asyncio.CancelledError:
                 raise
             except (
@@ -579,8 +594,20 @@ class AllpowersBLEClient:
 
             if self._stop_event.is_set():
                 break
-            await self._sleep_until_retry(self._retry_delay_with_jitter(delay))
-            delay = min(delay * 2, self._options.reconnect_max_delay)
+
+            retry_timeout = (
+                min(1.0, self._options.reconnect_max_delay)
+                if established
+                else self._retry_delay_with_jitter(delay)
+            )
+            advertisement_triggered = await self._wait_for_retry_trigger(
+                after_generation=retry_after_generation,
+                timeout=retry_timeout,
+            )
+            if established or advertisement_triggered:
+                delay = 1.0
+            else:
+                delay = min(delay * 2, self._options.reconnect_max_delay)
 
     async def _connect_once(self) -> None:
         session_generation = self._activate_session_generation()
@@ -713,7 +740,16 @@ class AllpowersBLEClient:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._disconnect_event.set)
+        advertisement_generation = self._advertisement_generation
+        loop.call_soon_threadsafe(
+            self._request_disconnect,
+            advertisement_generation,
+        )
+
+    def _request_disconnect(self, after_generation: int) -> None:
+        """Wake the connection loop and require a newer advertisement for retry."""
+        self._retry_after_advertisement_generation = after_generation
+        self._disconnect_event.set()
 
     def _activate_session_generation(self) -> int:
         """Start a new BLE session generation and reset session-scoped state."""
@@ -735,7 +771,11 @@ class AllpowersBLEClient:
                 return
             if self._client is not client:
                 return
-            loop.call_soon_threadsafe(self._disconnect_event.set)
+            advertisement_generation = self._advertisement_generation
+            loop.call_soon_threadsafe(
+                self._request_disconnect,
+                advertisement_generation,
+            )
 
         return _callback
 
@@ -872,7 +912,7 @@ class AllpowersBLEClient:
                 write_errors=self._statistics.write_errors + 1,
             )
             self._last_error = f"{type(ex).__name__}: {ex}"
-            self._disconnect_event.set()
+            self._request_disconnect(self._advertisement_generation)
             self._emit_update()
             raise
 
@@ -1094,10 +1134,38 @@ class AllpowersBLEClient:
         return deadline
 
     async def _sleep_until_retry(self, delay: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
-        except TimeoutError:
-            return
+        await self._wait_for_retry_trigger(
+            after_generation=self._advertisement_generation,
+            timeout=delay,
+        )
+
+    async def _wait_for_retry_trigger(
+        self,
+        *,
+        after_generation: int,
+        timeout: float,
+    ) -> bool:
+        """Wait for a newer advertisement or a bounded fallback timeout."""
+        deadline = self._loop_time() + max(0.0, timeout)
+        while not self._stop_event.is_set():
+            if self._advertisement_generation > after_generation:
+                return True
+
+            self._advertisement_event.clear()
+            if self._advertisement_generation > after_generation:
+                return True
+
+            remaining = deadline - self._loop_time()
+            if remaining <= 0:
+                return False
+
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._advertisement_event.wait()
+            except TimeoutError:
+                return False
+
+        return False
 
     def _fresh_ble_device(self) -> BLEDevice | None:
         return bluetooth.async_ble_device_from_address(
