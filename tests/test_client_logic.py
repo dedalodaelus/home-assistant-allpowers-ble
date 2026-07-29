@@ -828,6 +828,8 @@ def test_update_advertisement_emits_only_on_change() -> None:
     assert client.advertised_name == "R600 New"
     assert client.snapshot().rssi == -61
     assert callbacks == 1
+    assert client._advertisement_generation == 2
+    assert client._advertisement_event.is_set()
 
 
 def test_update_advertisement_debounces_rssi_only_changes() -> None:

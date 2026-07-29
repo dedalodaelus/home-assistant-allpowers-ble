@@ -252,12 +252,13 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         nonlocal disconnects
         disconnects += 1
 
-    async def no_sleep(delay: float) -> None:
-        del delay
+    async def no_wait(*, after_generation: int, timeout: float) -> bool:
+        del after_generation, timeout
+        return False
 
     monkeypatch.setattr(client, "_connect_once", connect)
     monkeypatch.setattr(client, "_disconnect_client", disconnect)
-    monkeypatch.setattr(client, "_sleep_until_retry", no_sleep)
+    monkeypatch.setattr(client, "_wait_for_retry_trigger", no_wait)
     await client._connection_loop()
     assert attempts == 2
     assert disconnects == 2
@@ -277,6 +278,41 @@ async def test_connection_loop_success_reconnect_and_error_boundaries(
         monkeypatch.setattr(another, "_disconnect_client", disconnect)
         await another._connection_loop()
         assert type(error).__name__ in (another.snapshot().last_error or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertisement_triggered", [False, True])
+async def test_failed_connection_retry_trigger_controls_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    advertisement_triggered: bool,
+) -> None:
+    client = make_client(ConnectionOptions(reconnect_max_delay=10))
+    attempts = 0
+    waits: list[tuple[int, float]] = []
+
+    async def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            client._stop_event.set()
+        raise DeviceNotFoundError("missing")
+
+    async def disconnect() -> None:
+        return None
+
+    async def wait(*, after_generation: int, timeout: float) -> bool:
+        waits.append((after_generation, timeout))
+        return advertisement_triggered
+
+    monkeypatch.setattr(client, "_connect_once", fail)
+    monkeypatch.setattr(client, "_disconnect_client", disconnect)
+    monkeypatch.setattr(client, "_wait_for_retry_trigger", wait)
+    monkeypatch.setattr(client, "_retry_delay_with_jitter", lambda delay: delay)
+
+    await client._connection_loop()
+
+    assert attempts == 2
+    assert waits == [(0, 1.0)]
 
 
 def test_retry_delay_with_jitter_is_bounded_and_seeded_per_client() -> None:
@@ -354,6 +390,7 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
     callback = captured["ble_device_callback"]
     assert callable(callback)
     assert isinstance(callback(), FakeDevice)
+    assert captured["max_attempts"] == client_module.CONNECTION_ATTEMPTS == 1
     assert client.snapshot().statistics.successful_connections == 1
 
     missing = make_client()
@@ -714,6 +751,7 @@ async def test_maintenance_status_request_respects_configured_interval(
     async def due_request_status() -> None:
         nonlocal due_requests
         due_requests += 1
+        due_client._last_status_request_monotonic = due_now
 
     async def due_wait_for_wakeup(timeout: float | None) -> None:
         due_waits.append(timeout)
@@ -797,6 +835,7 @@ async def test_maintenance_settings_keepalive_respects_configured_interval(
     async def due_send_keepalive() -> None:
         nonlocal due_keepalive_sends
         due_keepalive_sends += 1
+        due_client._last_settings_keepalive_monotonic = due_now
 
     async def due_wait_for_wakeup(timeout: float | None) -> None:
         due_waits.append(timeout)
@@ -813,7 +852,91 @@ async def test_maintenance_settings_keepalive_respects_configured_interval(
     await due_client._maintenance_loop()
 
     assert due_keepalive_sends == 1
-    assert due_waits == [pytest.approx(0.001)]
+    assert due_waits == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_sends_real_settings_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=300,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    current_settings = settings()
+    client._settings = current_settings
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 100.0
+    client._last_packet_monotonic = 100.0
+    client._last_status_request_monotonic = 110.0
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 160.0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert fake.writes == [client_module.encode_settings_control(current_settings)]
+    assert client._last_settings_keepalive_monotonic == pytest.approx(now)
+    assert client._last_settings_keepalive_attempt_monotonic is None
+    assert waits == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_refreshes_stale_settings_with_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=20,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    client._connected_monotonic = 100.0
+    client._status_monotonic = 1000.0
+    client._last_packet_monotonic = 1000.0
+    client._last_status_request_monotonic = 995.0
+    client._settings_monotonic = 100.0
+    client._last_settings_keepalive_monotonic = 100.0
+    client._initial_settings_keepalive_pending = False
+    now = 1000.0
+    waits: list[float | None] = []
+
+    def loop_time() -> float:
+        return now
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    client._loop_time = loop_time  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert fake.writes == [client_module.encode_status_request()]
+    assert client._last_status_request_monotonic == pytest.approx(now)
+    assert client._last_settings_keepalive_monotonic == pytest.approx(100.0)
+    assert client._last_settings_keepalive_attempt_monotonic == pytest.approx(now)
+    assert waits == [pytest.approx(20.0)]
 
 
 @pytest.mark.asyncio
@@ -1077,6 +1200,7 @@ async def test_maintenance_initial_and_periodic_settings_keepalive(
         sends += 1
         client._initial_settings_keepalive_pending = False
         client._last_settings_keepalive_monotonic = monotonic()
+        client._last_settings_keepalive_attempt_monotonic = None
 
     monkeypatch.setattr(client, "async_send_settings_keepalive", send)
     await client._maintenance_loop()
@@ -1100,6 +1224,41 @@ async def test_maintenance_initial_and_periodic_settings_keepalive(
 
     monkeypatch.setattr(client, "async_send_settings_keepalive", fail_send)
     await client._maintenance_loop()
+
+    client._stop_event = IterationStop()  # type: ignore[assignment]
+    client._last_settings_keepalive_monotonic = (
+        monotonic() - options.settings_keepalive_interval - 1
+    )
+    client._last_settings_keepalive_attempt_monotonic = None
+
+    async def fail_direct_send() -> None:
+        raise NotConnectedError("offline")
+
+    monkeypatch.setattr(client, "async_send_settings_keepalive", fail_direct_send)
+    await client._maintenance_loop()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_waits_without_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    client._connected = True
+    client._connected_monotonic = monotonic()
+    client._last_packet_monotonic = monotonic()
+    client._last_status_request_monotonic = monotonic()
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_next_maintenance_deadline", lambda now: None)
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+
+    await client._maintenance_loop()
+
+    assert waits == [None]
 
 
 @pytest.mark.asyncio
@@ -1136,6 +1295,72 @@ async def test_sleep_fresh_device_and_freshness_notifications(
         monotonic() + client.options.settings_stale_timeout + 1
     )
     assert updates == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_wait_is_woken_by_a_fresh_advertisement() -> None:
+    client = make_client()
+    generation = client._advertisement_generation
+    wait = asyncio.create_task(
+        client._wait_for_retry_trigger(
+            after_generation=generation,
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+
+    client.update_advertisement(SimpleNamespace(name=client.advertised_name, rssi=None))
+
+    assert await wait is True
+
+
+@pytest.mark.asyncio
+async def test_retry_wait_handles_immediate_timeout_stop_and_clear_race() -> None:
+    client = make_client()
+    client._advertisement_generation = 2
+    assert await client._wait_for_retry_trigger(
+        after_generation=1,
+        timeout=1,
+    )
+
+    assert not await client._wait_for_retry_trigger(
+        after_generation=2,
+        timeout=0,
+    )
+    assert not await client._wait_for_retry_trigger(
+        after_generation=2,
+        timeout=0.001,
+    )
+
+    stopped = make_client()
+    stop_wait = asyncio.create_task(
+        stopped._wait_for_retry_trigger(
+            after_generation=0,
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+    stopped._stop_event.set()
+    stopped._advertisement_event.set()
+    assert await stop_wait is False
+
+    raced = make_client()
+
+    class AdvertisementOnClear:
+        def clear(self) -> None:
+            raced._advertisement_generation += 1
+
+        async def wait(self) -> None:
+            raise AssertionError("the generation check should avoid waiting")
+
+        def set(self) -> None:
+            return None
+
+    raced._advertisement_event = AdvertisementOnClear()  # type: ignore[assignment]
+    assert await raced._wait_for_retry_trigger(
+        after_generation=0,
+        timeout=1,
+    )
 
 
 class ProbeClient(FakeClient):

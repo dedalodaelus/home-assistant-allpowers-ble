@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     COMMAND_REFRESH_DELAY,
+    CONNECTION_ATTEMPTS,
     NOTIFY_UUID,
     SERVICE_UUID,
     WRITE_TIMEOUT,
@@ -53,6 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 _RECONNECT_JITTER_RATIO = 0.15
 _RSSI_UPDATE_MIN_DELTA = 3
 _RSSI_UPDATE_MAX_INTERVAL = 30.0
+_SETTINGS_KEEPALIVE_RETRY_MAX_DELAY = 30.0
 
 
 class AllpowersClientError(RuntimeError):
@@ -146,6 +148,7 @@ class AllpowersBLEClient:
         self._refresh_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._disconnect_event = asyncio.Event()
+        self._advertisement_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._maintenance_wakeup = asyncio.Event()
         # One lock owns every operation that mutates or uses the active client.
@@ -153,6 +156,8 @@ class AllpowersBLEClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session_generation_counter = 0
         self._active_session_generation: int | None = None
+        self._advertisement_generation = 0
+        self._retry_after_advertisement_generation = 0
 
         self._connected = False
         self._connected_monotonic: float | None = None
@@ -165,6 +170,7 @@ class AllpowersBLEClient:
         self._last_packet_monotonic: float | None = None
         self._last_status_request_monotonic: float | None = None
         self._last_settings_keepalive_monotonic: float | None = None
+        self._last_settings_keepalive_attempt_monotonic: float | None = None
         self._rssi: int | None = None
         self._last_connected_at: datetime | None = None
         self._last_disconnected_at: datetime | None = None
@@ -198,6 +204,9 @@ class AllpowersBLEClient:
 
     def update_advertisement(self, service_info: Any) -> None:
         """Consume a Home Assistant Bluetooth advertisement callback."""
+        self._advertisement_generation += 1
+        self._advertisement_event.set()
+
         changed = False
         name = str(service_info.name or self._advertised_name)
         rssi = int(service_info.rssi) if service_info.rssi is not None else None
@@ -218,6 +227,7 @@ class AllpowersBLEClient:
         self._loop = asyncio.get_running_loop()
         self._stop_event.clear()
         self._disconnect_event.clear()
+        self._advertisement_event.clear()
         self._maintenance_wakeup.clear()
         self._connection_task = asyncio.create_task(
             self._connection_loop(), name=f"allpowers-ble-{self.address}"
@@ -230,6 +240,7 @@ class AllpowersBLEClient:
         """Stop all tasks and release the Bluetooth connection slot."""
         self._stop_event.set()
         self._disconnect_event.set()
+        self._advertisement_event.set()
         self._maintenance_wakeup.set()
         tasks = [
             task
@@ -262,8 +273,10 @@ class AllpowersBLEClient:
         self._options = options
         if options.settings_keepalive and not keepalive_was_enabled:
             self._initial_settings_keepalive_pending = True
+            self._last_settings_keepalive_attempt_monotonic = None
         elif not options.settings_keepalive:
             self._initial_settings_keepalive_pending = False
+            self._last_settings_keepalive_attempt_monotonic = None
         self._reported_freshness = self._freshness(self._loop_time())
         self._wake_maintenance_loop()
         self._emit_update()
@@ -295,7 +308,7 @@ class AllpowersBLEClient:
     async def async_reconnect(self, reason: str = "Manual reconnect") -> None:
         """Disconnect now so the connection loop can establish a fresh route."""
         self._last_error = reason
-        self._disconnect_event.set()
+        self._request_disconnect(self._advertisement_generation)
         self._wake_maintenance_loop()
         await self._disconnect_client()
 
@@ -544,8 +557,11 @@ class AllpowersBLEClient:
         ever_connected = False
         while not self._stop_event.is_set():
             self._disconnect_event.clear()
+            established = False
+            retry_after_generation = self._advertisement_generation
             try:
                 await self._connect_once()
+                established = True
                 if ever_connected:
                     self._statistics = replace(
                         self._statistics,
@@ -554,6 +570,10 @@ class AllpowersBLEClient:
                 ever_connected = True
                 delay = 1.0
                 await self._disconnect_event.wait()
+                retry_after_generation = max(
+                    retry_after_generation,
+                    self._retry_after_advertisement_generation,
+                )
             except asyncio.CancelledError:
                 raise
             except (
@@ -574,8 +594,20 @@ class AllpowersBLEClient:
 
             if self._stop_event.is_set():
                 break
-            await self._sleep_until_retry(self._retry_delay_with_jitter(delay))
-            delay = min(delay * 2, self._options.reconnect_max_delay)
+
+            retry_timeout = (
+                min(1.0, self._options.reconnect_max_delay)
+                if established
+                else self._retry_delay_with_jitter(delay)
+            )
+            advertisement_triggered = await self._wait_for_retry_trigger(
+                after_generation=retry_after_generation,
+                timeout=retry_timeout,
+            )
+            if established or advertisement_triggered:
+                delay = 1.0
+            else:
+                delay = min(delay * 2, self._options.reconnect_max_delay)
 
     async def _connect_once(self) -> None:
         session_generation = self._activate_session_generation()
@@ -604,7 +636,7 @@ class AllpowersBLEClient:
             device,
             self._advertised_name,
             disconnected_callback=self._make_disconnected_callback(session_generation),
-            max_attempts=3,
+            max_attempts=CONNECTION_ATTEMPTS,
             ble_device_callback=fresh_device_for_retry,
             use_services_cache=True,
         )
@@ -625,6 +657,7 @@ class AllpowersBLEClient:
                 self._last_packet_monotonic = None
                 self._last_status_request_monotonic = None
                 self._last_settings_keepalive_monotonic = None
+                self._last_settings_keepalive_attempt_monotonic = None
                 self._status_version = 0
                 self._settings_version = 0
                 self._pending_output_transaction = None
@@ -678,6 +711,7 @@ class AllpowersBLEClient:
             self._output_blocked_until_version = None
             self._settings_blocked_until_version = None
             self._initial_settings_keepalive_pending = False
+            self._last_settings_keepalive_attempt_monotonic = None
             self._reported_freshness = (False, False)
 
             refresh_task = self._refresh_task
@@ -706,7 +740,16 @@ class AllpowersBLEClient:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._disconnect_event.set)
+        advertisement_generation = self._advertisement_generation
+        loop.call_soon_threadsafe(
+            self._request_disconnect,
+            advertisement_generation,
+        )
+
+    def _request_disconnect(self, after_generation: int) -> None:
+        """Wake the connection loop and require a newer advertisement for retry."""
+        self._retry_after_advertisement_generation = after_generation
+        self._disconnect_event.set()
 
     def _activate_session_generation(self) -> int:
         """Start a new BLE session generation and reset session-scoped state."""
@@ -728,7 +771,11 @@ class AllpowersBLEClient:
                 return
             if self._client is not client:
                 return
-            loop.call_soon_threadsafe(self._disconnect_event.set)
+            advertisement_generation = self._advertisement_generation
+            loop.call_soon_threadsafe(
+                self._request_disconnect,
+                advertisement_generation,
+            )
 
         return _callback
 
@@ -808,6 +855,7 @@ class AllpowersBLEClient:
             elif isinstance(packet, SettingsData):
                 self._settings = packet
                 self._settings_monotonic = now
+                self._last_settings_keepalive_attempt_monotonic = None
                 self._settings_version += 1
                 if (
                     self._settings_blocked_until_version is not None
@@ -864,7 +912,7 @@ class AllpowersBLEClient:
                 write_errors=self._statistics.write_errors + 1,
             )
             self._last_error = f"{type(ex).__name__}: {ex}"
-            self._disconnect_event.set()
+            self._request_disconnect(self._advertisement_generation)
             self._emit_update()
             raise
 
@@ -932,34 +980,42 @@ class AllpowersBLEClient:
                     action_taken = True
 
             if not action_taken:
-                if self._options.settings_keepalive:
-                    should_send_initial = (
-                        self._initial_settings_keepalive_pending
-                        and self._settings is not None
-                        and self._settings_monotonic is not None
-                        and now - self._settings_monotonic
-                        <= self._options.settings_stale_timeout
-                    )
-                    reference = (
-                        self._last_settings_keepalive_monotonic
-                        or self._settings_monotonic
-                        or self._connected_monotonic
-                    )
-                    should_send_periodic = (
-                        reference is not None
-                        and now - reference >= self._options.settings_keepalive_interval
-                    )
-                    if should_send_initial or should_send_periodic:
+                keepalive_deadline = self._settings_keepalive_deadline(now)
+                if keepalive_deadline is not None and keepalive_deadline <= now:
+                    self._last_settings_keepalive_attempt_monotonic = now
+                    try:
+                        await self.async_send_settings_keepalive()
+                    except StateUnavailableError as ex:
+                        _LOGGER.debug(
+                            "Automatic settings keepalive for %s needs a fresh "
+                            "settings snapshot: %s",
+                            self.address,
+                            ex,
+                        )
                         try:
-                            await self.async_send_settings_keepalive()
+                            await self.async_request_status()
                         except (
-                            StateUnavailableError,
                             NotConnectedError,
                             TimeoutError,
                             *BLEAK_RETRY_EXCEPTIONS,
-                        ):
-                            pass
-                        action_taken = True
+                        ) as refresh_ex:
+                            _LOGGER.debug(
+                                "Settings keepalive recovery status request failed "
+                                "for %s: %s",
+                                self.address,
+                                refresh_ex,
+                            )
+                    except (
+                        NotConnectedError,
+                        TimeoutError,
+                        *BLEAK_RETRY_EXCEPTIONS,
+                    ) as ex:
+                        _LOGGER.debug(
+                            "Automatic settings keepalive failed for %s: %s",
+                            self.address,
+                            ex,
+                        )
+                    action_taken = True
 
             if not action_taken and (
                 self._last_status_request_monotonic is None
@@ -972,10 +1028,11 @@ class AllpowersBLEClient:
                     pass
                 action_taken = True
 
-            next_deadline = self._next_maintenance_deadline(now)
-            timeout: float | None = 0.001 if action_taken else None
-            if timeout is None and next_deadline is not None:
-                timeout = max(0.001, next_deadline - now)
+            wait_reference = self._loop_time()
+            next_deadline = self._next_maintenance_deadline(wait_reference)
+            timeout: float | None = None
+            if next_deadline is not None:
+                timeout = max(0.001, next_deadline - wait_reference)
             await self._wait_for_maintenance_wakeup(timeout)
 
     def _wake_maintenance_loop(self) -> None:
@@ -1024,26 +1081,9 @@ class AllpowersBLEClient:
                 self._last_status_request_monotonic + self._options.status_interval
             )
 
-        if self._options.settings_keepalive:
-            should_send_initial = (
-                self._initial_settings_keepalive_pending
-                and self._settings is not None
-                and self._settings_monotonic is not None
-                and now - self._settings_monotonic
-                <= self._options.settings_stale_timeout
-            )
-            if should_send_initial:
-                deadlines.append(now)
-            else:
-                reference = (
-                    self._last_settings_keepalive_monotonic
-                    or self._settings_monotonic
-                    or self._connected_monotonic
-                )
-                if reference is not None:
-                    deadlines.append(
-                        reference + self._options.settings_keepalive_interval
-                    )
+        keepalive_deadline = self._settings_keepalive_deadline(now)
+        if keepalive_deadline is not None:
+            deadlines.append(keepalive_deadline)
 
         if self._status_monotonic is not None:
             status_freshness_deadline = (
@@ -1061,11 +1101,71 @@ class AllpowersBLEClient:
 
         return min(deadlines)
 
+    def _settings_keepalive_deadline(self, now: float) -> float | None:
+        if not self._options.settings_keepalive:
+            return None
+
+        should_send_initial = (
+            self._initial_settings_keepalive_pending
+            and self._settings is not None
+            and self._settings_monotonic is not None
+            and now - self._settings_monotonic <= self._options.settings_stale_timeout
+        )
+        if should_send_initial:
+            assert self._settings_monotonic is not None
+            deadline = self._settings_monotonic
+        else:
+            reference = (
+                self._last_settings_keepalive_monotonic
+                or self._settings_monotonic
+                or self._connected_monotonic
+            )
+            if reference is None:
+                return None
+            deadline = reference + self._options.settings_keepalive_interval
+
+        last_attempt = self._last_settings_keepalive_attempt_monotonic
+        if last_attempt is not None and last_attempt >= deadline:
+            retry_delay = min(
+                self._options.status_interval,
+                _SETTINGS_KEEPALIVE_RETRY_MAX_DELAY,
+            )
+            return last_attempt + retry_delay
+        return deadline
+
     async def _sleep_until_retry(self, delay: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
-        except TimeoutError:
-            return
+        await self._wait_for_retry_trigger(
+            after_generation=self._advertisement_generation,
+            timeout=delay,
+        )
+
+    async def _wait_for_retry_trigger(
+        self,
+        *,
+        after_generation: int,
+        timeout: float,
+    ) -> bool:
+        """Wait for a newer advertisement or a bounded fallback timeout."""
+        deadline = self._loop_time() + max(0.0, timeout)
+        while not self._stop_event.is_set():
+            if self._advertisement_generation > after_generation:
+                return True
+
+            self._advertisement_event.clear()
+            if self._advertisement_generation > after_generation:
+                return True
+
+            remaining = deadline - self._loop_time()
+            if remaining <= 0:
+                return False
+
+            try:
+                async with asyncio.timeout(remaining):
+                    await self._advertisement_event.wait()
+            except TimeoutError:
+                return False
+
+        return False
 
     def _fresh_ble_device(self) -> BLEDevice | None:
         return bluetooth.async_ble_device_from_address(
@@ -1134,6 +1234,7 @@ class AllpowersBLEClient:
 
     def _record_settings_write_activity(self, now: float) -> None:
         self._last_settings_keepalive_monotonic = now
+        self._last_settings_keepalive_attempt_monotonic = None
         self._initial_settings_keepalive_pending = False
 
     def _output_source_version(self) -> int:
@@ -1192,7 +1293,7 @@ async def async_probe_device(
                 BleakClientWithServiceCache,
                 device,
                 advertised_name,
-                max_attempts=3,
+                max_attempts=CONNECTION_ATTEMPTS,
                 ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
