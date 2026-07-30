@@ -85,6 +85,22 @@ Static-analysis policy:
 Any new ignore must document why the check is noisy, why the scope is minimal, and
 why moving the exception to test-only code is not possible.
 
+## CI dependency graph
+
+The pull-request CI workflow uses GitHub Actions `steps.parallel` to run
+independent checks concurrently after the shared checkout, Python setup, and
+dependency installation. Pre-commit runs first because some of its hooks can
+autofix files; Ruff format/lint, Mypy, Pylint, the unit/config-flow/real Home
+Assistant test suites, and repository/HIL validation then run in the parallel
+group. Test suites use separate coverage and pytest cache paths so they do not
+overwrite one another. The release steps remain sequential because metadata
+and archive-layout checks consume the archive produced by the build step.
+
+The final `Python, tests, and release validation` job is an aggregate check. It
+waits for all CI lanes and fails if any lane is not successful. Its exact name
+is part of the `merge-gate` required-check contract and must be updated there if
+the CI job is renamed.
+
 `make all` runs the standard local sequence.
 
 ## Repository validation
