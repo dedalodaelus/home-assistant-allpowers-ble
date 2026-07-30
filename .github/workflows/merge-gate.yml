@@ -11,10 +11,7 @@ on:
       - ready_for_review
 
 # Minimum privileges for reading PR/check state.
-permissions:
-  contents: read
-  checks: read
-  pull-requests: read
+permissions: {}
 
 concurrency:
   # Keep one active run per PR and cancel obsolete runs after new pushes.
@@ -27,11 +24,15 @@ jobs:
     name: Gate all required checks
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
       - name: Wait for required checks on PR head
-        uses: actions/github-script@v9
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

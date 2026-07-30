@@ -8,13 +8,14 @@ on:
   schedule:
     - cron: "37 4 * * 1"
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   validate:
     name: Home Assistant Hassfest
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: home-assistant/actions/hassfest@e3fb68ebda13d88a0d695082f471ba2c83d025fb # master

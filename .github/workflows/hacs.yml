@@ -8,15 +8,16 @@ on:
   schedule:
     - cron: "17 4 * * 1"
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   validate:
     name: HACS validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa # main
         with:
           category: integration
