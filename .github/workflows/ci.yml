@@ -16,7 +16,7 @@ jobs:
   quality:
     name: Python, tests, and release validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -33,45 +33,65 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --requirement requirements_test.txt
 
+      # Pre-commit contains autofix hooks and must finish before readers start.
       - name: Pre-commit hooks
         run: pre-commit run --all-files
 
-      - name: Ruff format
-        run: ruff format --check custom_components scripts tests
+      # GitHub waits for every step in this group before continuing.
+      # Keep this group at or below GitHub's ten-step parallel limit.
+      - parallel:
+          - name: Ruff format
+            run: ruff format --check custom_components scripts tests
 
-      - name: Ruff lint
-        run: ruff check custom_components scripts tests
+          - name: Ruff lint
+            run: ruff check custom_components scripts tests
 
-      - name: Mypy
-        run: mypy custom_components/allpowers_ble
+          - name: Mypy
+            run: mypy custom_components/allpowers_ble
 
-      - name: Pylint errors
-        run: pylint --errors-only custom_components/allpowers_ble
+          - name: Pylint errors
+            run: pylint --errors-only custom_components/allpowers_ble
 
-      - name: Unit and simulated transport tests
-        env:
-          USE_REAL_HOMEASSISTANT: "0"
-        run: >-
-          pytest --ignore=tests/homeassistant
-          --cov=custom_components/allpowers_ble
-          --cov-branch
-          --cov-report=term-missing
-          --cov-report=xml
+          - name: Unit and simulated transport tests
+            env:
+              COVERAGE_FILE: .coverage.unit
+              USE_REAL_HOMEASSISTANT: "0"
+            run: >-
+              pytest --ignore=tests/homeassistant
+              --basetemp=.pytest-tmp-unit
+              -o cache_dir=.pytest_cache-unit
+              --cov=custom_components/allpowers_ble
+              --cov-branch
+              --cov-report=term-missing
+              --cov-report=xml:coverage.xml
 
-      - name: Config flow coverage gate
-        env:
-          USE_REAL_HOMEASSISTANT: "0"
-        run: >-
-          pytest tests/test_config_flow.py
-          --cov=custom_components.allpowers_ble.config_flow
-          --cov-branch
-          --cov-report=term-missing
-          --cov-fail-under=100
+          - name: Config flow coverage gate
+            env:
+              COVERAGE_FILE: .coverage.config-flow
+              USE_REAL_HOMEASSISTANT: "0"
+            run: >-
+              pytest tests/test_config_flow.py
+              --basetemp=.pytest-tmp-config-flow
+              -o cache_dir=.pytest_cache-config-flow
+              --cov=custom_components.allpowers_ble.config_flow
+              --cov-branch
+              --cov-report=term-missing
+              --cov-report=xml:coverage-config-flow.xml
+              --cov-fail-under=100
 
-      - name: Real Home Assistant lifecycle harness (gating lane)
-        env:
-          USE_REAL_HOMEASSISTANT: "1"
-        run: pytest tests/homeassistant
+          - name: Real Home Assistant lifecycle harness
+            env:
+              USE_REAL_HOMEASSISTANT: "1"
+            run: >-
+              pytest tests/homeassistant
+              --basetemp=.pytest-tmp-homeassistant
+              -o cache_dir=.pytest_cache-homeassistant
+
+          - name: Validate repository
+            run: python scripts/validate_repository.py
+
+          - name: Validate HIL qualification matrix
+            run: python scripts/validate_hil_qualification.py
 
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -84,17 +104,12 @@ jobs:
       - name: Remove generated caches
         run: make clean
 
-      - name: Validate repository
-        run: python scripts/validate_repository.py
-
-      - name: Validate HIL qualification matrix
-        run: python scripts/validate_hil_qualification.py
-
       - name: Build HACS release archive
         run: python scripts/build_release.py --clean
 
       - name: Release metadata dry-run (non-publishing)
         run: |
+          set -euo pipefail
           VERSION="$(python - <<'PY'
           import json
           from pathlib import Path
@@ -104,7 +119,7 @@ jobs:
           PY
           )"
           python scripts/validate_release_metadata.py \
-            --tag "$VERSION" \
+            --tag "${VERSION}" \
             --zip-path dist/allpowers_ble.zip \
             --checksum-path dist/allpowers_ble.zip.sha256 \
             --write-checksum \
