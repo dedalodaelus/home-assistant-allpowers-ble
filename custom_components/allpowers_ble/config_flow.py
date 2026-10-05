@@ -699,6 +699,7 @@ def _matches_device(discovery_info: BluetoothServiceInfoBleak) -> bool:
     service_uuids = {uuid.lower() for uuid in discovery_info.service_uuids}
     return (
         name.startswith("R600")
+        or name.startswith("VOLIX P1800")
         or name.startswith("AP R")
         or name.startswith("AP S")
         or name.startswith("ALLPOWERS")
