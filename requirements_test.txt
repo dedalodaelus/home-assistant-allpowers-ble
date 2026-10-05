@@ -4,7 +4,7 @@ aiousbwatcher>=1.1.2
 serialx>=1.10.0
 aioesphomeapi>=46.3.0
 pytest-homeassistant-custom-component==0.13.364
-pytest>=9.1.1,<10
+pytest>=9.0.3,<10
 pytest-asyncio>=1.4.0,<2
 pytest-cov>=7.1.0,<8
 coverage[toml]>=7.15.4,<8
