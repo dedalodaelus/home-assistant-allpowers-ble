@@ -64,6 +64,20 @@ def identify_model(
             (normalized_hw, raw_hardware_version)
         )
 
+    if "VOLIX P1800" in normalized and revision_profile is not None:
+        return ModelSupport(
+            model="VOLIX P1800",
+            supported=True,
+            verified=True,
+            classification="verified",
+            profile=revision_profile,
+            capabilities=FULL_R600_CAPABILITIES,
+            evidence=(
+                "VOLIX P1800 reports the verified R600 hardware revision and uses the "
+                "same status/settings frames"
+            ),
+        )
+
     if "R600" in normalized and revision_profile is not None:
         return ModelSupport(
             model="R600",

@@ -3,6 +3,9 @@
   "name": "ALLPOWERS BLE",
   "bluetooth": [
     {
+      "local_name": "VOLIX P1800*"
+    },
+    {
       "local_name": "R600*"
     },
     {

@@ -90,3 +90,40 @@ def test_unnamed_candidate_requires_probe() -> None:
     assert support.supported is True
     assert support.verified is False
     assert "service UUID" in (support.reason or "")
+
+
+def test_volix_p1800_hw_0_3_uses_verified_r600_profile() -> None:
+    support = identify_model(
+        "VOLIX P1800",
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
+    )
+
+    assert support.model == "VOLIX P1800"
+    assert support.supported is True
+    assert support.verified is True
+    assert support.classification == "verified"
+    assert support.profile == "r600-hw-0.3"
+    assert support.capabilities.write_output_controls is True
+    assert support.capabilities.write_settings_controls is True
+    assert support.reason is None
+
+
+def test_volix_p1800_unknown_revision_stays_read_only() -> None:
+    for kwargs in ({}, {"hardware_version": "9.9", "raw_hardware_version": 0x99}):
+        support = identify_model("VOLIX P1800", **kwargs)
+        assert support.supported is True
+        assert support.verified is False
+        assert support.capabilities.write_output_controls is False
+        assert support.capabilities.write_settings_controls is False
+
+
+def test_other_volix_models_are_not_verified() -> None:
+    support = identify_model(
+        "VOLIX P2400",
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
+    )
+
+    assert support.verified is False
+    assert support.capabilities.write_output_controls is False
