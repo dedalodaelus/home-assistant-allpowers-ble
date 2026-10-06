@@ -8,9 +8,9 @@ pytest>=9.0.3,<10
 pytest-asyncio>=1.4.0,<2
 pytest-cov>=7.1.0,<8
 coverage[toml]>=7.15.4,<8
-ruff==0.16.0
-mypy==2.3.0
-pylint==4.0.6
+ruff==0.16.7
+mypy==2.3.1
+pylint==4.0.8
 PyYAML>=6.0.3,<7
-types-PyYAML>=6.0.12.20260724
+types-PyYAML>=6.0.12.20260906
 pre-commit>=4.6.2,<5
