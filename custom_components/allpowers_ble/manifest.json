@@ -3,6 +3,9 @@
   "name": "ALLPOWERS BLE",
   "bluetooth": [
     {
+      "local_name": "VOLIX P1800*"
+    },
+    {
       "local_name": "R600*"
     },
     {
@@ -33,5 +36,5 @@
     "bleak_retry_connector"
   ],
   "requirements": [],
-  "version": "0.3.0"
+  "version": "1.1.2"
 }

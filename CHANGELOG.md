@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.1.2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.1...1.1.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* **ble:** reduce BLE connection retry latency ([#150](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/150)) ([a949133](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/a949133a0686ccfa6761ced3df34b5e83b58ca7c))
+* **ble:** wake retries from fresh advertisements ([#152](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/152)) ([f4b6244](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/f4b62446e66f3a9cea48725a26ac9222681567ba)), closes [#144](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/144)
+* **client:** back off failed settings keepalives ([#151](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/151)) ([2786d1a](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/2786d1a0f449bb4df3d20ef1e995243cbebf433d))
+
+## [1.1.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.0...1.1.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* prevent automatic settings keepalive starvation ([#146](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/146)) ([d1705a9](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/d1705a9f358a8a0282bf90fbbe9f7a43648d0790)), closes [#140](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/140)
+* skip redundant probe on same-address reconfigure ([#136](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/136)) ([aa23d27](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/aa23d27ad111f571275636cbba3985c05beeb3fb))
+
+## [1.1.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.0.0...1.1.0) (2026-07-28)
+
+
+### Features
+
+* **branding:** refresh integration assets and add dark theme icons ([#132](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/132)) ([0e497ad](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/0e497ad0ff838df3a56a90b5e44e334d77cf8f44))
+
+
+### Bug Fixes
+
+* **model-support:** replace verified R600 signature with hw 0.3 ([#130](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/130)) ([34aa40d](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/34aa40d8c95382bd729cef19abbbc76e665afd47)), closes [#129](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/129)
+
+## [1.0.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.1...1.0.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* project reaches stable 1.0.0 contract
+
+### Features
+
+* add HIL qualification gate and runbook ([#125](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/125)) ([df4a85f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/df4a85fd9c7a251bef6836a1b5e94337abd1ccd6)), closes [#54](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/54)
+* add persistent Home Assistant Repairs for actionable BLE failures ([#122](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/122)) ([b8ecd32](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/b8ecd3266ff3a5d84e948733500c76060ae0ad3b)), closes [#53](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/53)
+* **config-flow:** add reconfigure flow for mutable entry updates ([#123](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/123)) ([d91638c](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/d91638c48f3d7412817a6c6e548c27fbef1dce81)), closes [#52](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/52)
+
+
+### Bug Fixes
+
+* **ci:** allow main-&gt;devel changelog sync in merge gate ([#121](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/121)) ([792b6c3](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/792b6c35b3b95028ce8b0dcb63872c7312d48c2f))
+* formalize 1.0 quality readiness contract ([#126](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/126)) ([3f16c26](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/3f16c261b6b71223edd010e97a04df80358aefb5)), closes [#55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55)
+
+
+### Miscellaneous Chores
+
+* declare stable 1.0 line ([24e58af](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/24e58afc94eb57da41d802524cfbe296d1ca2af5))
+
+## [0.3.1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.3.0...0.3.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **ci:** allow CHANGELOG.md in main-to-devel sync PRs ([#113](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/113)) ([40e08e3](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/40e08e31ee02a711adee72e3fb627891ca86890a))
+* **merge-gate:** simplify CHANGELOG.md edit policy for devel branch ([18766bf](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/18766bf3fd4281842b7e2bb8520287a36b4441ad))
+
 ## [0.3.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/0.2.0...0.3.0) (2026-07-27)
 
 
