@@ -15,4 +15,4 @@ mypy==2.3.1
 pylint==4.0.8
 PyYAML>=6.0.3,<7
 types-PyYAML>=6.0.12.20260906
-pre-commit>=4.6.2,<5
+pre-commit>=4.7.0,<5
