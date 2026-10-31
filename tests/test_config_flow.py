@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 
 from custom_components.allpowers_ble import config_flow
 from custom_components.allpowers_ble.client import (
@@ -479,7 +479,11 @@ async def test_reconfigure_success_updates_existing_entry(
         unique_id=ADDRESS,
     )
     if has_update_listener:
-        entry.update_listeners = [object()]
+
+        async def listener(hass: Any, config_entry: ConfigEntry[Any]) -> None:
+            del hass, config_entry
+
+        entry.add_update_listener(listener)
     flow = new_reconfigure_flow(entry)
 
     async def request_scan(hass: Any) -> None:
@@ -764,6 +768,58 @@ async def test_reconfigure_accepts_selected_address_missing_from_discovery(
 
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert entry.data["address"] == missing_address
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "expected_reload"),
+    [
+        (ConfigEntryState.NOT_LOADED, False),
+        (ConfigEntryState.SETUP_IN_PROGRESS, False),
+        (ConfigEntryState.SETUP_RETRY, True),
+        (ConfigEntryState.SETUP_ERROR, True),
+    ],
+)
+async def test_no_op_reconfigure_without_listener_only_recovers_failed_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    state: ConfigEntryState,
+    expected_reload: bool,
+) -> None:
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            "device_identity": "ALLPOWERS R600",
+        },
+        unique_id=ADDRESS,
+    )
+    entry.state = state
+    initial_data = dict(entry.data)
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_discovered_service_info", lambda *args, **kw: []
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    result = await flow.async_step_reconfigure(
+        {"address": ADDRESS, "device_name": "ALLPOWERS R600"}
+    )
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert entry.data == initial_data
+    assert flow.hass.config_entries.scheduled_reloads == (
+        [entry.entry_id] if expected_reload else []
+    )
 
 
 @pytest.mark.asyncio

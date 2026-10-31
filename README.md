@@ -299,7 +299,8 @@ Defaults are deliberately conservative and match observed R600 behavior.
 | Settings keepalive interval | 540 s | 60–540 s; settings timeout must be longer |
 | Car charger control | Off | Experimental; exposes no writable control until enabled |
 
-Options are applied live. A full integration reload is not required.
+Options are applied live, including changes saved during initialization, without
+restarting the Bluetooth client. A full integration reload is not required.
 
 ## Reconfigure entry data
 
@@ -311,7 +312,11 @@ need to update entry-level setup data without removing the integration entry.
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
 - Changed setup data triggers one reload; unchanged reconfiguration does not.
-  Options-only updates keep the existing Bluetooth connection.
+  An unchanged reconfiguration retries setup immediately when the entry is in
+  `SETUP_RETRY` or `SETUP_ERROR`, but does not start an explicitly unloaded entry.
+- Setup reconciles data changes received during initialization. If the obsolete
+  Bluetooth client times out, the new configuration is initialized in the same
+  setup attempt instead of waiting for Home Assistant's retry timer.
 
 Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
 settings). Do not use reconfigure for those option values.

@@ -179,6 +179,14 @@ class NumberEntity(_Entity):
 T = TypeVar("T")
 
 
+class ConfigEntryState(Enum):
+    NOT_LOADED = "not_loaded"
+    SETUP_IN_PROGRESS = "setup_in_progress"
+    LOADED = "loaded"
+    SETUP_RETRY = "setup_retry"
+    SETUP_ERROR = "setup_error"
+
+
 class ConfigEntry(Generic[T]):
     """Config entry stub with runtime data and unload callbacks."""
 
@@ -200,15 +208,17 @@ class ConfigEntry(Generic[T]):
         self.version = version
         self.minor_version = minor_version
         self.unique_id = unique_id
+        self.state = ConfigEntryState.NOT_LOADED
         self.runtime_data: T
+        self.update_listeners: list[Callable[..., Any]] = []
         self._unload_callbacks: list[Callable[..., Any]] = []
 
     def async_on_unload(self, callback_fn: Callable[..., Any]) -> None:
         self._unload_callbacks.append(callback_fn)
 
     def add_update_listener(self, listener: Callable[..., Any]) -> Callable[[], None]:
-        self._update_listener = listener
-        return lambda: None
+        self.update_listeners.append(listener)
+        return lambda: self.update_listeners.remove(listener)
 
 
 class _FlowBase:
@@ -651,6 +661,7 @@ def install() -> None:
 
     config_entries = ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigFlow = ConfigFlow
     config_entries.ConfigFlowResult = ConfigFlowResult
     config_entries.OptionsFlow = OptionsFlow

@@ -269,16 +269,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
         except TimeoutError as ex:
             await coordinator.async_shutdown()
+            if entry.data != config_data or entry.title != config_title:
+                _unsubscribe_advertisement()
+                continue
             raise ConfigEntryNotReady(
                 "Connected path exists, but no valid status frame was received "
                 f"from {address}"
             ) from ex
 
-        if (
-            entry.data != config_data
-            or entry.title != config_title
-            or entry.options != config_options
-        ):
+        while entry.options != config_options:
+            config_options = dict(entry.options)
+            await coordinator.async_apply_options(
+                ConnectionOptions.from_mapping(config_options)
+            )
+
+        if entry.data != config_data or entry.title != config_title:
             await coordinator.async_shutdown()
             _unsubscribe_advertisement()
             continue
@@ -305,12 +310,13 @@ async def _async_update_listener(
     hass: HomeAssistant, entry: AllpowersConfigEntry
 ) -> None:
     """Apply options live, or schedule one reload for changed runtime config."""
+    from homeassistant.config_entries import ConfigEntryState
+
     from .options import ConnectionOptions
 
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
-        state = getattr(getattr(entry, "state", None), "value", None)
-        if state != "setup_in_progress":
+        if entry.state is not ConfigEntryState.SETUP_IN_PROGRESS:
             hass.config_entries.async_schedule_reload(entry.entry_id)
         return
     if runtime.reload_pending:

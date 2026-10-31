@@ -288,7 +288,8 @@ valores por defecto salvo que tengas una razón medida para ajustarlos.
 | Intervalo de keepalive | 540 s | 60–540 s; la caducidad de ajustes debe ser mayor |
 | Cargador de coche | Desactivado | Experimental y requiere activación expresa |
 
-Los cambios de opciones se aplican en caliente, sin recargar la integración.
+Los cambios de opciones se aplican en caliente, incluso durante la inicialización,
+sin reiniciar el cliente Bluetooth ni recargar la integración.
 
 ## Reconfiguracion de la entrada
 
@@ -300,7 +301,12 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.
 - Los cambios de configuracion provocan una sola recarga; si no hay cambios, no
-  se recarga. Los cambios solo de opciones mantienen la conexion Bluetooth.
+  se recarga. Como excepcion, una entrada en `SETUP_RETRY` o `SETUP_ERROR` vuelve
+  a intentar la inicializacion de inmediato. Una entrada descargada expresamente
+  no se inicia si la reconfiguracion no cambia sus datos.
+- La inicializacion comprueba los cambios recibidos mientras arranca el cliente.
+  Si el cliente obsoleto agota el tiempo de espera, la nueva configuracion se
+  inicia en el mismo intento, sin esperar al temporizador de Home Assistant.
 
 Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
 keepalive). No uses reconfiguracion para esos valores opcionales.

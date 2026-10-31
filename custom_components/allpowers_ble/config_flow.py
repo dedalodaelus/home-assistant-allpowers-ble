@@ -13,6 +13,7 @@ from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
@@ -264,6 +265,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                     }
                     if address != current_address:
                         data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
+                    changed = (
+                        reconfigure_entry.data != reconfigure_entry.data | data_updates
+                        or reconfigure_entry.title != entry_title
+                        or reconfigure_entry.unique_id != address
+                    )
                     result = self.async_update_and_abort(
                         reconfigure_entry,
                         unique_id=address,
@@ -271,7 +277,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         data_updates=data_updates,
                         reason="reconfigure_successful",
                     )
-                    if not getattr(reconfigure_entry, "update_listeners", ()):
+                    if not reconfigure_entry.update_listeners and (
+                        changed
+                        or reconfigure_entry.state
+                        in (ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR)
+                    ):
                         self.hass.config_entries.async_schedule_reload(
                             reconfigure_entry.entry_id
                         )

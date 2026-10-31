@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
@@ -268,8 +268,10 @@ async def test_setup_entry_defers_and_cleans_up_on_initial_timeout(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("times_out", [False, True])
 async def test_setup_restarts_with_latest_config_after_initialization_update(
     monkeypatch: pytest.MonkeyPatch,
+    times_out: bool,
 ) -> None:
     hass = FakeHass()
     entry = make_entry()
@@ -301,7 +303,7 @@ async def test_setup_restarts_with_latest_config_after_initialization_update(
     async def wait_ready(coordinator: SetupCoordinator, timeout: float) -> None:
         del timeout
         if coordinator is SetupCoordinator.instances[0]:
-            entry.state = SimpleNamespace(value="setup_in_progress")
+            entry.state = ConfigEntryState.SETUP_IN_PROGRESS
             entry.data = {**entry.data, "address": latest_address}
             entry.title = "Station Patio 5566"
             entry.options = {
@@ -309,6 +311,8 @@ async def test_setup_restarts_with_latest_config_after_initialization_update(
                 "status_interval": 15.0,
             }
             await integration._async_update_listener(hass, entry)
+            if times_out:
+                raise TimeoutError("Obsolete startup timed out")
 
     monkeypatch.setattr(SetupCoordinator, "async_wait_ready", wait_ready)
 
@@ -326,21 +330,61 @@ async def test_setup_restarts_with_latest_config_after_initialization_update(
 
 
 @pytest.mark.asyncio
+async def test_setup_applies_latest_options_without_restarting_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    async def wait_ready(coordinator: SetupCoordinator, timeout: float) -> None:
+        del coordinator, timeout
+        entry.options = ConnectionOptions(status_interval=15).as_dict()
+
+    async def apply_options(
+        coordinator: SetupCoordinator, options: ConnectionOptions
+    ) -> None:
+        coordinator.applied.append(options)
+        if len(coordinator.applied) == 1:
+            entry.options = ConnectionOptions(status_interval=25).as_dict()
+
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", wait_ready)
+    monkeypatch.setattr(SetupCoordinator, "async_apply_options", apply_options)
+
+    assert await integration.async_setup_entry(hass, entry)
+    assert len(SetupClient.instances) == 1
+    coordinator = entry.runtime_data.coordinator
+    assert [options.status_interval for options in coordinator.applied] == [15, 25]
+    assert coordinator.shutdown_calls == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("state", "should_schedule"),
     [
-        ("setup_in_progress", False),
-        ("setup_retry", True),
-        ("setup_error", True),
+        (ConfigEntryState.SETUP_IN_PROGRESS, False),
+        (ConfigEntryState.SETUP_RETRY, True),
+        (ConfigEntryState.SETUP_ERROR, True),
     ],
 )
 async def test_update_listener_without_runtime_only_reloads_outside_setup(
-    state: str,
+    state: ConfigEntryState,
     should_schedule: bool,
 ) -> None:
     hass = FakeHass()
     entry = make_entry()
-    entry.state = SimpleNamespace(value=state)
+    entry.state = state
 
     await integration._async_update_listener(hass, entry)
 
