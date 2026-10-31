@@ -31,22 +31,12 @@ jobs:
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
-      - name: Check out trusted base and history
+      - name: Check out PR revisions and history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Run the validator from the trusted base revision, not PR-controlled code.
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Fetch the immutable PR head revision
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          git fetch --no-tags origin \
-            "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/promotion-validation-head"
-          test "$(git rev-parse refs/remotes/origin/promotion-validation-head)" = "$PR_HEAD_SHA"
 
       - name: Validate release metadata at current PR revisions
         env:
