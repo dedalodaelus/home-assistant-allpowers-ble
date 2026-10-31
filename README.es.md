@@ -322,6 +322,9 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 - Si Core indica `FAILED_UNLOAD`, reinicia Home Assistant en vez de recargar.
   Se bloquea la reconfiguracion y las opciones guardadas quedan pendientes hasta
   el reinicio. Repairs y diagnosticos indican el requisito sin perder identidades.
+  Durante `UNLOAD_IN_PROGRESS` tambien se bloquea la reconfiguracion y los cambios
+  quedan pendientes. Se detectan los fallos de limpieza posteriores de Core; borrar
+  la entrada elimina su Repair persistente de descarga.
   Consulta la [recuperacion](docs/troubleshooting.md#integration-unload-failed).
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.

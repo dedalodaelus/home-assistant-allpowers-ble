@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import issue_registry as ir
 
 from .const import DOMAIN
@@ -21,6 +22,44 @@ ISSUE_NO_ROUTE = "persistent_no_route"
 ISSUE_WATCHDOG = "repeated_watchdog_resets"
 ISSUE_INVALID_MIGRATION = "invalid_migrated_options"
 ISSUE_FAILED_UNLOAD = "failed_unload"
+
+
+@callback
+def async_unload_block_reason(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> str | None:
+    """Block changes to a runtime unloading or left in Core's terminal state."""
+    if entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS:
+        return "unload_in_progress"
+    if entry.state is ConfigEntryState.FAILED_UNLOAD:
+        async_create_unload_failed_issue(hass, entry)
+        return ISSUE_FAILED_UNLOAD
+    return None
+
+
+@callback
+def async_observe_unload_result(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> None:
+    """Observe Core cleanup, which runs after the integration unload returns."""
+    completed = False
+
+    @callback
+    def state_changed() -> None:
+        nonlocal completed
+        if completed:
+            return
+        if entry.state is ConfigEntryState.FAILED_UNLOAD:
+            async_create_unload_failed_issue(hass, entry)
+        elif entry.state is not ConfigEntryState.NOT_LOADED:
+            return
+        completed = True
+        # Do not mutate Core's callback list during its state-change iteration.
+        hass.loop.call_soon(unsubscribe)
+
+    # Unload callbacks run before Core sets the final state, so this subscription
+    # must outlive them and unsubscribe itself on completion instead.
+    unsubscribe = entry.async_on_state_change(state_changed)
 
 
 @callback

@@ -11,6 +11,7 @@
       "device_change_required": "When changing the Bluetooth address, select whether this is the same physical device or a replacement.",
       "registry_conflict": "The target registry identity is already in use. No configuration or registry records were changed.",
       "failed_unload": "The integration could not unload. Restart Home Assistant before reconfiguring; reloading cannot recover this state. No changes were applied.",
+      "unload_in_progress": "The integration is unloading. Wait until it finishes before reconfiguring. If unloading fails, restart Home Assistant. No changes were applied.",
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
       "connect_timeout": "Connection setup exceeded the probe timeout before a BLE session could be established.",
       "gatt_unavailable": "The device connected but the required ALLPOWERS GATT service or characteristics were unavailable.",

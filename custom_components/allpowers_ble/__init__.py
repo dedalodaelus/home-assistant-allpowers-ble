@@ -36,6 +36,8 @@ from .repairs import (
     AllpowersRepairsManager,
     async_create_unload_failed_issue,
     async_delete_unload_failed_issue,
+    async_observe_unload_result,
+    async_unload_block_reason,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -338,8 +340,7 @@ async def _async_update_listener(
 
     from .options import ConnectionOptions
 
-    if entry.state is ConfigEntryState.FAILED_UNLOAD:
-        async_create_unload_failed_issue(hass, entry)
+    if async_unload_block_reason(hass, entry):
         return
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
@@ -359,6 +360,7 @@ async def _async_update_listener(
 
 async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
     """Unload an ALLPOWERS BLE config entry and release its connection slot."""
+    async_observe_unload_result(hass, entry)
     try:
         unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         if unloaded:
@@ -374,6 +376,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -
         )
         async_create_unload_failed_issue(hass, entry)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> None:
+    """Delete the persistent unload Repair when its config entry is removed."""
+    async_delete_unload_failed_issue(hass, entry)
 
 
 def _migration_issue_id(entry: AllpowersConfigEntry) -> str:

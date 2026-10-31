@@ -190,6 +190,7 @@ class ConfigEntryState(Enum):
     SETUP_RETRY = "setup_retry"
     SETUP_ERROR = "setup_error"
     FAILED_UNLOAD = "failed_unload"
+    UNLOAD_IN_PROGRESS = "unload_in_progress"
 
 
 class ConfigEntry(Generic[T]):
@@ -217,6 +218,13 @@ class ConfigEntry(Generic[T]):
         self.runtime_data: T
         self.update_listeners: list[Callable[..., Any]] = []
         self._unload_callbacks: list[Callable[..., Any]] = []
+        self._state_callbacks: list[Callable[..., Any]] = []
+
+    def async_on_state_change(
+        self, callback_fn: Callable[..., Any]
+    ) -> Callable[[], None]:
+        self._state_callbacks.append(callback_fn)
+        return lambda: self._state_callbacks.remove(callback_fn)
 
     def async_on_unload(self, callback_fn: Callable[..., Any]) -> None:
         self._unload_callbacks.append(callback_fn)

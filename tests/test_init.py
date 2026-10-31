@@ -521,13 +521,21 @@ async def test_unload_entry_shuts_down_only_after_platform_unload() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_runtime", [False, True])
-async def test_failed_unload_listener_does_not_schedule_or_apply_updates(has_runtime):
+@pytest.mark.parametrize("unloading", [False, True])
+async def test_failed_unload_listener_does_not_schedule_or_apply_updates(
+    has_runtime, unloading
+):
     from homeassistant.config_entries import ConfigEntryState
     from homeassistant.helpers import issue_registry as ir
 
     hass = FakeHass()
     entry = make_entry()
-    entry.state = ConfigEntryState.FAILED_UNLOAD
+    entry.state = (
+        ConfigEntryState.UNLOAD_IN_PROGRESS
+        if unloading
+        else ConfigEntryState.FAILED_UNLOAD
+    )
+    ir.async_delete_issue(hass, integration.DOMAIN, f"{entry.entry_id}_failed_unload")
     coordinator = SetupCoordinator(hass, entry, None)
     if has_runtime:
         entry.runtime_data = SimpleNamespace(
@@ -544,8 +552,8 @@ async def test_failed_unload_listener_does_not_schedule_or_apply_updates(has_run
         ir.async_get(hass).async_get_issue(
             integration.DOMAIN, f"{entry.entry_id}_failed_unload"
         )
-        is not None
-    )
+        is None
+    ) is unloading
 
 
 @pytest.mark.asyncio

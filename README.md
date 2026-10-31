@@ -334,6 +334,9 @@ need to update entry-level setup data without removing the integration entry.
 - If Core reports `FAILED_UNLOAD`, restart Home Assistant rather than reloading.
   Reconfiguration is blocked and saved options remain pending until restart.
   Repairs and diagnostics expose the requirement; registry identities are kept.
+  During `UNLOAD_IN_PROGRESS`, updates also stay pending and reconfiguration is
+  blocked. Core cleanup failures are reported even after listeners are removed;
+  deleting the entry removes its persistent unload Repair.
   See [unload recovery](docs/troubleshooting.md#integration-unload-failed).
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.

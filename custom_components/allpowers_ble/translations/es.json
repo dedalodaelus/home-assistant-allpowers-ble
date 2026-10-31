@@ -11,6 +11,7 @@
       "device_change_required": "Al cambiar la dirección Bluetooth, indica si es el mismo dispositivo físico o un dispositivo de sustitución.",
       "registry_conflict": "La identidad de destino del registro ya está en uso. No se han modificado la configuración ni los registros.",
       "failed_unload": "La integración no pudo descargarse. Reinicia Home Assistant antes de reconfigurar; una recarga no recupera este estado. No se han aplicado cambios.",
+      "unload_in_progress": "La integración se está descargando. Espera a que termine antes de reconfigurar. Si la descarga falla, reinicia Home Assistant. No se han aplicado cambios.",
       "cannot_connect": "No se pudo conectar mediante ningún adaptador o proxy Bluetooth disponible.",
       "connect_timeout": "La fase de conexión superó el tiempo límite del probe antes de establecer una sesión BLE.",
       "gatt_unavailable": "El dispositivo se conectó, pero el servicio o las características GATT requeridas por ALLPOWERS no estaban disponibles.",

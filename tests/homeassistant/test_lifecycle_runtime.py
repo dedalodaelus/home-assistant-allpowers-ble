@@ -1301,6 +1301,20 @@ async def test_failed_unload_is_terminal_and_updates_require_restart(
     original_devices = dr.async_entries_for_config_entry(
         dr.async_get(hass), entry.entry_id
     )
+    state_subscriptions = []
+    subscribe = entry.async_on_state_change
+
+    def track_state_subscription(callback):
+        state_subscriptions.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            state_subscriptions.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track_state_subscription)
     shutdown = runtime.coordinator.async_shutdown
 
     async def fail_platforms(*args):
@@ -1334,6 +1348,8 @@ async def test_failed_unload_is_terminal_and_updates_require_restart(
         await hass.async_block_till_done()
         assert scheduled == [entry.entry_id]
     assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    await hass.async_block_till_done()
+    assert state_subscriptions == []
     assert not entry.state.recoverable
     monkeypatch.setattr(runtime.coordinator, "async_shutdown", shutdown)
     assert entry.runtime_data is runtime
@@ -1391,6 +1407,13 @@ async def test_failed_unload_is_terminal_and_updates_require_restart(
     # Release the fake transport for test teardown without changing Core's state.
     await shutdown()
     assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert await hass.config_entries.async_remove(entry.entry_id) == {
+        "require_restart": True
+    }
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -1426,6 +1449,202 @@ async def test_fresh_setup_dismisses_previous_unload_repair_only_on_success(
         assert entry.state is ConfigEntryState.LOADED
         assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
         assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_updates_during_suspended_unload_remain_pending(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    reconfigure_address,
+) -> None:
+    """No client mutation or extra reload is allowed before a failing unload ends."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = entry.runtime_data.client
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def unload_platforms(*args):
+        del args
+        entered.set()
+        await finish.wait()
+        return False
+
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload_platforms)
+    scheduled = []
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", scheduled.append)
+    unload_task = hass.async_create_background_task(
+        hass.config_entries.async_unload(entry.entry_id), "suspended unload"
+    )
+    await entered.wait()
+    try:
+        assert entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS
+        before_calls = list(client.calls)
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+                SECTION_ADVANCED_TIMING: {},
+                SECTION_EXPERIMENTAL_CONTROLS: {},
+            },
+        )
+        assert result["type"] == "create_entry"
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_NAME: "Pending"},
+            title="Pending title",
+        )
+        await hass.async_block_till_done(wait_background_tasks=False)
+        assert client.calls == before_calls
+        assert scheduled == []
+        assert entry.options["status_interval"] == 15
+        before_data = dict(entry.data)
+        result = await reconfigure_address(entry, "11:22:33:44:55:66", "replacement")
+        assert result["errors"] == {"base": "unload_in_progress"}
+        assert entry.data == before_data
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"{entry.entry_id}_failed_unload"
+            )
+            is None
+        )
+    finally:
+        finish.set()
+        assert not await unload_task
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert scheduled == []
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is not None
+    )
+    await entry.runtime_data.coordinator.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_entry", [False, True])
+async def test_core_cleanup_failure_creates_repair_without_update_listener(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    remove_entry,
+) -> None:
+    """Observe Core's final state after successful integration unload and cleanup error."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    listener_count = len(entry.update_listeners)
+    observed = []
+    subscribe = entry.async_on_state_change
+
+    def track_state_subscription(callback):
+        observed.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            observed.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track_state_subscription)
+
+    def cleanup_failure():
+        assert runtime.client.stopped
+        raise HomeAssistantError("Injected Core unload callback failure")
+
+    entry.async_on_unload(cleanup_failure)
+    entry.async_on_unload(entry.add_update_listener(lambda *args: None))
+    # Core processes callbacks in reverse order; explicitly remove the integration
+    # update listener before the injected failure to reproduce the blind spot.
+    integration_listeners = entry.update_listeners[:listener_count]
+
+    def remove_integration_listeners():
+        for listener in integration_listeners:
+            entry.update_listeners.remove(listener)
+
+    entry.async_on_unload(remove_integration_listeners)
+    if remove_entry:
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": True}
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+    else:
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert observed == []
+    assert entry.update_listeners == []
+    assert entry.runtime_data is runtime
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{entry.entry_id}_failed_unload"
+    )
+    if remove_entry:
+        assert issue is None
+    else:
+        assert issue is not None
+        assert issue.is_persistent
+        assert not issue.is_fixable
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": True}
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"{entry.entry_id}_failed_unload"
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_unloads_release_final_state_observers(
+    hass, enable_custom_integrations, monkeypatch, bluetooth_callbacks
+) -> None:
+    """Two successful unload cycles must not accumulate final-state observers."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    active = []
+    subscribe = entry.async_on_state_change
+
+    def track(callback):
+        active.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            active.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track)
+    for _ in range(2):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.NOT_LOADED
+        assert active == []
+        assert bluetooth_callbacks == []
 
 
 @pytest.mark.asyncio

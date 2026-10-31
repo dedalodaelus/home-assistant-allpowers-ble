@@ -49,15 +49,22 @@ the barrier that prevents a false-positive device from receiving control frames.
 Home Assistant puts an entry in the non-recoverable `FAILED_UNLOAD` state if
 platform unloading returns `False` or platform/coordinator unloading raises an
 exception. Resetting a reload flag cannot recover this Core state.
+Core's own post-unload callbacks can also fail after the integration reports a
+successful unload; the final-state observer reports that failure in Repairs too.
 
 - Restart Home Assistant, not just the integration. Do not remove and recreate the
   entry: a restart retains registry IDs, user customizations, and references.
 - Until restart, the integration suppresses update-triggered reloads, does not
   apply options to the partially unloaded runtime, and rejects reconfiguration
   without changing the entry. Options saved during this state remain pending.
+- These protections also apply while `UNLOAD_IN_PROGRESS`: concurrent configuration
+  and options updates remain pending without touching the unloading client or
+  scheduling an additional reload. Reconfiguration is rejected until unloading
+  finishes.
 - A persistent error in **Settings -> System -> Repairs** explains the restart
   requirement. It is not an automatic repair and clears only after a successful
   new setup; fresh telemetry alone does not dismiss it.
+  If the entry is deleted, its persistent unload Repair is removed as well.
 - Diagnostics include `entry.state` and `entry.restart_required`. Check the unload
   error in the Home Assistant logs if the problem repeats.
 
@@ -116,8 +123,9 @@ actionable conditions and dismisses them automatically after recovery:
 - `invalid_migrated_options`: created when a legacy entry cannot be migrated due
   to invalid option relationships and dismissed after successful migration.
 - `failed_unload`: created immediately after unsuccessful platform/coordinator
-  unloading, requires a Home Assistant restart, and is dismissed only after
-  successful new setup. See [Integration unload failed](#integration-unload-failed).
+  unloading or Core post-unload cleanup, requires a Home Assistant restart, and
+  is dismissed after successful new setup or entry deletion.
+  See [Integration unload failed](#integration-unload-failed).
 
 Normal transient reconnects do not create Repairs.
 

@@ -68,7 +68,7 @@ from .const import (
 )
 from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
-from .repairs import async_create_unload_failed_issue
+from .repairs import async_unload_block_reason
 from .registry import (
     async_registry_source_address,
     async_registry_transition_conflicts,
@@ -233,9 +233,8 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
 
-        if reconfigure_entry.state is ConfigEntryState.FAILED_UNLOAD:
-            async_create_unload_failed_issue(self.hass, reconfigure_entry)
-            errors["base"] = "failed_unload"
+        if unload_error := async_unload_block_reason(self.hass, reconfigure_entry):
+            errors["base"] = unload_error
         elif user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
@@ -278,7 +277,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         address=address,
                         advertised_name=discovery_info.name or current_name,
                     )
-                if abort_reason is not None:
+                if unload_error := async_unload_block_reason(
+                    self.hass, reconfigure_entry
+                ):
+                    errors["base"] = unload_error
+                elif abort_reason is not None:
                     errors["base"] = abort_reason
                 elif self._probe_error is not None:
                     errors["base"] = self._probe_error
