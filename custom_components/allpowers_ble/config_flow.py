@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, cast, override
+from uuid import uuid4
 
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 import voluptuous as vol
@@ -20,6 +21,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig
 
 from .client import (
     DeviceNotFoundError,
@@ -36,6 +38,10 @@ from .const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_DEVICE_CHANGE,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+    CONF_REPLACE_DEVICE,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
     CONF_SETTINGS_KEEPALIVE,
@@ -62,6 +68,7 @@ from .const import (
 )
 from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
+from .registry import async_registry_transition_conflicts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -203,6 +210,24 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                 tx_power=None,
             )
 
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADDRESS, default=current_address): vol.In(
+                    {
+                        address: _display_name(info)
+                        for address, info in discovered_devices.items()
+                    }
+                ),
+                vol.Required(CONF_DEVICE_NAME, default=current_name): str,
+                vol.Optional(CONF_DEVICE_CHANGE): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["same_device", "replacement"],
+                        translation_key="device_change",
+                    )
+                ),
+            }
+        )
+
         if user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
@@ -210,6 +235,10 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
             if self._is_address_in_use(reconfigure_entry, address):
                 errors[CONF_ADDRESS] = "already_configured"
+            elif address != current_address and user_input.get(
+                CONF_DEVICE_CHANGE
+            ) not in ("same_device", "replacement"):
+                errors[CONF_DEVICE_CHANGE] = "device_change_required"
             else:
                 discovery_info = discovered_devices.get(address)
                 if discovery_info is None:
@@ -265,6 +294,47 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                     }
                     if address != current_address:
                         data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
+                        source = str(
+                            reconfigure_entry.data.get(
+                                CONF_PREVIOUS_REGISTRY_ID,
+                                reconfigure_entry.data.get(
+                                    CONF_REGISTRY_ID, current_address
+                                ),
+                            )
+                        )
+                        replace_device = user_input[
+                            CONF_DEVICE_CHANGE
+                        ] == "replacement" or reconfigure_entry.data.get(
+                            CONF_REPLACE_DEVICE, False
+                        )
+                        registry_id = (
+                            uuid4().hex
+                            if replace_device
+                            else str(
+                                reconfigure_entry.data.get(
+                                    CONF_REGISTRY_ID, uuid4().hex
+                                )
+                            )
+                        )
+                        if not replace_device and async_registry_transition_conflicts(
+                            self.hass, reconfigure_entry, registry_id, address
+                        ):
+                            _LOGGER.error(
+                                "Registry identity collision for config entry %s",
+                                reconfigure_entry.entry_id,
+                            )
+                            return self.async_show_form(
+                                step_id="reconfigure",
+                                data_schema=schema,
+                                errors={"base": "registry_conflict"},
+                            )
+                        data_updates.update(
+                            {
+                                CONF_REGISTRY_ID: registry_id,
+                                CONF_PREVIOUS_REGISTRY_ID: source,
+                                CONF_REPLACE_DEVICE: replace_device,
+                            }
+                        )
                     changed = (
                         reconfigure_entry.data != reconfigure_entry.data | data_updates
                         or reconfigure_entry.title != entry_title
@@ -289,17 +359,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return cast(Any, self.async_show_form)(
             step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_ADDRESS, default=current_address): vol.In(
-                        {
-                            address: _display_name(info)
-                            for address, info in discovered_devices.items()
-                        }
-                    ),
-                    vol.Required(CONF_DEVICE_NAME, default=current_name): str,
-                }
-            ),
+            data_schema=schema,
             errors=errors,
         )
 

@@ -297,6 +297,17 @@ Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
 cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 
 - Campos reconfigurables: direccion Bluetooth y nombre visible.
+- Cambiar la direccion requiere elegir expresamente la relacion fisica:
+  - **Mismo dispositivo:** migra el registro conservando los IDs de entidades y
+    dispositivo, nombres, areas y otras personalizaciones. Tras el primer cambio,
+    una identidad opaca estable deja de depender de la direccion Bluetooth.
+  - **Dispositivo de sustitucion:** elimina los registros de entidades y
+    dispositivos de esta entrada y crea identidades nuevas. Las automatizaciones
+    y los paneles no se transfieren automaticamente. Volver a una direccion
+    anterior no restaura las personalizaciones del dispositivo sustituido.
+- El protocolo BLE no permite verificar la identidad fisica; debes confirmarla.
+  Los registros solo cambian tras recibir telemetria valida durante el arranque,
+  sin modificar otras entradas. Las colisiones impiden una migracion parcial.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.

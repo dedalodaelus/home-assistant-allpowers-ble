@@ -8,6 +8,8 @@
     },
     "error": {
       "already_configured": "This Bluetooth address is already configured in another ALLPOWERS BLE entry.",
+      "device_change_required": "When changing the Bluetooth address, select whether this is the same physical device or a replacement.",
+      "registry_conflict": "The target registry identity is already in use. No configuration or registry records were changed.",
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
       "connect_timeout": "Bluetooth connection could not be established within the probe timeout.",
       "gatt_unavailable": "The required ALLPOWERS BLE GATT services/characteristics are not available on this device.",
@@ -31,10 +33,19 @@
       "reconfigure": {
         "data": {
           "address": "Bluetooth address",
+          "device_change": "Physical device relationship (required for an address change)",
           "device_name": "Display name"
         },
-        "description": "Update supported entry-level values and validate the selected device before applying changes.",
+        "description": "Validate changes before applying them. Same physical device preserves entity IDs, device ID and customizations. Replacement removes this entry's old registry records and creates new identities; update automations and dashboards yourself. The integration cannot verify physical identity.",
         "title": "Reconfigure ALLPOWERS BLE"
+      }
+    }
+  },
+  "selector": {
+    "device_change": {
+      "options": {
+        "same_device": "Same physical device: preserve registry identities",
+        "replacement": "Replacement device: remove old records and create new identities"
       }
     }
   },

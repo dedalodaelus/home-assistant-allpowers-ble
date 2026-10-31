@@ -330,6 +330,55 @@ async def test_setup_restarts_with_latest_config_after_initialization_update(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_setup_finishes_pending_registry_transition_or_stops_client_on_error(
+    monkeypatch: pytest.MonkeyPatch, conflict: bool
+) -> None:
+    from custom_components.allpowers_ble import registry
+    from custom_components.allpowers_ble.const import (
+        CONF_PREVIOUS_REGISTRY_ID,
+        CONF_REGISTRY_ID,
+        CONF_REPLACE_DEVICE,
+    )
+    from homeassistant.components import bluetooth
+
+    hass = FakeHass()
+    entry = make_entry()
+    entry.data.update(
+        {
+            CONF_REGISTRY_ID: "new-id",
+            CONF_PREVIOUS_REGISTRY_ID: "old-id",
+            CONF_REPLACE_DEVICE: False,
+        }
+    )
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    monkeypatch.setattr(
+        bluetooth, "async_ble_device_from_address", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    def apply_transition(hass, entry) -> None:
+        del hass, entry
+        if conflict:
+            raise RuntimeError("Registry conflict after probe")
+
+    monkeypatch.setattr(registry, "async_apply_registry_transition", apply_transition)
+    if conflict:
+        with pytest.raises(RuntimeError, match="Registry conflict"):
+            await integration.async_setup_entry(hass, entry)
+        assert SetupCoordinator.instances[0].shutdown_calls == 1
+        assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    else:
+        assert await integration.async_setup_entry(hass, entry)
+        assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+        assert CONF_REPLACE_DEVICE not in entry.data
+        assert entry.runtime_data.config_data == entry.data
+
+
+@pytest.mark.asyncio
 async def test_setup_applies_latest_options_without_restarting_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

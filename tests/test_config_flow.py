@@ -20,6 +20,9 @@ from custom_components.allpowers_ble.client import (
 )
 from custom_components.allpowers_ble.const import (
     CONF_DEVICE_IDENTITY_CONFLICT,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+    CONF_REPLACE_DEVICE,
     SERVICE_UUID,
 )
 from custom_components.allpowers_ble.options import ConnectionOptions
@@ -463,9 +466,11 @@ def test_get_options_flow() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_update_listener", [False, True])
+@pytest.mark.parametrize("device_change", ["same_device", "replacement"])
 async def test_reconfigure_success_updates_existing_entry(
     monkeypatch: pytest.MonkeyPatch,
     has_update_listener: bool,
+    device_change: str,
 ) -> None:
     new_address = "11:22:33:44:55:66"
     entry = ConfigEntry(
@@ -511,6 +516,7 @@ async def test_reconfigure_success_updates_existing_entry(
     result = await flow.async_step_reconfigure(
         {
             "address": new_address,
+            "device_change": device_change,
             "device_name": "Station Patio",
         }
     )
@@ -522,9 +528,59 @@ async def test_reconfigure_success_updates_existing_entry(
     assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is False
     assert entry.unique_id == new_address
     assert entry.title == "Station Patio 5566"
+    assert len(entry.data[CONF_REGISTRY_ID]) == 32
+    assert entry.data[CONF_PREVIOUS_REGISTRY_ID] == ADDRESS
+    assert entry.data[CONF_REPLACE_DEVICE] == (device_change == "replacement")
     assert flow.hass.config_entries.scheduled_reloads == (
         [] if has_update_listener else [entry.entry_id]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", [None, "invalid", "collision"])
+async def test_reconfigure_rejects_unconfirmed_or_conflicting_registry_transition(
+    monkeypatch: pytest.MonkeyPatch, choice: str | None
+) -> None:
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        unique_id=ADDRESS,
+    )
+    flow = new_reconfigure_flow(entry)
+    before = (dict(entry.data), entry.title, entry.unique_id)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        assert choice == "collision"
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_discovered_service_info", lambda *args, **kw: []
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+    monkeypatch.setattr(
+        config_flow, "async_registry_transition_conflicts", lambda *args: True
+    )
+    result = await flow.async_step_reconfigure(
+        {
+            "address": "11:22:33:44:55:66",
+            "device_name": "Station Patio",
+            "device_change": "same_device" if choice == "collision" else choice,
+        }
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == (
+        {"base": "registry_conflict"}
+        if choice == "collision"
+        else {"device_change": "device_change_required"}
+    )
+    assert (entry.data, entry.title, entry.unique_id) == before
+    assert flow.hass.config_entries.scheduled_reloads == []
 
 
 @pytest.mark.asyncio
@@ -723,6 +779,7 @@ async def test_reconfigure_does_not_modify_migration_or_options_state(
     result = await flow.async_step_reconfigure(
         {
             "address": new_address,
+            "device_change": "same_device",
             "device_name": "Station Patio",
         }
     )
@@ -763,7 +820,11 @@ async def test_reconfigure_accepts_selected_address_missing_from_discovery(
     monkeypatch.setattr(config_flow, "async_probe_device", probe)
 
     result = await flow.async_step_reconfigure(
-        {"address": missing_address, "device_name": "Station Patio"}
+        {
+            "address": missing_address,
+            "device_name": "Station Patio",
+            "device_change": "same_device",
+        }
     )
 
     assert result == {"type": "abort", "reason": "reconfigure_successful"}

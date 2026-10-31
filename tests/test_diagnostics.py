@@ -18,6 +18,12 @@ from tests.helpers import ADDRESS, configured_entry
 @pytest.mark.asyncio
 async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> None:
     entry, client, _, hass = configured_entry()
+    entry.data.update(
+        {
+            "registry_id": "1234567890abcdef1234567890abcdef",
+            "previous_registry_id": "11:22:33:44:55:66",
+        }
+    )
     client.set_snapshot(
         replace(
             client.snapshot(),
@@ -29,6 +35,8 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
     assert payload["entry"]["data"]["address"] == "**REDACTED**"
+    assert payload["entry"]["data"]["registry_id"] == "**REDACTED**"
+    assert payload["entry"]["data"]["previous_registry_id"] == "**REDACTED**"
     assert payload["entry"]["title"] == "**REDACTED_NAME**"
     assert "device_name" not in payload["entry"]["data"]
     assert payload["entry"]["options"]["status_interval"] == 20

@@ -19,6 +19,8 @@ from .const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REPLACE_DEVICE,
     DOMAIN,
 )
 from .model_support import (
@@ -288,6 +290,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             _unsubscribe_advertisement()
             continue
         break
+
+    if CONF_PREVIOUS_REGISTRY_ID in entry.data:
+        from .registry import async_apply_registry_transition
+
+        try:
+            async_apply_registry_transition(hass, entry)
+        except Exception:
+            await coordinator.async_shutdown()
+            raise
+        config_data.pop(CONF_PREVIOUS_REGISTRY_ID)
+        config_data.pop(CONF_REPLACE_DEVICE)
+        hass.config_entries.async_update_entry(entry, data=dict(config_data))
 
     entry.runtime_data = AllpowersRuntimeData(
         client=client,

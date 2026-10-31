@@ -411,6 +411,41 @@ class DeviceEntry:
     manufacturer: str | None = None
 
 
+class EmptyRegistry:
+    """Empty registry for adapter tests not exercising registry records."""
+
+    entities: dict[str, Any] = {}
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> None:
+        del identifier, config_entry_id
+
+    def async_get_device_by_connection(
+        self, connection: tuple[str, str], config_entry_id: str
+    ) -> None:
+        del connection, config_entry_id
+
+    def async_get_entity_id(self, domain: str, platform: str, unique_id: str) -> None:
+        del domain, platform, unique_id
+
+
+def _empty_registry(hass: Any) -> EmptyRegistry:
+    del hass
+    return EmptyRegistry()
+
+
+def _empty_registry_entries(registry: Any, entry_id: str) -> list[Any]:
+    del registry, entry_id
+    return []
+
+
+def _select_selector(config: dict[str, Any]):
+    import voluptuous as vol
+
+    return vol.In(config["options"])
+
+
 @dataclass
 class BluetoothServiceInfoBleak:
     name: str | None
@@ -695,6 +730,16 @@ def install() -> None:
     device_registry.CONNECTION_BLUETOOTH = "bluetooth"
     device_registry.DeviceEntry = DeviceEntry
     device_registry.DeviceInfo = DeviceInfo
+    device_registry.async_get = _empty_registry
+    device_registry.async_entries_for_config_entry = _empty_registry_entries
+
+    entity_registry = ModuleType("homeassistant.helpers.entity_registry")
+    entity_registry.async_get = _empty_registry
+    entity_registry.async_entries_for_config_entry = _empty_registry_entries
+
+    selector = ModuleType("homeassistant.helpers.selector")
+    selector.SelectSelector = _select_selector
+    selector.SelectSelectorConfig = dict
 
     update_coordinator = ModuleType("homeassistant.helpers.update_coordinator")
     update_coordinator.CoordinatorEntity = CoordinatorEntity
@@ -771,6 +816,7 @@ def install() -> None:
     voluptuous = ModuleType("voluptuous")
     voluptuous.Schema = _Schema
     voluptuous.Required = _Required
+    voluptuous.Optional = _Required
     voluptuous.All = lambda *validators: validators
     voluptuous.Coerce = lambda target: target
     voluptuous.Range = _Range
@@ -802,6 +848,8 @@ def install() -> None:
             "homeassistant.helpers": helpers,
             "homeassistant.helpers.entity_platform": entity_platform,
             "homeassistant.helpers.device_registry": device_registry,
+            "homeassistant.helpers.entity_registry": entity_registry,
+            "homeassistant.helpers.selector": selector,
             "homeassistant.helpers.update_coordinator": update_coordinator,
             "homeassistant.helpers.issue_registry": issue_registry,
             "homeassistant.helpers.event": event,

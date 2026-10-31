@@ -34,6 +34,8 @@ from custom_components.allpowers_ble.const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_DEVICE_CHANGE,
+    CONF_REGISTRY_ID,
     DOMAIN,
     SERVICE_UUID,
 )
@@ -208,7 +210,7 @@ def _make_entry(address: str, *, title: str) -> MockConfigEntry:
 
 def _keys_for_address(hass, address: str) -> set[str]:
     registry = er.async_get(hass)
-    prefix = f"{address.upper()}_"
+    prefix = f"{address}_"
     return {
         entry.unique_id[len(prefix) :]
         for entry in registry.entities.values()
@@ -334,6 +336,12 @@ async def test_reconfigure_manages_one_lifecycle_update(
     initial_title = entry.title
     initial_unique_id = entry.unique_id
     initial_keys = _keys_for_address(hass, address)
+    initial_entities = tuple(
+        er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    )
+    initial_devices = tuple(
+        dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+    )
     name = "AP S300" if change == "model_identity" else "ALLPOWERS R600"
     discovery = SimpleNamespace(
         address=target_address, name=name, service_uuids=[SERVICE_UUID]
@@ -383,6 +391,7 @@ async def test_reconfigure_manages_one_lifecycle_update(
             result["flow_id"],
             {
                 CONF_ADDRESS: target_address,
+                CONF_DEVICE_CHANGE: "same_device",
                 CONF_DEVICE_NAME: "Patio"
                 if change == "display_name"
                 else "ALLPOWERS R600",
@@ -395,7 +404,7 @@ async def test_reconfigure_manages_one_lifecycle_update(
         else:
             assert result["type"] == "abort"
             assert result["reason"] == "reconfigure_successful"
-            assert len(updates) == 1
+            assert len(updates) == (2 if change == "address" else 1)
     await hass.async_block_till_done()
     assert scheduled == ([entry.entry_id] if expected_reload else [])
     assert len(StatefulFakeClient.instances) == (2 if expected_reload else 1)
@@ -403,9 +412,10 @@ async def test_reconfigure_manages_one_lifecycle_update(
     assert len(entry.update_listeners) == 1
     active_client = entry.runtime_data.client
     assert active_client.address == (target_address if expected_reload else address)
-    assert _keys_for_address(hass, active_client.address) == initial_keys
+    registry_id = entry.data.get(CONF_REGISTRY_ID, active_client.address)
+    assert _keys_for_address(hass, registry_id) == initial_keys
     assert all(
-        _count_unique_id(hass, f"{active_client.address}_{key}", domain="switch") == 1
+        _count_unique_id(hass, f"{registry_id}_{key}", domain="switch") == 1
         for key in ("ac_output", "dc_output", "light")
     )
     if expected_reload:
@@ -417,7 +427,7 @@ async def test_reconfigure_manages_one_lifecycle_update(
         )
         assert entry.runtime_data.coordinator.name == entry.title
         device = dr.async_get(hass).async_get_device_by_identifier(
-            (DOMAIN, target_address), entry.entry_id
+            (DOMAIN, registry_id), entry.entry_id
         )
         assert device is not None
         assert device.name == entry.title
@@ -436,6 +446,22 @@ async def test_reconfigure_manages_one_lifecycle_update(
         assert entry.unique_id == initial_unique_id
         if change in {"failed", "cancelled"}:
             assert updates == []
+            assert (
+                tuple(
+                    er.async_entries_for_config_entry(
+                        er.async_get(hass), entry.entry_id
+                    )
+                )
+                == initial_entities
+            )
+            assert (
+                tuple(
+                    dr.async_entries_for_config_entry(
+                        dr.async_get(hass), entry.entry_id
+                    )
+                )
+                == initial_devices
+            )
     assert entry.options == initial_options
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -518,6 +544,7 @@ async def test_reconfigure_recovers_setup_without_update_listener(
         result["flow_id"],
         {
             CONF_ADDRESS: target_address,
+            CONF_DEVICE_CHANGE: "same_device",
             CONF_DEVICE_NAME: "ALLPOWERS R600" if no_op else "Recovered station",
         },
     )
@@ -647,7 +674,11 @@ async def test_setup_reconciles_reconfigure_when_obsolete_startup_times_out(
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        {CONF_ADDRESS: target_address, CONF_DEVICE_NAME: "Latest station"},
+        {
+            CONF_ADDRESS: target_address,
+            CONF_DEVICE_NAME: "Latest station",
+            CONF_DEVICE_CHANGE: "same_device",
+        },
     )
     assert result["type"] == "abort"
     time_out.set()
@@ -724,11 +755,13 @@ async def test_no_op_reconfigure_does_not_reload_an_unloaded_entry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replace_first", [False, True])
 async def test_setup_reconciles_config_changed_during_pending_reload(
     hass,
     enable_custom_integrations,
     monkeypatch: pytest.MonkeyPatch,
     bluetooth_callbacks: list[tuple[Any, Any]],
+    replace_first: bool,
 ) -> None:
     """A second reconfigure during reload setup wins before the new client is ready."""
     del enable_custom_integrations
@@ -744,6 +777,9 @@ async def test_setup_reconciles_config_changed_during_pending_reload(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
+    original_device = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )[0]
     replacement_started = asyncio.Event()
     allow_replacement = asyncio.Event()
 
@@ -786,7 +822,15 @@ async def test_setup_reconciles_config_changed_during_pending_reload(
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {CONF_ADDRESS: address, CONF_DEVICE_NAME: name},
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: name,
+                CONF_DEVICE_CHANGE: (
+                    "replacement"
+                    if replace_first and address == pending_address
+                    else "same_device"
+                ),
+            },
         )
         assert result["type"] == "abort"
 
@@ -809,7 +853,174 @@ async def test_setup_reconciles_config_changed_during_pending_reload(
     ]
     assert StatefulFakeClient.instances[0].stopped
     assert StatefulFakeClient.instances[1].stopped
+    active_devices = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )
+    assert len(active_devices) == 1
+    assert (active_devices[0].id == original_device.id) is not replace_first
+    assert active_devices[0].connections == {("bluetooth", latest_address)}
     assert len(bluetooth_callbacks) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("device_change", ["same_device", "replacement"])
+async def test_address_transitions_preserve_or_replace_complete_registries(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    device_change: str,
+) -> None:
+    """Inspect all records and user customizations through A -> B -> A."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+    from homeassistant.helpers import area_registry as ar
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    customized_id = "switch.my_cabin_power"
+    entity_id = entities.async_get_entity_id("switch", DOMAIN, f"{address_a}_ac_output")
+    entities.async_update_entity(
+        entity_id, new_entity_id=customized_id, name="My outlet", icon="mdi:power"
+    )
+    light_id = entities.async_get_entity_id("switch", DOMAIN, f"{address_a}_light")
+    entities.async_update_entity(light_id, disabled_by=er.RegistryEntryDisabler.USER)
+    area = ar.async_get(hass).async_create("Cabin")
+    original_device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(
+        original_device.id, name_by_user="My battery", area_id=area.id
+    )
+    original_entities = {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_keys = {
+        (record.domain, record.unique_id.removeprefix(f"{address_a}_"))
+        for record in original_entities.values()
+    }
+    other_entry = _make_entry("33:44:55:66:77:88", title="Other station")
+    other_entry.add_to_hass(hass)
+    other_device = devices.async_get_or_create(
+        config_entry_id=other_entry.entry_id,
+        identifiers={(DOMAIN, "unrelated")},
+        connections={("bluetooth", other_entry.data[CONF_ADDRESS])},
+    )
+    other_entity = entities.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "unrelated_battery",
+        config_entry=other_entry,
+        device_id=other_device.id,
+    )
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    previous_entities = set(original_entities)
+    previous_device_id = original_device.id
+    registry_ids = []
+    for address in (address_b, address_a):
+        monkeypatch.setattr(
+            flow_module.bluetooth,
+            "async_discovered_service_info",
+            lambda hass, connectable, address=address: [
+                SimpleNamespace(
+                    address=address, name="ALLPOWERS R600", service_uuids=[SERVICE_UUID]
+                )
+            ],
+        )
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: "ALLPOWERS R600",
+                CONF_DEVICE_CHANGE: device_change,
+            },
+        )
+        assert result["type"] == "abort"
+        await hass.async_block_till_done()
+        registry_id = entry.data[CONF_REGISTRY_ID]
+        registry_ids.append(registry_id)
+        current_entities = {
+            record.entity_id: record
+            for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+        }
+        current_devices = dr.async_entries_for_config_entry(devices, entry.entry_id)
+        assert len(current_entities) == len(original_entities)
+        assert len(current_devices) == 1
+        device = current_devices[0]
+        assert device.identifiers == {(DOMAIN, registry_id)}
+        assert device.connections == {("bluetooth", address)}
+        assert {
+            (record.domain, record.unique_id.removeprefix(f"{registry_id}_"))
+            for record in current_entities.values()
+        } == original_keys
+        assert all(
+            record.unique_id.startswith(f"{registry_id}_")
+            and record.device_id == device.id
+            for record in current_entities.values()
+        )
+        if device_change == "same_device":
+            assert set(current_entities) == set(original_entities)
+            assert device.id == original_device.id
+            assert device.name_by_user == "My battery"
+            assert device.area_id == area.id
+            assert current_entities[customized_id].name == "My outlet"
+            assert current_entities[customized_id].icon == "mdi:power"
+            for entity_id, original in original_entities.items():
+                current = current_entities[entity_id]
+                assert (
+                    current.name,
+                    current.icon,
+                    current.disabled_by,
+                    current.hidden_by,
+                    current.area_id,
+                    current.labels,
+                    current.options,
+                ) == (
+                    original.name,
+                    original.icon,
+                    original.disabled_by,
+                    original.hidden_by,
+                    original.area_id,
+                    original.labels,
+                    original.options,
+                )
+        else:
+            assert set(current_entities).isdisjoint(previous_entities)
+            assert entities.async_get(customized_id) is None
+            assert device.id != previous_device_id
+            assert device.name_by_user is None
+            assert device.area_id is None
+        assert entities.async_get(other_entity.entity_id) == other_entity
+        assert devices.async_get(other_device.id) == other_device
+        assert len(entities.entities) == len(current_entities) + 1
+        assert len(devices.devices) == 2
+        previous_entities = set(current_entities)
+        previous_device_id = device.id
+        assert len(bluetooth_callbacks) == 1
+    assert (registry_ids[0] == registry_ids[1]) == (device_change == "same_device")
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert bluetooth_callbacks == []

@@ -13,11 +13,16 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from .const import CONF_DEVICE_IDENTITY_CONFLICT, CONF_DEVICE_NAME
+from .const import (
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    CONF_DEVICE_NAME,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+)
 from .coordinator import AllpowersConfigEntry
 from .model_support import resolve_runtime_model_support
 
-TO_REDACT = {CONF_ADDRESS}
+TO_REDACT = {CONF_ADDRESS, CONF_REGISTRY_ID, CONF_PREVIOUS_REGISTRY_ID}
 REDACTED_NAME = "**REDACTED_NAME**"
 REDACTED_ADDRESS = "**REDACTED_ADDRESS**"
 _SENSITIVE_NAME_FIELDS = {

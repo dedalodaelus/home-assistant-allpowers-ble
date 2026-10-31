@@ -8,6 +8,8 @@
     },
     "error": {
       "already_configured": "Esta dirección Bluetooth ya está configurada en otra entrada de ALLPOWERS BLE.",
+      "device_change_required": "Al cambiar la dirección Bluetooth, indica si es el mismo dispositivo físico o un dispositivo de sustitución.",
+      "registry_conflict": "La identidad de destino del registro ya está en uso. No se han modificado la configuración ni los registros.",
       "cannot_connect": "No se pudo conectar mediante ningún adaptador o proxy Bluetooth disponible.",
       "connect_timeout": "La fase de conexión superó el tiempo límite del probe antes de establecer una sesión BLE.",
       "gatt_unavailable": "El dispositivo se conectó, pero el servicio o las características GATT requeridas por ALLPOWERS no estaban disponibles.",
@@ -31,10 +33,19 @@
       "reconfigure": {
         "data": {
           "address": "Direccion Bluetooth",
+          "device_change": "Relación entre dispositivos (obligatoria al cambiar la dirección)",
           "device_name": "Nombre visible"
         },
-        "description": "Actualiza valores de entrada compatibles y valida activamente el dispositivo seleccionado antes de aplicar cambios.",
+        "description": "Valida los cambios antes de aplicarlos. Mismo dispositivo conserva los IDs de entidades, el ID del dispositivo y las personalizaciones. Sustitución elimina los registros anteriores de esta entrada y crea identidades nuevas; debes actualizar tus automatizaciones y paneles. La integración no puede verificar la identidad física.",
         "title": "Reconfigurar ALLPOWERS BLE"
+      }
+    }
+  },
+  "selector": {
+    "device_change": {
+      "options": {
+        "same_device": "Mismo dispositivo físico: conservar identidades del registro",
+        "replacement": "Dispositivo de sustitución: eliminar registros y crear identidades nuevas"
       }
     }
   },

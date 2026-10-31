@@ -308,6 +308,18 @@ Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
 need to update entry-level setup data without removing the integration entry.
 
 - Supported reconfigure fields: Bluetooth address and display name.
+- Changing the address requires an explicit physical-device choice:
+  - **Same physical device:** migrate registry identities while preserving entity
+    IDs, the device ID, names, areas, and other user customizations. After the first
+    address change, a stable opaque registry identity is independent of Bluetooth.
+  - **Replacement device:** remove the entity and device records owned by this
+    entry and create fresh identities. Automations and dashboards are not
+    transferred automatically. Returning to a previously used address does not
+    restore the replaced device's customizations.
+- Physical identity cannot be verified by the BLE protocol; choose the relationship
+  yourself. Registry transitions occur only after valid startup telemetry and
+  never modify records belonging to other config entries. Registry collisions
+  reject same-device migration without applying partial changes.
 - Reconfigure performs an active probe before applying changes.
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
