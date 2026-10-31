@@ -36,6 +36,7 @@ from .repairs import (
     AllpowersRepairsManager,
     async_create_unload_failed_issue,
     async_delete_unload_failed_issue,
+    async_mark_setup_cleanup_failed,
     async_observe_unload_result,
     async_unload_block_reason,
 )
@@ -159,12 +160,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     from homeassistant.components import bluetooth
     from homeassistant.components.bluetooth.match import BluetoothCallbackMatcher
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 
     from .client import AllpowersBLEClient
     from .const import CONF_DEVICE_NAME, INITIAL_DATA_TIMEOUT
     from .coordinator import AllpowersCoordinator, AllpowersRuntimeData
     from .options import ConnectionOptions
+
+    if async_unload_block_reason(hass, entry):
+        raise HomeAssistantError(
+            "Restart Home Assistant before setting up this entry: "
+            "previous platform cleanup did not complete"
+        )
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     advertisement_unsubscribe: Callable[[], None] | None = None
@@ -342,9 +349,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
                             "config entry %s; restart Home Assistant",
                             entry.entry_id,
                         )
-                        async_create_unload_failed_issue(hass, entry)
+                        async_mark_setup_cleanup_failed(hass, entry)
                 except Exception:
-                    async_create_unload_failed_issue(hass, entry)
+                    async_mark_setup_cleanup_failed(hass, entry)
                     raise
                 finally:
                     try:

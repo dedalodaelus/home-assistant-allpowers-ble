@@ -24,11 +24,27 @@ ISSUE_INVALID_MIGRATION = "invalid_migrated_options"
 ISSUE_FAILED_UNLOAD = "failed_unload"
 
 
+def _setup_restart_key(entry: AllpowersConfigEntry) -> str:
+    return f"{DOMAIN}_{entry.entry_id}_setup_restart_required"
+
+
+@callback
+def async_mark_setup_cleanup_failed(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> None:
+    """Latch unsafe partial cleanup in this Home Assistant instance only."""
+    hass.data[_setup_restart_key(entry)] = True
+    async_create_unload_failed_issue(hass, entry)
+
+
 @callback
 def async_unload_block_reason(
     hass: HomeAssistant, entry: AllpowersConfigEntry
 ) -> str | None:
-    """Block changes to a runtime unloading or left in Core's terminal state."""
+    """Block unloading runtimes and restart-only recovery, regardless of state."""
+    if hass.data.get(_setup_restart_key(entry)):
+        async_create_unload_failed_issue(hass, entry)
+        return ISSUE_FAILED_UNLOAD
     if entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS:
         return "unload_in_progress"
     if entry.state is ConfigEntryState.FAILED_UNLOAD:
@@ -88,7 +104,8 @@ def async_create_unload_failed_issue(
 def async_delete_unload_failed_issue(
     hass: HomeAssistant, entry: AllpowersConfigEntry
 ) -> None:
-    """Dismiss the restart requirement only after a successful new setup."""
+    """Dismiss after a successful fresh setup or entry removal."""
+    hass.data.pop(_setup_restart_key(entry), None)
     ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_{ISSUE_FAILED_UNLOAD}")
 
 

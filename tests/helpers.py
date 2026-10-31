@@ -268,6 +268,7 @@ class FakeHass:
     def __init__(self) -> None:
         self.config_entries = FakeConfigEntriesManager()
         self.bus = FakeBus()
+        self.data: dict[str, Any] = {}
 
 
 def configured_entry(

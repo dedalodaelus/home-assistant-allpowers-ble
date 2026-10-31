@@ -488,7 +488,8 @@ async def test_update_listener_schedules_one_reload(
     )
     scheduled: list[str] = []
     hass = SimpleNamespace(
-        config_entries=SimpleNamespace(async_schedule_reload=scheduled.append)
+        config_entries=SimpleNamespace(async_schedule_reload=scheduled.append),
+        data={},
     )
     if "title" in updates:
         entry.title = updates["title"]
@@ -664,6 +665,12 @@ async def test_unsuccessful_setup_always_releases_coordinator(
         )
         is not None
     ) is (phase in {"forward", "cancel"} and cleanup_result != "success")
+    if phase in {"forward", "cancel"} and cleanup_result != "success":
+        from homeassistant.exceptions import HomeAssistantError
+
+        with pytest.raises(HomeAssistantError, match="Restart Home Assistant"):
+            await integration.async_setup_entry(hass, entry)
+        assert len(SetupCoordinator.instances) == 1
 
 
 @pytest.mark.asyncio

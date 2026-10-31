@@ -299,6 +299,8 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 Un arranque fallido cierra el cliente BLE antes de devolver el error a Core,
 incluidos errores inesperados y cancelaciones. Se descargan las plataformas
 parcialmente inicializadas y se elimina el runtime fallido antes del reintento.
+Si falla esa limpieza parcial, se bloquean nuevos arranques de la entrada hasta
+reiniciar Home Assistant; no basta con recargar la integracion.
 
 - Campos reconfigurables: direccion Bluetooth y nombre visible.
 - Cambiar la direccion requiere elegir expresamente la relacion fisica:

@@ -1807,6 +1807,113 @@ async def test_failed_setup_stops_real_client_tasks_and_connection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_result", ["false", "exception"])
+@pytest.mark.parametrize("setup_failure", ["error", "retry"])
+async def test_failed_partial_cleanup_blocks_core_recovery(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    cleanup_result,
+    setup_failure,
+) -> None:
+    """Recoverable Core states must not restart incompletely unloaded platforms."""
+    del enable_custom_integrations
+    from datetime import UTC, datetime, timedelta
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.helpers import issue_registry as ir
+    from homeassistant.helpers import entity_platform
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    forward = hass.config_entries.async_forward_entry_setups
+    unload = hass.config_entries.async_unload_platforms
+    forward_calls = []
+
+    async def fail_forward(entry, platforms):
+        del platforms
+        forward_calls.append(entry.entry_id)
+        await forward(entry, [Platform.SENSOR])
+        if setup_failure == "retry":
+            raise ConfigEntryNotReady("Injected platform setup retry")
+        raise HomeAssistantError("Injected platform setup failure")
+
+    async def fail_unload(entry, platforms):
+        del entry, platforms
+        if cleanup_result == "exception":
+            raise HomeAssistantError("Injected partial cleanup failure")
+        return False
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", fail_forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", fail_unload)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    expected_state = (
+        ConfigEntryState.SETUP_RETRY
+        if setup_failure == "retry" and cleanup_result == "false"
+        else ConfigEntryState.SETUP_ERROR
+    )
+    assert entry.state is expected_state
+    registry_records = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+    }
+    assert registry_records
+    platform_resources = [
+        (platform, dict(platform.entities))
+        for platform in entity_platform.async_get_platforms(hass, DOMAIN)
+    ]
+    assert any(entities for _, entities in platform_resources)
+    assert len(StatefulFakeClient.instances) == 1
+    assert StatefulFakeClient.instances[0].stopped
+    assert bluetooth_callbacks == []
+    issue_id = f"{entry.entry_id}_failed_unload"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload)
+    try:
+        if expected_state is ConfigEntryState.SETUP_RETRY:
+            hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+            async_fire_time_changed(hass, datetime.now(UTC) + timedelta(seconds=60))
+            await hass.async_block_till_done(wait_background_tasks=True)
+            assert entry.state is ConfigEntryState.SETUP_ERROR
+            assert len(StatefulFakeClient.instances) == 1
+        for _ in range(2):
+            assert not await hass.config_entries.async_reload(entry.entry_id)
+            await hass.async_block_till_done()
+            assert len(StatefulFakeClient.instances) == 1
+            assert forward_calls == [entry.entry_id]
+            assert not hasattr(entry, "runtime_data")
+            assert bluetooth_callbacks == []
+            assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+            assert {
+                record.entity_id
+                for record in er.async_entries_for_config_entry(
+                    er.async_get(hass), entry.entry_id
+                )
+            } == registry_records
+            assert [
+                (platform, dict(platform.entities))
+                for platform in entity_platform.async_get_platforms(hass, DOMAIN)
+            ] == platform_resources
+    finally:
+        # The injected unload deliberately retained real sensor platform resources.
+        assert await unload(entry, [Platform.SENSOR])
+    assert await hass.config_entries.async_remove(entry.entry_id) == {
+        "require_restart": False
+    }
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
 async def test_strict_contract_rejects_old_reloading_helper(
     hass,
     enable_custom_integrations,

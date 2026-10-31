@@ -53,8 +53,14 @@ released. Partially initialized platforms are unloaded, failed runtime data is
 removed, and Core processes the remaining entry unload callbacks.
 
 If partial-platform cleanup fails, the error is reported rather than treated as
-successful setup; restart Home Assistant as instructed in Repairs. Same-device
-registry records are not deleted by setup cleanup.
+successful setup; restart Home Assistant as instructed in Repairs. A per-entry
+block in the running Home Assistant instance prevents further setup, reload, or
+retry from creating another BLE client or initializing platforms, even if Core
+reports the recoverable `SETUP_ERROR` or `SETUP_RETRY` state. Reconfiguration is
+also blocked. Reloading the integration does not clear this condition or its
+persistent Repair. A genuinely fresh Home Assistant instance has no such block;
+the Repair clears only after successful startup there, or entry removal.
+Same-device registry records are not deleted by setup cleanup.
 
 ## Integration unload failed
 

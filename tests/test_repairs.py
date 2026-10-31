@@ -20,7 +20,8 @@ from custom_components.allpowers_ble.repairs import (
     ISSUE_WATCHDOG,
     AllpowersRepairsManager,
     async_observe_unload_result,
-    async_create_unload_failed_issue,
+    async_mark_setup_cleanup_failed,
+    async_unload_block_reason,
 )
 
 from tests.helpers import FakeHass, snapshot
@@ -68,8 +69,8 @@ async def test_remove_entry_clears_only_its_persistent_unload_repair():
     hass = FakeHass()
     entry = ConfigEntry(entry_id="removed-entry")
     other = ConfigEntry(entry_id="other-entry")
-    async_create_unload_failed_issue(hass, entry)
-    async_create_unload_failed_issue(hass, other)
+    async_mark_setup_cleanup_failed(hass, entry)
+    async_mark_setup_cleanup_failed(hass, other)
     await async_remove_entry(hass, entry)
     assert (
         ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
@@ -79,6 +80,19 @@ async def test_remove_entry_clears_only_its_persistent_unload_repair():
         ir.async_get(hass).async_get_issue(DOMAIN, f"{other.entry_id}_failed_unload")
         is not None
     )
+    assert async_unload_block_reason(hass, entry) is None
+    assert async_unload_block_reason(hass, other) == "failed_unload"
+
+
+def test_setup_restart_guard_is_scoped_to_home_assistant_instance():
+    hass = FakeHass()
+    fresh_hass = FakeHass()
+    entry = ConfigEntry(entry_id="restart-scoping")
+    other = ConfigEntry(entry_id="unaffected-entry")
+    async_mark_setup_cleanup_failed(hass, entry)
+    assert async_unload_block_reason(hass, entry) == "failed_unload"
+    assert async_unload_block_reason(hass, other) is None
+    assert async_unload_block_reason(fresh_hass, entry) is None
 
 
 def _issue_id(entry_id: str, issue_key: str) -> str:
