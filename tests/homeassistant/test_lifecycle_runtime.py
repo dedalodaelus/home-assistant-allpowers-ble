@@ -1648,6 +1648,165 @@ async def test_successful_unloads_release_final_state_observers(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_phase",
+    ["start", "ready", "options", "forward", "partial_forward", "cancel"],
+)
+async def test_failed_setup_stops_real_client_tasks_and_connection(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    failure_phase,
+) -> None:
+    """Inject failures around real client startup and require complete cleanup."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.const import Platform
+
+    clients = []
+    transports = []
+    owned_tasks = []
+    failure_active = True
+
+    class Transport:
+        is_connected = True
+        notification_callback = object()
+
+        async def disconnect(self):
+            self.is_connected = False
+            self.notification_callback = None
+
+    class TaskClient(client_module.AllpowersBLEClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            clients.append(self)
+
+        def snapshot(self):
+            return replace(snapshot(), model_identity="ALLPOWERS R600")
+
+        async def _connection_loop(self):
+            transport = Transport()
+            transports.append(transport)
+            self._client = transport
+            self._connected = True
+            self._ready_event.set()
+            await asyncio.Event().wait()
+
+        async def _maintenance_loop(self):
+            await asyncio.Event().wait()
+
+        async def async_start(self):
+            await super().async_start()
+            self._refresh_task = asyncio.create_task(asyncio.Event().wait())
+            owned_tasks.extend(
+                [self._connection_task, self._maintenance_task, self._refresh_task]
+            )
+            await self._ready_event.wait()
+            if failure_active and failure_phase == "start":
+                raise HomeAssistantError("Injected start failure after tasks exist")
+
+        async def async_wait_ready(self, timeout):
+            await super().async_wait_ready(timeout)
+            if failure_active and failure_phase == "ready":
+                raise HomeAssistantError("Injected readiness failure")
+            if failure_active and failure_phase == "options":
+                hass.config_entries.async_update_entry(
+                    entry,
+                    options=ConnectionOptions(
+                        status_interval=15, stale_timeout=31
+                    ).as_dict(),
+                )
+
+        async def async_apply_options(self, options):
+            if failure_active:
+                raise HomeAssistantError("Injected startup option failure")
+            await super().async_apply_options(options)
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", TaskClient)
+    forward = hass.config_entries.async_forward_entry_setups
+    forward_started = asyncio.Event()
+
+    async def fail_forward(config_entry, platforms):
+        del platforms
+        if failure_phase == "partial_forward":
+            await forward(config_entry, [Platform.SENSOR])
+        forward_started.set()
+        if failure_phase == "cancel":
+            await asyncio.Event().wait()
+        raise HomeAssistantError("Injected platform initialization failure")
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", fail_forward)
+    import custom_components.allpowers_ble as integration
+
+    setup = integration.async_setup_entry
+    cleanup_observed = []
+
+    async def observe_failed_setup(hass, entry):
+        try:
+            return await setup(hass, entry)
+        except Exception, asyncio.CancelledError:
+            assert len(owned_tasks) == 3
+            assert len(transports) == 1
+            assert all(task.done() for task in owned_tasks)
+            assert all(not transport.is_connected for transport in transports)
+            assert clients[0]._update_callback is None
+            assert bluetooth_callbacks == []
+            assert not hasattr(entry, "runtime_data")
+            cleanup_observed.append(True)
+            raise
+
+    monkeypatch.setattr(integration, "async_setup_entry", observe_failed_setup)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    try:
+        if failure_phase == "cancel":
+            setup_task = hass.async_create_background_task(
+                hass.config_entries.async_setup(entry.entry_id), "cancel failed setup"
+            )
+            await forward_started.wait()
+            setup_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await setup_task
+        else:
+            assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert cleanup_observed == [True]
+        assert all(task.done() for task in owned_tasks)
+        assert all(not transport.is_connected for transport in transports)
+        assert all(transport.notification_callback is None for transport in transports)
+        client = clients[0]
+        assert client._connection_task is None
+        assert client._maintenance_task is None
+        assert client._refresh_task is None
+        assert client._client is None
+        assert client._update_callback is None
+        assert bluetooth_callbacks == []
+        assert entry.update_listeners == []
+        assert not hasattr(entry, "runtime_data")
+        if failure_phase == "partial_forward":
+            for record in er.async_entries_for_config_entry(
+                er.async_get(hass), entry.entry_id
+            ):
+                state = hass.states.get(record.entity_id)
+                assert state is None or state.state == "unavailable"
+        failure_active = False
+        monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert len(clients) == 2
+        assert entry.runtime_data.client is clients[1]
+        assert clients[0]._connection_task is None
+        assert len(bluetooth_callbacks) == 1
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert bluetooth_callbacks == []
+    finally:
+        for client in clients:
+            await client.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_strict_contract_rejects_old_reloading_helper(
     hass,
     enable_custom_integrations,

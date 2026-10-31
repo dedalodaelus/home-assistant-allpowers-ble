@@ -44,6 +44,18 @@ Possible causes:
 Collect debug logs and sanitized diagnostics. Do not bypass the active probe: it is
 the barrier that prevents a false-positive device from receiving control frames.
 
+Every unsuccessful startup after client initialization explicitly shuts down the
+coordinator/client and releases the advertisement subscription before returning
+to Core. This includes startup/readiness errors, option reconciliation failures,
+registry transition errors, platform initialization failures, and cancellation.
+Connection, maintenance, and refresh tasks are stopped; the BLE connection is
+released. Partially initialized platforms are unloaded, failed runtime data is
+removed, and Core processes the remaining entry unload callbacks.
+
+If partial-platform cleanup fails, the error is reported rather than treated as
+successful setup; restart Home Assistant as instructed in Repairs. Same-device
+registry records are not deleted by setup cleanup.
+
 ## Integration unload failed
 
 Home Assistant puts an entry in the non-recoverable `FAILED_UNLOAD` state if

@@ -586,6 +586,87 @@ async def test_unload_exception_is_reported_and_propagated(monkeypatch, phase):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["start", "ready", "options", "forward", "cancel"])
+@pytest.mark.parametrize("cleanup_result", ["success", "false", "exception"])
+async def test_unsuccessful_setup_always_releases_coordinator(
+    monkeypatch, phase, cleanup_result
+):
+    import asyncio
+    from homeassistant.components import bluetooth
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    ir.async_delete_issue(hass, integration.DOMAIN, f"{entry.entry_id}_failed_unload")
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    monkeypatch.setattr(
+        bluetooth, "async_ble_device_from_address", lambda *args, **kwargs: object()
+    )
+    callbacks = []
+
+    def register(*args, **kwargs):
+        callbacks.append("advertisement")
+        return lambda: callbacks.remove("advertisement")
+
+    monkeypatch.setattr(bluetooth, "async_register_callback", register)
+    original_start = SetupCoordinator.async_start
+    original_ready = SetupCoordinator.async_wait_ready
+
+    async def start(coordinator):
+        await original_start(coordinator)
+        if phase == "start":
+            raise RuntimeError("Injected setup error")
+
+    async def ready(coordinator, timeout):
+        await original_ready(coordinator, timeout)
+        if phase == "ready":
+            raise RuntimeError("Injected setup error")
+        if phase == "options":
+            entry.options = ConnectionOptions(
+                status_interval=15, stale_timeout=31
+            ).as_dict()
+
+    async def options(coordinator, options):
+        del coordinator, options
+        raise RuntimeError("Injected setup error")
+
+    async def forward(entry, platforms):
+        del entry, platforms
+        if phase == "cancel":
+            raise asyncio.CancelledError
+        raise RuntimeError("Injected setup error")
+
+    async def unload(entry, platforms):
+        del entry, platforms
+        if cleanup_result == "exception":
+            raise RuntimeError("Injected cleanup error")
+        return cleanup_result == "success"
+
+    monkeypatch.setattr(SetupCoordinator, "async_start", start)
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", ready)
+    monkeypatch.setattr(SetupCoordinator, "async_apply_options", options)
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload)
+    expected = (
+        asyncio.CancelledError
+        if phase == "cancel" and cleanup_result != "exception"
+        else RuntimeError
+    )
+    with pytest.raises(expected):
+        await integration.async_setup_entry(hass, entry)
+    assert SetupCoordinator.instances[0].shutdown_calls == 1
+    assert callbacks == []
+    assert not hasattr(entry, "runtime_data")
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is not None
+    ) is (phase in {"forward", "cancel"} and cleanup_result != "success")
+
+
+@pytest.mark.asyncio
 async def test_migrate_entry_current_version_is_noop() -> None:
     hass = FakeHass()
     entry = make_entry()

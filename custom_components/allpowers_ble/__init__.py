@@ -275,61 +275,84 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             bluetooth.BluetoothScanningMode.PASSIVE,
         )
 
-        await coordinator.async_start()
+        setup_complete = False
+        forwarding_started = False
         try:
-            await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
-        except TimeoutError as ex:
-            await coordinator.async_shutdown()
-            if entry.data != config_data or entry.title != config_title:
-                _unsubscribe_advertisement()
-                continue
-            raise ConfigEntryNotReady(
-                "Connected path exists, but no valid status frame was received "
-                f"from {address}"
-            ) from ex
+            await coordinator.async_start()
+            try:
+                await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
+            except TimeoutError as ex:
+                if entry.data != config_data or entry.title != config_title:
+                    continue
+                raise ConfigEntryNotReady(
+                    "Connected path exists, but no valid status frame was received "
+                    f"from {address}"
+                ) from ex
 
-        while entry.options != config_options:
-            config_options = dict(entry.options)
-            await coordinator.async_apply_options(
-                ConnectionOptions.from_mapping(config_options)
+            while entry.options != config_options:
+                config_options = dict(entry.options)
+                await coordinator.async_apply_options(
+                    ConnectionOptions.from_mapping(config_options)
+                )
+
+            if entry.data != config_data or entry.title != config_title:
+                continue
+
+            if CONF_PREVIOUS_REGISTRY_ID in entry.data:
+                from .registry import async_apply_registry_transition
+
+                async_apply_registry_transition(hass, entry)
+                if config_data[CONF_REPLACE_DEVICE]:
+                    config_data[CONF_ENTITY_ID_PREFIX] = config_data[CONF_REGISTRY_ID]
+                config_data.pop(CONF_PREVIOUS_REGISTRY_ID)
+                config_data.pop(CONF_REPLACE_DEVICE)
+                hass.config_entries.async_update_entry(entry, data=dict(config_data))
+
+            entry.runtime_data = AllpowersRuntimeData(
+                client=client,
+                coordinator=coordinator,
+                config_data=config_data,
+                config_title=config_title,
             )
 
-        if entry.data != config_data or entry.title != config_title:
-            await coordinator.async_shutdown()
-            _unsubscribe_advertisement()
-            continue
-        break
+            async def _async_stop(
+                _event: Any, *, active_coordinator: AllpowersCoordinator = coordinator
+            ) -> None:
+                await active_coordinator.async_shutdown()
 
-    if CONF_PREVIOUS_REGISTRY_ID in entry.data:
-        from .registry import async_apply_registry_transition
-
-        try:
-            async_apply_registry_transition(hass, entry)
-        except Exception:
-            await coordinator.async_shutdown()
-            raise
-        if config_data[CONF_REPLACE_DEVICE]:
-            config_data[CONF_ENTITY_ID_PREFIX] = config_data[CONF_REGISTRY_ID]
-        config_data.pop(CONF_PREVIOUS_REGISTRY_ID)
-        config_data.pop(CONF_REPLACE_DEVICE)
-        hass.config_entries.async_update_entry(entry, data=dict(config_data))
-
-    entry.runtime_data = AllpowersRuntimeData(
-        client=client,
-        coordinator=coordinator,
-        config_data=config_data,
-        config_title=config_title,
-    )
-
-    async def _async_stop(_event: Any) -> None:
-        await coordinator.async_shutdown()
-
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
-    )
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    async_delete_unload_failed_issue(hass, entry)
-    return True
+            entry.async_on_unload(
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
+            )
+            forwarding_started = True
+            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+            async_delete_unload_failed_issue(hass, entry)
+            setup_complete = True
+            return True
+        finally:
+            if not setup_complete:
+                try:
+                    if (
+                        forwarding_started
+                        and not await hass.config_entries.async_unload_platforms(
+                            entry, PLATFORMS
+                        )
+                    ):
+                        _LOGGER.error(
+                            "Failed to unload partially initialized platforms for "
+                            "config entry %s; restart Home Assistant",
+                            entry.entry_id,
+                        )
+                        async_create_unload_failed_issue(hass, entry)
+                except Exception:
+                    async_create_unload_failed_issue(hass, entry)
+                    raise
+                finally:
+                    try:
+                        await coordinator.async_shutdown()
+                    finally:
+                        _unsubscribe_advertisement()
+                        if forwarding_started:
+                            del entry.runtime_data
 
 
 async def _async_update_listener(

@@ -396,6 +396,9 @@ class DataUpdateCoordinator(Generic[T]):
         self.data = data
         self.update_count += 1
 
+    async def async_shutdown(self) -> None:
+        self._shutdown_requested = True
+
 
 C = TypeVar("C")
 

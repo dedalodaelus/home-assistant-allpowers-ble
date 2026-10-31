@@ -307,6 +307,10 @@ restarting the Bluetooth client. A full integration reload is not required.
 Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
 need to update entry-level setup data without removing the integration entry.
 
+Unsuccessful startup shuts down the BLE client before handing the failure back
+to Core, including unexpected errors and cancellation. Partially initialized
+platforms are unloaded and failed runtime data is removed before a retry.
+
 - Supported reconfigure fields: Bluetooth address and display name.
 - Changing the address requires an explicit physical-device choice:
   - **Same physical device:** migrate registry identities while preserving entity

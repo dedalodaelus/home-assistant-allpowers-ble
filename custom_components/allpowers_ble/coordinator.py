@@ -75,6 +75,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
 
     async def async_shutdown(self) -> None:
         """Stop the active client and release callbacks."""
+        await super().async_shutdown()
         if self._repairs_manager is not None:
             self._repairs_manager.clear()
         self.client.set_update_callback(None)

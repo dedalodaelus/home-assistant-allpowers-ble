@@ -296,6 +296,10 @@ sin reiniciar el cliente Bluetooth ni recargar la integración.
 Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
 cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 
+Un arranque fallido cierra el cliente BLE antes de devolver el error a Core,
+incluidos errores inesperados y cancelaciones. Se descargan las plataformas
+parcialmente inicializadas y se elimina el runtime fallido antes del reintento.
+
 - Campos reconfigurables: direccion Bluetooth y nombre visible.
 - Cambiar la direccion requiere elegir expresamente la relacion fisica:
   - **Mismo dispositivo:** migra el registro conservando los IDs de entidades y
