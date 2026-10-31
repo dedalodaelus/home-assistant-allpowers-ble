@@ -1296,14 +1296,16 @@ async def test_non_identifying_device_name_notification_preserves_identity(
     assert not persisted
 
 
+@pytest.mark.parametrize("device_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
 def test_identifying_device_name_notification_persists_identity(
+    device_name: str,
     notification_builder,
 ) -> None:
     client, _ = _connected_client()
     client._device_identity = ""
     persisted: list[str] = []
     client._model_identity_callback = persisted.append
-    frame = notification_builder(0x35, b"AP R600 V2.0")
+    frame = notification_builder(0x35, device_name.encode())
 
     client._notification_handler(FakeCharacteristic(), bytearray(frame))
 
@@ -1311,7 +1313,9 @@ def test_identifying_device_name_notification_persists_identity(
     assert client.snapshot().model_identity == "R600"
 
 
+@pytest.mark.parametrize("device_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
 def test_model_identity_persistence_waits_for_current_session_settings(
+    device_name: str,
     notification_builder,
 ) -> None:
     client, _ = _connected_client()
@@ -1320,7 +1324,7 @@ def test_model_identity_persistence_waits_for_current_session_settings(
     persisted: list[str] = []
     client._model_identity_callback = persisted.append
 
-    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-61))
+    client.update_advertisement(SimpleNamespace(name=device_name, rssi=-61))
     assert client.snapshot().model_identity == "R600"
     assert not persisted
 

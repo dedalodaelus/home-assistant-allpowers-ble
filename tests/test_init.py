@@ -308,6 +308,7 @@ async def test_migrate_entry_from_1_0_normalizes_options_and_sets_latest_version
     ("display_name", "expected_identity"),
     (
         ("AP R600 V2.0", "AP R600 V2.0"),
+        ("AP R600 V2.0 CE3A", "AP R600 V2.0 CE3A"),
         ("VOLIX P1800", "VOLIX P1800"),
         ("AP S500", ""),
         ("AP S700", ""),

@@ -256,6 +256,7 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert bluetooth_callbacks == []
 
 
+@pytest.mark.parametrize("r600_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
 @pytest.mark.asyncio
 async def test_production_client_identity_survives_proxy_advertisements_and_reload(
     hass,
@@ -263,6 +264,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     monkeypatch: pytest.MonkeyPatch,
     bluetooth_callbacks: list[tuple[Any, Any]],
     notification_builder,
+    r600_name: str,
 ) -> None:
     """Use the production client for identity, entity, and reload behavior."""
     del enable_custom_integrations
@@ -301,7 +303,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
         title="Cabin Power",
         data={
             CONF_ADDRESS: address,
-            "device_name": "AP R600 V2.0",
+            "device_name": r600_name,
         },
         options=ConnectionOptions().as_dict(),
     )
@@ -325,12 +327,12 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     first_callback(SimpleNamespace(name=None, rssi=-50), object())
     assert first_client.snapshot().model_identity == ""
     assert not first_client._runtime_model_support().capabilities.write_output_controls
-    first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    first_callback(SimpleNamespace(name=r600_name, rssi=-50), object())
     await hass.async_block_till_done()
-    assert first_client.snapshot().advertised_name == "AP R600 V2.0"
+    assert first_client.snapshot().advertised_name == r600_name
     assert first_client.snapshot().model_identity == "R600"
     assert entry.data["device_identity"] == "R600"
-    first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    first_callback(SimpleNamespace(name=r600_name, rssi=-50), object())
     assert len(entry_updates) == 1
     assert first_client._runtime_model_support().capabilities.write_output_controls
 
@@ -417,7 +419,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     contradictory_client._status = status()
     contradictory_client._settings_monotonic = monotonic()
     contradictory_client._status_monotonic = monotonic()
-    contradictory_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-48), object())
+    contradictory_callback(SimpleNamespace(name=r600_name, rssi=-48), object())
     await hass.async_block_till_done()
     assert not contradictory_client._identity_conflicted
     assert entry.data["device_identity_conflict"] is False

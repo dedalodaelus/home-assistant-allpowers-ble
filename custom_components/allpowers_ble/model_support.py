@@ -35,9 +35,16 @@ _VERIFIED_R600_REVISIONS = {
     ("0.3", 0x03): "r600-hw-0.3",
 }
 
-_R600_IDENTITY_RE = re.compile(r"^(?:(?:ALLPOWERS|AP)\s+)?R600(?:\s+V\d+(?:\.\d+)*)?$")
-_VOLIX_P1800_IDENTITY_RE = re.compile(r"^VOLIX\s+P1800(?:\s+V\d+(?:\.\d+)*)?$")
-_AP_S_IDENTITY_RE = re.compile(r"^AP\s+(S\d{3,4})(?:\s+V\d+(?:\.\d+)*)?$")
+_DEVICE_SUFFIX = r"(?:\s+[A-F0-9]{4})?"
+_R600_IDENTITY_RE = re.compile(
+    rf"^(?:(?:ALLPOWERS|AP)\s+)?R600(?:\s+V\d+(?:\.\d+)*)?{_DEVICE_SUFFIX}$"
+)
+_VOLIX_P1800_IDENTITY_RE = re.compile(
+    rf"^VOLIX\s+P1800(?:\s+V\d+(?:\.\d+)*)?{_DEVICE_SUFFIX}$"
+)
+_AP_S_IDENTITY_RE = re.compile(
+    rf"^AP\s+(S\d{{3,4}})(?:\s+V\d+(?:\.\d+)*)?{_DEVICE_SUFFIX}$"
+)
 
 
 def canonical_model_identity(name: str | None) -> str | None:

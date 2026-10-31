@@ -13,14 +13,18 @@ from custom_components.allpowers_ble.model_support import (
     ("name", "expected"),
     (
         ("AP R600 V2.0", "R600"),
+        ("AP R600 V2.0 CE3A", "R600"),
         ("ALLPOWERS R600", "R600"),
         ("allpowers r600", "R600"),
         ("R600", "R600"),
         ("Living room R600", None),
         ("AP R600 kitchen", None),
+        ("AP R600 V2.0 TEST", None),
         ("AP R6000", None),
         ("AP S", None),
         ("AP S300", "AP S300"),
+        ("AP S500 V2.0 CE3A", "AP S500"),
+        ("VOLIX P1800 CE3A", "VOLIX P1800"),
     ),
 )
 def test_model_identity_is_specific_and_canonical(
@@ -34,13 +38,15 @@ def test_model_identity_is_specific_and_canonical(
     ("hardware_version", "raw_hardware_version", "expected_profile"),
     (("0.3", 0x03, "r600-hw-0.3"),),
 )
+@pytest.mark.parametrize("name", ["ALLPOWERS R600", "AP R600 V2.0 CE3A"])
 def test_r600_is_verified(
+    name: str,
     hardware_version: str,
     raw_hardware_version: int,
     expected_profile: str,
 ) -> None:
     support = identify_model(
-        "ALLPOWERS R600",
+        name,
         hardware_version=hardware_version,
         raw_hardware_version=raw_hardware_version,
     )
@@ -72,7 +78,14 @@ def test_r600_unknown_revision_is_read_only_experimental() -> None:
 
 
 def test_s500_and_s700_are_rejected() -> None:
-    for name in ("AP S500", "AP S700 V2"):
+    for name in (
+        "AP S500",
+        "AP S500 V2 CE3A",
+        "AP S500 V2.0 CE3A",
+        "AP S700 V2",
+        "AP S700 V2 CE3A",
+        "AP S700 V2.0 CE3A",
+    ):
         support = identify_model(name)
         assert support.supported is False
         assert support.verified is False
