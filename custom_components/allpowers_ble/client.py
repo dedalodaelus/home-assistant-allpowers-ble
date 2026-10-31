@@ -33,11 +33,11 @@ from .const import (
     WRITE_UUID,
 )
 from .model_support import (
-    READ_ONLY_CAPABILITIES,
     ModelSupport,
     canonical_model_identity,
     has_specific_model_identity,
     identify_model,
+    resolve_runtime_model_support,
 )
 from .models import AllpowersSnapshot, ConnectionStatistics
 from .options import ConnectionOptions
@@ -328,6 +328,17 @@ class AllpowersBLEClient:
             last_packet_at=self._last_packet_at,
             last_error=self._last_error,
             statistics=self._statistics,
+            session_hardware_version=(
+                self._session_hardware_revision[0]
+                if self._session_hardware_revision
+                else None
+            ),
+            session_raw_hardware_version=(
+                self._session_hardware_revision[1]
+                if self._session_hardware_revision
+                else None
+            ),
+            identity_conflicted=self._identity_conflicted,
         )
 
     async def async_request_status(self) -> None:
@@ -637,21 +648,12 @@ class AllpowersBLEClient:
                 self._settings.hardware_version,
                 self._settings.raw_hardware_version,
             )
-        support = identify_model(
+        return resolve_runtime_model_support(
             self._device_identity,
             hardware_version=revision[0] if revision else None,
             raw_hardware_version=revision[1] if revision else None,
+            identity_conflicted=self._identity_conflicted,
         )
-        if self._identity_conflicted:
-            return replace(
-                support,
-                verified=False,
-                classification="identity_conflict",
-                profile="identity-conflict-read-only",
-                capabilities=READ_ONLY_CAPABILITIES,
-                reason="Conflicting model identities require a fresh identifying observation",
-            )
-        return support
 
     def _settings_are_fresh(self) -> bool:
         return (
@@ -669,6 +671,18 @@ class AllpowersBLEClient:
         if observed_identity is None:
             return False
         if not self._device_identity:
+            observed_support = identify_model(observed_identity)
+            if not observed_support.supported:
+                if not self._identity_conflicted:
+                    self._identity_conflicted = True
+                    if self._identity_conflict_callback is not None:
+                        self._identity_conflict_callback(True)
+                    return True
+                return False
+            if self._identity_conflicted:
+                self._pending_model_identity = observed_identity
+                self._persist_model_identity_if_validated()
+                return self._identity_conflicted is False
             self._device_identity = observed_identity
             self._persist_model_identity_if_validated()
             return True
@@ -703,8 +717,13 @@ class AllpowersBLEClient:
                 hardware_version=self._settings.hardware_version,
                 raw_hardware_version=self._settings.raw_hardware_version,
             )
-            if pending_support.verified or (
-                pending_identity == self._device_identity and pending_support.supported
+            if (
+                pending_support.verified
+                or (
+                    pending_identity == self._device_identity
+                    and pending_support.supported
+                )
+                or (not self._device_identity and pending_support.supported)
             ):
                 self._device_identity = pending_identity
                 self._pending_model_identity = None

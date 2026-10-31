@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 
 
@@ -186,4 +186,29 @@ def identify_model(
             "Matched by service UUID; only telemetry is enabled until write "
             "capabilities are verified"
         ),
+    )
+
+
+def resolve_runtime_model_support(
+    name: str | None,
+    *,
+    hardware_version: str | None = None,
+    raw_hardware_version: int | None = None,
+    identity_conflicted: bool = False,
+) -> ModelSupport:
+    """Apply one shared runtime authorization policy to the observed evidence."""
+    support = identify_model(
+        name,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
+    )
+    if not identity_conflicted:
+        return support
+    return replace(
+        support,
+        verified=False,
+        classification="identity_conflict",
+        profile="identity-conflict-read-only",
+        capabilities=READ_ONLY_CAPABILITIES,
+        reason="Conflicting model identities require a fresh identifying observation",
     )

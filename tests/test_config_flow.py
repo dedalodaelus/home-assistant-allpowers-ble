@@ -18,7 +18,10 @@ from custom_components.allpowers_ble.client import (
     ProbeStatusTimeoutError,
     UnsupportedDeviceError,
 )
-from custom_components.allpowers_ble.const import SERVICE_UUID
+from custom_components.allpowers_ble.const import (
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    SERVICE_UUID,
+)
 from custom_components.allpowers_ble.options import ConnectionOptions
 
 from tests.ha_stubs import FakeBleakError
@@ -465,7 +468,11 @@ async def test_reconfigure_success_updates_existing_entry(
     new_address = "11:22:33:44:55:66"
     entry = ConfigEntry(
         title="ALLPOWERS R600 EEFF",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            CONF_DEVICE_IDENTITY_CONFLICT: True,
+        },
         options=ConnectionOptions().as_dict(),
         unique_id=ADDRESS,
     )
@@ -504,6 +511,7 @@ async def test_reconfigure_success_updates_existing_entry(
     assert entry.data["address"] == new_address
     assert entry.data["device_name"] == "Station Patio"
     assert entry.data["device_identity"] == "ALLPOWERS R600"
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is False
     assert entry.unique_id == new_address
     assert entry.title == "Station Patio 5566"
 
@@ -757,7 +765,11 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
 ) -> None:
     entry = ConfigEntry(
         title="ALLPOWERS R600 EEFF",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            CONF_DEVICE_IDENTITY_CONFLICT: True,
+        },
         options=ConnectionOptions().as_dict(),
         unique_id=ADDRESS,
     )
@@ -804,9 +816,11 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
                 "address": ADDRESS,
                 "device_name": "ALLPOWERS R600",
                 "device_identity": "ALLPOWERS R600",
+                CONF_DEVICE_IDENTITY_CONFLICT: True,
             }
         }
     ]
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is True
 
 
 @pytest.mark.asyncio

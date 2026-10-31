@@ -22,6 +22,7 @@ from custom_components.allpowers_ble import (
     switch,
 )
 from custom_components.allpowers_ble.client import NotConnectedError
+from custom_components.allpowers_ble.entity import runtime_model_support
 from custom_components.allpowers_ble.options import ConnectionOptions
 from custom_components.allpowers_ble.protocol import StateUnavailableError, WorkMode
 
@@ -123,6 +124,29 @@ async def test_coordinator_lifecycle_and_push_updates() -> None:
 def test_validated_registry_version_accepts_only_bcd_and_non_zero() -> None:
     assert coordinator_module._validated_registry_version("1.2", 0x12) == "1.2"
     assert coordinator_module._validated_registry_version(" 3.4 ", 0x34) == "3.4"
+
+
+def test_runtime_support_uses_session_revision_and_conflict_snapshot() -> None:
+    _, client, coordinator, _ = configured_entry()
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings_monotonic=monotonic() - 1000,
+            session_hardware_version="0.3",
+            session_raw_hardware_version=0x03,
+        )
+    )
+
+    support = runtime_model_support(coordinator)
+    assert not coordinator.settings_are_fresh
+    assert support.capabilities.write_output_controls
+    assert support.capabilities.write_settings_controls
+
+    client.set_snapshot(replace(client.snapshot(), identity_conflicted=True))
+    conflicted_support = runtime_model_support(coordinator)
+    assert conflicted_support.classification == "identity_conflict"
+    assert not conflicted_support.capabilities.write_output_controls
+    assert not conflicted_support.capabilities.write_settings_controls
     assert coordinator_module._validated_registry_version("", 0x12) is None
     assert coordinator_module._validated_registry_version(None, 0x12) is None
     assert coordinator_module._validated_registry_version("0xAF", 0xAF) is None

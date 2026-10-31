@@ -33,6 +33,7 @@ from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     CONF_DEVICE_IDENTITY,
+    CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
@@ -266,13 +267,16 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                             unique_id=address,
                             title=entry_title,
                         )
+                    data_updates: dict[str, Any] = {
+                        CONF_ADDRESS: address,
+                        CONF_DEVICE_NAME: device_name,
+                        CONF_DEVICE_IDENTITY: model_identity,
+                    }
+                    if address != current_address:
+                        data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
                     return self.async_update_reload_and_abort(
                         reconfigure_entry,
-                        data_updates={
-                            CONF_ADDRESS: address,
-                            CONF_DEVICE_NAME: device_name,
-                            CONF_DEVICE_IDENTITY: model_identity,
-                        },
+                        data_updates=data_updates,
                         reason="reconfigure_successful",
                         reload_even_if_entry_is_unchanged=False,
                     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -16,7 +17,14 @@ from tests.helpers import ADDRESS, configured_entry
 
 @pytest.mark.asyncio
 async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> None:
-    entry, _, _, hass = configured_entry()
+    entry, client, _, hass = configured_entry()
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            session_hardware_version="0.3",
+            session_raw_hardware_version=0x03,
+        )
+    )
 
     payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 

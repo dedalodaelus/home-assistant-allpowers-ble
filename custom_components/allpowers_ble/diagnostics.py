@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
 import re
@@ -15,7 +15,7 @@ from homeassistant.helpers.device_registry import DeviceEntry
 
 from .const import CONF_DEVICE_IDENTITY_CONFLICT, CONF_DEVICE_NAME
 from .coordinator import AllpowersConfigEntry
-from .model_support import READ_ONLY_CAPABILITIES, identify_model
+from .model_support import resolve_runtime_model_support
 
 TO_REDACT = {CONF_ADDRESS}
 REDACTED_NAME = "**REDACTED_NAME**"
@@ -68,20 +68,24 @@ def _diagnostics_payload(
     settings = (
         snapshot.settings if entry.runtime_data.coordinator.settings_are_fresh else None
     )
-    support = identify_model(
+    hardware_version = snapshot.session_hardware_version
+    raw_hardware_version = snapshot.session_raw_hardware_version
+    if (
+        hardware_version is None
+        and raw_hardware_version is None
+        and entry.runtime_data.coordinator.settings_are_fresh
+    ):
+        hardware_version = settings.hardware_version if settings else None
+        raw_hardware_version = settings.raw_hardware_version if settings else None
+    support = resolve_runtime_model_support(
         snapshot.model_identity,
-        hardware_version=settings.hardware_version if settings else None,
-        raw_hardware_version=settings.raw_hardware_version if settings else None,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
+        identity_conflicted=(
+            snapshot.identity_conflicted
+            or entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+        ),
     )
-    if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False):
-        support = replace(
-            support,
-            verified=False,
-            classification="identity_conflict",
-            profile="identity-conflict-read-only",
-            capabilities=READ_ONLY_CAPABILITIES,
-            reason="Conflicting model identities require a fresh identifying observation",
-        )
     payload: dict[str, Any] = {
         "entry": {
             "title": entry.title,
