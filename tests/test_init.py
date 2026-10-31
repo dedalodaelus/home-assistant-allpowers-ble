@@ -331,14 +331,16 @@ async def test_setup_restarts_with_latest_config_after_initialization_update(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
 async def test_setup_finishes_pending_registry_transition_or_stops_client_on_error(
-    monkeypatch: pytest.MonkeyPatch, conflict: bool
+    monkeypatch: pytest.MonkeyPatch, conflict: bool, replacement: bool
 ) -> None:
     from custom_components.allpowers_ble import registry
     from custom_components.allpowers_ble.const import (
         CONF_PREVIOUS_REGISTRY_ID,
         CONF_REGISTRY_ID,
         CONF_REPLACE_DEVICE,
+        CONF_ENTITY_ID_PREFIX,
     )
     from homeassistant.components import bluetooth
 
@@ -348,7 +350,7 @@ async def test_setup_finishes_pending_registry_transition_or_stops_client_on_err
         {
             CONF_REGISTRY_ID: "new-id",
             CONF_PREVIOUS_REGISTRY_ID: "old-id",
-            CONF_REPLACE_DEVICE: False,
+            CONF_REPLACE_DEVICE: replacement,
         }
     )
     monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
@@ -375,6 +377,9 @@ async def test_setup_finishes_pending_registry_transition_or_stops_client_on_err
         assert await integration.async_setup_entry(hass, entry)
         assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
         assert CONF_REPLACE_DEVICE not in entry.data
+        assert entry.data.get(CONF_ENTITY_ID_PREFIX) == (
+            "new-id" if replacement else None
+        )
         assert entry.runtime_data.config_data == entry.data
 
 

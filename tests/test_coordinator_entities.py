@@ -22,7 +22,11 @@ from custom_components.allpowers_ble import (
     switch,
 )
 from custom_components.allpowers_ble.client import NotConnectedError
-from custom_components.allpowers_ble.entity import runtime_model_support
+from custom_components.allpowers_ble.entity import (
+    AllpowersEntity,
+    runtime_model_support,
+)
+from custom_components.allpowers_ble.const import CONF_ENTITY_ID_PREFIX
 from custom_components.allpowers_ble.options import ConnectionOptions
 from custom_components.allpowers_ble.protocol import StateUnavailableError, WorkMode
 
@@ -47,6 +51,14 @@ def assert_command_error(
     assert getattr(error, "translation_domain", None) == "allpowers_ble"
     assert getattr(error, "translation_key", None) == key
     assert isinstance(error.__cause__, cause)
+
+
+def test_replacement_default_entity_ids_use_a_persistent_generation_prefix():
+    entry, _, _, _ = configured_entry()
+    entity = AllpowersEntity(entry, "ac_output")
+    assert entity.suggested_object_id == getattr(entity, "_attr_name", None)
+    entry.data[CONF_ENTITY_ID_PREFIX] = "replacement-generation"
+    assert entity.suggested_object_id == "replacement-generation_ac_output"
 
 
 class _RegistryDevice:

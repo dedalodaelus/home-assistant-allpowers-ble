@@ -68,7 +68,10 @@ from .const import (
 )
 from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
-from .registry import async_registry_transition_conflicts
+from .registry import (
+    async_registry_source_address,
+    async_registry_transition_conflicts,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,6 +187,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle user-initiated config-entry reconfiguration."""
         reconfigure_entry = self._get_reconfigure_entry()
+        pending_transition = CONF_PREVIOUS_REGISTRY_ID in reconfigure_entry.data
         current_address = str(reconfigure_entry.data.get(CONF_ADDRESS, "")).upper()
         current_name = str(
             reconfigure_entry.data.get(CONF_DEVICE_NAME, reconfigure_entry.title)
@@ -235,9 +239,13 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
             if self._is_address_in_use(reconfigure_entry, address):
                 errors[CONF_ADDRESS] = "already_configured"
-            elif address != current_address and user_input.get(
-                CONF_DEVICE_CHANGE
-            ) not in ("same_device", "replacement"):
+            elif (
+                address != current_address
+                or (pending_transition and CONF_DEVICE_CHANGE in user_input)
+            ) and user_input.get(CONF_DEVICE_CHANGE) not in (
+                "same_device",
+                "replacement",
+            ):
                 errors[CONF_DEVICE_CHANGE] = "device_change_required"
             else:
                 discovery_info = discovered_devices.get(address)
@@ -292,7 +300,9 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_DEVICE_NAME: device_name,
                         CONF_DEVICE_IDENTITY: model_identity,
                     }
-                    if address != current_address:
+                    if address != current_address or (
+                        pending_transition and CONF_DEVICE_CHANGE in user_input
+                    ):
                         data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
                         source = str(
                             reconfigure_entry.data.get(
@@ -302,13 +312,23 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                                 ),
                             )
                         )
-                        replace_device = user_input[
-                            CONF_DEVICE_CHANGE
-                        ] == "replacement" or reconfigure_entry.data.get(
-                            CONF_REPLACE_DEVICE, False
+                        rollback = (
+                            pending_transition
+                            and reconfigure_entry.data.get(CONF_REPLACE_DEVICE, False)
+                            and user_input.get(CONF_DEVICE_CHANGE) == "same_device"
+                            and address
+                            == async_registry_source_address(
+                                self.hass, reconfigure_entry
+                            )
+                        )
+                        replace_device = not rollback and (
+                            user_input[CONF_DEVICE_CHANGE] == "replacement"
+                            or reconfigure_entry.data.get(CONF_REPLACE_DEVICE, False)
                         )
                         registry_id = (
-                            uuid4().hex
+                            source
+                            if rollback
+                            else uuid4().hex
                             if replace_device
                             else str(
                                 reconfigure_entry.data.get(

@@ -13,7 +13,7 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .client import AllpowersClientError, NotConnectedError
-from .const import CONF_REGISTRY_ID, DOMAIN, MANUFACTURER
+from .const import CONF_ENTITY_ID_PREFIX, CONF_REGISTRY_ID, DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
 from .model_support import ModelSupport, resolve_runtime_model_support
 from .protocol import StateUnavailableError
@@ -104,6 +104,14 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
         self._address = str(entry.data[CONF_ADDRESS]).upper()
         self._registry_id = str(entry.data.get(CONF_REGISTRY_ID, self._address))
         self._attr_unique_id = f"{self._registry_id}_{key}"
+        self._key = key
+
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Namespace replacement defaults so old automation targets stay retired."""
+        if prefix := self._entry.data.get(CONF_ENTITY_ID_PREFIX):
+            return f"{prefix}_{self._key}"
+        return super().suggested_object_id
 
     @property
     def device_info(self) -> DeviceInfo:

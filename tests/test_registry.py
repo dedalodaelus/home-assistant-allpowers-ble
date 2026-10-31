@@ -234,3 +234,64 @@ def test_transition_keeps_stable_ids_and_unrelated_device_metadata(registries):
     assert foreign.unique_id == "foreign"
     assert source_device.identifiers == {(DOMAIN, "A"), ("other", "extra")}
     assert source_device.connections == {("bluetooth", "B"), ("mac", "other")}
+
+
+@pytest.mark.parametrize(
+    "connections",
+    [None, set(), {("bluetooth", "A")}, {("bluetooth", "A"), ("bluetooth", "B")}],
+)
+def test_source_address_only_identifies_an_intact_unambiguous_device(
+    registries, connections
+):
+    entry = make_entry()
+    entry.data[CONF_PREVIOUS_REGISTRY_ID] = "source"
+    if connections is not None:
+        source = device("source")
+        source.connections = connections | {("mac", "unrelated")}
+        registries.devices[source.id] = source
+    assert registry.async_registry_source_address(FakeHass(), entry) == (
+        "A" if connections == {("bluetooth", "A")} else None
+    )
+
+
+@pytest.mark.parametrize("device_migrated", [False, True])
+def test_partially_migrated_records_are_idempotently_retryable(
+    registries, device_migrated
+):
+    entry = make_entry()
+    entry.data.update(
+        {
+            "address": "B",
+            CONF_REGISTRY_ID: "target",
+            CONF_PREVIOUS_REGISTRY_ID: "source",
+            CONF_REPLACE_DEVICE: False,
+        }
+    )
+    original = entity("source_battery")
+    migrated = entity("target_temperature")
+    registries.entities = {original.entity_id: original, migrated.entity_id: migrated}
+    record = device(
+        "target" if device_migrated else "source",
+        address="B" if device_migrated else "A",
+    )
+    registries.devices[record.id] = record
+    assert not registry.async_registry_transition_conflicts(
+        FakeHass(), entry, "target", "B"
+    )
+    registry.async_apply_registry_transition(FakeHass(), entry)
+    registry.async_apply_registry_transition(FakeHass(), entry)
+    assert original.unique_id == "target_battery"
+    assert migrated.unique_id == "target_temperature"
+    assert record.identifiers == {(DOMAIN, "target")}
+    assert record.connections == {("bluetooth", "B")}
+
+
+def test_partial_migration_rejects_duplicate_logical_entities(registries):
+    entry = make_entry()
+    entry.data.update({CONF_PREVIOUS_REGISTRY_ID: "source", CONF_REGISTRY_ID: "target"})
+    source = entity("source_battery")
+    duplicate = entity("target_battery")
+    registries.entities = {source.entity_id: source, duplicate.entity_id: duplicate}
+    assert registry.async_registry_transition_conflicts(
+        FakeHass(), entry, "target", "B"
+    )

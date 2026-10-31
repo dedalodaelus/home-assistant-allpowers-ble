@@ -315,11 +315,21 @@ need to update entry-level setup data without removing the integration entry.
   - **Replacement device:** remove the entity and device records owned by this
     entry and create fresh identities. Automations and dashboards are not
     transferred automatically. Returning to a previously used address does not
-    restore the replaced device's customizations.
+    restore the replaced device's customizations or default entity IDs. New
+    default entity IDs include a persistent generation prefix; existing migrated
+    or customized IDs are not renamed.
+- If a replacement fails before touching the source registries, returning to the
+  registered source address with **Same physical device** cancels the pending
+  replacement and preserves the original records and references.
+- A pending transition can be recovered at its current target address: choose
+  **Same physical device** to retry migration or **Replacement device** to discard
+  this entry's old records. Already migrated records are recognized on retry.
 - Physical identity cannot be verified by the BLE protocol; choose the relationship
   yourself. Registry transitions occur only after valid startup telemetry and
   never modify records belonging to other config entries. Registry collisions
-  reject same-device migration without applying partial changes.
+  reject conflicting same-device migration before it starts. If an unexpected
+  registry update fails mid-migration, the pending transition remains retryable;
+  no source records are deleted by same-device migration.
 - Reconfigure performs an active probe before applying changes.
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.

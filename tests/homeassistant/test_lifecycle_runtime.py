@@ -1009,6 +1009,7 @@ async def test_address_transitions_preserve_or_replace_complete_registries(
                 )
         else:
             assert set(current_entities).isdisjoint(previous_entities)
+            assert set(current_entities).isdisjoint(original_entities)
             assert entities.async_get(customized_id) is None
             assert device.id != previous_device_id
             assert device.name_by_user is None
@@ -1024,6 +1025,249 @@ async def test_address_transitions_preserve_or_replace_complete_registries(
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert bluetooth_callbacks == []
+
+
+@pytest.fixture
+def reconfigure_address(hass, monkeypatch: pytest.MonkeyPatch, bluetooth_callbacks):
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+
+    async def reconfigure(entry, address, choice):
+        monkeypatch.setattr(
+            flow_module.bluetooth,
+            "async_discovered_service_info",
+            lambda hass, connectable: [
+                SimpleNamespace(
+                    address=address, name="ALLPOWERS R600", service_uuids=[SERVICE_UUID]
+                )
+            ],
+        )
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: "ALLPOWERS R600",
+                CONF_DEVICE_CHANGE: choice,
+            },
+        )
+        await hass.async_block_till_done()
+        return result
+
+    return reconfigure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_registry_id", [None, "stable-source"])
+async def test_failed_replacement_can_roll_back_to_original_device(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    reconfigure_address,
+    source_registry_id,
+) -> None:
+    """An uncompleted replacement must not destroy the restored source identity."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    if source_registry_id:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REGISTRY_ID: source_registry_id}
+        )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    entity_id = entities.async_get_entity_id(
+        "switch", DOMAIN, f"{source_registry_id or address_a}_ac_output"
+    )
+    entities.async_update_entity(
+        entity_id, new_entity_id="switch.my_power", name="My outlet", icon="mdi:power"
+    )
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(device.id, name_by_user="Original battery")
+    original_entities = {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_device = devices.async_get(device.id)
+
+    async def wait_ready(client, timeout):
+        del timeout
+        if client.address == address_b:
+            raise TimeoutError("Replacement never delivered telemetry")
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    result = await reconfigure_address(entry, address_b, "replacement")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    } == original_entities
+    assert devices.async_get(device.id) == original_device
+    result = await reconfigure_address(entry, address_a, "same_device")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    assert {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    } == original_entities
+    restored = devices.async_get(device.id)
+    assert restored.id == original_device.id
+    assert restored.identifiers == original_device.identifiers
+    assert restored.connections == original_device.connections
+    assert restored.name_by_user == original_device.name_by_user
+    assert restored.area_id == original_device.area_id
+    assert len(devices.devices) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_choice", ["same_device", "replacement"])
+@pytest.mark.parametrize("fail_after", [1, 3])
+async def test_partial_migration_recovers_at_the_same_address(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    reconfigure_address,
+    recovery_choice,
+    fail_after,
+) -> None:
+    """A partially migrated registry can retry or explicitly replace at target B."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    original_ids = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    update_entity = entities.async_update_entity
+    calls = 0
+
+    def injected_update(entity_id, **kwargs):
+        nonlocal calls
+        if "new_unique_id" in kwargs:
+            calls += 1
+            if calls >= fail_after + 1:
+                raise HomeAssistantError("Injected migration failure")
+        return update_entity(entity_id, **kwargs)
+
+    monkeypatch.setattr(entities, "async_update_entity", injected_update)
+    result = await reconfigure_address(entry, address_b, "same_device")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    assert (
+        sum(
+            record.unique_id.startswith(f"{entry.data[CONF_REGISTRY_ID]}_")
+            for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+        )
+        == fail_after
+    )
+    monkeypatch.setattr(entities, "async_update_entity", update_entity)
+    result = await reconfigure_address(entry, address_b, recovery_choice)
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    current = er.async_entries_for_config_entry(entities, entry.entry_id)
+    assert len(current) == len(original_ids)
+    assert all(
+        record.unique_id.startswith(f"{entry.data[CONF_REGISTRY_ID]}_")
+        for record in current
+    )
+    current_ids = {record.entity_id for record in current}
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    if recovery_choice == "same_device":
+        assert current_ids == original_ids
+        assert device.id == original_device.id
+    else:
+        assert current_ids.isdisjoint(original_ids)
+        assert device.id != original_device.id
+    assert device.connections == {("bluetooth", address_b)}
+    assert len(devices.devices) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_pending_registry_conflict_can_be_replaced_at_the_same_address(
+    hass, enable_custom_integrations, monkeypatch, reconfigure_address
+) -> None:
+    """An unexpected owned record discovered during startup has an explicit recovery."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    original_ids = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+
+    async def wait_ready(client, timeout):
+        del timeout
+        if client.address == address_b:
+            entities.async_get_or_create(
+                "sensor", DOMAIN, "unexpected_battery", config_entry=entry
+            )
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    assert (await reconfigure_address(entry, address_b, "same_device"))[
+        "type"
+    ] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    before = dict(entry.data)
+    result = await reconfigure_address(entry, address_b, "same_device")
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "registry_conflict"}
+    assert entry.data == before
+    result = await reconfigure_address(entry, address_b, "replacement")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    current = er.async_entries_for_config_entry(entities, entry.entry_id)
+    assert len(current) == len(original_ids)
+    assert {record.entity_id for record in current}.isdisjoint(original_ids)
+    assert entities.async_get_entity_id("sensor", DOMAIN, "unexpected_battery") is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
         {
             "registry_id": "1234567890abcdef1234567890abcdef",
             "previous_registry_id": "11:22:33:44:55:66",
+            "entity_id_prefix": "1234567890abcdef1234567890abcdef",
         }
     )
     client.set_snapshot(
@@ -37,6 +38,7 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     assert payload["entry"]["data"]["address"] == "**REDACTED**"
     assert payload["entry"]["data"]["registry_id"] == "**REDACTED**"
     assert payload["entry"]["data"]["previous_registry_id"] == "**REDACTED**"
+    assert payload["entry"]["data"]["entity_id_prefix"] == "**REDACTED**"
     assert payload["entry"]["title"] == "**REDACTED_NAME**"
     assert "device_name" not in payload["entry"]["data"]
     assert payload["entry"]["options"]["status_interval"] == 20

@@ -304,10 +304,20 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
   - **Dispositivo de sustitucion:** elimina los registros de entidades y
     dispositivos de esta entrada y crea identidades nuevas. Las automatizaciones
     y los paneles no se transfieren automaticamente. Volver a una direccion
-    anterior no restaura las personalizaciones del dispositivo sustituido.
+    anterior no restaura las personalizaciones ni los IDs predeterminados del
+    dispositivo sustituido. Los nuevos IDs incluyen un prefijo persistente por
+    generacion; los IDs migrados o personalizados no se renombran.
+- Si una sustitucion falla antes de modificar los registros originales, volver
+  a la direccion registrada original eligiendo **Mismo dispositivo** cancela la
+  sustitucion pendiente sin perder registros ni referencias.
+- Una transicion pendiente se recupera sin cambiar la direccion de destino:
+  **Mismo dispositivo** reintenta la migracion; **Dispositivo de sustitucion**
+  descarta los registros anteriores. El reintento reconoce registros ya migrados.
 - El protocolo BLE no permite verificar la identidad fisica; debes confirmarla.
   Los registros solo cambian tras recibir telemetria valida durante el arranque,
-  sin modificar otras entradas. Las colisiones impiden una migracion parcial.
+  sin modificar otras entradas. Las colisiones se rechazan antes de iniciar la
+  migracion. Un fallo inesperado durante la actualizacion conserva la transicion
+  pendiente para reintentarla; migrar no elimina los registros originales.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.

@@ -36,7 +36,7 @@
           "device_change": "Physical device relationship (required for an address change)",
           "device_name": "Display name"
         },
-        "description": "Validate changes before applying them. Same physical device preserves entity IDs, device ID and customizations. Replacement removes this entry's old registry records and creates new identities; update automations and dashboards yourself. The integration cannot verify physical identity.",
+        "description": "Same physical device preserves entity IDs and customizations. Replacement removes old records and uses new default entity IDs; update automations and dashboards yourself. For a pending transition, choose either option at the current address to retry or replace. Return to the registered original address with Same physical device to cancel an uncompleted replacement. The integration cannot verify physical identity.",
         "title": "Reconfigure ALLPOWERS BLE"
       }
     }

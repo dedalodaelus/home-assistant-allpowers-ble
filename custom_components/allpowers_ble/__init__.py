@@ -19,7 +19,9 @@ from .const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_ENTITY_ID_PREFIX,
     CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
     CONF_REPLACE_DEVICE,
     DOMAIN,
 )
@@ -299,6 +301,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         except Exception:
             await coordinator.async_shutdown()
             raise
+        if config_data[CONF_REPLACE_DEVICE]:
+            config_data[CONF_ENTITY_ID_PREFIX] = config_data[CONF_REGISTRY_ID]
         config_data.pop(CONF_PREVIOUS_REGISTRY_ID)
         config_data.pop(CONF_REPLACE_DEVICE)
         hass.config_entries.async_update_entry(entry, data=dict(config_data))

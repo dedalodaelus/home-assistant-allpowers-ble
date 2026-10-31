@@ -18,6 +18,25 @@ from .coordinator import AllpowersConfigEntry
 
 
 @callback
+def async_registry_source_address(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> str | None:
+    """Identify an intact pending source from its registered Bluetooth connection."""
+    source = str(entry.data[CONF_PREVIOUS_REGISTRY_ID])
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, source), entry.entry_id
+    )
+    if device is None:
+        return None
+    addresses = [
+        address.upper()
+        for connection, address in device.connections
+        if connection == dr.CONNECTION_BLUETOOTH
+    ]
+    return addresses[0] if len(addresses) == 1 else None
+
+
+@callback
 def async_registry_transition_conflicts(
     hass: HomeAssistant,
     entry: AllpowersConfigEntry,
@@ -32,11 +51,15 @@ def async_registry_transition_conflicts(
             entry.data.get(CONF_REGISTRY_ID, entry.data[CONF_ADDRESS]),
         )
     )
-    prefix = f"{source}_"
+    prefixes = (f"{source}_", f"{registry_id}_")
     for entity in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
         if entity.platform != DOMAIN:
             continue
-        if not entity.unique_id.startswith(prefix):
+        prefix = next(
+            (prefix for prefix in prefixes if entity.unique_id.startswith(prefix)),
+            None,
+        )
+        if prefix is None:
             return True
         unique_id = f"{registry_id}_{entity.unique_id[len(prefix) :]}"
         existing = entity_registry.async_get_entity_id(entity.domain, DOMAIN, unique_id)
@@ -49,14 +72,15 @@ def async_registry_transition_conflicts(
     source_device = device_registry.async_get_device_by_identifier(
         (DOMAIN, source), entry.entry_id
     )
+    migration_device = source_device or target
     connection_device = device_registry.async_get_device_by_connection(
         (dr.CONNECTION_BLUETOOTH, address), entry.entry_id
     )
     return (
-        (target is not None and target != source_device)
-        or (connection_device is not None and connection_device != source_device)
+        (source_device is not None and target is not None and target != source_device)
+        or (connection_device is not None and connection_device != migration_device)
         or any(
-            device != source_device
+            device != migration_device
             for device in dr.async_entries_for_config_entry(
                 device_registry, entry.entry_id
             )

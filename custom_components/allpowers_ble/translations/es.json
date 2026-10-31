@@ -36,7 +36,7 @@
           "device_change": "Relación entre dispositivos (obligatoria al cambiar la dirección)",
           "device_name": "Nombre visible"
         },
-        "description": "Valida los cambios antes de aplicarlos. Mismo dispositivo conserva los IDs de entidades, el ID del dispositivo y las personalizaciones. Sustitución elimina los registros anteriores de esta entrada y crea identidades nuevas; debes actualizar tus automatizaciones y paneles. La integración no puede verificar la identidad física.",
+        "description": "Mismo dispositivo conserva los IDs y las personalizaciones. Sustitución elimina registros anteriores y crea IDs predeterminados nuevos; debes actualizar automatizaciones y paneles. Si hay una transición pendiente, elige una opción en la dirección actual para reintentar o sustituir. Vuelve a la dirección original registrada con Mismo dispositivo para cancelar una sustitución no completada. La integración no puede verificar la identidad física.",
         "title": "Reconfigurar ALLPOWERS BLE"
       }
     }

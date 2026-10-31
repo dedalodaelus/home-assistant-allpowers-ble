@@ -151,6 +151,10 @@ class _Entity:
 
     hass: Any
 
+    @property
+    def suggested_object_id(self) -> str | None:
+        return getattr(self, "_attr_name", None)
+
 
 class SensorEntity(_Entity):
     pass

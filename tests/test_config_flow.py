@@ -584,6 +584,102 @@ async def test_reconfigure_rejects_unconfirmed_or_conflicting_registry_transitio
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("choice", [None, "invalid", "same_device", "replacement"])
+async def test_pending_transition_can_be_recovered_without_changing_address(
+    monkeypatch: pytest.MonkeyPatch, choice
+):
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            CONF_REGISTRY_ID: "target",
+            CONF_PREVIOUS_REGISTRY_ID: "source",
+            CONF_REPLACE_DEVICE: False,
+        },
+        unique_id=ADDRESS,
+    )
+    entry.state = ConfigEntryState.SETUP_ERROR
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass):
+        del hass
+
+    async def probe(*args, **kwargs):
+        del args, kwargs
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+    payload = {"address": ADDRESS, "device_name": "ALLPOWERS R600"}
+    if choice is not None:
+        payload["device_change"] = choice
+    result = await flow.async_step_reconfigure(payload)
+    if choice == "invalid":
+        assert result["errors"] == {"device_change": "device_change_required"}
+        assert flow.hass.config_entries.scheduled_reloads == []
+    else:
+        assert result["type"] == "abort"
+        assert entry.data[CONF_REPLACE_DEVICE] is (choice == "replacement")
+        assert (entry.data[CONF_REGISTRY_ID] == "target") is (choice != "replacement")
+        assert entry.data[CONF_PREVIOUS_REGISTRY_ID] == "source"
+        assert flow.hass.config_entries.scheduled_reloads == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_pending_replacement_rollback_restores_source_registry_identity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    entry = ConfigEntry(
+        title="Replacement",
+        data={
+            "address": "11:22:33:44:55:66",
+            "device_name": "Replacement",
+            CONF_REGISTRY_ID: "pending-target",
+            CONF_PREVIOUS_REGISTRY_ID: "stable-source",
+            CONF_REPLACE_DEVICE: True,
+        },
+        unique_id="11:22:33:44:55:66",
+    )
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass):
+        del hass
+
+    async def probe(*args, **kwargs):
+        del args, kwargs
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+    monkeypatch.setattr(
+        config_flow, "async_registry_source_address", lambda *args: ADDRESS
+    )
+    result = await flow.async_step_reconfigure(
+        {
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            "device_change": "same_device",
+        }
+    )
+    assert result["type"] == "abort"
+    assert entry.data[CONF_REGISTRY_ID] == "stable-source"
+    assert entry.data[CONF_REPLACE_DEVICE] is False
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_duplicate_target_returns_field_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
