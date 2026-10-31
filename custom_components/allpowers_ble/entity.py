@@ -34,7 +34,11 @@ def _translated_command_error(key: str) -> HomeAssistantError:
 def _state_error_key(error: StateUnavailableError) -> str:
     """Map state-guard failures to a stable user-facing translation key."""
     message = str(error).lower()
-    if "confirmation timed out" in message or "state is ambiguous" in message:
+    if (
+        "confirmation timed out" in message
+        or "confirmation is pending" in message
+        or "state is ambiguous" in message
+    ):
         return "command_unconfirmed"
     if (
         "semantic validation" in message

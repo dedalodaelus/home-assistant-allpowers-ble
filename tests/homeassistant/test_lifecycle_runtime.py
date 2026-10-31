@@ -21,7 +21,7 @@ from custom_components.allpowers_ble import diagnostics
 from custom_components.allpowers_ble.const import DOMAIN
 from custom_components.allpowers_ble.options import ConnectionOptions
 
-from tests.helpers import settings, snapshot
+from tests.helpers import settings, snapshot, status
 
 pytestmark = pytest.mark.homeassistant
 
@@ -317,6 +317,119 @@ async def test_command_errors_surface_via_real_service_call(
 
     assert getattr(error.value, "translation_domain", None) == DOMAIN
     assert getattr(error.value, "translation_key", None) == "command_timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings", "keepalive"])
+async def test_pending_transaction_blocks_real_service_until_notification(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    notification_builder,
+    group: str,
+) -> None:
+    """Use the production transaction client under HA with only BLE replaced."""
+    del enable_custom_integrations, bluetooth_callbacks
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.protocol import WorkMode
+    from tests.ha_stubs import FakeCharacteristic, FakeClient
+
+    real_client_type = client_module.AllpowersBLEClient
+    clients = []
+    transports = []
+
+    def create_client(**kwargs):
+        client = real_client_type(**kwargs)
+        transport = FakeClient()
+
+        async def start() -> None:
+            now = monotonic()
+            client._client = transport
+            client._write_characteristic = FakeCharacteristic()
+            client._activate_session_generation()
+            client._connected = True
+            client._status = status(dc_enabled=False, raw_flags=0x10)
+            client._status_monotonic = now
+            client._settings = settings(
+                eco_enabled=False, work_mode=WorkMode.MUTE, raw_flags=0xA0
+            )
+            client._settings_monotonic = now
+            client._ready_event.set()
+            client._emit_update()
+
+        monkeypatch.setattr(client, "async_start", start)
+        monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+        clients.append(client)
+        transports.append(transport)
+        return client
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", create_client)
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = _make_entry(address, title="ALLPOWERS R600 AABB")
+    entry.add_to_hass(hass)
+    if group == "keepalive":
+        er.async_get(hass).async_get_or_create(
+            "button", DOMAIN, f"{address}_settings_keepalive", config_entry=entry
+        )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = clients[0]
+    transport = transports[0]
+    registry = er.async_get(hass)
+    first_key = "ac_output" if group == "output" else "eco_mode"
+    first_id = registry.async_get_entity_id("switch", DOMAIN, f"{address}_{first_key}")
+    assert first_id is not None
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": first_id}, blocking=True
+    )
+    assert len(transport.writes) == 1
+    assert client.snapshot().status.ac_enabled is False
+    assert client.snapshot().settings.eco_enabled is False
+
+    second_domain = "button" if group == "keepalive" else "switch"
+    second_key = (
+        "dc_output"
+        if group == "output"
+        else "settings_keepalive"
+        if group == "keepalive"
+        else "eco_mode"
+    )
+    second_service = (
+        "press"
+        if group == "keepalive"
+        else "turn_off"
+        if group == "settings"
+        else "turn_on"
+    )
+    second_id = registry.async_get_entity_id(
+        second_domain, DOMAIN, f"{address}_{second_key}"
+    )
+    assert second_id is not None
+    with pytest.raises(HomeAssistantError) as error:
+        await hass.services.async_call(
+            second_domain, second_service, {"entity_id": second_id}, blocking=True
+        )
+    assert error.value.translation_domain == DOMAIN
+    assert error.value.translation_key == "command_unconfirmed"
+    assert len(transport.writes) == 1
+
+    notification = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 73, 1, 44, 0, 150, 0, 120))
+        if group == "output"
+        else bytes((0xA1, 4, 0, 0, 0x03, 0x34)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(notification))
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        second_domain, second_service, {"entity_id": second_id}, blocking=True
+    )
+    assert len(transport.writes) == 2
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
 
 
 @pytest.mark.asyncio

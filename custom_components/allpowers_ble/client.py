@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum, auto
 import logging
 from random import Random
 from time import monotonic
@@ -89,6 +90,14 @@ class NotConnectedError(AllpowersClientError):
     """Raised when a command is attempted without an active GATT connection."""
 
 
+class TransactionPhase(Enum):
+    """Separate transport submission from observed device-state convergence."""
+
+    SENDING = auto()
+    AWAITING_CONFIRMATION = auto()
+    CONFIRMED = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
     """Result of a non-persistent config-flow probe."""
@@ -100,7 +109,7 @@ class ProbeResult:
 
 @dataclass(frozen=True, slots=True)
 class PendingOutputTransaction:
-    """Pending output command awaiting explicit on-device confirmation."""
+    """Requested outputs, never a confirmed snapshot or a dependent write base."""
 
     session_generation: int
     source_version: int
@@ -109,17 +118,19 @@ class PendingOutputTransaction:
     target_light: bool
     sent_monotonic: float
     confirm_deadline_monotonic: float
+    phase: TransactionPhase = TransactionPhase.AWAITING_CONFIRMATION
 
 
 @dataclass(frozen=True, slots=True)
 class PendingSettingsTransaction:
-    """Pending settings command awaiting explicit on-device confirmation."""
+    """Requested settings, never a confirmed snapshot or a keepalive payload."""
 
     session_generation: int
     source_version: int
     target: SettingsData
     sent_monotonic: float
     confirm_deadline_monotonic: float
+    phase: TransactionPhase = TransactionPhase.AWAITING_CONFIRMATION
 
 
 class AllpowersBLEClient:
@@ -337,26 +348,30 @@ class AllpowersBLEClient:
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
             target_light = current_light if light is None else light
-            await self._write_frame_unlocked(
-                encode_output_control(
-                    dc=target_dc,
-                    ac=target_ac,
-                    light=target_light,
-                )
-            )
-            now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
                 raise NotConnectedError("The ALLPOWERS device is not connected")
-            self._pending_output_transaction = PendingOutputTransaction(
+            if (target_dc, target_ac, target_light) == (
+                current_dc,
+                current_ac,
+                current_light,
+            ):
+                return
+            frame = encode_output_control(
+                dc=target_dc, ac=target_ac, light=target_light
+            )
+            now = self._loop_time()
+            transaction = PendingOutputTransaction(
                 session_generation=active_generation,
-                source_version=self._output_source_version(),
+                source_version=self._status_version,
                 target_dc=target_dc,
                 target_ac=target_ac,
                 target_light=target_light,
                 sent_monotonic=now,
                 confirm_deadline_monotonic=now + self._options.stale_timeout,
+                phase=TransactionPhase.SENDING,
             )
+            await self._write_transaction_unlocked(frame, transaction)
         self._schedule_status_refresh()
 
     async def async_set_eco(self, enabled: bool) -> None:
@@ -397,18 +412,22 @@ class AllpowersBLEClient:
                 car_charger_enabled=car_charger_enabled,
                 eco_timeout_hours=eco_timeout_hours,
             )
-            await self._write_frame_unlocked(encode_settings_control(target))
-            now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
                 raise NotConnectedError("The ALLPOWERS device is not connected")
-            self._pending_settings_transaction = PendingSettingsTransaction(
+            if target == current:
+                return
+            frame = encode_settings_control(target)
+            now = self._loop_time()
+            transaction = PendingSettingsTransaction(
                 session_generation=active_generation,
-                source_version=self._settings_source_version(),
+                source_version=self._settings_version,
                 target=target,
                 sent_monotonic=now,
                 confirm_deadline_monotonic=now + self._options.settings_stale_timeout,
+                phase=TransactionPhase.SENDING,
             )
+            await self._write_transaction_unlocked(frame, transaction)
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
@@ -417,23 +436,90 @@ class AllpowersBLEClient:
         async with self._operation_lock:
             self._require_settings_keepalive_capability_unlocked()
             current = self._safe_settings_snapshot()
-            await self._write_frame_unlocked(encode_settings_control(current))
+            frame = encode_settings_control(current)
             now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
                 raise NotConnectedError("The ALLPOWERS device is not connected")
-            self._pending_settings_transaction = PendingSettingsTransaction(
+            transaction = PendingSettingsTransaction(
                 session_generation=active_generation,
-                source_version=self._settings_source_version(),
+                source_version=self._settings_version,
                 target=current,
                 sent_monotonic=now,
                 confirm_deadline_monotonic=now + self._options.settings_stale_timeout,
+                phase=TransactionPhase.SENDING,
             )
+            await self._write_transaction_unlocked(frame, transaction)
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
+    async def _write_transaction_unlocked(
+        self,
+        frame: bytes,
+        transaction: PendingOutputTransaction | PendingSettingsTransaction,
+    ) -> None:
+        """Publish before yielding; failed submissions require a new snapshot."""
+        if isinstance(transaction, PendingOutputTransaction):
+            self._pending_output_transaction = transaction
+        else:
+            self._pending_settings_transaction = transaction
+        try:
+            await self._write_frame_unlocked(frame)
+            if self._disconnect_event.is_set() or (
+                self._client is None or not self._client.is_connected
+            ):
+                raise NotConnectedError(
+                    "The ALLPOWERS device disconnected during write"
+                )
+        except Exception, asyncio.CancelledError:
+            same_session = (
+                transaction.session_generation == self._active_session_generation
+            )
+            if isinstance(transaction, PendingOutputTransaction):
+                failed_output = self._pending_output_transaction
+                if (
+                    failed_output is not None
+                    and failed_output.session_generation
+                    == transaction.session_generation
+                ):
+                    self._pending_output_transaction = None
+                if same_session:
+                    self._output_blocked_until_version = self._status_version + 1
+            else:
+                failed_settings = self._pending_settings_transaction
+                if (
+                    failed_settings is not None
+                    and failed_settings.session_generation
+                    == transaction.session_generation
+                ):
+                    self._pending_settings_transaction = None
+                if same_session:
+                    self._settings_blocked_until_version = self._settings_version + 1
+            raise
+
+        if isinstance(transaction, PendingOutputTransaction):
+            pending_output = self._pending_output_transaction
+            if pending_output is not None:
+                self._pending_output_transaction = (
+                    None
+                    if pending_output.phase is TransactionPhase.CONFIRMED
+                    else replace(
+                        pending_output, phase=TransactionPhase.AWAITING_CONFIRMATION
+                    )
+                )
+        else:
+            pending_settings = self._pending_settings_transaction
+            if pending_settings is not None:
+                self._pending_settings_transaction = (
+                    None
+                    if pending_settings.phase is TransactionPhase.CONFIRMED
+                    else replace(
+                        pending_settings, phase=TransactionPhase.AWAITING_CONFIRMATION
+                    )
+                )
+
     def _safe_output_snapshot(self) -> tuple[bool, bool, bool]:
-        if not self._connected:
+        if not self._connected or self._disconnect_event.is_set():
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
@@ -441,7 +527,9 @@ class AllpowersBLEClient:
         pending = self._pending_output_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
-                return pending.target_dc, pending.target_ac, pending.target_light
+                raise StateUnavailableError(
+                    "Output command confirmation is pending; wait for a status update"
+                )
             self._pending_output_transaction = None
             self._output_blocked_until_version = self._status_version + 1
             raise StateUnavailableError(
@@ -476,7 +564,7 @@ class AllpowersBLEClient:
         )
 
     def _safe_settings_snapshot(self) -> SettingsData:
-        if not self._connected:
+        if not self._connected or self._disconnect_event.is_set():
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
@@ -484,7 +572,9 @@ class AllpowersBLEClient:
         pending = self._pending_settings_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
-                return pending.target
+                raise StateUnavailableError(
+                    "Settings command confirmation is pending; wait for a settings update"
+                )
             self._pending_settings_transaction = None
             self._settings_blocked_until_version = self._settings_version + 1
             raise StateUnavailableError(
@@ -846,16 +936,30 @@ class AllpowersBLEClient:
                         self._pending_output_transaction = None
                         self._output_blocked_until_version = self._status_version + 1
                     elif (
-                        packet.dc_enabled == pending_output.target_dc
+                        self._status_version > pending_output.source_version
+                        and not status_write_validation_errors(
+                            self._runtime_model_support().profile, packet
+                        )
+                        and packet.dc_enabled == pending_output.target_dc
                         and packet.ac_enabled == pending_output.target_ac
                         and packet.light_enabled == pending_output.target_light
                     ):
-                        self._pending_output_transaction = None
+                        self._pending_output_transaction = (
+                            None
+                            if pending_output.phase
+                            is TransactionPhase.AWAITING_CONFIRMATION
+                            else replace(
+                                pending_output, phase=TransactionPhase.CONFIRMED
+                            )
+                        )
+                    elif pending_output.phase is TransactionPhase.CONFIRMED:
+                        self._pending_output_transaction = replace(
+                            pending_output, phase=TransactionPhase.SENDING
+                        )
                 self._ready_event.set()
             elif isinstance(packet, SettingsData):
                 self._settings = packet
                 self._settings_monotonic = now
-                self._last_settings_keepalive_attempt_monotonic = None
                 self._settings_version += 1
                 if (
                     self._settings_blocked_until_version is not None
@@ -874,8 +978,30 @@ class AllpowersBLEClient:
                         self._settings_blocked_until_version = (
                             self._settings_version + 1
                         )
-                    elif packet == pending_settings.target:
-                        self._pending_settings_transaction = None
+                    elif (
+                        self._settings_version > pending_settings.source_version
+                        and not settings_write_validation_errors(
+                            self._runtime_model_support().profile, packet
+                        )
+                        and packet == pending_settings.target
+                    ):
+                        self._pending_settings_transaction = (
+                            None
+                            if pending_settings.phase
+                            is TransactionPhase.AWAITING_CONFIRMATION
+                            else replace(
+                                pending_settings, phase=TransactionPhase.CONFIRMED
+                            )
+                        )
+                    elif pending_settings.phase is TransactionPhase.CONFIRMED:
+                        self._pending_settings_transaction = replace(
+                            pending_settings, phase=TransactionPhase.SENDING
+                        )
+                if (
+                    self._pending_settings_transaction is None
+                    and self._settings_blocked_until_version is None
+                ):
+                    self._last_settings_keepalive_attempt_monotonic = None
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
 
@@ -992,19 +1118,31 @@ class AllpowersBLEClient:
                             self.address,
                             ex,
                         )
-                        try:
-                            await self.async_request_status()
-                        except (
-                            NotConnectedError,
-                            TimeoutError,
-                            *BLEAK_RETRY_EXCEPTIONS,
-                        ) as refresh_ex:
-                            _LOGGER.debug(
-                                "Settings keepalive recovery status request failed "
-                                "for %s: %s",
-                                self.address,
-                                refresh_ex,
+                        reference = (
+                            self._last_settings_keepalive_monotonic
+                            or self._settings_monotonic
+                            or self._connected_monotonic
+                        )
+                        if reference is not None and (
+                            now - reference >= self._options.settings_keepalive_interval
+                        ):
+                            await self.async_reconnect(
+                                "Settings confirmation unavailable; renewing BLE session"
                             )
+                        else:
+                            try:
+                                await self.async_request_status()
+                            except (
+                                NotConnectedError,
+                                TimeoutError,
+                                *BLEAK_RETRY_EXCEPTIONS,
+                            ) as refresh_ex:
+                                _LOGGER.debug(
+                                    "Settings keepalive recovery status request failed "
+                                    "for %s: %s",
+                                    self.address,
+                                    refresh_ex,
+                                )
                     except (
                         NotConnectedError,
                         TimeoutError,
@@ -1029,7 +1167,11 @@ class AllpowersBLEClient:
                 action_taken = True
 
             wait_reference = self._loop_time()
-            next_deadline = self._next_maintenance_deadline(wait_reference)
+            next_deadline = (
+                self._next_maintenance_deadline(wait_reference)
+                if self._connected
+                else None
+            )
             timeout: float | None = None
             if next_deadline is not None:
                 timeout = max(0.001, next_deadline - wait_reference)
@@ -1236,18 +1378,6 @@ class AllpowersBLEClient:
         self._last_settings_keepalive_monotonic = now
         self._last_settings_keepalive_attempt_monotonic = None
         self._initial_settings_keepalive_pending = False
-
-    def _output_source_version(self) -> int:
-        pending = self._pending_output_transaction
-        if pending is not None:
-            return pending.source_version
-        return self._status_version
-
-    def _settings_source_version(self) -> int:
-        pending = self._pending_settings_transaction
-        if pending is not None:
-            return pending.source_version
-        return self._settings_version
 
     def _emit_update(self) -> None:
         if self._update_callback is not None:
