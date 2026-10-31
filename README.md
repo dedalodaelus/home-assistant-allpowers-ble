@@ -3,7 +3,7 @@
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-%3E98%25-brightgreen.svg)](docs/quality.md)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](docs/quality.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Español](README.es.md)
@@ -25,9 +25,11 @@ There is no vendor cloud, no direct BlueZ access, and no ESPHome component is
 required on the power station side.
 
 > [!IMPORTANT]
-> The **ALLPOWERS R600** is the verified target. Similar names do not prove
-> protocol compatibility. Every device is actively checked for the expected GATT
-> service, characteristics, and a checksum-valid status frame before setup.
+> The code recognizes canonical **ALLPOWERS R600** and **VOLIX P1800** identities
+> with hardware revision `0.3` (`raw_hardware_version=0x03`). Broad discovery
+> matches do not establish identity. Code-profile classification is separate
+> from physical HIL qualification; the single reported VOLIX unit used firmware
+> `0xF1`, and full qualification remains pending.
 
 ## Highlights
 
@@ -47,7 +49,10 @@ required on the power station side.
 
 | Model / advertisement | Status | Notes |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Primary development and protocol target with writable controls enabled. |
+| Canonical R600 identity recognized by the integration with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Primary development and protocol target; physical qualification remains pending. |
+| R600 discovery candidate with an unrecognized identity (for example, `R6000` or `AP R1500`) | Experimental read-only | Broad discovery matching alone does not grant verified identity or writable capabilities. |
+| Canonical VOLIX P1800 identity with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Uses the R600 protocol profile. PR #183 reports one unit on firmware `0xF1`; other firmware is not physically qualified, but firmware is not a runtime allowlist. |
+| VOLIX P1800 discovery candidate with unrecognized identity or revision | Experimental read-only | Discovery matching alone does not grant verified identity or writable capabilities. |
 | AP S300 and similar `AP S*` units | Experimental read-only | Accepted only after an active GATT and protocol probe. Telemetry entities are exposed, but writable controls remain disabled. |
 | AP S500 / AP S700 V2 family | Rejected | Known to use a different protocol revision. |
 | Generic `ALLPOWERS*` or FFF0 advertisement | Experimental read-only | Setup proceeds only after protocol validation. Telemetry is exposed, but writable controls remain disabled. |
@@ -114,6 +119,9 @@ it permanently to one proxy.
 This integration assumes a trusted local Home Assistant environment:
 
 - write commands are accepted only from Home Assistant users who can control entities;
+- capability checks use an observed BLE model identity stored separately from the editable display name and entry title; placeholders and synthetic reconfigure entries cannot establish or replace it;
+- legacy entries migrate only recognizable model-family names, but their history cannot prove that a family-looking display name was never edited; writes still require matching hardware-revision settings received in the current GATT session;
+- a later contradictory model-family observation is persisted as a conservative downgrade rather than being forgotten across restarts;
 - BLE proximity limits command reach, but nearby radio access is still part of the risk model;
 - ESPHome proxies are transport relays and must be managed like trusted local infrastructure;
 - there is no cloud credential boundary to rotate if local access is compromised.
@@ -154,8 +162,10 @@ therefore applies the following invariants:
    output-command semantics are not claimed safe.
 2. ECO, work mode, car charger, and ECO timeout changes require a fresh settings
    snapshot and preserve every unrelated raw flag bit.
-3. Each write starts a versioned command transaction and waits for a matching
-   on-device confirmation before the next write can reuse that state.
+3. Each write publishes a versioned transaction before awaiting GATT. A newer,
+   matching notification from the same session is required before another write
+   in that control group. Dependent commands are rejected, not queued, while
+   confirmation is pending; requested targets never become write snapshots.
 4. Pending transactions and freshness are invalidated on every disconnect and
    new GATT session.
 5. The BLE client enforces revision-aware write capabilities at the transport
@@ -165,6 +175,29 @@ therefore applies the following invariants:
 
 Any future write-safety guarantee must be supported by captured evidence from the
 target hardware revision and a matching regression test.
+
+Service completion means transport submission, not physical confirmation. Entity
+state changes only from device telemetry. A matching notification establishes
+observed convergence, not command causality: the protocol has no transaction ID.
+Notifications received during the GATT await are tracked, but a failed or canceled
+write still leaves the group blocked until a new safe snapshot is received.
+Confirmation timeout also requires a new snapshot, not reuse of cached state.
+
+Sequential automations must wait for matching device state before changing another
+output or setting. Settings keepalive never re-sends a pending user target: manual
+keepalive is rejected while pending. Automatic maintenance renews the BLE session
+if settings are still unsafe at the next keepalive interval, rather than waiting
+indefinitely for a status request to produce settings. The new session must receive
+fresh `0x03` before any settings write; cached targets are never replayed.
+If the device supplies only `0x01` across new sessions, settings controls stay
+unavailable and session recovery remains bounded by the keepalive interval.
+This cannot guarantee prevention of the physical inactivity cutoff. Settings
+`0x03` response timing remains unqualified on physical R600 hardware; simulation
+tests do not demonstrate a physical safety fix.
+
+Commands already matching a fresh, validated snapshot are no-ops: no frame or
+transaction is created. All guards still apply, including pending or ambiguous
+transactions. Explicit settings keepalive intentionally remains a write.
 
 See [Architecture](docs/architecture/README.md) and [Protocol](docs/protocol.md).
 
@@ -271,17 +304,59 @@ Defaults are deliberately conservative and match observed R600 behavior.
 | Settings keepalive interval | 540 s | 60–540 s; settings timeout must be longer |
 | Car charger control | Off | Experimental; exposes no writable control until enabled |
 
-Options are applied live. A full integration reload is not required.
+Options are applied live, including changes saved during initialization, without
+restarting the Bluetooth client. A full integration reload is not required.
 
 ## Reconfigure entry data
 
 Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
 need to update entry-level setup data without removing the integration entry.
 
+Unsuccessful startup shuts down the BLE client before handing the failure back
+to Core, including unexpected errors and cancellation. Partially initialized
+platforms are unloaded and failed runtime data is removed before a retry.
+If partial-platform cleanup fails, further setup attempts are blocked for that
+entry until Home Assistant restarts; an integration reload is not sufficient.
+
 - Supported reconfigure fields: Bluetooth address and display name.
+- Changing the address requires an explicit physical-device choice:
+  - **Same physical device:** migrate registry identities while preserving entity
+    IDs, the device ID, names, areas, and other user customizations. After the first
+    address change, a stable opaque registry identity is independent of Bluetooth.
+  - **Replacement device:** remove the entity and device records owned by this
+    entry and create fresh identities. Automations and dashboards are not
+    transferred automatically. Returning to a previously used address does not
+    restore the replaced device's customizations or default entity IDs. New
+    default entity IDs include a persistent generation prefix; existing migrated
+    or customized IDs are not renamed.
+- If a replacement fails before touching the source registries, returning to the
+  registered source address with **Same physical device** cancels the pending
+  replacement and preserves the original records and references.
+- A pending transition can be recovered at its current target address: choose
+  **Same physical device** to retry migration or **Replacement device** to discard
+  this entry's old records. Already migrated records are recognized on retry.
+- Physical identity cannot be verified by the BLE protocol; choose the relationship
+  yourself. Registry transitions occur only after valid startup telemetry and
+  never modify records belonging to other config entries. Registry collisions
+  reject conflicting same-device migration before it starts. If an unexpected
+  registry update fails mid-migration, the pending transition remains retryable;
+  no source records are deleted by same-device migration.
 - Reconfigure performs an active probe before applying changes.
+- If Core reports `FAILED_UNLOAD`, restart Home Assistant rather than reloading.
+  Reconfiguration is blocked and saved options remain pending until restart.
+  Repairs and diagnostics expose the requirement; registry identities are kept.
+  During `UNLOAD_IN_PROGRESS`, updates also stay pending and reconfiguration is
+  blocked. Core cleanup failures are reported even after listeners are removed;
+  deleting the entry removes its persistent unload Repair.
+  See [unload recovery](docs/troubleshooting.md#integration-unload-failed).
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
+- Changed setup data triggers one reload; unchanged reconfiguration does not.
+  An unchanged reconfiguration retries setup immediately when the entry is in
+  `SETUP_RETRY` or `SETUP_ERROR`, but does not start an explicitly unloaded entry.
+- Setup reconciles data changes received during initialization. If the obsolete
+  Bluetooth client times out, the new configuration is initialized in the same
+  setup attempt instead of waiting for Home Assistant's retry timer.
 
 Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
 settings). Do not use reconfigure for those option values.

@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
@@ -83,8 +83,14 @@ def reset_setup_fakes() -> None:
 def make_entry() -> ConfigEntry[Any]:
     return ConfigEntry(
         title="ALLPOWERS R600 AABB",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            "device_identity": "ALLPOWERS R600",
+        },
         options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=2,
     )
 
 
@@ -100,11 +106,29 @@ def make_legacy_entry(*, options: dict[str, Any]) -> ConfigEntry[Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("device_name", "device_identity", "identity_conflicted"),
+    (
+        ("ALLPOWERS R600", "ALLPOWERS R600", False),
+        ("AP R600 V2.0", "AP S300", False),
+        ("AP R600 V2.0", "AP S500", True),
+        ("AP R600 V2.0", "AP S700", True),
+        ("ALLPOWERS power station", "AP S500", True),
+    ),
+)
 async def test_setup_entry_success_registers_callbacks_and_platforms(
     monkeypatch: pytest.MonkeyPatch,
+    device_name: str,
+    device_identity: str,
+    identity_conflicted: bool,
 ) -> None:
     hass = FakeHass()
     entry = make_entry()
+    entry.data = {
+        **entry.data,
+        "device_name": device_name,
+        "device_identity": device_identity,
+    }
     registered: dict[str, Any] = {}
 
     monkeypatch.setattr(
@@ -136,17 +160,58 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     assert await integration.async_setup_entry(hass, entry)
     client = SetupClient.instances[0]
     coordinator = SetupCoordinator.instances[0]
+    assert (
+        entry.data.get(integration.CONF_DEVICE_IDENTITY_CONFLICT, False)
+        is identity_conflicted
+    )
     assert client.kwargs["address"] == ADDRESS
-    assert client.kwargs["advertised_name"] == "ALLPOWERS R600"
+    assert client.kwargs["advertised_name"] == device_name
+    assert client.kwargs["device_identity"] == device_identity
+    assert client.kwargs["identity_conflicted"] is identity_conflicted
     assert coordinator.started
     assert coordinator.timeout == INITIAL_DATA_TIMEOUT
     assert entry.runtime_data.client is client
     assert entry.runtime_data.coordinator is coordinator
     assert hass.config_entries.forwarded == [(entry, integration.PLATFORMS)]
 
+    identity_updates: list[dict[str, Any]] = []
+    original_update_entry = hass.config_entries.async_update_entry
+
+    def track_update_entry(config_entry: Any, **kwargs: Any) -> None:
+        if "device_identity" in kwargs.get("data", {}):
+            identity_updates.append(dict(kwargs["data"]))
+        original_update_entry(config_entry, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update_entry)
+    persist_identity = client.kwargs["model_identity_callback"]
+    persist_identity("R600")
+    persist_identity("R600")
+    assert entry.data["device_identity"] == "R600"
+    assert len(identity_updates) == 1
+    persist_conflict = client.kwargs["identity_conflict_callback"]
+    persist_conflict(identity_conflicted)
+    persist_conflict(identity_conflicted)
+    persist_conflict(not identity_conflicted)
+    await integration._async_update_listener(hass, entry)
+    assert not entry.runtime_data.reload_pending
+    assert coordinator.applied == [ConnectionOptions.from_mapping(entry.options)]
+
     advertisement = SimpleNamespace(name="R600 updated", rssi=-50)
     registered["callback"](advertisement, object())
     assert client.advertisements == [advertisement]
+
+    # Late callbacks must not overwrite pending reconfiguration, even on this route.
+    entry.title = "Patio EEFF"
+    previous_data = dict(entry.data)
+    persist_identity("AP S300")
+    persist_conflict(identity_conflicted)
+    assert entry.data == previous_data
+    entry.title = entry.runtime_data.config_title
+    entry.data = {**entry.data, "address": "11:22:33:44:55:66"}
+    previous_data = dict(entry.data)
+    persist_identity("AP S300")
+    persist_conflict(identity_conflicted)
+    assert entry.data == previous_data
 
     assert hass.bus.listeners
     _, stop_callback = hass.bus.listeners[0]
@@ -170,6 +235,7 @@ async def test_setup_entry_defers_when_no_connectable_path(
 
     with pytest.raises(ConfigEntryNotReady, match="No connectable Bluetooth path"):
         await integration.async_setup_entry(hass, entry)
+    entry._unload_callbacks[-1]()
 
 
 @pytest.mark.asyncio
@@ -202,15 +268,239 @@ async def test_setup_entry_defers_and_cleans_up_on_initial_timeout(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("times_out", [False, True])
+async def test_setup_restarts_with_latest_config_after_initialization_update(
+    monkeypatch: pytest.MonkeyPatch,
+    times_out: bool,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    registered_callbacks: list[Any] = []
+    first_address = entry.data["address"]
+    latest_address = "11:22:33:44:55:66"
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+
+    def register_callback(hass: Any, callback: Any, matcher: Any, mode: Any):
+        del hass, matcher, mode
+        registered_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            registered_callbacks.remove(callback)
+
+        return unsubscribe
+
+    monkeypatch.setattr(bluetooth, "async_register_callback", register_callback)
+
+    async def wait_ready(coordinator: SetupCoordinator, timeout: float) -> None:
+        del timeout
+        if coordinator is SetupCoordinator.instances[0]:
+            entry.state = ConfigEntryState.SETUP_IN_PROGRESS
+            entry.data = {**entry.data, "address": latest_address}
+            entry.title = "Station Patio 5566"
+            entry.options = {
+                **entry.options,
+                "status_interval": 15.0,
+            }
+            await integration._async_update_listener(hass, entry)
+            if times_out:
+                raise TimeoutError("Obsolete startup timed out")
+
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", wait_ready)
+
+    assert await integration.async_setup_entry(hass, entry)
+
+    assert [client.kwargs["address"] for client in SetupClient.instances] == [
+        first_address,
+        latest_address,
+    ]
+    assert SetupClient.instances[1].kwargs["options"].status_interval == 15
+    assert entry.runtime_data.client is SetupClient.instances[1]
+    assert SetupCoordinator.instances[0].shutdown_calls == 1
+    assert len(registered_callbacks) == 1
+    assert hass.config_entries.scheduled_reloads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_setup_finishes_pending_registry_transition_or_stops_client_on_error(
+    monkeypatch: pytest.MonkeyPatch, conflict: bool, replacement: bool
+) -> None:
+    from custom_components.allpowers_ble import registry
+    from custom_components.allpowers_ble.const import (
+        CONF_PREVIOUS_REGISTRY_ID,
+        CONF_REGISTRY_ID,
+        CONF_REPLACE_DEVICE,
+        CONF_ENTITY_ID_PREFIX,
+    )
+    from homeassistant.components import bluetooth
+
+    hass = FakeHass()
+    entry = make_entry()
+    entry.data.update(
+        {
+            CONF_REGISTRY_ID: "new-id",
+            CONF_PREVIOUS_REGISTRY_ID: "old-id",
+            CONF_REPLACE_DEVICE: replacement,
+        }
+    )
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    monkeypatch.setattr(
+        bluetooth, "async_ble_device_from_address", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    def apply_transition(hass, entry) -> None:
+        del hass, entry
+        if conflict:
+            raise RuntimeError("Registry conflict after probe")
+
+    monkeypatch.setattr(registry, "async_apply_registry_transition", apply_transition)
+    if conflict:
+        with pytest.raises(RuntimeError, match="Registry conflict"):
+            await integration.async_setup_entry(hass, entry)
+        assert SetupCoordinator.instances[0].shutdown_calls == 1
+        assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    else:
+        assert await integration.async_setup_entry(hass, entry)
+        assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+        assert CONF_REPLACE_DEVICE not in entry.data
+        assert entry.data.get(CONF_ENTITY_ID_PREFIX) == (
+            "new-id" if replacement else None
+        )
+        assert entry.runtime_data.config_data == entry.data
+
+
+@pytest.mark.asyncio
+async def test_setup_applies_latest_options_without_restarting_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    async def wait_ready(coordinator: SetupCoordinator, timeout: float) -> None:
+        del coordinator, timeout
+        entry.options = ConnectionOptions(status_interval=15).as_dict()
+
+    async def apply_options(
+        coordinator: SetupCoordinator, options: ConnectionOptions
+    ) -> None:
+        coordinator.applied.append(options)
+        if len(coordinator.applied) == 1:
+            entry.options = ConnectionOptions(status_interval=25).as_dict()
+
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", wait_ready)
+    monkeypatch.setattr(SetupCoordinator, "async_apply_options", apply_options)
+
+    assert await integration.async_setup_entry(hass, entry)
+    assert len(SetupClient.instances) == 1
+    coordinator = entry.runtime_data.coordinator
+    assert [options.status_interval for options in coordinator.applied] == [15, 25]
+    assert coordinator.shutdown_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "should_schedule"),
+    [
+        (ConfigEntryState.SETUP_IN_PROGRESS, False),
+        (ConfigEntryState.SETUP_RETRY, True),
+        (ConfigEntryState.SETUP_ERROR, True),
+    ],
+)
+async def test_update_listener_without_runtime_only_reloads_outside_setup(
+    state: ConfigEntryState,
+    should_schedule: bool,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    entry.state = state
+
+    await integration._async_update_listener(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == (
+        [entry.entry_id] if should_schedule else []
+    )
+
+
+@pytest.mark.asyncio
 async def test_update_listener_applies_normalized_options() -> None:
     entry = make_entry()
     coordinator = SetupCoordinator(None, entry, None)
-    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+        reload_pending=False,
+    )
     entry.options = ConnectionOptions(status_interval=15, stale_timeout=31).as_dict()
 
     await integration._async_update_listener(FakeHass(), entry)
 
     assert coordinator.applied[-1].status_interval == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"address": "11:22:33:44:55:66"},
+        {"device_name": "Patio"},
+        {"device_identity": "AP S300"},
+        {"device_identity_conflict": True},
+        {"title": "Patio EEFF"},
+    ),
+)
+async def test_update_listener_schedules_one_reload(
+    updates: dict[str, Any],
+) -> None:
+    entry = make_entry()
+    coordinator = SetupCoordinator(None, entry, None)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+        reload_pending=False,
+    )
+    scheduled: list[str] = []
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_schedule_reload=scheduled.append),
+        data={},
+    )
+    if "title" in updates:
+        entry.title = updates["title"]
+    else:
+        entry.data = {**entry.data, **updates}
+
+    await integration._async_update_listener(hass, entry)
+    await integration._async_update_listener(hass, entry)
+
+    assert scheduled == [entry.entry_id]
+    assert coordinator.applied == []
 
 
 @pytest.mark.asyncio
@@ -224,8 +514,163 @@ async def test_unload_entry_shuts_down_only_after_platform_unload() -> None:
     assert coordinator.shutdown_calls == 1
 
     hass.config_entries.unload_result = False
+    entry.runtime_data.reload_pending = True
     assert not await integration.async_unload_entry(hass, entry)
     assert coordinator.shutdown_calls == 1
+    assert entry.runtime_data.reload_pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_runtime", [False, True])
+@pytest.mark.parametrize("unloading", [False, True])
+async def test_failed_unload_listener_does_not_schedule_or_apply_updates(
+    has_runtime, unloading
+):
+    from homeassistant.config_entries import ConfigEntryState
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    entry.state = (
+        ConfigEntryState.UNLOAD_IN_PROGRESS
+        if unloading
+        else ConfigEntryState.FAILED_UNLOAD
+    )
+    ir.async_delete_issue(hass, integration.DOMAIN, f"{entry.entry_id}_failed_unload")
+    coordinator = SetupCoordinator(hass, entry, None)
+    if has_runtime:
+        entry.runtime_data = SimpleNamespace(
+            coordinator=coordinator,
+            config_data={},
+            config_title="",
+            reload_pending=False,
+        )
+    await integration._async_update_listener(hass, entry)
+    await integration._async_update_listener(hass, entry)
+    assert hass.config_entries.scheduled_reloads == []
+    assert coordinator.applied == []
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is None
+    ) is unloading
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["platforms", "shutdown"])
+async def test_unload_exception_is_reported_and_propagated(monkeypatch, phase):
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    coordinator = SetupCoordinator(hass, entry, None)
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator, reload_pending=True)
+
+    async def fail(*args):
+        del args
+        raise RuntimeError("Injected unload exception")
+
+    if phase == "platforms":
+        monkeypatch.setattr(hass.config_entries, "async_unload_platforms", fail)
+    else:
+        monkeypatch.setattr(coordinator, "async_shutdown", fail)
+    with pytest.raises(RuntimeError, match="Injected unload exception"):
+        await integration.async_unload_entry(hass, entry)
+    assert entry.runtime_data.reload_pending
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["start", "ready", "options", "forward", "cancel"])
+@pytest.mark.parametrize("cleanup_result", ["success", "false", "exception"])
+async def test_unsuccessful_setup_always_releases_coordinator(
+    monkeypatch, phase, cleanup_result
+):
+    import asyncio
+    from homeassistant.components import bluetooth
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    ir.async_delete_issue(hass, integration.DOMAIN, f"{entry.entry_id}_failed_unload")
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    monkeypatch.setattr(
+        bluetooth, "async_ble_device_from_address", lambda *args, **kwargs: object()
+    )
+    callbacks = []
+
+    def register(*args, **kwargs):
+        callbacks.append("advertisement")
+        return lambda: callbacks.remove("advertisement")
+
+    monkeypatch.setattr(bluetooth, "async_register_callback", register)
+    original_start = SetupCoordinator.async_start
+    original_ready = SetupCoordinator.async_wait_ready
+
+    async def start(coordinator):
+        await original_start(coordinator)
+        if phase == "start":
+            raise RuntimeError("Injected setup error")
+
+    async def ready(coordinator, timeout):
+        await original_ready(coordinator, timeout)
+        if phase == "ready":
+            raise RuntimeError("Injected setup error")
+        if phase == "options":
+            entry.options = ConnectionOptions(
+                status_interval=15, stale_timeout=31
+            ).as_dict()
+
+    async def options(coordinator, options):
+        del coordinator, options
+        raise RuntimeError("Injected setup error")
+
+    async def forward(entry, platforms):
+        del entry, platforms
+        if phase == "cancel":
+            raise asyncio.CancelledError
+        raise RuntimeError("Injected setup error")
+
+    async def unload(entry, platforms):
+        del entry, platforms
+        if cleanup_result == "exception":
+            raise RuntimeError("Injected cleanup error")
+        return cleanup_result == "success"
+
+    monkeypatch.setattr(SetupCoordinator, "async_start", start)
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", ready)
+    monkeypatch.setattr(SetupCoordinator, "async_apply_options", options)
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload)
+    expected = (
+        asyncio.CancelledError
+        if phase == "cancel" and cleanup_result != "exception"
+        else RuntimeError
+    )
+    with pytest.raises(expected):
+        await integration.async_setup_entry(hass, entry)
+    assert SetupCoordinator.instances[0].shutdown_calls == 1
+    assert callbacks == []
+    assert not hasattr(entry, "runtime_data")
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is not None
+    ) is (phase in {"forward", "cancel"} and cleanup_result != "success")
+    if phase in {"forward", "cancel"} and cleanup_result != "success":
+        from homeassistant.exceptions import HomeAssistantError
+
+        with pytest.raises(HomeAssistantError, match="Restart Home Assistant"):
+            await integration.async_setup_entry(hass, entry)
+        assert len(SetupCoordinator.instances) == 1
 
 
 @pytest.mark.asyncio
@@ -249,10 +694,122 @@ async def test_migrate_entry_from_1_0_normalizes_options_and_sets_latest_version
 
     assert await integration.async_migrate_entry(hass, entry)
     assert entry.version == 1
-    assert entry.minor_version == 1
+    assert entry.minor_version == 2
     assert entry.unique_id == unique_id
     assert entry.options["enable_car_charger"] is False
+    assert entry.data["device_identity"] == "ALLPOWERS R600"
     assert len(hass.config_entries.updates) == 1
+
+
+@pytest.mark.parametrize(
+    ("display_name", "expected_identity"),
+    (
+        ("AP R600 V2.0", "AP R600 V2.0"),
+        ("AP R600 V2.0 CE3A", "AP R600 V2.0 CE3A"),
+        ("VOLIX P1800", "VOLIX P1800"),
+        ("AP S500", ""),
+        ("AP S700", ""),
+        ("Station Patio", ""),
+    ),
+)
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_separates_identity_from_display_name(
+    display_name: str,
+    expected_identity: str,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title=display_name,
+        data={"address": ADDRESS, "device_name": display_name},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.minor_version == 2
+    assert entry.data["device_identity"] == expected_identity
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_ignores_malformed_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="AP R600",
+        data={"address": ADDRESS, "device_name": ["AP R600 V2.0"]},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+    updates: list[dict[str, Any]] = []
+    original_update = hass.config_entries.async_update_entry
+
+    def track_update(entry_to_update: Any, **kwargs: Any) -> None:
+        updates.append(dict(kwargs))
+        original_update(entry_to_update, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update)
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.data["device_identity"] == ""
+    assert len(updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="AP R600 V2.0",
+        data={"address": ADDRESS, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+    updates: list[dict[str, Any]] = []
+    original_update = hass.config_entries.async_update_entry
+
+    def track_update(entry_to_update: Any, **kwargs: Any) -> None:
+        updates.append(dict(kwargs))
+        original_update(entry_to_update, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update)
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.data["device_identity"] == "AP R600 V2.0"
+    assert len(updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_ignores_malformed_stored_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    entry.data["device_identity"] = ["ALLPOWERS R600"]
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    assert await integration.async_setup_entry(hass, entry)
+    assert SetupClient.instances[0].kwargs["device_identity"] == ""
 
 
 @pytest.mark.asyncio
@@ -325,8 +882,8 @@ async def test_migrate_entry_from_1_0_without_optional_data_keys() -> None:
 
     assert await integration.async_migrate_entry(hass, entry)
     assert entry.version == 1
-    assert entry.minor_version == 1
-    assert entry.data == {}
+    assert entry.minor_version == 2
+    assert entry.data == {"device_identity": ""}
     assert len(hass.config_entries.updates) == 1
 
 

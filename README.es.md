@@ -23,9 +23,11 @@ No utiliza la nube del fabricante, no accede directamente a BlueZ y no necesita 
 componente ESPHome específico para la estación.
 
 > [!IMPORTANT]
-> La **ALLPOWERS R600** es el objetivo verificado. Un nombre parecido no demuestra
-> compatibilidad. Antes de crear la entrada, la integración comprueba activamente
-> el servicio GATT, las características y una trama de estado con checksum válido.
+> El código reconoce identidades canónicas **ALLPOWERS R600** y **VOLIX P1800**
+> con revisión de hardware `0.3` (`raw_hardware_version=0x03`). La coincidencia
+> amplia de discovery no establece la identidad. La clasificación de código es
+> distinta de la cualificación HIL física: la única VOLIX reportada usó firmware
+> `0xF1` y la cualificación completa sigue pendiente.
 
 ## Funciones principales
 
@@ -43,7 +45,10 @@ componente ESPHome específico para la estación.
 
 | Modelo o anuncio | Estado | Observaciones |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) con firma de revisión verificada (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verificado | Objetivo principal de desarrollo y protocolo con controles de escritura habilitados. |
+| Identidad canónica R600 reconocida por la integración con firma de revisión (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Perfil de código verificado; HIL pendiente | Objetivo principal de desarrollo y protocolo; la cualificación física sigue pendiente. |
+| Candidato R600 detectado con identidad no reconocida (por ejemplo, `R6000` o `AP R1500`) | Experimental de solo lectura | La coincidencia amplia de discovery por sí sola no concede identidad verificada ni capacidades de escritura. |
+| Identidad canónica VOLIX P1800 con firma de revisión (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Perfil de código verificado; HIL pendiente | Utiliza el perfil de protocolo R600. El PR #183 reporta una unidad con firmware `0xF1`; otras versiones no están cualificadas físicamente, pero el firmware no es una lista de autorización en tiempo de ejecución. |
+| Candidato VOLIX P1800 detectado con identidad o revisión no reconocida | Experimental de solo lectura | La coincidencia de discovery por sí sola no concede identidad verificada ni capacidades de escritura. |
 | AP S300 y unidades similares `AP S*` | Experimental de solo lectura | Solo se aceptan tras una prueba activa GATT y de protocolo. Se exponen entidades de telemetría, pero no controles de escritura. |
 | AP S500 / AP S700 V2 | Rechazado | Utilizan una revisión de protocolo diferente. |
 | Anuncio genérico `ALLPOWERS*` o servicio FFF0 | Experimental de solo lectura | La configuración continúa únicamente si la validación de protocolo termina correctamente. Se expone telemetría, pero no controles de escritura. |
@@ -104,6 +109,9 @@ permanente a uno concreto.
 Esta integración asume un entorno local de Home Assistant de confianza:
 
 - los comandos de escritura solo se aceptan desde usuarios con permisos sobre entidades;
+- las capacidades usan una identidad de modelo observada por BLE y guardada separada del nombre visible y del título editable; los placeholders y las entradas sintéticas de reconfiguración no pueden establecerla ni reemplazarla;
+- las entradas antiguas solo migran nombres que reconocen una familia, pero su historial no permite demostrar que ese nombre nunca se editó; las escrituras también requieren ajustes de revisión de hardware coincidentes recibidos en la sesión GATT actual;
+- una observación posterior de una familia contradictoria se guarda como degradación conservadora para no perderla al reiniciar;
 - la proximidad BLE limita el alcance, pero el acceso por radio cercano sigue siendo parte del riesgo;
 - los proxies ESPHome son relés de transporte y deben gestionarse como infraestructura local de confianza;
 - no existe una frontera de credenciales en nube que rotar si el acceso local se compromete.
@@ -142,8 +150,11 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    no se afirma seguridad para semánticas no documentadas del comando de salida.
 2. ECO, modo de trabajo, cargador de coche y temporizador requieren ajustes
    recientes y conservan todos los bits no relacionados.
-3. Cada escritura abre una transacción versionada y espera una confirmación en
-   notificación antes de reutilizar ese estado para otra escritura.
+3. Cada escritura publica una transacción versionada antes de esperar a GATT.
+   Otra escritura del mismo grupo requiere una notificación posterior y
+   coincidente de la misma sesión. Los comandos dependientes se rechazan, no se
+   encolan, mientras la confirmación esté pendiente; el objetivo solicitado nunca
+   se utiliza como instantánea para otra escritura.
 4. Las transacciones pendientes y la frescura se invalidan al desconectar o
    iniciar otra sesión GATT.
 5. El cliente BLE aplica capacidades de escritura por perfil y revisión en el
@@ -153,6 +164,30 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
 
 Cualquier garantía futura de seguridad en escritura debe apoyarse en evidencia
 capturada del hardware objetivo y en pruebas de regresión equivalentes.
+
+La finalización del servicio significa envío al transporte, no confirmación
+física. Las entidades solo cambian de estado mediante telemetría del dispositivo.
+Una notificación coincidente demuestra convergencia observada, no causalidad del
+comando: el protocolo no tiene identificadores de transacción. Se registran las
+notificaciones recibidas durante la espera GATT, pero un error o una cancelación
+bloquea el grupo hasta recibir otra instantánea segura. El tiempo de confirmación
+agotado también exige una instantánea nueva, no reutilizar datos en caché.
+
+Las automatizaciones secuenciales deben esperar al estado coincidente antes de
+modificar otra salida o ajuste. El keepalive nunca reenvía un objetivo pendiente:
+el manual se rechaza mientras esté pendiente. El mantenimiento automático renueva
+la sesión BLE si los ajustes siguen sin ser seguros al siguiente intervalo, en
+vez de esperar indefinidamente que una petición de estado produzca ajustes. La
+nueva sesión necesita un `0x03` reciente antes de escribir ajustes; no se reenvían
+objetivos en caché. Si solo llegan `0x01` incluso tras reconectar, los controles de
+ajustes siguen no disponibles y la recuperación se espacia por el intervalo de
+keepalive. Esto no garantiza evitar el corte físico por inactividad. La respuesta
+`0x03` aún no está cualificada en hardware R600 físico; las simulaciones no
+demuestran una corrección física.
+
+Los comandos que ya coinciden con una instantánea reciente y validada no envían
+tramas ni crean transacciones. Todos los guards siguen activos, incluso con
+transacciones pendientes o ambiguas. El keepalive explícito sí envía una trama.
 
 Consulta [Arquitectura](docs/architecture/README.md) y [Protocolo](docs/protocol.md).
 
@@ -258,17 +293,59 @@ valores por defecto salvo que tengas una razón medida para ajustarlos.
 | Intervalo de keepalive | 540 s | 60–540 s; la caducidad de ajustes debe ser mayor |
 | Cargador de coche | Desactivado | Experimental y requiere activación expresa |
 
-Los cambios de opciones se aplican en caliente, sin recargar la integración.
+Los cambios de opciones se aplican en caliente, incluso durante la inicialización,
+sin reiniciar el cliente Bluetooth ni recargar la integración.
 
 ## Reconfiguracion de la entrada
 
 Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
 cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 
+Un arranque fallido cierra el cliente BLE antes de devolver el error a Core,
+incluidos errores inesperados y cancelaciones. Se descargan las plataformas
+parcialmente inicializadas y se elimina el runtime fallido antes del reintento.
+Si falla esa limpieza parcial, se bloquean nuevos arranques de la entrada hasta
+reiniciar Home Assistant; no basta con recargar la integracion.
+
 - Campos reconfigurables: direccion Bluetooth y nombre visible.
+- Cambiar la direccion requiere elegir expresamente la relacion fisica:
+  - **Mismo dispositivo:** migra el registro conservando los IDs de entidades y
+    dispositivo, nombres, areas y otras personalizaciones. Tras el primer cambio,
+    una identidad opaca estable deja de depender de la direccion Bluetooth.
+  - **Dispositivo de sustitucion:** elimina los registros de entidades y
+    dispositivos de esta entrada y crea identidades nuevas. Las automatizaciones
+    y los paneles no se transfieren automaticamente. Volver a una direccion
+    anterior no restaura las personalizaciones ni los IDs predeterminados del
+    dispositivo sustituido. Los nuevos IDs incluyen un prefijo persistente por
+    generacion; los IDs migrados o personalizados no se renombran.
+- Si una sustitucion falla antes de modificar los registros originales, volver
+  a la direccion registrada original eligiendo **Mismo dispositivo** cancela la
+  sustitucion pendiente sin perder registros ni referencias.
+- Una transicion pendiente se recupera sin cambiar la direccion de destino:
+  **Mismo dispositivo** reintenta la migracion; **Dispositivo de sustitucion**
+  descarta los registros anteriores. El reintento reconoce registros ya migrados.
+- El protocolo BLE no permite verificar la identidad fisica; debes confirmarla.
+  Los registros solo cambian tras recibir telemetria valida durante el arranque,
+  sin modificar otras entradas. Las colisiones se rechazan antes de iniciar la
+  migracion. Un fallo inesperado durante la actualizacion conserva la transicion
+  pendiente para reintentarla; migrar no elimina los registros originales.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
+- Si Core indica `FAILED_UNLOAD`, reinicia Home Assistant en vez de recargar.
+  Se bloquea la reconfiguracion y las opciones guardadas quedan pendientes hasta
+  el reinicio. Repairs y diagnosticos indican el requisito sin perder identidades.
+  Durante `UNLOAD_IN_PROGRESS` tambien se bloquea la reconfiguracion y los cambios
+  quedan pendientes. Se detectan los fallos de limpieza posteriores de Core; borrar
+  la entrada elimina su Repair persistente de descarga.
+  Consulta la [recuperacion](docs/troubleshooting.md#integration-unload-failed).
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.
+- Los cambios de configuracion provocan una sola recarga; si no hay cambios, no
+  se recarga. Como excepcion, una entrada en `SETUP_RETRY` o `SETUP_ERROR` vuelve
+  a intentar la inicializacion de inmediato. Una entrada descargada expresamente
+  no se inicia si la reconfiguracion no cambia sus datos.
+- La inicializacion comprueba los cambios recibidos mientras arranca el cliente.
+  Si el cliente obsoleto agota el tiempo de espera, la nueva configuracion se
+  inicia en el mismo intento, sin esperar al temporizador de Home Assistant.
 
 Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
 keepalive). No uses reconfiguracion para esos valores opcionales.

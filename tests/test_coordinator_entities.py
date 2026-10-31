@@ -22,6 +22,11 @@ from custom_components.allpowers_ble import (
     switch,
 )
 from custom_components.allpowers_ble.client import NotConnectedError
+from custom_components.allpowers_ble.entity import (
+    AllpowersEntity,
+    runtime_model_support,
+)
+from custom_components.allpowers_ble.const import CONF_ENTITY_ID_PREFIX
 from custom_components.allpowers_ble.options import ConnectionOptions
 from custom_components.allpowers_ble.protocol import StateUnavailableError, WorkMode
 
@@ -48,6 +53,14 @@ def assert_command_error(
     assert isinstance(error.__cause__, cause)
 
 
+def test_replacement_default_entity_ids_use_a_persistent_generation_prefix():
+    entry, _, _, _ = configured_entry()
+    entity = AllpowersEntity(entry, "ac_output")
+    assert entity.suggested_object_id == getattr(entity, "_attr_name", None)
+    entry.data[CONF_ENTITY_ID_PREFIX] = "replacement-generation"
+    assert entity.suggested_object_id == "replacement-generation_ac_output"
+
+
 class _RegistryDevice:
     """Tiny mutable record emulating Home Assistant device entries."""
 
@@ -66,14 +79,13 @@ class _RegistryStub:
         self._devices_by_address = devices_by_address
         self.updates: list[tuple[str, dict[str, str]]] = []
 
-    def async_get_device(
+    def async_get_device_by_identifier(
         self,
-        *,
-        identifiers: set[tuple[str, str]],
-        connections: set[tuple[str, str]],
+        identifier: tuple[str, str],
+        config_entry_id: str,
     ) -> _RegistryDevice | None:
-        del connections
-        _, address = next(iter(identifiers))
+        del config_entry_id
+        _, address = identifier
         return self._devices_by_address.get(address)
 
     def async_update_device(self, device_id: str, **kwargs: str) -> _RegistryDevice:
@@ -123,6 +135,29 @@ async def test_coordinator_lifecycle_and_push_updates() -> None:
 def test_validated_registry_version_accepts_only_bcd_and_non_zero() -> None:
     assert coordinator_module._validated_registry_version("1.2", 0x12) == "1.2"
     assert coordinator_module._validated_registry_version(" 3.4 ", 0x34) == "3.4"
+
+
+def test_runtime_support_uses_session_revision_and_conflict_snapshot() -> None:
+    _, client, coordinator, _ = configured_entry()
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            settings_monotonic=monotonic() - 1000,
+            session_hardware_version="0.3",
+            session_raw_hardware_version=0x03,
+        )
+    )
+
+    support = runtime_model_support(coordinator)
+    assert not coordinator.settings_are_fresh
+    assert support.capabilities.write_output_controls
+    assert support.capabilities.write_settings_controls
+
+    client.set_snapshot(replace(client.snapshot(), identity_conflicted=True))
+    conflicted_support = runtime_model_support(coordinator)
+    assert conflicted_support.classification == "identity_conflict"
+    assert not conflicted_support.capabilities.write_output_controls
+    assert not conflicted_support.capabilities.write_settings_controls
     assert coordinator_module._validated_registry_version("", 0x12) is None
     assert coordinator_module._validated_registry_version(None, 0x12) is None
     assert coordinator_module._validated_registry_version("0xAF", 0xAF) is None
@@ -132,9 +167,10 @@ def test_validated_registry_version_accepts_only_bcd_and_non_zero() -> None:
 def test_coordinator_registry_refresh_returns_early_without_address_or_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    entry, client, coordinator, _ = configured_entry()
+    entry, client, coordinator, hass = configured_entry()
 
     entry.data["address"] = ""
+    coordinator = coordinator_module.AllpowersCoordinator(hass, entry, client)
     client.set_snapshot(
         replace(
             client.snapshot(),
@@ -142,6 +178,10 @@ def test_coordinator_registry_refresh_returns_early_without_address_or_device(
             settings_monotonic=monotonic(),
         )
     )
+    entry.data["address"] = ADDRESS
+    monkeypatch.delattr(coordinator_module.dr, "async_get")
+    coordinator = coordinator_module.AllpowersCoordinator(hass, entry, client)
+    coordinator._async_refresh_device_registry_metadata()
 
     registry = _RegistryStub({})
     monkeypatch.setattr(
@@ -150,7 +190,6 @@ def test_coordinator_registry_refresh_returns_early_without_address_or_device(
         lambda hass: registry,
         raising=False,
     )
-    entry.data["address"] = ADDRESS
     coordinator._async_refresh_device_registry_metadata()
     assert registry.updates == []
 
@@ -256,8 +295,9 @@ def test_coordinator_registry_refresh_is_isolated_per_entry_address(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entry_a, client_a, _, _ = configured_entry()
-    entry_b, client_b, _, _ = configured_entry()
+    entry_b, client_b, _, hass_b = configured_entry()
     entry_b.data["address"] = "11:22:33:44:55:66"
+    coordinator_module.AllpowersCoordinator(hass_b, entry_b, client_b)
     registry = _RegistryStub(
         {
             ADDRESS: _RegistryDevice("dev-a", hw_version=None, sw_version=None),
@@ -652,6 +692,7 @@ async def test_experimental_profiles_expose_no_writable_entities() -> None:
     experimental_state = replace(
         snapshot(),
         advertised_name="AP S300",
+        model_identity="AP S300",
     )
     entry, _, _, _ = configured_entry(state=experimental_state)
 

@@ -45,7 +45,14 @@ REQUIRED_INTEGRATION_FILES = {
     "translations/en.json",
     "translations/es.json",
 }
-IGNORED_DIRS = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist"}
+IGNORED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "dist",
+}
 README_REQUIRED_HEADINGS = {
     "README.md": {
         "## Safety model",
@@ -277,7 +284,7 @@ def validate_text_files(errors: list[str]) -> None:
 def validate_clean_tree(errors: list[str]) -> None:
     """Reject generated caches from the distributable source tree."""
     for path in ROOT.rglob("*"):
-        if ".git" in path.parts or "dist" in path.parts:
+        if any(part in IGNORED_DIRS for part in path.parts):
             continue
         if path.name == "__pycache__" or path.suffix in {".pyc", ".pyo"}:
             errors.append(f"generated Python cache present: {path.relative_to(ROOT)}")

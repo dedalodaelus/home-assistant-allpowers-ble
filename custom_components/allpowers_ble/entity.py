@@ -13,9 +13,9 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .client import AllpowersClientError, NotConnectedError
-from .const import DOMAIN, MANUFACTURER
+from .const import CONF_ENTITY_ID_PREFIX, CONF_REGISTRY_ID, DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
-from .model_support import ModelSupport, identify_model
+from .model_support import ModelSupport, resolve_runtime_model_support
 from .protocol import StateUnavailableError
 
 
@@ -34,7 +34,11 @@ def _translated_command_error(key: str) -> HomeAssistantError:
 def _state_error_key(error: StateUnavailableError) -> str:
     """Map state-guard failures to a stable user-facing translation key."""
     message = str(error).lower()
-    if "confirmation timed out" in message or "state is ambiguous" in message:
+    if (
+        "confirmation timed out" in message
+        or "confirmation is pending" in message
+        or "state is ambiguous" in message
+    ):
         return "command_unconfirmed"
     if (
         "semantic validation" in message
@@ -69,13 +73,23 @@ def raise_command_error(error: Exception) -> NoReturn:
 
 
 def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
-    """Return revision-aware model support from the latest snapshot."""
+    """Return model support using the same session and conflict evidence as client."""
     data = coordinator.data
-    settings = data.settings
-    return identify_model(
-        data.advertised_name,
-        hardware_version=settings.hardware_version if settings else None,
-        raw_hardware_version=settings.raw_hardware_version if settings else None,
+    hardware_version = data.session_hardware_version
+    raw_hardware_version = data.session_raw_hardware_version
+    if (
+        hardware_version is None
+        and raw_hardware_version is None
+        and coordinator.settings_are_fresh
+    ):
+        settings = data.settings
+        hardware_version = settings.hardware_version if settings else None
+        raw_hardware_version = settings.raw_hardware_version if settings else None
+    return resolve_runtime_model_support(
+        data.model_identity,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
+        identity_conflicted=data.identity_conflicted,
     )
 
 
@@ -88,7 +102,16 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
         super().__init__(entry.runtime_data.coordinator)
         self._entry = entry
         self._address = str(entry.data[CONF_ADDRESS]).upper()
-        self._attr_unique_id = f"{self._address}_{key}"
+        self._registry_id = str(entry.data.get(CONF_REGISTRY_ID, self._address))
+        self._attr_unique_id = f"{self._registry_id}_{key}"
+        self._key = key
+
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Namespace replacement defaults so old automation targets stay retired."""
+        if prefix := self._entry.data.get(CONF_ENTITY_ID_PREFIX):
+            return f"{prefix}_{self._key}"
+        return super().suggested_object_id
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -97,7 +120,7 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
         support = runtime_model_support(self.coordinator)
         settings = data.settings
         return DeviceInfo(
-            identifiers={(DOMAIN, self._address)},
+            identifiers={(DOMAIN, self._registry_id)},
             connections={(CONNECTION_BLUETOOTH, self._address)},
             manufacturer=MANUFACTURER,
             model=support.model,

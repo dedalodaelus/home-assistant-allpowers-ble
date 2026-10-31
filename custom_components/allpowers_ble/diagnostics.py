@@ -10,17 +10,36 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from .const import CONF_DEVICE_NAME
+from .const import (
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    CONF_DEVICE_NAME,
+    CONF_ENTITY_ID_PREFIX,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+)
 from .coordinator import AllpowersConfigEntry
-from .model_support import identify_model
+from .model_support import resolve_runtime_model_support
 
-TO_REDACT = {CONF_ADDRESS}
+TO_REDACT = {
+    CONF_ADDRESS,
+    CONF_REGISTRY_ID,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_ENTITY_ID_PREFIX,
+}
 REDACTED_NAME = "**REDACTED_NAME**"
 REDACTED_ADDRESS = "**REDACTED_ADDRESS**"
-_SENSITIVE_NAME_FIELDS = {"advertised_name", "device_name", "name", "title"}
+_SENSITIVE_NAME_FIELDS = {
+    "advertised_name",
+    "device_identity",
+    "device_name",
+    "model_identity",
+    "name",
+    "title",
+}
 _LAST_ERROR_FIELD = "last_error"
 _EXCEPTION_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)$")
 _BLE_COLON_OR_HYPHEN_RE = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b")
@@ -58,15 +77,32 @@ def _diagnostics_payload(
     device_name: str | None = None,
 ) -> dict[str, Any]:
     snapshot = entry.runtime_data.coordinator.data
-    settings = snapshot.settings
-    support = identify_model(
-        snapshot.advertised_name,
-        hardware_version=settings.hardware_version if settings else None,
-        raw_hardware_version=settings.raw_hardware_version if settings else None,
+    settings = (
+        snapshot.settings if entry.runtime_data.coordinator.settings_are_fresh else None
+    )
+    hardware_version = snapshot.session_hardware_version
+    raw_hardware_version = snapshot.session_raw_hardware_version
+    if (
+        hardware_version is None
+        and raw_hardware_version is None
+        and entry.runtime_data.coordinator.settings_are_fresh
+    ):
+        hardware_version = settings.hardware_version if settings else None
+        raw_hardware_version = settings.raw_hardware_version if settings else None
+    support = resolve_runtime_model_support(
+        snapshot.model_identity,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
+        identity_conflicted=(
+            snapshot.identity_conflicted
+            or entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+        ),
     )
     payload: dict[str, Any] = {
         "entry": {
             "title": entry.title,
+            "state": entry.state.value,
+            "restart_required": entry.state is ConfigEntryState.FAILED_UNLOAD,
             "data": dict(entry.data),
             "options": entry.runtime_data.client.options.as_dict(),
         },

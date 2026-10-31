@@ -5,16 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from time import monotonic
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import CONF_REGISTRY_ID, DOMAIN
 from .client import AllpowersBLEClient
 from .models import AllpowersSnapshot
 from .options import ConnectionOptions
@@ -34,6 +33,9 @@ class AllpowersRuntimeData:
 
     client: AllpowersBLEClient
     coordinator: AllpowersCoordinator
+    config_data: dict[str, Any]
+    config_title: str
+    reload_pending: bool = False
 
 
 class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
@@ -56,6 +58,9 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             always_update=False,
         )
         self.client = client
+        self._registry_id = str(
+            entry.data.get(CONF_REGISTRY_ID, entry.data.get(CONF_ADDRESS, ""))
+        )
         self._repairs_manager: AllpowersRepairsManager | None = None
         self.client.set_update_callback(self._handle_client_update)
         self.async_set_updated_data(client.snapshot())
@@ -70,6 +75,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
 
     async def async_shutdown(self) -> None:
         """Stop the active client and release callbacks."""
+        await super().async_shutdown()
         if self._repairs_manager is not None:
             self._repairs_manager.clear()
         self.client.set_update_callback(None)
@@ -106,7 +112,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
         if settings is None:
             return
 
-        address = str(self.config_entry.data.get(CONF_ADDRESS, "")).upper()
+        address = self._registry_id
         if not address:
             return
 
@@ -115,9 +121,9 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             return
 
         registry = get_registry(self.hass)
-        device = registry.async_get_device(
-            identifiers={(DOMAIN, address)},
-            connections={(CONNECTION_BLUETOOTH, address)},
+        device = registry.async_get_device_by_identifier(
+            (DOMAIN, address),
+            self.config_entry.entry_id,
         )
         if device is None:
             return

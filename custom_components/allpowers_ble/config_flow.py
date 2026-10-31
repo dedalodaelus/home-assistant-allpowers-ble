@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, cast, override
+from uuid import uuid4
 
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 import voluptuous as vol
@@ -13,12 +14,14 @@ from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
+from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig
 
 from .client import (
     DeviceNotFoundError,
@@ -32,7 +35,13 @@ from .client import (
 from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
+    CONF_DEVICE_IDENTITY,
+    CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_DEVICE_CHANGE,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+    CONF_REPLACE_DEVICE,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
     CONF_SETTINGS_KEEPALIVE,
@@ -57,8 +66,13 @@ from .const import (
     MIN_WATCHDOG_TIMEOUT,
     SERVICE_UUID,
 )
-from .model_support import identify_model
+from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
+from .repairs import async_unload_block_reason
+from .registry import (
+    async_registry_source_address,
+    async_registry_transition_conflicts,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,7 +117,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
         address = discovery_info.address.upper()
         await self.async_set_unique_id(address)
-        self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured(reload_on_update=False)
         self._discovery_info = discovery_info
         self.context["title_placeholders"] = {
             "name": _display_name(discovery_info),
@@ -124,7 +138,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = self._probe_error or "unknown"
 
         self._set_confirm_only()
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="confirm",
             data_schema=vol.Schema({}),
             errors=errors,
@@ -142,7 +156,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             discovery_info = self._discovered_devices[user_input[CONF_ADDRESS]]
             address = discovery_info.address.upper()
             await self.async_set_unique_id(address, raise_on_progress=False)
-            self._abort_if_unique_id_configured()
+            self._abort_if_unique_id_configured(reload_on_update=False)
             result = await self._async_probe_and_create(discovery_info)
             if result is not None:
                 return result
@@ -153,7 +167,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
 
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="user",
             data_schema=vol.Schema(
                 {
@@ -174,6 +188,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle user-initiated config-entry reconfiguration."""
         reconfigure_entry = self._get_reconfigure_entry()
+        pending_transition = CONF_PREVIOUS_REGISTRY_ID in reconfigure_entry.data
         current_address = str(reconfigure_entry.data.get(CONF_ADDRESS, "")).upper()
         current_name = str(
             reconfigure_entry.data.get(CONF_DEVICE_NAME, reconfigure_entry.title)
@@ -182,6 +197,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
         await bluetooth.async_request_active_scan(self.hass)
         discovered_devices = self._discover_reconfigure_candidates(reconfigure_entry)
+        genuinely_discovered_addresses = set(discovered_devices)
         if current_address and current_address not in discovered_devices:
             # Keep the current route selectable when the device is temporarily silent.
             discovered_devices[current_address] = BluetoothServiceInfoBleak(
@@ -199,12 +215,41 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                 tx_power=None,
             )
 
-        if user_input is not None:
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADDRESS, default=current_address): vol.In(
+                    {
+                        address: _display_name(info)
+                        for address, info in discovered_devices.items()
+                    }
+                ),
+                vol.Required(CONF_DEVICE_NAME, default=current_name): str,
+                vol.Optional(CONF_DEVICE_CHANGE): SelectSelector(
+                    SelectSelectorConfig(
+                        options=["same_device", "replacement"],
+                        translation_key="device_change",
+                    )
+                ),
+            }
+        )
+
+        if unload_error := async_unload_block_reason(self.hass, reconfigure_entry):
+            errors["base"] = unload_error
+        elif user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
+            was_discovered = address in genuinely_discovered_addresses
 
             if self._is_address_in_use(reconfigure_entry, address):
                 errors[CONF_ADDRESS] = "already_configured"
+            elif (
+                address != current_address
+                or (pending_transition and CONF_DEVICE_CHANGE in user_input)
+            ) and user_input.get(CONF_DEVICE_CHANGE) not in (
+                "same_device",
+                "replacement",
+            ):
+                errors[CONF_DEVICE_CHANGE] = "device_change_required"
             else:
                 discovery_info = discovered_devices.get(address)
                 if discovery_info is None:
@@ -223,53 +268,127 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         tx_power=None,
                     )
                 abort_reason: str | None = None
-                if not self._can_reuse_active_reconfigure_session(
+                reuse_active_session = self._can_reuse_active_reconfigure_session(
                     reconfigure_entry,
                     address,
-                ):
+                )
+                if not reuse_active_session:
                     abort_reason = await self._async_probe_candidate(
                         address=address,
                         advertised_name=discovery_info.name or current_name,
                     )
-                if abort_reason is not None:
+                if unload_error := async_unload_block_reason(
+                    self.hass, reconfigure_entry
+                ):
+                    errors["base"] = unload_error
+                elif abort_reason is not None:
                     errors["base"] = abort_reason
                 elif self._probe_error is not None:
                     errors["base"] = self._probe_error
                 else:
-                    entry_title = _entry_title_for_name(device_name, address)
-                    current_unique_id = str(reconfigure_entry.unique_id or "").upper()
-                    if (
-                        current_unique_id != address
-                        or reconfigure_entry.title != entry_title
+                    stored_identity = reconfigure_entry.data.get(
+                        CONF_DEVICE_IDENTITY, ""
+                    )
+                    model_identity = (
+                        stored_identity
+                        if isinstance(stored_identity, str)
+                        and has_specific_model_identity(stored_identity)
+                        else ""
+                    )
+                    if address != current_address:
+                        model_identity = ""
+                    if was_discovered and has_specific_model_identity(
+                        discovery_info.name
                     ):
-                        self.hass.config_entries.async_update_entry(
+                        model_identity = discovery_info.name.strip()
+                    entry_title = _entry_title_for_name(device_name, address)
+                    data_updates: dict[str, Any] = {
+                        CONF_ADDRESS: address,
+                        CONF_DEVICE_NAME: device_name,
+                        CONF_DEVICE_IDENTITY: model_identity,
+                    }
+                    if address != current_address or (
+                        pending_transition and CONF_DEVICE_CHANGE in user_input
+                    ):
+                        data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
+                        source = str(
+                            reconfigure_entry.data.get(
+                                CONF_PREVIOUS_REGISTRY_ID,
+                                reconfigure_entry.data.get(
+                                    CONF_REGISTRY_ID, current_address
+                                ),
+                            )
+                        )
+                        rollback = (
+                            pending_transition
+                            and reconfigure_entry.data.get(CONF_REPLACE_DEVICE, False)
+                            and user_input.get(CONF_DEVICE_CHANGE) == "same_device"
+                            and address
+                            == async_registry_source_address(
+                                self.hass, reconfigure_entry
+                            )
+                        )
+                        replace_device = not rollback and (
+                            user_input[CONF_DEVICE_CHANGE] == "replacement"
+                            or reconfigure_entry.data.get(CONF_REPLACE_DEVICE, False)
+                        )
+                        registry_id = (
+                            source
+                            if rollback
+                            else uuid4().hex
+                            if replace_device
+                            else str(
+                                reconfigure_entry.data.get(
+                                    CONF_REGISTRY_ID, uuid4().hex
+                                )
+                            )
+                        )
+                        if not replace_device and async_registry_transition_conflicts(
+                            self.hass, reconfigure_entry, registry_id, address
+                        ):
+                            _LOGGER.error(
+                                "Registry identity collision for config entry %s",
+                                reconfigure_entry.entry_id,
+                            )
+                            errors["base"] = "registry_conflict"
+                        else:
+                            data_updates.update(
+                                {
+                                    CONF_REGISTRY_ID: registry_id,
+                                    CONF_PREVIOUS_REGISTRY_ID: source,
+                                    CONF_REPLACE_DEVICE: replace_device,
+                                }
+                            )
+                    if not errors:
+                        changed = (
+                            reconfigure_entry.data
+                            != reconfigure_entry.data | data_updates
+                            or reconfigure_entry.title != entry_title
+                            or reconfigure_entry.unique_id != address
+                        )
+                        result = self.async_update_and_abort(
                             reconfigure_entry,
                             unique_id=address,
                             title=entry_title,
+                            data_updates=data_updates,
+                            reason="reconfigure_successful",
                         )
-                    return self.async_update_reload_and_abort(
-                        reconfigure_entry,
-                        data_updates={
-                            CONF_ADDRESS: address,
-                            CONF_DEVICE_NAME: device_name,
-                        },
-                        reason="reconfigure_successful",
-                        reload_even_if_entry_is_unchanged=False,
-                    )
+                        if not reconfigure_entry.update_listeners and (
+                            changed
+                            or reconfigure_entry.state
+                            in (
+                                ConfigEntryState.SETUP_RETRY,
+                                ConfigEntryState.SETUP_ERROR,
+                            )
+                        ):
+                            self.hass.config_entries.async_schedule_reload(
+                                reconfigure_entry.entry_id
+                            )
+                        return result
 
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_ADDRESS, default=current_address): vol.In(
-                        {
-                            address: _display_name(info)
-                            for address, info in discovered_devices.items()
-                        }
-                    ),
-                    vol.Required(CONF_DEVICE_NAME, default=current_name): str,
-                }
-            ),
+            data_schema=schema,
             errors=errors,
         )
 
@@ -371,13 +490,16 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             return None
 
         await self.async_set_unique_id(address, raise_on_progress=False)
-        self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured(reload_on_update=False)
         title = _entry_title(discovery_info)
         return self.async_create_entry(
             title=title,
             data={
                 CONF_ADDRESS: address,
                 CONF_DEVICE_NAME: name,
+                CONF_DEVICE_IDENTITY: (
+                    name.strip() if has_specific_model_identity(name) else ""
+                ),
             },
             options=ConnectionOptions().as_dict(),
         )
@@ -442,11 +564,12 @@ class AllpowersOptionsFlow(OptionsFlow):
                 return self.async_create_entry(title="", data=options.as_dict())
 
         current = ConnectionOptions.from_mapping(self.config_entry.options)
-        return self.async_show_form(
+        section = cast(Any, data_entry_flow.section)
+        return cast(Any, self.async_show_form)(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(SECTION_CONNECTION_HEALTH): data_entry_flow.section(
+                    vol.Required(SECTION_CONNECTION_HEALTH): section(
                         vol.Schema(
                             {
                                 vol.Required(
@@ -482,7 +605,7 @@ class AllpowersOptionsFlow(OptionsFlow):
                             }
                         ),
                     ),
-                    vol.Required(SECTION_ADVANCED_TIMING): data_entry_flow.section(
+                    vol.Required(SECTION_ADVANCED_TIMING): section(
                         vol.Schema(
                             {
                                 vol.Required(
@@ -523,9 +646,7 @@ class AllpowersOptionsFlow(OptionsFlow):
                         ),
                         {"collapsed": True},
                     ),
-                    vol.Required(
-                        SECTION_EXPERIMENTAL_CONTROLS
-                    ): data_entry_flow.section(
+                    vol.Required(SECTION_EXPERIMENTAL_CONTROLS): section(
                         vol.Schema(
                             {
                                 vol.Required(
@@ -699,6 +820,7 @@ def _matches_device(discovery_info: BluetoothServiceInfoBleak) -> bool:
     service_uuids = {uuid.lower() for uuid in discovery_info.service_uuids}
     return (
         name.startswith("R600")
+        or name.startswith("VOLIX P1800")
         or name.startswith("AP R")
         or name.startswith("AP S")
         or name.startswith("ALLPOWERS")

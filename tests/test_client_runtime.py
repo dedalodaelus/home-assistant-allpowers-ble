@@ -83,6 +83,7 @@ def make_client(
         hass=FakeHass(),  # type: ignore[arg-type]
         address="aa:bb:cc:dd:ee:ff",
         advertised_name=name,
+        device_identity=name,
         options=options or ConnectionOptions(),
     )
     client._settings = settings()
@@ -95,6 +96,7 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
     client._active_session_generation = 1
+    client._disconnect_event.clear()
     client._settings = settings()
     client._connected_monotonic = monotonic()
     return fake
@@ -227,8 +229,8 @@ async def test_expired_pending_transactions_require_fresh_updates(
     client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
     client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
 
-    await client.async_set_ac(True)
-    await client.async_set_eco(True)
+    await client.async_set_ac(False)
+    await client.async_set_eco(False)
 
     assert len(fake.writes) == 2
 
@@ -405,6 +407,208 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
 
 
 @pytest.mark.asyncio
+async def test_notifications_during_start_notify_persist_identity_once_and_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    name_frame = notification_builder(0x35, b"AP R600 V2.0")
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+
+    class EarlyNotifyClient(FakeClient):
+        async def start_notify(
+            self,
+            characteristic: object,
+            callback: Any,
+        ) -> None:
+            await super().start_notify(characteristic, callback)
+            callback(characteristic, bytearray(name_frame))
+            callback(characteristic, bytearray(settings_frame))
+
+    client = make_client(name="ALLPOWERS power station")
+    client._device_identity = ""
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+    fake = EarlyNotifyClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> EarlyNotifyClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
+
+    restarted = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted[0],
+        options=ConnectionOptions(),
+    )
+    restarted._settings = settings()
+    restarted._connected = True
+    restarted.update_advertisement(SimpleNamespace(name="aa:bb:cc:dd:ee:ff", rssi=-54))
+
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AP S500", "AP S700"])
+async def test_conflicted_rejected_identity_reconnects_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    client = make_client(name=name)
+    client._identity_conflicted = True
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client._connect_once()
+
+    assert client.snapshot().connected
+    assert client._runtime_model_support().classification == "identity_conflict"
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+async def test_generic_identity_with_persisted_conflict_can_reconnect_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client(name="ALLPOWERS power station")
+    client._device_identity = ""
+    client._identity_conflicted = True
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client._connect_once()
+
+    assert client.snapshot().connected
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejected_identity", ["AP S500", "AP S700"])
+async def test_rejected_persisted_identity_recovers_after_current_session_settings(
+    rejected_identity: str,
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    persisted = {"identity": rejected_identity, "conflict": True}
+    client = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+    assert fake.writes == [client_module.encode_status_request()]
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    assert fake.notification_callback is not None
+    fake.notification_callback(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert persisted == {"identity": "R600", "conflict": False}
+    assert client._runtime_model_support().capabilities.write_output_controls
+    assert client._runtime_model_support().capabilities.write_settings_controls
+
+    restarted = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        options=ConnectionOptions(),
+    )
+    restarted._connected = True
+    restarted._settings = settings()
+    restarted.update_advertisement(SimpleNamespace(name="aa:bb:cc:dd:ee:ff", rssi=-54))
+
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+async def test_reconnect_requires_current_session_settings_for_write_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    client = make_client()
+    client._settings_monotonic = monotonic()
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert client._settings is not None
+    assert client._settings_monotonic is None
+    assert fake.notification_callback is not None
+
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+    fake.notification_callback(FakeCharacteristic(), bytearray(status_frame))
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    with pytest.raises(StateUnavailableError):
+        await client.async_set_ac(True)
+    assert fake.writes == [client_module.encode_status_request()]
+
+    settings_notification = notification_builder(
+        0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11))
+    )
+    fake.notification_callback(FakeCharacteristic(), bytearray(settings_notification))
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
 async def test_connect_once_disconnects_when_gatt_validation_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -511,6 +715,8 @@ async def test_disconnect_waits_for_in_flight_write(
     client._active_session_generation = 1
     client._status = status(dc_enabled=False, ac_enabled=False, light_enabled=False)
     client._status_monotonic = monotonic()
+    client._settings = settings()
+    client._settings_monotonic = monotonic()
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
 
     write_task = asyncio.create_task(client.async_set_ac(True))
@@ -895,11 +1101,146 @@ async def test_maintenance_keepalive_sends_real_settings_frame(
     assert fake.writes == [client_module.encode_settings_control(current_settings)]
     assert client._last_settings_keepalive_monotonic == pytest.approx(now)
     assert client._last_settings_keepalive_attempt_monotonic is None
+    assert client._pending_settings_transaction is not None
+    assert client._settings_keepalive_deadline(now) == pytest.approx(
+        now + options.settings_keepalive_interval
+    )
     assert waits == [pytest.approx(60.0)]
 
 
 @pytest.mark.asyncio
-async def test_maintenance_keepalive_refreshes_stale_settings_with_backoff(
+@pytest.mark.parametrize("command", ["automatic_keepalive", "mutation"])
+async def test_settings_status_only_cycles_renew_session_without_replaying_mutation(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+    settings_frame: bytes,
+) -> None:
+    options = ConnectionOptions(settings_keepalive=True)
+    client = make_client(options)
+    fake = connect_fake(client)
+    now = 100.0
+    client._connected_monotonic = now
+    client._settings_monotonic = now
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+    if command == "automatic_keepalive":
+        await client._maintenance_loop()
+    else:
+        await client.async_set_eco(False)
+    assert len(fake.writes) == 1
+    assert client._pending_settings_transaction is not None
+    original_frame = fake.writes[0]
+    original_version = client._settings_version
+
+    for _ in range(3):
+        client._stop_event.clear()
+        now += options.settings_keepalive_interval
+        client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+        client._last_status_request_monotonic = now
+        await client._maintenance_loop()
+        assert fake.disconnect_calls == 1
+        assert not client._connected
+        assert client._pending_settings_transaction is None
+        assert client._freshness(now) == (False, False)
+        assert client._settings_version == original_version
+        assert waits[-1] is None
+        assert fake.writes in ([], [original_frame])
+        with pytest.raises(
+            StateUnavailableError, match="Unsupported settings keepalive"
+        ):
+            await client.async_send_settings_keepalive()
+
+        old_handler = client._make_notification_handler(1, fake)
+        fake = connect_fake(client)
+        client._settings = None
+        client._settings_monotonic = None
+        client._last_settings_keepalive_monotonic = None
+        client._connected_monotonic = now
+        old_handler(FakeCharacteristic(), bytearray(settings_frame))
+        assert client._settings is None
+        client._stop_event.clear()
+        now += options.status_interval
+        client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+        client._last_status_request_monotonic = now
+        await client._maintenance_loop()
+        assert fake.disconnect_calls == 0
+        assert fake.writes == []
+        assert waits[-1] > 0
+
+    client._stop_event.clear()
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    client._initial_settings_keepalive_pending = True
+    client._last_status_request_monotonic = now
+    await client._maintenance_loop()
+    assert fake.writes == [client_module.encode_settings_control(client._settings)]
+    assert client._settings_blocked_until_version is None
+    if command == "mutation":
+        assert fake.writes[0] != original_frame
+
+
+@pytest.mark.asyncio
+async def test_maintenance_defers_pending_settings_then_renews_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=20,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    now = 100.0
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    client._settings_monotonic = now
+    await client.async_set_eco(False)
+    pending = client._pending_settings_transaction
+    assert pending is not None
+    original_frame = fake.writes[0]
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+    now = 159.0
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    await client._maintenance_loop()
+    assert fake.writes == [original_frame]
+    assert client._pending_settings_transaction is pending
+    assert waits == [pytest.approx(1.0)]
+
+    client._stop_event.clear()
+    now = pending.sent_monotonic + options.settings_keepalive_interval
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    await client._maintenance_loop()
+    assert fake.writes == [original_frame]
+    assert fake.disconnect_calls == 1
+    assert not client._connected
+    assert client._pending_settings_transaction is None
+    assert client._settings_blocked_until_version is None
+    assert waits[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keepalive_renews_session_with_stale_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     options = ConnectionOptions(
@@ -932,10 +1273,87 @@ async def test_maintenance_keepalive_refreshes_stale_settings_with_backoff(
 
     await client._maintenance_loop()
 
-    assert fake.writes == [client_module.encode_status_request()]
-    assert client._last_status_request_monotonic == pytest.approx(now)
+    assert fake.writes == []
+    assert fake.disconnect_calls == 1
+    assert not client._connected
     assert client._last_settings_keepalive_monotonic == pytest.approx(100.0)
-    assert client._last_settings_keepalive_attempt_monotonic == pytest.approx(now)
+    assert client._last_settings_keepalive_attempt_monotonic is None
+    assert waits == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_error", [False, True])
+async def test_initial_keepalive_invalid_settings_reads_with_bounded_backoff(
+    transport_error: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_client(ConnectionOptions(settings_keepalive=True, status_interval=20))
+    fake = connect_fake(client)
+    now = 100.0
+    client._connected_monotonic = now
+    client._settings = settings(eco_timeout_hours=9)
+    client._settings_monotonic = now
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    if transport_error:
+        fake.raise_on_write = FakeBleakError("read recovery failed")
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+    for _ in range(1 if transport_error else 2):
+        client._stop_event.clear()
+        await client._maintenance_loop()
+        assert client._settings_keepalive_deadline(now) == pytest.approx(now + 20)
+        assert waits[-1] == pytest.approx(20.0)
+        assert fake.disconnect_calls == 0
+        assert client._pending_settings_transaction is None
+        now += 20
+        client._status_monotonic = now
+        client._last_packet_monotonic = now
+    assert fake.writes == (
+        [] if transport_error else [client_module.encode_status_request()] * 2
+    )
+    assert client._disconnect_event.is_set() is transport_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["bleak", "timeout"])
+async def test_automatic_keepalive_failed_write_does_not_confirm_settings(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = make_client(ConnectionOptions(settings_keepalive=True, status_interval=20))
+    fake = connect_fake(client)
+    now = 100.0
+    client._connected_monotonic = now
+    client._settings_monotonic = now
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    fake.raise_on_write = (
+        FakeBleakError("keepalive failed")
+        if failure == "bleak"
+        else TimeoutError("keepalive timed out")
+    )
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+    await client._maintenance_loop()
+    assert fake.writes == []
+    assert client._disconnect_event.is_set()
+    assert client._pending_settings_transaction is None
+    assert client._settings_blocked_until_version == client._settings_version + 1
+    assert client._last_settings_keepalive_monotonic is None
+    assert client._statistics.write_errors == 1
     assert waits == [pytest.approx(20.0)]
 
 

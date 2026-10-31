@@ -151,6 +151,10 @@ class _Entity:
 
     hass: Any
 
+    @property
+    def suggested_object_id(self) -> str | None:
+        return getattr(self, "_attr_name", None)
+
 
 class SensorEntity(_Entity):
     pass
@@ -179,6 +183,16 @@ class NumberEntity(_Entity):
 T = TypeVar("T")
 
 
+class ConfigEntryState(Enum):
+    NOT_LOADED = "not_loaded"
+    SETUP_IN_PROGRESS = "setup_in_progress"
+    LOADED = "loaded"
+    SETUP_RETRY = "setup_retry"
+    SETUP_ERROR = "setup_error"
+    FAILED_UNLOAD = "failed_unload"
+    UNLOAD_IN_PROGRESS = "unload_in_progress"
+
+
 class ConfigEntry(Generic[T]):
     """Config entry stub with runtime data and unload callbacks."""
 
@@ -200,15 +214,24 @@ class ConfigEntry(Generic[T]):
         self.version = version
         self.minor_version = minor_version
         self.unique_id = unique_id
+        self.state = ConfigEntryState.NOT_LOADED
         self.runtime_data: T
+        self.update_listeners: list[Callable[..., Any]] = []
         self._unload_callbacks: list[Callable[..., Any]] = []
+        self._state_callbacks: list[Callable[..., Any]] = []
+
+    def async_on_state_change(
+        self, callback_fn: Callable[..., Any]
+    ) -> Callable[[], None]:
+        self._state_callbacks.append(callback_fn)
+        return lambda: self._state_callbacks.remove(callback_fn)
 
     def async_on_unload(self, callback_fn: Callable[..., Any]) -> None:
         self._unload_callbacks.append(callback_fn)
 
     def add_update_listener(self, listener: Callable[..., Any]) -> Callable[[], None]:
-        self._update_listener = listener
-        return lambda: None
+        self.update_listeners.append(listener)
+        return lambda: self.update_listeners.remove(listener)
 
 
 class _FlowBase:
@@ -227,7 +250,8 @@ class _FlowBase:
         del raise_on_progress
         self.unique_id = unique_id
 
-    def _abort_if_unique_id_configured(self) -> None:
+    def _abort_if_unique_id_configured(self, *, reload_on_update: bool = True) -> None:
+        del reload_on_update
         return None
 
     def _abort_if_unique_id_mismatch(self) -> None:
@@ -277,24 +301,25 @@ class _FlowBase:
             result["options"] = dict(options)
         return result
 
-    def async_update_reload_and_abort(
+    def async_update_and_abort(
         self,
         entry: ConfigEntry[Any],
         *,
         data_updates: Mapping[str, Any] | None = None,
-        options_updates: Mapping[str, Any] | None = None,
+        unique_id: str | None = None,
+        title: str | None = None,
         reason: str = "reconfigure_successful",
-        reload_even_if_entry_is_unchanged: bool = True,
     ) -> dict[str, Any]:
-        del reload_even_if_entry_is_unchanged
+        updates: dict[str, Any] = {}
+        if unique_id is not None:
+            updates["unique_id"] = unique_id
+        if title is not None:
+            updates["title"] = title
         if data_updates is not None:
             merged_data = dict(entry.data)
             merged_data.update(data_updates)
-            self.hass.config_entries.async_update_entry(entry, data=merged_data)
-        if options_updates is not None:
-            merged_options = dict(entry.options)
-            merged_options.update(options_updates)
-            self.hass.config_entries.async_update_entry(entry, options=merged_options)
+            updates["data"] = merged_data
+        self.hass.config_entries.async_update_entry(entry, **updates)
         return self.async_abort(reason=reason)
 
 
@@ -371,6 +396,9 @@ class DataUpdateCoordinator(Generic[T]):
         self.data = data
         self.update_count += 1
 
+    async def async_shutdown(self) -> None:
+        self._shutdown_requested = True
+
 
 C = TypeVar("C")
 
@@ -397,6 +425,41 @@ class DeviceEntry:
     name: str | None = None
     model: str | None = None
     manufacturer: str | None = None
+
+
+class EmptyRegistry:
+    """Empty registry for adapter tests not exercising registry records."""
+
+    entities: dict[str, Any] = {}
+
+    def async_get_device_by_identifier(
+        self, identifier: tuple[str, str], config_entry_id: str
+    ) -> None:
+        del identifier, config_entry_id
+
+    def async_get_device_by_connection(
+        self, connection: tuple[str, str], config_entry_id: str
+    ) -> None:
+        del connection, config_entry_id
+
+    def async_get_entity_id(self, domain: str, platform: str, unique_id: str) -> None:
+        del domain, platform, unique_id
+
+
+def _empty_registry(hass: Any) -> EmptyRegistry:
+    del hass
+    return EmptyRegistry()
+
+
+def _empty_registry_entries(registry: Any, entry_id: str) -> list[Any]:
+    del registry, entry_id
+    return []
+
+
+def _select_selector(config: dict[str, Any]):
+    import voluptuous as vol
+
+    return vol.In(config["options"])
 
 
 @dataclass
@@ -649,6 +712,7 @@ def install() -> None:
 
     config_entries = ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = ConfigEntry
+    config_entries.ConfigEntryState = ConfigEntryState
     config_entries.ConfigFlow = ConfigFlow
     config_entries.ConfigFlowResult = ConfigFlowResult
     config_entries.OptionsFlow = OptionsFlow
@@ -682,6 +746,16 @@ def install() -> None:
     device_registry.CONNECTION_BLUETOOTH = "bluetooth"
     device_registry.DeviceEntry = DeviceEntry
     device_registry.DeviceInfo = DeviceInfo
+    device_registry.async_get = _empty_registry
+    device_registry.async_entries_for_config_entry = _empty_registry_entries
+
+    entity_registry = ModuleType("homeassistant.helpers.entity_registry")
+    entity_registry.async_get = _empty_registry
+    entity_registry.async_entries_for_config_entry = _empty_registry_entries
+
+    selector = ModuleType("homeassistant.helpers.selector")
+    selector.SelectSelector = _select_selector
+    selector.SelectSelectorConfig = dict
 
     update_coordinator = ModuleType("homeassistant.helpers.update_coordinator")
     update_coordinator.CoordinatorEntity = CoordinatorEntity
@@ -758,6 +832,7 @@ def install() -> None:
     voluptuous = ModuleType("voluptuous")
     voluptuous.Schema = _Schema
     voluptuous.Required = _Required
+    voluptuous.Optional = _Required
     voluptuous.All = lambda *validators: validators
     voluptuous.Coerce = lambda target: target
     voluptuous.Range = _Range
@@ -789,6 +864,8 @@ def install() -> None:
             "homeassistant.helpers": helpers,
             "homeassistant.helpers.entity_platform": entity_platform,
             "homeassistant.helpers.device_registry": device_registry,
+            "homeassistant.helpers.entity_registry": entity_registry,
+            "homeassistant.helpers.selector": selector,
             "homeassistant.helpers.update_coordinator": update_coordinator,
             "homeassistant.helpers.issue_registry": issue_registry,
             "homeassistant.helpers.event": event,

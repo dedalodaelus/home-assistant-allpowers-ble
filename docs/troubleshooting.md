@@ -44,6 +44,51 @@ Possible causes:
 Collect debug logs and sanitized diagnostics. Do not bypass the active probe: it is
 the barrier that prevents a false-positive device from receiving control frames.
 
+Every unsuccessful startup after client initialization explicitly shuts down the
+coordinator/client and releases the advertisement subscription before returning
+to Core. This includes startup/readiness errors, option reconciliation failures,
+registry transition errors, platform initialization failures, and cancellation.
+Connection, maintenance, and refresh tasks are stopped; the BLE connection is
+released. Partially initialized platforms are unloaded, failed runtime data is
+removed, and Core processes the remaining entry unload callbacks.
+
+If partial-platform cleanup fails, the error is reported rather than treated as
+successful setup; restart Home Assistant as instructed in Repairs. A per-entry
+block in the running Home Assistant instance prevents further setup, reload, or
+retry from creating another BLE client or initializing platforms, even if Core
+reports the recoverable `SETUP_ERROR` or `SETUP_RETRY` state. Reconfiguration is
+also blocked. Reloading the integration does not clear this condition or its
+persistent Repair. A genuinely fresh Home Assistant instance has no such block;
+the Repair clears only after successful startup there, or entry removal.
+Same-device registry records are not deleted by setup cleanup.
+
+## Integration unload failed
+
+Home Assistant puts an entry in the non-recoverable `FAILED_UNLOAD` state if
+platform unloading returns `False` or platform/coordinator unloading raises an
+exception. Resetting a reload flag cannot recover this Core state.
+Core's own post-unload callbacks can also fail after the integration reports a
+successful unload; the final-state observer reports that failure in Repairs too.
+
+- Restart Home Assistant, not just the integration. Do not remove and recreate the
+  entry: a restart retains registry IDs, user customizations, and references.
+- Until restart, the integration suppresses update-triggered reloads, does not
+  apply options to the partially unloaded runtime, and rejects reconfiguration
+  without changing the entry. Options saved during this state remain pending.
+- These protections also apply while `UNLOAD_IN_PROGRESS`: concurrent configuration
+  and options updates remain pending without touching the unloading client or
+  scheduling an additional reload. Reconfiguration is rejected until unloading
+  finishes.
+- A persistent error in **Settings -> System -> Repairs** explains the restart
+  requirement. It is not an automatic repair and clears only after a successful
+  new setup; fresh telemetry alone does not dismiss it.
+  If the entry is deleted, its persistent unload Repair is removed as well.
+- Diagnostics include `entry.state` and `entry.restart_required`. Check the unload
+  error in the Home Assistant logs if the problem repeats.
+
+The runtime and registrations retained by Core after a failed unload are not
+treated as a cleanly unloaded integration. No second BLE client is started.
+
 ## Entities become unavailable while Connected remains on
 
 This is expected when the socket remains open but telemetry or settings have
@@ -95,6 +140,10 @@ actionable conditions and dismisses them automatically after recovery:
   and dismissed once telemetry is fresh again.
 - `invalid_migrated_options`: created when a legacy entry cannot be migrated due
   to invalid option relationships and dismissed after successful migration.
+- `failed_unload`: created immediately after unsuccessful platform/coordinator
+  unloading or Core post-unload cleanup, requires a Home Assistant restart, and
+  is dismissed after successful new setup or entry deletion.
+  See [Integration unload failed](#integration-unload-failed).
 
 Normal transient reconnects do not create Repairs.
 

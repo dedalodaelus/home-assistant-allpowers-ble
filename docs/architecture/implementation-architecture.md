@@ -103,8 +103,21 @@ connection, verifies the expected service and characteristics, writes the known
 status request, and waits for a valid decoded status response.
 
 The reconfigure step follows the same active-probe contract before updating
-mutable entry fields (Bluetooth address and display name). It updates the
-existing entry and aborts with success, rather than creating a new entry.
+mutable entry fields (Bluetooth address and display name). Model identity is
+stored separately from the editable display name: only a genuinely observed BLE
+family name can establish or replace it. A missing/generic advertisement or a
+synthetic current-address fallback preserves identity on the same address; a
+changed address never inherits the previous identity. Runtime observations are
+persisted only when identity changes, including conservative downgrades for
+contradictory families. Reconfigure updates the existing entry and aborts with
+success, rather than creating a new entry.
+
+Schema 1.2 migrates a legacy display name to model identity only when it contains
+a recognized family marker. Legacy storage cannot prove that such a name was not
+manually edited, so the migrated value alone grants no write capability. The
+client additionally requires a matching, fresh hardware-revision settings packet
+from the current GATT session; cached settings from a previous connection remain
+diagnostic-only until refreshed.
 
 ## Persistent connection state machine
 
@@ -170,6 +183,9 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
 - Freshness transitions are emitted even when no new BLE notification arrives.
 - Cached data remains available to diagnostics, but cannot authorize writes after
   disconnect or expiry.
+- Revision-based model write capabilities require fresh settings from the active
+  GATT session; a status packet or cached settings from a prior session is not
+  sufficient.
 - Control platforms subscribe to coordinator updates and add newly authorized
   writable entities exactly once when revision-verified capabilities become
   available after setup.
@@ -205,9 +221,31 @@ capabilities at the transport boundary under the operation lock:
 Entity availability remains a UI guard only. Runtime profile downgrades are
 therefore enforced even for direct internal client calls.
 
-Transactions complete only when the matching notification arrives from the same
-session generation. They are in-memory only and are cleared on disconnect, on new
-GATT session, or when confirmation times out and a newer safe version is required.
+Confirmed snapshots and requested targets are separate. Pending targets cannot
+authorize another combined output/settings write or a keepalive. Commands in a
+pending group fail closed with `command_unconfirmed`, without automatic queuing.
+
+A transaction is visible in `SENDING` before yielding to GATT. Matching, newer,
+semantically safe same-session telemetry marks observed `CONFIRMED` convergence
+during that await; contradictory telemetry revokes it. Only successful transport
+return retires that provisional transaction. Otherwise it enters
+`AWAITING_CONFIRMATION` until a matching notification arrives. Error or cancellation
+clears the transaction and leaves an unknown group blocked until a newer snapshot;
+cached pre-error telemetry cannot recover it. Timeout likewise requires a new
+snapshot. Disconnect clears session-scoped state.
+
+Service completion represents submission, not physical confirmation. Versions and
+generation reject old state/session callbacks, but the protocol has no transaction
+ID and matching telemetry does not establish causation. No-op commands return only
+after freshness, capability, semantic, pending/unknown and session guards pass.
+Explicit keepalive is not a no-op. Automatic maintenance renews the session when
+settings are unsafe at the next keepalive interval, before the longer confirmation
+deadline. Early initial-keepalive recovery can request status with bounded backoff;
+status is never assumed to yield settings. New sessions require fresh `0x03` and
+never replay a prior target. If settings remain absent, controls stay unavailable
+and further session recovery is paced by that interval. No physical inactivity
+cutoff prevention is guaranteed. Settings response timing and output behavior remain
+subject to the [HIL checklist](../hil-qualification.md#transaction-safety-regression).
 
 Any new safety claim must include matching protocol evidence and regression tests
 before it is documented as guaranteed behavior.
@@ -257,11 +295,12 @@ storage writes and prevents ephemeral state from being trusted after restart.
 
 ### Config-entry schema and migration baseline
 
-The integration currently persists config entries at schema version `1.1`.
+The integration currently persists config entries at schema version `1.2`.
 
 - `entry.data`
   - `address` (`str`, normalized uppercase Bluetooth MAC address)
-  - `device_name` (`str`, device label captured at setup)
+  - `device_name` (`str`, mutable display label)
+  - `device_identity` (`str`, model family established by the setup probe)
 - `entry.options`
   - `status_interval` (`float`)
   - `stale_timeout` (`float`)
@@ -273,9 +312,12 @@ The integration currently persists config entries at schema version `1.1`.
   - `enable_car_charger` (`bool`)
 
 Migration runs through `async_migrate_entry` before setup. The current baseline
-supports migration from `1.0` to `1.1` by normalizing persisted options and
-filling any missing keys with safe defaults. Unsupported future versions are
-rejected explicitly so setup fails cleanly instead of partially initializing.
+supports migration from `1.0` and `1.1` to `1.2`, separating a recognized legacy
+model name from its mutable display label while preserving conservative
+read-only behavior for generic names. Version `1.0` migration also normalizes
+persisted options and fills any missing keys with safe defaults. Unsupported
+future versions are rejected explicitly so setup fails cleanly instead of
+partially initializing.
 
 Migration does not perform network I/O, does not mutate unique IDs, and is
 idempotent once an entry reaches the latest schema.

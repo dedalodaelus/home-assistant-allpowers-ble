@@ -19,10 +19,80 @@ from custom_components.allpowers_ble.repairs import (
     ISSUE_NO_ROUTE,
     ISSUE_WATCHDOG,
     AllpowersRepairsManager,
+    async_observe_unload_result,
+    async_mark_setup_cleanup_failed,
+    async_unload_block_reason,
 )
 
 from tests.helpers import FakeHass, snapshot
 from tests.ha_stubs import ConfigEntry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_unload_observer_survives_cleanup_and_unsubscribes_on_final_state(
+    failure,
+):
+    import asyncio
+    from homeassistant.config_entries import ConfigEntryState
+
+    hass = FakeHass()
+    hass.loop = asyncio.get_running_loop()
+    entry = ConfigEntry(entry_id="observer-test")
+    ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_failed_unload")
+    async_observe_unload_result(hass, entry)
+    assert len(entry._state_callbacks) == 1
+    entry.state = ConfigEntryState.UNLOAD_IN_PROGRESS
+    entry._state_callbacks[0]()
+    assert len(entry._state_callbacks) == 1
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is None
+    )
+    entry.state = (
+        ConfigEntryState.FAILED_UNLOAD if failure else ConfigEntryState.NOT_LOADED
+    )
+    entry._state_callbacks[0]()
+    entry._state_callbacks[0]()
+    await asyncio.sleep(0)
+    assert entry._state_callbacks == []
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is not None
+    ) is failure
+
+
+@pytest.mark.asyncio
+async def test_remove_entry_clears_only_its_persistent_unload_repair():
+    from custom_components.allpowers_ble import async_remove_entry
+
+    hass = FakeHass()
+    entry = ConfigEntry(entry_id="removed-entry")
+    other = ConfigEntry(entry_id="other-entry")
+    async_mark_setup_cleanup_failed(hass, entry)
+    async_mark_setup_cleanup_failed(hass, other)
+    await async_remove_entry(hass, entry)
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is None
+    )
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{other.entry_id}_failed_unload")
+        is not None
+    )
+    assert async_unload_block_reason(hass, entry) is None
+    assert async_unload_block_reason(hass, other) == "failed_unload"
+
+
+def test_setup_restart_guard_is_scoped_to_home_assistant_instance():
+    hass = FakeHass()
+    fresh_hass = FakeHass()
+    entry = ConfigEntry(entry_id="restart-scoping")
+    other = ConfigEntry(entry_id="unaffected-entry")
+    async_mark_setup_cleanup_failed(hass, entry)
+    assert async_unload_block_reason(hass, entry) == "failed_unload"
+    assert async_unload_block_reason(hass, other) is None
+    assert async_unload_block_reason(fresh_hass, entry) is None
 
 
 def _issue_id(entry_id: str, issue_key: str) -> str:
