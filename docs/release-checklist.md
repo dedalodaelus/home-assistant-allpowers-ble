@@ -26,6 +26,26 @@
 - Dependabot pull requests target `devel`.
 - Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 
+### Preparing a development promotion
+
+1. From **Actions → Promote devel to main**, run the workflow on `main`.
+2. If an open promotion PR exists, inspect it; reruns return its URL and preserve
+   its description and review metadata.
+3. If branches diverged, create a reviewed `main` to `devel` synchronization PR,
+   merge it, then retry. Do not rewrite either branch.
+4. Review the generated change groups, test-file summary, and complete diff. Reconcile any
+   Release Please managed metadata before promotion.
+5. Mark the draft ready for review. Wait for Merge gate and every required check.
+6. Merge manually after approval. This workflow never merges or publishes.
+7. Review and merge the separate Release Please PR on `main`; existing release
+   automation then publishes the release and HACS assets.
+
+The workflow requires `PROMOTION_APP_ID` and `PROMOTION_APP_PRIVATE_KEY` secrets
+for a GitHub App installed with repository Contents: read and Pull requests:
+write permissions. The short-lived installation token is limited to this
+repository and those permissions. `GITHUB_TOKEN` is not used to create the PR
+because its PR event would not start the downstream validation workflows.
+
 ## Code and metadata
 
 - `manifest.json` version is valid SemVer.

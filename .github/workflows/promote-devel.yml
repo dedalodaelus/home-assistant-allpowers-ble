@@ -1,0 +1,152 @@
+name: Promote devel to main
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: promote-devel-to-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out the promotion template
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Create narrowly scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.PROMOTION_APP_ID }}
+          private-key: ${{ secrets.PROMOTION_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+
+      - name: Check branches and prepare promotion PR
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PROMOTION_TEMPLATE: .github/PULL_REQUEST_TEMPLATE/promotion.md
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const fail = (message) => core.setFailed(message);
+
+            // Idempotence includes drafts; never rewrite a human-edited PR body.
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', base: 'main', head: `${owner}:devel`, per_page: 100,
+            });
+            if (existing.length) {
+              core.info(`Promotion PR already exists: ${existing[0].html_url}`);
+              core.setOutput('pull-request-url', existing[0].html_url);
+              return;
+            }
+
+            const comparison = await github.rest.repos.compareCommits({
+              owner, repo, base: 'main', head: 'devel',
+            });
+            if (comparison.data.status === 'identical') {
+              core.info('No changes to promote: main and devel are identical.');
+              return;
+            }
+            if (comparison.data.status !== 'ahead') {
+              fail(`Branches have diverged (comparison status: ${comparison.data.status}). `
+                + 'Create a reviewed synchronization PR from main into devel, then retry.');
+              return;
+            }
+
+            const files = comparison.data.files || [];
+            const protectedFiles = new Set([
+              'CHANGELOG.md',
+              '.release-please-manifest.json',
+              'custom_components/allpowers_ble/manifest.json',
+            ]);
+            const changed = files.map((file) => file.filename);
+            const metadataChanges = changed.filter((name) => protectedFiles.has(name));
+            if (metadataChanges.length) {
+              fail(`Promotion changes Release Please managed metadata: ${metadataChanges.join(', ')}. `
+                + 'Review and reconcile release metadata through the normal Release Please process.');
+              return;
+            }
+
+            const commits = comparison.data.commits || [];
+            const commitsWithPrs = await Promise.all(commits.map(async (commit) => {
+              const subject = (commit.commit.message || '').split('\n')[0];
+              const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: commit.sha,
+              });
+              const mergedPrs = associated.data.filter((pr) => pr.merged_at);
+              return { commit, subject, mergedPrs };
+            }));
+
+            const groups = new Map([
+              ['Features', []], ['Bug Fixes', []], ['Documentation', []],
+              ['Maintenance', []], ['Other Changes', []],
+            ]);
+            const includedPrs = new Set();
+            for (const item of commitsWithPrs) {
+              const entries = item.mergedPrs.length ? item.mergedPrs : [null];
+              for (const pr of entries) {
+                if (pr && includedPrs.has(pr.number)) continue;
+                if (pr) includedPrs.add(pr.number);
+                const title = pr?.title || item.subject;
+                const match = title.match(/^(feat|fix|docs|test|build|ci|chore|refactor|perf)(?:\([^)]*\))?:\s*/i);
+                const category = match?.[1]?.toLowerCase();
+                const heading = category === 'feat' ? 'Features'
+                  : category === 'fix' ? 'Bug Fixes'
+                    : category === 'docs' ? 'Documentation'
+                      : ['test', 'build', 'ci', 'chore', 'refactor', 'perf'].includes(category)
+                        ? 'Maintenance' : 'Other Changes';
+                const displayTitle = match ? title.replace(match[0], '') : title;
+                const link = pr
+                  ? `([#${pr.number}](${pr.html_url}))`
+                  : `([\`${item.commit.sha.slice(0, 7)}\`](${item.commit.html_url}))`;
+                groups.get(heading).push(`* ${displayTitle} ${link}`);
+              }
+            }
+            const changeSummary = [...groups.entries()]
+              .filter(([, lines]) => lines.length)
+              .map(([heading, lines]) => `#### ${heading}\n\n${lines.join('\n')}`)
+              .join('\n\n') || '* No included commits were reported.';
+
+            const testFiles = changed.filter((name) => name.startsWith('tests/'));
+            const testSummary = testFiles.length
+              ? testFiles.map((name) => `* \`${name}\``).join('\n')
+              : '* No test files changed. This list describes changed files, not test results.';
+
+            const previousPromotions = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'closed', base: 'main', head: `${owner}:devel`, per_page: 100,
+            });
+            const promotionHistory = previousPromotions
+              .filter((pr) => /^chore\(release\):/.test(pr.title) || /promot(?:e|ion).*devel.*main/i.test(pr.title))
+              .sort((a, b) => new Date(b.merged_at || b.closed_at) - new Date(a.merged_at || a.closed_at))
+              .slice(0, 4);
+            const previousSummary = promotionHistory.length
+              ? `The repository has ${promotionHistory.length} recent previous promotions from \`devel\` to \`main\`:\n\n`
+                + promotionHistory.map((pr) => `* [#${pr.number}](${pr.html_url})`).join('\n')
+                + '\n\nNo open promotion PR exists.'
+              : 'No previous promotion PRs from `devel` to `main` were found.\n\nNo open promotion PR exists.';
+
+            const template = fs.readFileSync(process.env.PROMOTION_TEMPLATE, 'utf8');
+            const body = template
+              .replace('<!-- GENERATED_COMMITS -->', changeSummary)
+              .replace('<!-- GENERATED_TESTS -->', testSummary)
+              .replace('<!-- GENERATED_PREVIOUS_PROMOTIONS -->', previousSummary);
+
+            const pr = await github.rest.pulls.create({
+              owner, repo, head: 'devel', base: 'main', draft: true,
+              title: 'chore: promote devel to main', body,
+            });
+            core.info(`Created draft promotion PR: ${pr.data.html_url}`);
+            core.setOutput('pull-request-url', pr.data.html_url);
