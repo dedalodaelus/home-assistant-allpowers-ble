@@ -197,6 +197,18 @@ only after required checks pass. Promotion does not publish a release. Release
 Please remains responsible for its separate release PR, version and changelog
 updates, tags, GitHub release, and HACS assets.
 
+### Trusted release metadata validation rollout
+
+`.github/workflows/release-metadata.yml` uses `pull_request_target` only to read
+the PR's immutable base/head revisions. It checks out the trusted default-branch
+validator and never checks out or executes PR code. Because the workflow is read
+from the default `main` branch, its first deployment is staged: after it reaches
+`main`, observe a successful guard run, then set the repository Actions variable
+`REQUIRE_RELEASE_METADATA_GUARD=true`. The Merge gate will then require the
+`Release metadata guard` workflow result for the exact PR revisions. Keep the
+variable unset until that workflow is present on `main`; doing so earlier makes
+the required gate correctly fail closed for a missing check.
+
 ## Manual Home Assistant development
 
 For interactive work, copy or symlink `custom_components/allpowers_ble` into a test

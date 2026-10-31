@@ -7,6 +7,9 @@
   `esphome-bluetooth-proxy`, and `allpowers`.
 - Vulnerability reporting enabled.
 - Branch protection/ruleset requires exactly one status check: `Merge gate`.
+- The `main-requires-up-to-date` ruleset requires PR heads targeting `main` to
+  include the latest `main` revision; it is scoped to `main` and does not affect
+  `main` to `devel` synchronization PRs.
 - `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
   and CodeQL checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
@@ -46,6 +49,13 @@ for a GitHub App installed with repository Contents: read and Pull requests:
 write permissions. The short-lived installation token is limited to this
 repository and those permissions. `GITHUB_TOKEN` is not used to create the PR
 because its PR event would not start the downstream validation workflows.
+
+Release metadata enforcement is staged because its trusted
+`pull_request_target` workflow is read from default branch `main`. After that
+workflow reaches `main` and a successful guard run has been observed, set the
+repository variable `REQUIRE_RELEASE_METADATA_GUARD=true` to make the Merge gate
+require its result. Do not enable the variable before the workflow exists on
+`main`.
 
 ## Code and metadata
 

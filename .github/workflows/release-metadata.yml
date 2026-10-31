@@ -1,0 +1,60 @@
+name: Release metadata guard
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - edited
+    branches:
+      - main
+      - devel
+
+permissions: {}
+
+concurrency:
+  group: release-metadata-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Release metadata guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted default-branch validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch immutable PR revisions
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin \
+            "refs/heads/${PR_BASE_REF}:refs/remotes/origin/metadata-validation-base"
+          git fetch --no-tags origin \
+            "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/metadata-validation-head"
+          test "$(git rev-parse refs/remotes/origin/metadata-validation-base)" = "$PR_BASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/metadata-validation-head)" = "$PR_HEAD_SHA"
+
+      - name: Validate release metadata without executing PR code
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: >-
+          python3 -m scripts.promotion_metadata
+          --base-sha "$PR_BASE_SHA"
+          --head-sha "$PR_HEAD_SHA"
+          --base-ref "$PR_BASE_REF"
+          --head-ref "$PR_HEAD_REF"

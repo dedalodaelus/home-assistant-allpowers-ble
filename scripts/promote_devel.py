@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from scripts.promotion_metadata import semver_key
+from scripts.promotion_metadata import semver_key, validate_version_policy
 
 API_ROOT = "https://api.github.com"
 MANIFEST_PATH = "custom_components/allpowers_ble/manifest.json"
@@ -142,7 +142,11 @@ class GitHubAPI:
             raise PromotionError(
                 "GitHub returned a truncated tree; refusing an incomplete preflight."
             )
-        return {entry["path"]: entry for entry in tree["tree"]}
+        return {
+            entry["path"]: entry
+            for entry in tree["tree"]
+            if entry.get("type") == "blob"
+        }
 
     def blob_text(self, sha: str) -> str:
         blob = self.request("GET", f"/repos/{self.owner}/{self.repo}/git/blobs/{sha}")
@@ -331,8 +335,16 @@ def prepare_promotion(api: GitHubAPI, template: str) -> str | None:
             "Branches differ but GitHub returned no commits; refusing an empty PR."
         )
 
-    base_tree = api.tree(base_sha)
-    head_tree = api.tree(head_sha)
+    base_tree = {
+        path: entry
+        for path, entry in api.tree(base_sha).items()
+        if entry.get("type") == "blob"
+    }
+    head_tree = {
+        path: entry
+        for path, entry in api.tree(head_sha).items()
+        if entry.get("type") == "blob"
+    }
     changed_paths = sorted(
         path
         for path in base_tree.keys() | head_tree.keys()
@@ -367,11 +379,12 @@ def prepare_promotion(api: GitHubAPI, template: str) -> str | None:
 
     base_manifest_version = load_version(api, base_tree, base_sha)
     head_manifest_version = load_version(api, head_tree, head_sha)
-    if semver_key(head_manifest_version) < semver_key(base_manifest_version):
-        raise PromotionError(
-            "Integration manifest version would regress from "
-            f"{base_manifest_version} to {head_manifest_version}."
+    try:
+        validate_version_policy(
+            base_manifest_version, head_manifest_version, "main", "devel"
         )
+    except ValueError as error:
+        raise PromotionError(str(error)) from error
 
     body = render_template(template, commits, changed_paths, api)
     if api.refs() != (base_sha, head_sha):

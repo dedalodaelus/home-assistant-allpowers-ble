@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
 from threading import Lock
 from time import sleep
 from typing import Any
@@ -28,6 +29,7 @@ TEMPLATE = """## Summary
 
 <!-- GENERATED_PREVIOUS_PROMOTIONS -->
 """
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _entry(path: str, sha: str) -> dict[str, Any]:
@@ -57,12 +59,19 @@ class FakeGitHub:
             "head-manifest": json.dumps(head_manifest),
         }
         self.base_tree = {
+            "tests": {"path": "tests", "sha": "tree-a", "type": "tree"},
             "custom_components/allpowers_ble/manifest.json": _entry(
                 "custom_components/allpowers_ble/manifest.json", "base-manifest"
             ),
             "README.md": _entry("README.md", "same-readme"),
         }
         self.head_tree = {
+            "tests": {"path": "tests", "sha": "tree-b", "type": "tree"},
+            "tests/subdirectory": {
+                "path": "tests/subdirectory",
+                "sha": "tree-c",
+                "type": "tree",
+            },
             "custom_components/allpowers_ble/manifest.json": _entry(
                 "custom_components/allpowers_ble/manifest.json", "head-manifest"
             ),
@@ -151,6 +160,8 @@ def test_success_creates_template_based_draft_with_traceable_summaries() -> None
     assert "add verified discovery" in body
     assert "[#210](https://example.test/pull/210)" in body
     assert "tests/test_feature.py" in body
+    assert "* `tests`" not in body
+    assert "tests/subdirectory" not in body
     assert "[#154](https://example.test/pull/154)" in body
     assert "#153" not in body
     assert "<!-- GENERATED_" not in body
@@ -206,7 +217,16 @@ def test_manifest_version_regression_fails_closed() -> None:
     api = FakeGitHub()
     api.blobs["head-manifest"] = json.dumps({"version": "1.2.2"})
 
-    with pytest.raises(PromotionError, match="would regress"):
+    with pytest.raises(PromotionError, match="regressed"):
+        prepare_promotion(api, TEMPLATE)
+    assert api.created == []
+
+
+def test_manifest_version_increase_is_not_allowed_in_devel_to_main_promotion() -> None:
+    api = FakeGitHub()
+    api.blobs["head-manifest"] = json.dumps({"version": "1.2.4"})
+
+    with pytest.raises(PromotionError, match="must remain unchanged"):
         prepare_promotion(api, TEMPLATE)
     assert api.created == []
 
@@ -349,6 +369,18 @@ def test_semantic_version_comparison(base: str, head: str, regresses: bool) -> N
         promotion_metadata.validate_version_change(base, head)
 
 
+def test_version_increase_requires_release_please_or_main_to_devel_sync() -> None:
+    with pytest.raises(promotion_metadata.MetadataError, match="must remain unchanged"):
+        promotion_metadata.validate_version_policy("1.2.3", "1.2.4", "devel", "feature")
+    with pytest.raises(promotion_metadata.MetadataError, match="must remain unchanged"):
+        promotion_metadata.validate_version_policy("1.2.3", "1.2.4", "main", "devel")
+
+    promotion_metadata.validate_version_policy(
+        "1.2.3", "1.2.4", "main", "release-please--123"
+    )
+    promotion_metadata.validate_version_policy("1.2.3", "1.2.4", "devel", "main")
+
+
 @pytest.mark.parametrize("version", ["1.2.3-", "1.2.3-01", "1.2.3+build."])
 def test_invalid_semver_is_rejected(version: str) -> None:
     with pytest.raises(
@@ -391,3 +423,17 @@ def test_renamed_protected_file_source_is_detected(
     assert "CHANGELOG.md" in changed
     with pytest.raises(promotion_metadata.MetadataError, match="CHANGELOG.md"):
         promotion_metadata.validate_release_file_changes(changed, "devel", "feature")
+
+
+def test_trusted_metadata_workflow_never_checks_out_or_runs_pr_head_code() -> None:
+    workflow = (ROOT / ".github/workflows/release-metadata.yml").read_text(
+        encoding="utf-8"
+    )
+    gate = (ROOT / ".github/workflows/merge-gate.yml").read_text(encoding="utf-8")
+
+    assert "pull_request_target:" in workflow
+    assert "ref: main" in workflow
+    assert "refs/pull/${PR_NUMBER}/head" in workflow
+    assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
+    assert "python3 -m scripts.promotion_metadata" in workflow
+    assert "REQUIRE_RELEASE_METADATA_GUARD" in gate

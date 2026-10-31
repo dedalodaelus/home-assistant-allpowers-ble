@@ -73,6 +73,9 @@ The repository uses an explicit promotion model:
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
 - Rulesets require a single status check: `Merge gate`. That workflow enforces
   downstream validation checks transitively.
+- Pull requests into `main` must be current with the latest `main` commit; this
+  freshness rule is scoped to `main` and does not constrain `main` to `devel`
+  synchronization PRs.
 
 When opening a pull request:
 

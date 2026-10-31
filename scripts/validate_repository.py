@@ -25,6 +25,7 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/hassfest.yml",
     ".github/workflows/merge-gate.yml",
     ".github/workflows/promote-devel.yml",
+    ".github/workflows/release-metadata.yml",
     ".github/workflows/release.yml",
     "CHANGELOG.md",
     "CONTRIBUTING.md",

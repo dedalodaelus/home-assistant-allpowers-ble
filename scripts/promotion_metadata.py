@@ -57,6 +57,21 @@ def validate_version_change(base_version: str, head_version: str) -> None:
         )
 
 
+def validate_version_policy(
+    base_version: str, head_version: str, base_ref: str, head_ref: str
+) -> None:
+    """Allow version changes only in Release Please or main-to-devel sync PRs."""
+    validate_version_change(base_version, head_version)
+    authorized_change = (
+        base_ref == "main" and head_ref.startswith("release-please--")
+    ) or (base_ref == "devel" and head_ref == "main")
+    if not authorized_change and base_version != head_version:
+        raise MetadataError(
+            "Integration manifest version must remain unchanged in ordinary development "
+            "and promotion PRs. Use Release Please or a reviewed main-to-devel sync."
+        )
+
+
 def validate_release_please_versions(
     base_versions: dict[str, Any], head_versions: dict[str, Any]
 ) -> None:
@@ -66,6 +81,13 @@ def validate_release_please_versions(
         raise MetadataError(
             "Release Please manifest removed package history for: " + ", ".join(missing)
         )
+    for package, version in head_versions.items():
+        if not isinstance(version, str):
+            raise MetadataError("Release Please manifest versions must be strings.")
+        try:
+            semver_key(version)
+        except MetadataError as error:
+            raise MetadataError(f"Release Please package {package}: {error}") from error
     for package, base_version in base_versions.items():
         head_version = head_versions[package]
         if not isinstance(base_version, str) or not isinstance(head_version, str):
@@ -159,7 +181,7 @@ def validate_revisions(
         raise MetadataError(
             "Integration manifest must have a string version at both revisions."
         )
-    validate_version_change(base_version, head_version)
+    validate_version_policy(base_version, head_version, base_ref, head_ref)
     if not isinstance(base_release_versions, dict) or not isinstance(
         head_release_versions, dict
     ):
