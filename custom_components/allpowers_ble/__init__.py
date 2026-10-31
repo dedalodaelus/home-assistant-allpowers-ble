@@ -155,6 +155,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     from .options import ConnectionOptions
 
     address = str(entry.data[CONF_ADDRESS]).upper()
+    config_data = dict(entry.data)
+    config_title = entry.title
     options = ConnectionOptions.from_mapping(entry.options)
     stored_name = entry.data.get(CONF_DEVICE_NAME)
     stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
@@ -165,16 +167,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     )
 
     def _persist_model_identity(identity: str) -> None:
+        if entry.data != config_data or entry.title != config_title:
+            return
         if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
             return
+        # The active client already applied this identity; do not reload it.
+        config_data[CONF_DEVICE_IDENTITY] = identity
         hass.config_entries.async_update_entry(
             entry,
             data={**entry.data, CONF_DEVICE_IDENTITY: identity},
         )
 
     def _persist_identity_conflict(conflicted: bool) -> None:
+        if entry.data != config_data or entry.title != config_title:
+            return
         if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
             return
+        config_data[CONF_DEVICE_IDENTITY_CONFLICT] = conflicted
         hass.config_entries.async_update_entry(
             entry,
             data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
@@ -236,7 +245,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             f"from {address}"
         ) from ex
 
-    entry.runtime_data = AllpowersRuntimeData(client=client, coordinator=coordinator)
+    entry.runtime_data = AllpowersRuntimeData(
+        client=client,
+        coordinator=coordinator,
+        config_data=config_data,
+        config_title=config_title,
+    )
 
     async def _async_stop(_event: Any) -> None:
         await coordinator.async_shutdown()
@@ -252,10 +266,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
 async def _async_update_listener(
     hass: HomeAssistant, entry: AllpowersConfigEntry
 ) -> None:
-    """Apply option changes without reloading the Bluetooth connection."""
+    """Apply options live, or schedule one reload for changed runtime config."""
     from .options import ConnectionOptions
 
-    await entry.runtime_data.coordinator.async_apply_options(
+    runtime = entry.runtime_data
+    if runtime.reload_pending:
+        return
+    if entry.data != runtime.config_data or entry.title != runtime.config_title:
+        runtime.reload_pending = True
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+    await runtime.coordinator.async_apply_options(
         ConnectionOptions.from_mapping(entry.options)
     )
 
@@ -265,6 +286,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         await entry.runtime_data.coordinator.async_shutdown()
+    else:
+        entry.runtime_data.reload_pending = False
     return unloaded
 
 

@@ -62,6 +62,30 @@ The `USE_REAL_HOMEASSISTANT=1` lane is the repository's gating compatibility
 lane for Home Assistant-facing contracts. Hardware-in-the-loop validation remains
 necessary before marking another model verified.
 
+### Config-entry update and reload contract
+
+The config-entry update listener owns reload decisions. Config flows must use
+`async_update_and_abort()` for one atomic data/title/unique-ID update, never
+`async_update_reload_and_abort()`, and pass `reload_on_update=False` to
+`_abort_if_unique_id_configured()`.
+
+Options-only changes apply to the existing coordinator and BLE client without
+reconnection. Data or title changes schedule one reload through
+`async_schedule_reload()` so the client, registry metadata, entities, and Repairs
+use the new configuration. Unchanged reconfiguration does not reload. Identity
+and conflict updates learned by the active client update its runtime baseline
+before persistence and therefore do not cause reload loops. Old client callbacks
+cannot overwrite a pending reconfiguration.
+
+The real lifecycle tests cover address, display-name, model-identity, unchanged,
+failed, and cancelled reconfiguration, plus callback/listener/entity cleanup.
+They enable Core's existing `ReportBehavior.ERROR` for custom-integration API
+misuse and include a negative control rejecting the previous reloading helper.
+This checks the announced 2026.12 reload/listener restriction on the currently
+available Core APIs; it is not certification against an unreleased 2026.12 build.
+Run the same gating lane against a Core release containing enforcement when
+available before claiming that version is tested.
+
 For step-by-step real hardware execution and evidence capture, follow
 `docs/hil-qualification.md`.
 

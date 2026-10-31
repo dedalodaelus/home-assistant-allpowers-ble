@@ -287,7 +287,12 @@ def configured_entry(
     fake_hass = hass or FakeHass()
     client = FakeIntegrationClient(state=state, options=runtime_options)
     coordinator = AllpowersCoordinator(fake_hass, entry, client)  # type: ignore[arg-type]
-    entry.runtime_data = AllpowersRuntimeData(client=client, coordinator=coordinator)  # type: ignore[arg-type]
+    entry.runtime_data = AllpowersRuntimeData(
+        client=client,  # type: ignore[arg-type]
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+    )
     return entry, client, coordinator, fake_hass
 
 

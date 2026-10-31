@@ -105,7 +105,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
         address = discovery_info.address.upper()
         await self.async_set_unique_id(address)
-        self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured(reload_on_update=False)
         self._discovery_info = discovery_info
         self.context["title_placeholders"] = {
             "name": _display_name(discovery_info),
@@ -144,7 +144,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             discovery_info = self._discovered_devices[user_input[CONF_ADDRESS]]
             address = discovery_info.address.upper()
             await self.async_set_unique_id(address, raise_on_progress=False)
-            self._abort_if_unique_id_configured()
+            self._abort_if_unique_id_configured(reload_on_update=False)
             result = await self._async_probe_and_create(discovery_info)
             if result is not None:
                 return result
@@ -257,16 +257,6 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                     ):
                         model_identity = discovery_info.name.strip()
                     entry_title = _entry_title_for_name(device_name, address)
-                    current_unique_id = str(reconfigure_entry.unique_id or "").upper()
-                    if (
-                        current_unique_id != address
-                        or reconfigure_entry.title != entry_title
-                    ):
-                        self.hass.config_entries.async_update_entry(
-                            reconfigure_entry,
-                            unique_id=address,
-                            title=entry_title,
-                        )
                     data_updates: dict[str, Any] = {
                         CONF_ADDRESS: address,
                         CONF_DEVICE_NAME: device_name,
@@ -274,11 +264,12 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                     }
                     if address != current_address:
                         data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
-                    return self.async_update_reload_and_abort(
+                    return self.async_update_and_abort(
                         reconfigure_entry,
+                        unique_id=address,
+                        title=entry_title,
                         data_updates=data_updates,
                         reason="reconfigure_successful",
-                        reload_even_if_entry_is_unchanged=False,
                     )
 
         return cast(Any, self.async_show_form)(
@@ -395,7 +386,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             return None
 
         await self.async_set_unique_id(address, raise_on_progress=False)
-        self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured(reload_on_update=False)
         title = _entry_title(discovery_info)
         return self.async_create_entry(
             title=title,

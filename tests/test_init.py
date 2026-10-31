@@ -191,10 +191,27 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     persist_conflict = client.kwargs["identity_conflict_callback"]
     persist_conflict(identity_conflicted)
     persist_conflict(identity_conflicted)
+    persist_conflict(not identity_conflicted)
+    await integration._async_update_listener(hass, entry)
+    assert not entry.runtime_data.reload_pending
+    assert coordinator.applied == [ConnectionOptions.from_mapping(entry.options)]
 
     advertisement = SimpleNamespace(name="R600 updated", rssi=-50)
     registered["callback"](advertisement, object())
     assert client.advertisements == [advertisement]
+
+    # Late callbacks must not overwrite pending reconfiguration, even on this route.
+    entry.title = "Patio EEFF"
+    previous_data = dict(entry.data)
+    persist_identity("AP S300")
+    persist_conflict(identity_conflicted)
+    assert entry.data == previous_data
+    entry.title = entry.runtime_data.config_title
+    entry.data = {**entry.data, "address": "11:22:33:44:55:66"}
+    previous_data = dict(entry.data)
+    persist_identity("AP S300")
+    persist_conflict(identity_conflicted)
+    assert entry.data == previous_data
 
     assert hass.bus.listeners
     _, stop_callback = hass.bus.listeners[0]
@@ -253,12 +270,55 @@ async def test_setup_entry_defers_and_cleans_up_on_initial_timeout(
 async def test_update_listener_applies_normalized_options() -> None:
     entry = make_entry()
     coordinator = SetupCoordinator(None, entry, None)
-    entry.runtime_data = SimpleNamespace(coordinator=coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+        reload_pending=False,
+    )
     entry.options = ConnectionOptions(status_interval=15, stale_timeout=31).as_dict()
 
     await integration._async_update_listener(FakeHass(), entry)
 
     assert coordinator.applied[-1].status_interval == 15
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"address": "11:22:33:44:55:66"},
+        {"device_name": "Patio"},
+        {"device_identity": "AP S300"},
+        {"device_identity_conflict": True},
+        {"title": "Patio EEFF"},
+    ),
+)
+async def test_update_listener_schedules_one_reload(
+    updates: dict[str, Any],
+) -> None:
+    entry = make_entry()
+    coordinator = SetupCoordinator(None, entry, None)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+        reload_pending=False,
+    )
+    scheduled: list[str] = []
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_schedule_reload=scheduled.append)
+    )
+    if "title" in updates:
+        entry.title = updates["title"]
+    else:
+        entry.data = {**entry.data, **updates}
+
+    await integration._async_update_listener(hass, entry)
+    await integration._async_update_listener(hass, entry)
+
+    assert scheduled == [entry.entry_id]
+    assert coordinator.applied == []
 
 
 @pytest.mark.asyncio
@@ -272,8 +332,10 @@ async def test_unload_entry_shuts_down_only_after_platform_unload() -> None:
     assert coordinator.shutdown_calls == 1
 
     hass.config_entries.unload_result = False
+    entry.runtime_data.reload_pending = True
     assert not await integration.async_unload_entry(hass, entry)
     assert coordinator.shutdown_calls == 1
+    assert not entry.runtime_data.reload_pending
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from time import monotonic
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.config_entries import ConfigEntry
@@ -34,6 +34,9 @@ class AllpowersRuntimeData:
 
     client: AllpowersBLEClient
     coordinator: AllpowersCoordinator
+    config_data: dict[str, Any]
+    config_title: str
+    reload_pending: bool = False
 
 
 class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):

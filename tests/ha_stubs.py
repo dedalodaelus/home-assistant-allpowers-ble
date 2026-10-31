@@ -227,7 +227,8 @@ class _FlowBase:
         del raise_on_progress
         self.unique_id = unique_id
 
-    def _abort_if_unique_id_configured(self) -> None:
+    def _abort_if_unique_id_configured(self, *, reload_on_update: bool = True) -> None:
+        del reload_on_update
         return None
 
     def _abort_if_unique_id_mismatch(self) -> None:
@@ -277,24 +278,25 @@ class _FlowBase:
             result["options"] = dict(options)
         return result
 
-    def async_update_reload_and_abort(
+    def async_update_and_abort(
         self,
         entry: ConfigEntry[Any],
         *,
         data_updates: Mapping[str, Any] | None = None,
-        options_updates: Mapping[str, Any] | None = None,
+        unique_id: str | None = None,
+        title: str | None = None,
         reason: str = "reconfigure_successful",
-        reload_even_if_entry_is_unchanged: bool = True,
     ) -> dict[str, Any]:
-        del reload_even_if_entry_is_unchanged
+        updates: dict[str, Any] = {}
+        if unique_id is not None:
+            updates["unique_id"] = unique_id
+        if title is not None:
+            updates["title"] = title
         if data_updates is not None:
             merged_data = dict(entry.data)
             merged_data.update(data_updates)
-            self.hass.config_entries.async_update_entry(entry, data=merged_data)
-        if options_updates is not None:
-            merged_options = dict(entry.options)
-            merged_options.update(options_updates)
-            self.hass.config_entries.async_update_entry(entry, options=merged_options)
+            updates["data"] = merged_data
+        self.hass.config_entries.async_update_entry(entry, **updates)
         return self.async_abort(reason=reason)
 
 

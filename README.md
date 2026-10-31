@@ -310,6 +310,8 @@ need to update entry-level setup data without removing the integration entry.
 - Reconfigure performs an active probe before applying changes.
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
+- Changed setup data triggers one reload; unchanged reconfiguration does not.
+  Options-only updates keep the existing Bluetooth connection.
 
 Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
 settings). Do not use reconfigure for those option values.

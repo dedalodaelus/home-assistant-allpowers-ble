@@ -299,6 +299,8 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.
+- Los cambios de configuracion provocan una sola recarga; si no hay cambios, no
+  se recarga. Los cambios solo de opciones mantienen la conexion Bluetooth.
 
 Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
 keepalive). No uses reconfiguracion para esos valores opcionales.

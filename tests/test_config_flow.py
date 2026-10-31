@@ -812,12 +812,14 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert update_calls == [
         {
+            "unique_id": ADDRESS,
+            "title": "ALLPOWERS R600 EEFF",
             "data": {
                 "address": ADDRESS,
                 "device_name": "ALLPOWERS R600",
                 "device_identity": "ALLPOWERS R600",
                 CONF_DEVICE_IDENTITY_CONFLICT: True,
-            }
+            },
         }
     ]
     assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is True
