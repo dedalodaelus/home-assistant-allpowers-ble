@@ -31,7 +31,12 @@ from .model_support import (
     identify_model,
 )
 from .options import ConnectionOptions
-from .repairs import ISSUE_INVALID_MIGRATION, AllpowersRepairsManager
+from .repairs import (
+    ISSUE_INVALID_MIGRATION,
+    AllpowersRepairsManager,
+    async_create_unload_failed_issue,
+    async_delete_unload_failed_issue,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -321,6 +326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    async_delete_unload_failed_issue(hass, entry)
     return True
 
 
@@ -332,6 +338,9 @@ async def _async_update_listener(
 
     from .options import ConnectionOptions
 
+    if entry.state is ConfigEntryState.FAILED_UNLOAD:
+        async_create_unload_failed_issue(hass, entry)
+        return
     runtime = getattr(entry, "runtime_data", None)
     if runtime is None:
         if entry.state is not ConfigEntryState.SETUP_IN_PROGRESS:
@@ -350,11 +359,20 @@ async def _async_update_listener(
 
 async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
     """Unload an ALLPOWERS BLE config entry and release its connection slot."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.coordinator.async_shutdown()
-    else:
-        entry.runtime_data.reload_pending = False
+    try:
+        unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        if unloaded:
+            await entry.runtime_data.coordinator.async_shutdown()
+    except Exception:
+        async_create_unload_failed_issue(hass, entry)
+        raise
+    if not unloaded:
+        _LOGGER.error(
+            "Platform unload failed for config entry %s; restart Home Assistant "
+            "before reloading or reconfiguring this entry",
+            entry.entry_id,
+        )
+        async_create_unload_failed_issue(hass, entry)
     return unloaded
 
 

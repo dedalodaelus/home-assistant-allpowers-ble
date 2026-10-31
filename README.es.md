@@ -319,6 +319,10 @@ cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
   migracion. Un fallo inesperado durante la actualizacion conserva la transicion
   pendiente para reintentarla; migrar no elimina los registros originales.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
+- Si Core indica `FAILED_UNLOAD`, reinicia Home Assistant en vez de recargar.
+  Se bloquea la reconfiguracion y las opciones guardadas quedan pendientes hasta
+  el reinicio. Repairs y diagnosticos indican el requisito sin perder identidades.
+  Consulta la [recuperacion](docs/troubleshooting.md#integration-unload-failed).
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.
 - Los cambios de configuracion provocan una sola recarga; si no hay cambios, no

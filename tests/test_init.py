@@ -516,7 +516,65 @@ async def test_unload_entry_shuts_down_only_after_platform_unload() -> None:
     entry.runtime_data.reload_pending = True
     assert not await integration.async_unload_entry(hass, entry)
     assert coordinator.shutdown_calls == 1
-    assert not entry.runtime_data.reload_pending
+    assert entry.runtime_data.reload_pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_runtime", [False, True])
+async def test_failed_unload_listener_does_not_schedule_or_apply_updates(has_runtime):
+    from homeassistant.config_entries import ConfigEntryState
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    entry.state = ConfigEntryState.FAILED_UNLOAD
+    coordinator = SetupCoordinator(hass, entry, None)
+    if has_runtime:
+        entry.runtime_data = SimpleNamespace(
+            coordinator=coordinator,
+            config_data={},
+            config_title="",
+            reload_pending=False,
+        )
+    await integration._async_update_listener(hass, entry)
+    await integration._async_update_listener(hass, entry)
+    assert hass.config_entries.scheduled_reloads == []
+    assert coordinator.applied == []
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["platforms", "shutdown"])
+async def test_unload_exception_is_reported_and_propagated(monkeypatch, phase):
+    from homeassistant.helpers import issue_registry as ir
+
+    hass = FakeHass()
+    entry = make_entry()
+    coordinator = SetupCoordinator(hass, entry, None)
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator, reload_pending=True)
+
+    async def fail(*args):
+        del args
+        raise RuntimeError("Injected unload exception")
+
+    if phase == "platforms":
+        monkeypatch.setattr(hass.config_entries, "async_unload_platforms", fail)
+    else:
+        monkeypatch.setattr(coordinator, "async_shutdown", fail)
+    with pytest.raises(RuntimeError, match="Injected unload exception"):
+        await integration.async_unload_entry(hass, entry)
+    assert entry.runtime_data.reload_pending
+    assert (
+        ir.async_get(hass).async_get_issue(
+            integration.DOMAIN, f"{entry.entry_id}_failed_unload"
+        )
+        is not None
+    )
 
 
 @pytest.mark.asyncio

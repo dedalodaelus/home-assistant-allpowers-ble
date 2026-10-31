@@ -331,6 +331,10 @@ need to update entry-level setup data without removing the integration entry.
   registry update fails mid-migration, the pending transition remains retryable;
   no source records are deleted by same-device migration.
 - Reconfigure performs an active probe before applying changes.
+- If Core reports `FAILED_UNLOAD`, restart Home Assistant rather than reloading.
+  Reconfiguration is blocked and saved options remain pending until restart.
+  Repairs and diagnostics expose the requirement; registry identities are kept.
+  See [unload recovery](docs/troubleshooting.md#integration-unload-failed).
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
 - Changed setup data triggers one reload; unchanged reconfiguration does not.

@@ -189,6 +189,7 @@ class ConfigEntryState(Enum):
     LOADED = "loaded"
     SETUP_RETRY = "setup_retry"
     SETUP_ERROR = "setup_error"
+    FAILED_UNLOAD = "failed_unload"
 
 
 class ConfigEntry(Generic[T]):

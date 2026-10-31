@@ -10,6 +10,7 @@
       "already_configured": "This Bluetooth address is already configured in another ALLPOWERS BLE entry.",
       "device_change_required": "When changing the Bluetooth address, select whether this is the same physical device or a replacement.",
       "registry_conflict": "The target registry identity is already in use. No configuration or registry records were changed.",
+      "failed_unload": "The integration could not unload. Restart Home Assistant before reconfiguring; reloading cannot recover this state. No changes were applied.",
       "cannot_connect": "Unable to connect through any available Bluetooth adapter or proxy.",
       "connect_timeout": "Bluetooth connection could not be established within the probe timeout.",
       "gatt_unavailable": "The required ALLPOWERS BLE GATT services/characteristics are not available on this device.",
@@ -222,6 +223,10 @@
     }
   },
   "issues": {
+    "failed_unload": {
+      "description": "Home Assistant could not unload {entry_title}, leaving this entry in the non-recoverable FAILED_UNLOAD state. Reloading or reconfiguring cannot recover it. Restart Home Assistant; do not delete and recreate the entry. Saved options remain pending until the restart. If the failure repeats, download diagnostics and inspect the unload error in the logs. This warning clears after a successful new setup.",
+      "title": "Restart required after unload failure for {entry_title}"
+    },
     "invalid_migrated_options": {
       "description": "The migrated options for {entry_title} are invalid and this entry cannot be loaded safely. Reconfigure the integration entry and keep the default option relationships (`status_interval` < `stale_timeout` < `watchdog_timeout`).",
       "title": "Invalid migrated options in {entry_title}"

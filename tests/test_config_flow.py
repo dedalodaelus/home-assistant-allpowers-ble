@@ -680,6 +680,50 @@ async def test_pending_replacement_rollback_restores_source_registry_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("submit", [False, True])
+async def test_failed_unload_reconfiguration_requires_restart_without_updates(
+    monkeypatch, submit
+):
+    entry = ConfigEntry(
+        title="ALLPOWERS R600 EEFF",
+        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        unique_id=ADDRESS,
+    )
+    entry.state = ConfigEntryState.FAILED_UNLOAD
+    flow = new_reconfigure_flow(entry)
+    before = (dict(entry.data), entry.title, entry.unique_id)
+
+    async def request_scan(hass):
+        del hass
+
+    async def probe(*args, **kwargs):
+        pytest.fail("A terminal entry must not open another BLE probe")
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+    result = await flow.async_step_reconfigure(
+        {
+            "address": "11:22:33:44:55:66",
+            "device_name": "Replacement",
+            "device_change": "replacement",
+        }
+        if submit
+        else None
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "failed_unload"}
+    assert (entry.data, entry.title, entry.unique_id) == before
+    assert flow.hass.config_entries.scheduled_reloads == []
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_duplicate_target_returns_field_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

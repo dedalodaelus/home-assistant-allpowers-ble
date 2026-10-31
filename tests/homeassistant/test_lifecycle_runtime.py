@@ -1271,6 +1271,164 @@ async def test_pending_registry_conflict_can_be_replaced_at_the_same_address(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["false", "platform_exception", "shutdown_exception"]
+)
+@pytest.mark.parametrize("trigger", ["manual", "update"])
+async def test_failed_unload_is_terminal_and_updates_require_restart(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    reconfigure_address,
+    failure,
+    trigger,
+) -> None:
+    """Core FAILED_UNLOAD must not produce futile reloads or hide restart recovery."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.config_entries import OperationNotAllowed
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    client = runtime.client
+    original_entities = dict(er.async_get(hass).entities)
+    original_devices = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )
+    shutdown = runtime.coordinator.async_shutdown
+
+    async def fail_platforms(*args):
+        del args
+        if failure == "platform_exception":
+            raise HomeAssistantError("Injected platform unload error")
+        return False
+
+    async def fail_shutdown():
+        raise HomeAssistantError("Injected coordinator shutdown error")
+
+    if failure == "shutdown_exception":
+        monkeypatch.setattr(runtime.coordinator, "async_shutdown", fail_shutdown)
+    else:
+        monkeypatch.setattr(
+            hass.config_entries, "async_unload_platforms", fail_platforms
+        )
+
+    scheduled = []
+    schedule_reload = hass.config_entries.async_schedule_reload
+
+    def track_reload(entry_id):
+        scheduled.append(entry_id)
+        schedule_reload(entry_id)
+
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", track_reload)
+    if trigger == "manual":
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+    else:
+        hass.config_entries.async_update_entry(entry, title="Pending new title")
+        await hass.async_block_till_done()
+        assert scheduled == [entry.entry_id]
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert not entry.state.recoverable
+    monkeypatch.setattr(runtime.coordinator, "async_shutdown", shutdown)
+    assert entry.runtime_data is runtime
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{entry.entry_id}_failed_unload"
+    )
+    assert issue is not None
+    assert issue.severity is ir.IssueSeverity.ERROR
+    assert issue.is_persistent
+    assert not issue.is_fixable
+    client.set_snapshot(client.snapshot())
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is not None
+    )
+    with pytest.raises(OperationNotAllowed):
+        await hass.config_entries.async_reload(entry.entry_id)
+    before_scheduled = list(scheduled)
+    before_calls = list(client.calls)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, CONF_DEVICE_NAME: "Pending name"},
+        title="Latest pending title",
+    )
+    await hass.async_block_till_done()
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+            SECTION_ADVANCED_TIMING: {},
+            SECTION_EXPERIMENTAL_CONTROLS: {},
+        },
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options["status_interval"] == 15
+    assert client.calls == before_calls
+    assert scheduled == before_scheduled
+    before_data = dict(entry.data)
+    result = await reconfigure_address(entry, "11:22:33:44:55:66", "replacement")
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "failed_unload"}
+    assert entry.data == before_data
+    assert scheduled == before_scheduled
+    assert er.async_get(hass).entities == original_entities
+    assert (
+        dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+        == original_devices
+    )
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+    assert payload["entry"]["state"] == "failed_unload"
+    assert payload["entry"]["restart_required"] is True
+    # Release the fake transport for test teardown without changing Core's state.
+    await shutdown()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_fresh_setup_dismisses_previous_unload_repair_only_on_success(
+    hass, enable_custom_integrations, monkeypatch, bluetooth_callbacks, timeout
+) -> None:
+    """A fresh Core lifecycle after restart clears the Repair only when loaded."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.repairs import async_create_unload_failed_issue
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    async_create_unload_failed_issue(hass, entry)
+    issue_id = f"{entry.entry_id}_failed_unload"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    async def wait_ready(client, timeout):
+        del client, timeout
+        raise TimeoutError("Startup after restart still lacks telemetry")
+
+    if timeout:
+        monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    assert await hass.config_entries.async_setup(entry.entry_id) is not timeout
+    await hass.async_block_till_done()
+    if timeout:
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    else:
+        assert entry.state is ConfigEntryState.LOADED
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
 async def test_strict_contract_rejects_old_reloading_helper(
     hass,
     enable_custom_integrations,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
@@ -10,12 +11,46 @@ from homeassistant.helpers import issue_registry as ir
 from .const import DOMAIN
 from .models import AllpowersSnapshot
 
+if TYPE_CHECKING:
+    from .coordinator import AllpowersConfigEntry
+
 NO_ROUTE_PERSISTENCE_UPDATES = 3
 WATCHDOG_RESET_PERSISTENCE = 3
 
 ISSUE_NO_ROUTE = "persistent_no_route"
 ISSUE_WATCHDOG = "repeated_watchdog_resets"
 ISSUE_INVALID_MIGRATION = "invalid_migrated_options"
+ISSUE_FAILED_UNLOAD = "failed_unload"
+
+
+@callback
+def async_create_unload_failed_issue(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> None:
+    """Expose Core's terminal unload failure with restart-only recovery."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        f"{entry.entry_id}_{ISSUE_FAILED_UNLOAD}",
+        issue_domain=DOMAIN,
+        is_fixable=False,
+        is_persistent=True,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=ISSUE_FAILED_UNLOAD,
+        translation_placeholders={"entry_title": entry.title},
+        learn_more_url=(
+            "https://github.com/dedalodaelus/home-assistant-allpowers-ble"
+            "/blob/main/docs/troubleshooting.md#integration-unload-failed"
+        ),
+    )
+
+
+@callback
+def async_delete_unload_failed_issue(
+    hass: HomeAssistant, entry: AllpowersConfigEntry
+) -> None:
+    """Dismiss the restart requirement only after a successful new setup."""
+    ir.async_delete_issue(hass, DOMAIN, f"{entry.entry_id}_{ISSUE_FAILED_UNLOAD}")
 
 
 @dataclass(slots=True)

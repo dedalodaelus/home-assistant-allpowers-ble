@@ -68,6 +68,7 @@ from .const import (
 )
 from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
+from .repairs import async_create_unload_failed_issue
 from .registry import (
     async_registry_source_address,
     async_registry_transition_conflicts,
@@ -232,7 +233,10 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
 
-        if user_input is not None:
+        if reconfigure_entry.state is ConfigEntryState.FAILED_UNLOAD:
+            async_create_unload_failed_issue(self.hass, reconfigure_entry)
+            errors["base"] = "failed_unload"
+        elif user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
             was_discovered = address in genuinely_discovered_addresses
