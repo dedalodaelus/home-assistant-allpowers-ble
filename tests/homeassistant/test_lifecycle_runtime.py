@@ -198,7 +198,7 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert first_client.started
     assert any(call[0] == "wait_ready" for call in first_client.calls)
 
-    devices = dr.async_get(hass).devices.get_devices_for_config_entry_id(entry.entry_id)
+    devices = dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
     assert devices
     assert devices[0].hw_version == "0.3"
     assert devices[0].sw_version == "3.4"
