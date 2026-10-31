@@ -290,6 +290,16 @@ def test_candidate_filtering_and_helpers(monkeypatch: pytest.MonkeyPatch) -> Non
     assert config_flow._matches_device(service_info(name="AP R600", service_uuids=[]))
     assert config_flow._matches_device(service_info(name="AP S300", service_uuids=[]))
     assert config_flow._matches_device(
+        service_info(
+            name="VOLIX P1800", service_uuids=["000000ff-0000-1000-8000-00805f9b34fb"]
+        )
+    )
+    assert not config_flow._matches_device(
+        service_info(
+            name="VOLIX P2400", service_uuids=["000000ff-0000-1000-8000-00805f9b34fb"]
+        )
+    )
+    assert config_flow._matches_device(
         service_info(name="ALLPOWERS X", service_uuids=[])
     )
     assert config_flow._matches_device(service_info(name="Other"))
