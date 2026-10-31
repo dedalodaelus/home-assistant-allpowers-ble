@@ -235,6 +235,7 @@ async def test_setup_entry_defers_when_no_connectable_path(
 
     with pytest.raises(ConfigEntryNotReady, match="No connectable Bluetooth path"):
         await integration.async_setup_entry(hass, entry)
+    entry._unload_callbacks[-1]()
 
 
 @pytest.mark.asyncio
@@ -264,6 +265,88 @@ async def test_setup_entry_defers_and_cleans_up_on_initial_timeout(
         await integration.async_setup_entry(hass, entry)
     assert SetupCoordinator.instances[0].shutdown_calls == 1
     assert not hass.config_entries.forwarded
+
+
+@pytest.mark.asyncio
+async def test_setup_restarts_with_latest_config_after_initialization_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    registered_callbacks: list[Any] = []
+    first_address = entry.data["address"]
+    latest_address = "11:22:33:44:55:66"
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+
+    def register_callback(hass: Any, callback: Any, matcher: Any, mode: Any):
+        del hass, matcher, mode
+        registered_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            registered_callbacks.remove(callback)
+
+        return unsubscribe
+
+    monkeypatch.setattr(bluetooth, "async_register_callback", register_callback)
+
+    async def wait_ready(coordinator: SetupCoordinator, timeout: float) -> None:
+        del timeout
+        if coordinator is SetupCoordinator.instances[0]:
+            entry.state = SimpleNamespace(value="setup_in_progress")
+            entry.data = {**entry.data, "address": latest_address}
+            entry.title = "Station Patio 5566"
+            entry.options = {
+                **entry.options,
+                "status_interval": 15.0,
+            }
+            await integration._async_update_listener(hass, entry)
+
+    monkeypatch.setattr(SetupCoordinator, "async_wait_ready", wait_ready)
+
+    assert await integration.async_setup_entry(hass, entry)
+
+    assert [client.kwargs["address"] for client in SetupClient.instances] == [
+        first_address,
+        latest_address,
+    ]
+    assert SetupClient.instances[1].kwargs["options"].status_interval == 15
+    assert entry.runtime_data.client is SetupClient.instances[1]
+    assert SetupCoordinator.instances[0].shutdown_calls == 1
+    assert len(registered_callbacks) == 1
+    assert hass.config_entries.scheduled_reloads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "should_schedule"),
+    [
+        ("setup_in_progress", False),
+        ("setup_retry", True),
+        ("setup_error", True),
+    ],
+)
+async def test_update_listener_without_runtime_only_reloads_outside_setup(
+    state: str,
+    should_schedule: bool,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    entry.state = SimpleNamespace(value=state)
+
+    await integration._async_update_listener(hass, entry)
+
+    assert hass.config_entries.scheduled_reloads == (
+        [entry.entry_id] if should_schedule else []
+    )
 
 
 @pytest.mark.asyncio

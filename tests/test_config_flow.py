@@ -462,8 +462,10 @@ def test_get_options_flow() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("has_update_listener", [False, True])
 async def test_reconfigure_success_updates_existing_entry(
     monkeypatch: pytest.MonkeyPatch,
+    has_update_listener: bool,
 ) -> None:
     new_address = "11:22:33:44:55:66"
     entry = ConfigEntry(
@@ -476,6 +478,8 @@ async def test_reconfigure_success_updates_existing_entry(
         options=ConnectionOptions().as_dict(),
         unique_id=ADDRESS,
     )
+    if has_update_listener:
+        entry.update_listeners = [object()]
     flow = new_reconfigure_flow(entry)
 
     async def request_scan(hass: Any) -> None:
@@ -514,6 +518,9 @@ async def test_reconfigure_success_updates_existing_entry(
     assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is False
     assert entry.unique_id == new_address
     assert entry.title == "Station Patio 5566"
+    assert flow.hass.config_entries.scheduled_reloads == (
+        [] if has_update_listener else [entry.entry_id]
+    )
 
 
 @pytest.mark.asyncio
