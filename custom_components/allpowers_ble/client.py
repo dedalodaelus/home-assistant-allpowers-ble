@@ -157,7 +157,14 @@ class AllpowersBLEClient:
         self._hass = hass
         self.address = address.upper()
         self._advertised_name = advertised_name
-        self._device_identity = canonical_model_identity(device_identity) or ""
+        canonical_identity = canonical_model_identity(device_identity)
+        if (
+            identity_conflicted
+            and canonical_identity is not None
+            and not identify_model(canonical_identity).supported
+        ):
+            canonical_identity = None
+        self._device_identity = canonical_identity or ""
         self._identity_conflicted = identity_conflicted
         self._pending_model_identity: str | None = None
         self._pending_model_identity_generation: int | None = None

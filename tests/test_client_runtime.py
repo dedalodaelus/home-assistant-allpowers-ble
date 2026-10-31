@@ -508,6 +508,71 @@ async def test_generic_identity_with_persisted_conflict_can_reconnect_read_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rejected_identity", ["AP S500", "AP S700"])
+async def test_rejected_persisted_identity_recovers_after_current_session_settings(
+    rejected_identity: str,
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    persisted = {"identity": rejected_identity, "conflict": True}
+    client = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+    assert fake.writes == [client_module.encode_status_request()]
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    assert fake.notification_callback is not None
+    fake.notification_callback(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert persisted == {"identity": "R600", "conflict": False}
+    assert client._runtime_model_support().capabilities.write_output_controls
+    assert client._runtime_model_support().capabilities.write_settings_controls
+
+    restarted = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        options=ConnectionOptions(),
+    )
+    restarted._connected = True
+    restarted._settings = settings()
+    restarted.update_advertisement(SimpleNamespace(name="aa:bb:cc:dd:ee:ff", rssi=-54))
+
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
 async def test_reconnect_requires_current_session_settings_for_write_capability(
     monkeypatch: pytest.MonkeyPatch,
     notification_builder,

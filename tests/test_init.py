@@ -113,6 +113,7 @@ def make_legacy_entry(*, options: dict[str, Any]) -> ConfigEntry[Any]:
         ("AP R600 V2.0", "AP S300", False),
         ("AP R600 V2.0", "AP S500", True),
         ("AP R600 V2.0", "AP S700", True),
+        ("ALLPOWERS power station", "AP S500", True),
     ),
 )
 async def test_setup_entry_success_registers_callbacks_and_platforms(
@@ -159,6 +160,10 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     assert await integration.async_setup_entry(hass, entry)
     client = SetupClient.instances[0]
     coordinator = SetupCoordinator.instances[0]
+    assert (
+        entry.data.get(integration.CONF_DEVICE_IDENTITY_CONFLICT, False)
+        is identity_conflicted
+    )
     assert client.kwargs["address"] == ADDRESS
     assert client.kwargs["advertised_name"] == device_name
     assert client.kwargs["device_identity"] == device_identity
@@ -304,6 +309,8 @@ async def test_migrate_entry_from_1_0_normalizes_options_and_sets_latest_version
     (
         ("AP R600 V2.0", "AP R600 V2.0"),
         ("VOLIX P1800", "VOLIX P1800"),
+        ("AP S500", ""),
+        ("AP S700", ""),
         ("Station Patio", ""),
     ),
 )

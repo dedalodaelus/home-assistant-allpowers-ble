@@ -40,6 +40,13 @@ PLATFORMS: tuple[Platform, ...] = (
 )
 
 
+def _migrated_identity_from_display_name(name: str) -> str:
+    """Trust only specific legacy names from protocol families not rejected here."""
+    if has_specific_model_identity(name) and identify_model(name).supported:
+        return name.strip()
+    return ""
+
+
 async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
     """Migrate old config entries to the latest supported schema."""
     if entry.version > CONFIG_ENTRY_VERSION or (
@@ -65,8 +72,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
         migrated_data = dict(entry.data)
         stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
         stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
-        migrated_data[CONF_DEVICE_IDENTITY] = (
-            stored_name.strip() if has_specific_model_identity(stored_name) else ""
+        migrated_data[CONF_DEVICE_IDENTITY] = _migrated_identity_from_display_name(
+            stored_name
         )
         hass.config_entries.async_update_entry(
             entry,
@@ -106,8 +113,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
             )
         stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
         stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
-        migrated_data[CONF_DEVICE_IDENTITY] = (
-            stored_name.strip() if has_specific_model_identity(stored_name) else ""
+        migrated_data[CONF_DEVICE_IDENTITY] = _migrated_identity_from_display_name(
+            stored_name
         )
 
         hass.config_entries.async_update_entry(
@@ -152,15 +159,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     stored_name = entry.data.get(CONF_DEVICE_NAME)
     stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
     stored_identity = stored_identity if isinstance(stored_identity, str) else ""
-    stored_name_identity = canonical_model_identity(
-        stored_name if isinstance(stored_name, str) else ""
-    )
     stored_model_identity = canonical_model_identity(stored_identity)
-    legacy_identity_conflict = bool(
-        stored_name_identity
-        and stored_model_identity
-        and stored_name_identity != stored_model_identity
-        and not identify_model(stored_model_identity).supported
+    rejected_stored_identity = bool(
+        stored_model_identity and not identify_model(stored_model_identity).supported
     )
 
     def _persist_model_identity(identity: str) -> None:
@@ -179,7 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
         )
 
-    if legacy_identity_conflict:
+    if rejected_stored_identity:
         _persist_identity_conflict(True)
 
     initial_device = bluetooth.async_ble_device_from_address(
@@ -195,7 +196,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         device_identity=stored_identity,
         identity_conflicted=bool(
             entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
-            or legacy_identity_conflict
+            or rejected_stored_identity
         ),
         model_identity_callback=_persist_model_identity,
         identity_conflict_callback=_persist_identity_conflict,
