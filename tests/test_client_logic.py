@@ -1483,6 +1483,108 @@ def test_identity_conflict_persists_across_restart_and_recovers_safely(
     assert restarted._runtime_model_support().capabilities.write_output_controls
 
 
+def test_new_rejected_observation_invalidates_pending_supported_identity(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+
+    client.update_advertisement(SimpleNamespace(name="AP S500", rssi=-55))
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    client.update_advertisement(SimpleNamespace(name="AP S500", rssi=-55))
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    support = client._runtime_model_support()
+    assert not support.capabilities.write_output_controls
+    assert not support.capabilities.write_settings_controls
+
+
+def test_preconnection_identity_candidate_binds_to_next_gatt_session(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._observe_model_identity("AP R600 V2.0")
+
+    generation = client._activate_session_generation()
+
+    assert client._pending_model_identity_generation == generation
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == "R600"
+    assert not client.snapshot().identity_conflicted
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_pending_identity_from_previous_gatt_session_is_discarded(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._session_generation_counter = 1
+    client._active_session_generation = 1
+    client._pending_model_identity = "R600"
+    client._pending_model_identity_generation = 1
+
+    client._activate_session_generation()
+
+    assert client._pending_model_identity is None
+    assert client._pending_model_identity_generation is None
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+
+
+def test_pending_identity_is_not_validated_by_a_different_gatt_generation(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._active_session_generation = 2
+    client._pending_model_identity = "R600"
+    client._pending_model_identity_generation = 1
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+
+
 @pytest.mark.parametrize("rejected_identity", ["AP S500", "AP S700"])
 def test_first_rejected_identity_stays_recoverable_after_restart(
     rejected_identity: str,

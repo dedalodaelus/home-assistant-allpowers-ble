@@ -160,6 +160,7 @@ class AllpowersBLEClient:
         self._device_identity = canonical_model_identity(device_identity) or ""
         self._identity_conflicted = identity_conflicted
         self._pending_model_identity: str | None = None
+        self._pending_model_identity_generation: int | None = None
         self._model_identity_callback = model_identity_callback
         self._identity_conflict_callback = identity_conflict_callback
         self._options = options
@@ -666,13 +667,15 @@ class AllpowersBLEClient:
         )
 
     def _observe_model_identity(self, name: str) -> bool:
-        """Track specific model observations without replacing identity on conflict."""
+        """Track the latest specific model observation without replacing conflicts."""
         observed_identity = canonical_model_identity(name)
         if observed_identity is None:
             return False
         if not self._device_identity:
             observed_support = identify_model(observed_identity)
             if not observed_support.supported:
+                self._pending_model_identity = None
+                self._pending_model_identity_generation = None
                 if not self._identity_conflicted:
                     self._identity_conflicted = True
                     if self._identity_conflict_callback is not None:
@@ -681,6 +684,9 @@ class AllpowersBLEClient:
                 return False
             if self._identity_conflicted:
                 self._pending_model_identity = observed_identity
+                self._pending_model_identity_generation = (
+                    self._active_session_generation
+                )
                 self._persist_model_identity_if_validated()
                 return self._identity_conflicted is False
             self._device_identity = observed_identity
@@ -692,6 +698,7 @@ class AllpowersBLEClient:
         previous_identity = self._device_identity
         previous_conflict = self._identity_conflicted
         self._pending_model_identity = observed_identity
+        self._pending_model_identity_generation = self._active_session_generation
         if not self._identity_conflicted:
             self._identity_conflicted = True
         self._persist_model_identity_if_validated()
@@ -707,11 +714,17 @@ class AllpowersBLEClient:
         )
 
     def _persist_model_identity_if_validated(self) -> None:
-        """Persist identities only after current-session settings telemetry."""
+        """Persist the latest candidate only with matching current-session settings."""
         if not self._settings_are_fresh() or self._settings is None:
             return
         pending_identity = self._pending_model_identity
         if pending_identity is not None:
+            if (
+                self._pending_model_identity_generation is not None
+                and self._pending_model_identity_generation
+                != self._active_session_generation
+            ):
+                return
             pending_support = identify_model(
                 pending_identity,
                 hardware_version=self._settings.hardware_version,
@@ -729,6 +742,7 @@ class AllpowersBLEClient:
             ):
                 self._device_identity = pending_identity
                 self._pending_model_identity = None
+                self._pending_model_identity_generation = None
                 self._identity_conflicted = False
                 if self._identity_conflict_callback is not None:
                     self._identity_conflict_callback(False)
@@ -971,7 +985,15 @@ class AllpowersBLEClient:
         self._disconnect_event.set()
 
     def _activate_session_generation(self) -> int:
-        """Start a new BLE session generation and reset session-scoped state."""
+        """Bind pre-connect candidates forward and discard prior-session candidates."""
+        if self._pending_model_identity is not None:
+            if self._pending_model_identity_generation is None:
+                self._pending_model_identity_generation = (
+                    self._session_generation_counter + 1
+                )
+            else:
+                self._pending_model_identity = None
+                self._pending_model_identity_generation = None
         self._session_generation_counter += 1
         self._active_session_generation = self._session_generation_counter
         self._session_hardware_revision = None
