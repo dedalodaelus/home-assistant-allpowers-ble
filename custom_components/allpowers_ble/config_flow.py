@@ -32,6 +32,7 @@ from .client import (
 from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
+    CONF_DEVICE_IDENTITY,
     CONF_DEVICE_NAME,
     CONF_ENABLE_CAR_CHARGER,
     CONF_RECONNECT_MAX_DELAY,
@@ -57,7 +58,7 @@ from .const import (
     MIN_WATCHDOG_TIMEOUT,
     SERVICE_UUID,
 )
-from .model_support import identify_model
+from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
 
 _LOGGER = logging.getLogger(__name__)
@@ -202,6 +203,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
+            was_discovered = address in discovered_devices
 
             if self._is_address_in_use(reconfigure_entry, address):
                 errors[CONF_ADDRESS] = "already_configured"
@@ -223,10 +225,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         tx_power=None,
                     )
                 abort_reason: str | None = None
-                if not self._can_reuse_active_reconfigure_session(
+                reuse_active_session = self._can_reuse_active_reconfigure_session(
                     reconfigure_entry,
                     address,
-                ):
+                )
+                if not reuse_active_session:
                     abort_reason = await self._async_probe_candidate(
                         address=address,
                         advertised_name=discovery_info.name or current_name,
@@ -236,6 +239,15 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                 elif self._probe_error is not None:
                     errors["base"] = self._probe_error
                 else:
+                    model_identity = str(
+                        reconfigure_entry.data.get(CONF_DEVICE_IDENTITY, "")
+                    )
+                    if address != current_address:
+                        model_identity = ""
+                    if was_discovered and has_specific_model_identity(
+                        discovery_info.name
+                    ):
+                        model_identity = discovery_info.name.strip()
                     entry_title = _entry_title_for_name(device_name, address)
                     current_unique_id = str(reconfigure_entry.unique_id or "").upper()
                     if (
@@ -252,6 +264,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         data_updates={
                             CONF_ADDRESS: address,
                             CONF_DEVICE_NAME: device_name,
+                            CONF_DEVICE_IDENTITY: model_identity,
                         },
                         reason="reconfigure_successful",
                         reload_even_if_entry_is_unchanged=False,
@@ -378,6 +391,9 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             data={
                 CONF_ADDRESS: address,
                 CONF_DEVICE_NAME: name,
+                CONF_DEVICE_IDENTITY: (
+                    name.strip() if has_specific_model_identity(name) else ""
+                ),
             },
             options=ConnectionOptions().as_dict(),
         )

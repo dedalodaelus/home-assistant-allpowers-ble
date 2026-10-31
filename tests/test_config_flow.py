@@ -503,6 +503,7 @@ async def test_reconfigure_success_updates_existing_entry(
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert entry.data["address"] == new_address
     assert entry.data["device_name"] == "Station Patio"
+    assert entry.data["device_identity"] == "ALLPOWERS R600"
     assert entry.unique_id == new_address
     assert entry.title == "Station Patio 5566"
 
@@ -802,6 +803,7 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
             "data": {
                 "address": ADDRESS,
                 "device_name": "ALLPOWERS R600",
+                "device_identity": "ALLPOWERS R600",
             }
         }
     ]

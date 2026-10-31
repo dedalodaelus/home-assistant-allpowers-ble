@@ -35,6 +35,16 @@ _VERIFIED_R600_REVISIONS = {
 }
 
 
+def has_specific_model_identity(name: str | None) -> bool:
+    """Return whether a name identifies a model family rather than a placeholder."""
+    normalized = (name or "").strip().upper()
+    return (
+        "R600" in normalized
+        or "VOLIX P1800" in normalized
+        or normalized.startswith("AP S")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ModelSupport:
     """Known compatibility information for an advertised device name."""

@@ -7,13 +7,14 @@ MANUFACTURER: Final = "ALLPOWERS"
 DEFAULT_NAME: Final = "ALLPOWERS power station"
 
 CONFIG_ENTRY_VERSION: Final = 1
-CONFIG_ENTRY_MINOR_VERSION: Final = 1
+CONFIG_ENTRY_MINOR_VERSION: Final = 2
 
 SERVICE_UUID: Final = "0000fff0-0000-1000-8000-00805f9b34fb"
 NOTIFY_UUID: Final = "0000fff1-0000-1000-8000-00805f9b34fb"
 WRITE_UUID: Final = "0000fff2-0000-1000-8000-00805f9b34fb"
 
 CONF_DEVICE_NAME: Final = "device_name"
+CONF_DEVICE_IDENTITY: Final = "device_identity"
 CONF_STATUS_INTERVAL: Final = "status_interval"
 CONF_STALE_TIMEOUT: Final = "stale_timeout"
 CONF_WATCHDOG_TIMEOUT: Final = "watchdog_timeout"

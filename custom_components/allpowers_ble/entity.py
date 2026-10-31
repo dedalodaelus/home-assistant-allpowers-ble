@@ -77,7 +77,7 @@ def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
     data = coordinator.data
     settings = data.settings
     return identify_model(
-        data.advertised_name,
+        data.model_identity,
         hardware_version=settings.hardware_version if settings else None,
         raw_hardware_version=settings.raw_hardware_version if settings else None,
     )

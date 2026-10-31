@@ -83,6 +83,7 @@ def make_client(
         hass=FakeHass(),  # type: ignore[arg-type]
         address="aa:bb:cc:dd:ee:ff",
         advertised_name=name,
+        device_identity=name,
         options=options or ConnectionOptions(),
     )
     client._settings = settings()

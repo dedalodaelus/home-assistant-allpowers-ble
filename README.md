@@ -114,6 +114,8 @@ it permanently to one proxy.
 This integration assumes a trusted local Home Assistant environment:
 
 - write commands are accepted only from Home Assistant users who can control entities;
+- capability checks use a persisted model identity established by setup, not an editable entry title or a later placeholder advertisement name;
+- writes additionally require fresh hardware-revision telemetry matching the verified profile;
 - BLE proximity limits command reach, but nearby radio access is still part of the risk model;
 - ESPHome proxies are transport relays and must be managed like trusted local infrastructure;
 - there is no cloud credential boundary to rotate if local access is compromised.

@@ -38,6 +38,7 @@ class AllpowersSnapshot:
     last_packet_monotonic: float | None
     rssi: int | None
     advertised_name: str
+    model_identity: str
     last_connected_at: datetime | None
     last_disconnected_at: datetime | None
     last_packet_at: datetime | None

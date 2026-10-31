@@ -103,7 +103,10 @@ connection, verifies the expected service and characteristics, writes the known
 status request, and waits for a valid decoded status response.
 
 The reconfigure step follows the same active-probe contract before updating
-mutable entry fields (Bluetooth address and display name). It updates the
+mutable entry fields (Bluetooth address and display name). Model identity is
+stored separately from the display name: a newly observed family can update it,
+while a placeholder advertisement on the same address preserves it. A changed
+address never inherits the previous device identity. Reconfigure updates the
 existing entry and aborts with success, rather than creating a new entry.
 
 ## Persistent connection state machine
@@ -279,11 +282,12 @@ storage writes and prevents ephemeral state from being trusted after restart.
 
 ### Config-entry schema and migration baseline
 
-The integration currently persists config entries at schema version `1.1`.
+The integration currently persists config entries at schema version `1.2`.
 
 - `entry.data`
   - `address` (`str`, normalized uppercase Bluetooth MAC address)
-  - `device_name` (`str`, device label captured at setup)
+  - `device_name` (`str`, mutable display label)
+  - `device_identity` (`str`, model family established by the setup probe)
 - `entry.options`
   - `status_interval` (`float`)
   - `stale_timeout` (`float`)
@@ -295,9 +299,12 @@ The integration currently persists config entries at schema version `1.1`.
   - `enable_car_charger` (`bool`)
 
 Migration runs through `async_migrate_entry` before setup. The current baseline
-supports migration from `1.0` to `1.1` by normalizing persisted options and
-filling any missing keys with safe defaults. Unsupported future versions are
-rejected explicitly so setup fails cleanly instead of partially initializing.
+supports migration from `1.0` and `1.1` to `1.2`, separating a recognized legacy
+model name from its mutable display label while preserving conservative
+read-only behavior for generic names. Version `1.0` migration also normalizes
+persisted options and fills any missing keys with safe defaults. Unsupported
+future versions are rejected explicitly so setup fails cleanly instead of
+partially initializing.
 
 Migration does not perform network I/O, does not mutate unique IDs, and is
 idempotent once an entry reaches the latest schema.

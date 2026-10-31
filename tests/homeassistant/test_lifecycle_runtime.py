@@ -38,6 +38,7 @@ class StatefulFakeClient:
         hass: Any,
         address: str,
         advertised_name: str,
+        device_identity: str,
         options: ConnectionOptions,
     ) -> None:
         del hass
@@ -52,6 +53,7 @@ class StatefulFakeClient:
         self._snapshot = replace(
             StatefulFakeClient.default_state,
             advertised_name=advertised_name,
+            model_identity=device_identity,
         )
         StatefulFakeClient.instances.append(self)
 
@@ -69,9 +71,13 @@ class StatefulFakeClient:
     def update_advertisement(self, service_info: Any) -> None:
         self.advertisements.append(service_info)
         advertised_name = service_info.name or self._snapshot.advertised_name
+        model_identity = self._snapshot.model_identity
+        if service_info.name and "R600" in service_info.name.upper():
+            model_identity = service_info.name
         self._snapshot = replace(
             self._snapshot,
             advertised_name=advertised_name,
+            model_identity=model_identity,
             rssi=getattr(service_info, "rssi", self._snapshot.rssi),
         )
         if self.callback is not None:
@@ -229,6 +235,183 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client.stopped
     assert reloaded_client.callback is None
     assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_production_client_identity_survives_proxy_advertisements_and_reload(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Use the production client for identity, entity, and reload behavior."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    async def start_with_telemetry(client) -> None:
+        client._connected = True
+        client._settings = settings()
+        client._status = status()
+        client._settings_monotonic = monotonic()
+        client._status_monotonic = monotonic()
+        client._ready_event.set()
+        client._emit_update()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_start", start_with_telemetry
+    )
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=address,
+        version=1,
+        minor_version=2,
+        title="Cabin Power",
+        data={
+            CONF_ADDRESS: address,
+            "device_name": "Station Patio",
+            "device_identity": "AP R600 V2.0",
+        },
+        options=ConnectionOptions().as_dict(),
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    first_client = entry.runtime_data.client
+    first_callback, _ = bluetooth_callbacks[0]
+    first_callback(SimpleNamespace(name=address, rssi=-50), object())
+    assert first_client.snapshot().advertised_name == address
+    assert first_client.snapshot().model_identity == "AP R600 V2.0"
+    assert first_client._runtime_model_support().capabilities.write_output_controls
+
+    registry = er.async_get(hass)
+    entity_ids = {
+        key: registry.async_get_entity_id("switch", DOMAIN, f"{address}_{key}")
+        for key in ("ac_output", "dc_output", "light")
+    }
+    assert all(entity_ids.values())
+    for entity_id in entity_ids.values():
+        assert hass.states.get(entity_id).state != "unavailable"
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    reloaded_client = entry.runtime_data.client
+    reload_callback, _ = bluetooth_callbacks[0]
+    reload_callback(SimpleNamespace(name=address, rssi=-49), object())
+    assert reloaded_client.snapshot().model_identity == "AP R600 V2.0"
+    assert reloaded_client._runtime_model_support().verified
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
+        for key in ("ac_output", "dc_output", "light")
+    )
+
+    reloaded_client._settings_monotonic = monotonic() - 1000
+    reloaded_client._status_monotonic = monotonic() - 1000
+    reloaded_client._emit_update()
+    await hass.async_block_till_done()
+    for entity_id in entity_ids.values():
+        assert hass.states.get(entity_id).state == "unavailable"
+
+    reloaded_client._settings = None
+    reloaded_client._status = None
+    reloaded_client._settings_monotonic = None
+    reloaded_client._status_monotonic = None
+    reloaded_client._emit_update()
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_ids["ac_output"]).state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_entry_title_and_hardware_revision_do_not_establish_identity(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """A title plus verified revision cannot authorize model-specific writes."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    async def start_with_telemetry(client) -> None:
+        client._connected = True
+        client._settings = settings()
+        client._status = status()
+        client._settings_monotonic = monotonic()
+        client._status_monotonic = monotonic()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_start", start_with_telemetry
+    )
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=address,
+        version=1,
+        minor_version=2,
+        title="AP R600 V2.0",
+        data={CONF_ADDRESS: address, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = entry.runtime_data.client
+    assert not client.snapshot().model_identity
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    output_keys = ("ac_output", "dc_output", "light")
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 0
+        for key in output_keys
+    )
+
+    callback, _ = bluetooth_callbacks[0]
+    client._settings = replace(
+        settings(), hardware_version="0.4", raw_hardware_version=0x04
+    )
+    callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    await hass.async_block_till_done()
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 0
+        for key in output_keys
+    )
+
+    client._settings = settings()
+    client._emit_update()
+    await hass.async_block_till_done()
+    assert client._runtime_model_support().capabilities.write_output_controls
+    registry = er.async_get(hass)
+    for key in output_keys:
+        assert _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
+        entity_id = registry.async_get_entity_id("switch", DOMAIN, f"{address}_{key}")
+        assert entity_id is not None
+        assert hass.states.get(entity_id).state != "unavailable"
 
 
 @pytest.mark.asyncio

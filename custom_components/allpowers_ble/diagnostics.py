@@ -20,7 +20,14 @@ from .model_support import identify_model
 TO_REDACT = {CONF_ADDRESS}
 REDACTED_NAME = "**REDACTED_NAME**"
 REDACTED_ADDRESS = "**REDACTED_ADDRESS**"
-_SENSITIVE_NAME_FIELDS = {"advertised_name", "device_name", "name", "title"}
+_SENSITIVE_NAME_FIELDS = {
+    "advertised_name",
+    "device_identity",
+    "device_name",
+    "model_identity",
+    "name",
+    "title",
+}
 _LAST_ERROR_FIELD = "last_error"
 _EXCEPTION_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)$")
 _BLE_COLON_OR_HYPHEN_RE = re.compile(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b")
@@ -60,7 +67,7 @@ def _diagnostics_payload(
     snapshot = entry.runtime_data.coordinator.data
     settings = snapshot.settings
     support = identify_model(
-        snapshot.advertised_name,
+        snapshot.model_identity,
         hardware_version=settings.hardware_version if settings else None,
         raw_hardware_version=settings.raw_hardware_version if settings else None,
     )

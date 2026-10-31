@@ -104,6 +104,8 @@ permanente a uno concreto.
 Esta integración asume un entorno local de Home Assistant de confianza:
 
 - los comandos de escritura solo se aceptan desde usuarios con permisos sobre entidades;
+- las capacidades usan una identidad de modelo persistida durante la configuración, no el título editable de la entrada ni un nombre placeholder posterior;
+- además, las escrituras requieren telemetría reciente de una revisión de hardware que coincida con el perfil verificado;
 - la proximidad BLE limita el alcance, pero el acceso por radio cercano sigue siendo parte del riesgo;
 - los proxies ESPHome son relés de transporte y deben gestionarse como infraestructura local de confianza;
 - no existe una frontera de credenciales en nube que rotar si el acceso local se compromete.

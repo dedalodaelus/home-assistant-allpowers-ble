@@ -63,6 +63,7 @@ def _connected_client(options: ConnectionOptions | None = None):
         hass=object(),
         address="aa:bb:cc:dd:ee:ff",
         advertised_name="ALLPOWERS R600",
+        device_identity="ALLPOWERS R600",
         options=options or ConnectionOptions(),
     )
     fake = FakeClient()
@@ -1224,6 +1225,87 @@ def test_update_advertisement_emits_only_on_change() -> None:
     assert callbacks == 1
     assert client._advertisement_generation == 2
     assert client._advertisement_event.is_set()
+
+
+@pytest.mark.parametrize(
+    "advertised_name",
+    [None, "", "AA:BB:CC:DD:EE:FF", "ALLPOWERS", "BLE power station"],
+)
+@pytest.mark.parametrize("model_identity", ["AP R600 V2.0", "VOLIX P1800"])
+def test_restart_identity_survives_unreliable_advertisements(
+    model_identity: str,
+    advertised_name: str | None,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=model_identity,
+        device_identity=model_identity,
+        options=ConnectionOptions(),
+    )
+    client._settings = _settings()
+
+    client.update_advertisement(SimpleNamespace(name=advertised_name, rssi=-55))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.profile == "r600-hw-0.3"
+    assert support.capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+async def test_non_identifying_device_name_notification_preserves_identity(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    frame = notification_builder(0x35, b"Kitchen")
+
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.profile == "r600-hw-0.3"
+
+
+@pytest.mark.parametrize(
+    "stored_name", [None, "", "AA:BB:CC:DD:EE:FF", "Station Patio"]
+)
+def test_unverified_stored_identity_stays_read_only_until_valid_name(
+    stored_name: str | None,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=stored_name or "",
+        device_identity=stored_name,
+        options=ConnectionOptions(),
+    )
+    client._settings = _settings()
+
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.capabilities.write_output_controls
+
+
+def test_contradictory_model_advertisement_is_read_only_until_resolved() -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="AP R600 V2.0",
+        options=ConnectionOptions(),
+    )
+    client._settings = _settings()
+
+    client.update_advertisement(SimpleNamespace(name="AP S300", rssi=-55))
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    assert client._runtime_model_support().capabilities.write_output_controls
 
 
 def test_update_advertisement_debounces_rssi_only_changes() -> None:

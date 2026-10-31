@@ -33,6 +33,7 @@ class RepairFakeClient:
         hass: Any,
         address: str,
         advertised_name: str,
+        device_identity: str,
         options: ConnectionOptions,
     ) -> None:
         del hass
@@ -41,6 +42,7 @@ class RepairFakeClient:
         self._snapshot = replace(
             RepairFakeClient.default_state,
             advertised_name=advertised_name,
+            model_identity=device_identity,
         )
         self.callback: Callable[[], None] | None = None
         RepairFakeClient.instances.append(self)

@@ -32,7 +32,7 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
-from .model_support import ModelSupport, identify_model
+from .model_support import ModelSupport, has_specific_model_identity, identify_model
 from .models import AllpowersSnapshot, ConnectionStatistics
 from .options import ConnectionOptions
 from .protocol import (
@@ -142,11 +142,17 @@ class AllpowersBLEClient:
         hass: HomeAssistant,
         address: str,
         advertised_name: str,
+        device_identity: str | None = None,
         options: ConnectionOptions,
     ) -> None:
         self._hass = hass
         self.address = address.upper()
         self._advertised_name = advertised_name
+        self._device_identity = (
+            device_identity.strip()
+            if device_identity and has_specific_model_identity(device_identity)
+            else ""
+        )
         self._options = options
 
         self._client: BleakClient | None = None
@@ -224,6 +230,8 @@ class AllpowersBLEClient:
         if name != self._advertised_name:
             self._advertised_name = name
             changed = True
+        if has_specific_model_identity(name):
+            self._device_identity = name
         if rssi != self._rssi:
             self._rssi = rssi
             if self._should_publish_rssi(rssi):
@@ -303,6 +311,7 @@ class AllpowersBLEClient:
             last_packet_monotonic=self._last_packet_monotonic,
             rssi=self._rssi,
             advertised_name=self._advertised_name,
+            model_identity=self._device_identity,
             last_connected_at=self._last_connected_at,
             last_disconnected_at=self._last_disconnected_at,
             last_packet_at=self._last_packet_at,
@@ -609,7 +618,7 @@ class AllpowersBLEClient:
         """Return model support resolved from the latest revision-aware snapshot."""
         settings = self._settings
         return identify_model(
-            self._advertised_name,
+            self._device_identity,
             hardware_version=settings.hardware_version if settings else None,
             raw_hardware_version=settings.raw_hardware_version if settings else None,
         )
@@ -717,7 +726,7 @@ class AllpowersBLEClient:
         def fresh_device_for_retry() -> BLEDevice:
             return self._fresh_ble_device() or device
 
-        support = identify_model(self._advertised_name)
+        support = identify_model(self._device_identity)
         if not support.supported:
             raise UnsupportedDeviceError(support.reason or "Unsupported model")
 
@@ -1004,6 +1013,8 @@ class AllpowersBLEClient:
                     self._last_settings_keepalive_attempt_monotonic = None
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
+                if has_specific_model_identity(packet.name):
+                    self._device_identity = packet.name
 
         if packets or discarded or discarded_bytes:
             self._reported_freshness = self._freshness(self._loop_time())

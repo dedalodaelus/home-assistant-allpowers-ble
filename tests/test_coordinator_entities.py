@@ -652,6 +652,7 @@ async def test_experimental_profiles_expose_no_writable_entities() -> None:
     experimental_state = replace(
         snapshot(),
         advertised_name="AP S300",
+        model_identity="AP S300",
     )
     entry, _, _, _ = configured_entry(state=experimental_state)
 

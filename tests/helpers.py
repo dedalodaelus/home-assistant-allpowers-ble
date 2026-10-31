@@ -82,6 +82,7 @@ def snapshot(
         last_packet_monotonic=now,
         rssi=-61,
         advertised_name="ALLPOWERS R600",
+        model_identity="ALLPOWERS R600",
         last_connected_at=timestamp,
         last_disconnected_at=None,
         last_packet_at=timestamp,

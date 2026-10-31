@@ -83,8 +83,14 @@ def reset_setup_fakes() -> None:
 def make_entry() -> ConfigEntry[Any]:
     return ConfigEntry(
         title="ALLPOWERS R600 AABB",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            "device_identity": "ALLPOWERS R600",
+        },
         options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=2,
     )
 
 
@@ -138,6 +144,7 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     coordinator = SetupCoordinator.instances[0]
     assert client.kwargs["address"] == ADDRESS
     assert client.kwargs["advertised_name"] == "ALLPOWERS R600"
+    assert client.kwargs["device_identity"] == "ALLPOWERS R600"
     assert coordinator.started
     assert coordinator.timeout == INITIAL_DATA_TIMEOUT
     assert entry.runtime_data.client is client
@@ -249,10 +256,39 @@ async def test_migrate_entry_from_1_0_normalizes_options_and_sets_latest_version
 
     assert await integration.async_migrate_entry(hass, entry)
     assert entry.version == 1
-    assert entry.minor_version == 1
+    assert entry.minor_version == 2
     assert entry.unique_id == unique_id
     assert entry.options["enable_car_charger"] is False
+    assert entry.data["device_identity"] == "ALLPOWERS R600"
     assert len(hass.config_entries.updates) == 1
+
+
+@pytest.mark.parametrize(
+    ("display_name", "expected_identity"),
+    (
+        ("AP R600 V2.0", "AP R600 V2.0"),
+        ("VOLIX P1800", "VOLIX P1800"),
+        ("Station Patio", ""),
+    ),
+)
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_separates_identity_from_display_name(
+    display_name: str,
+    expected_identity: str,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title=display_name,
+        data={"address": ADDRESS, "device_name": display_name},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.minor_version == 2
+    assert entry.data["device_identity"] == expected_identity
 
 
 @pytest.mark.asyncio
@@ -325,8 +361,8 @@ async def test_migrate_entry_from_1_0_without_optional_data_keys() -> None:
 
     assert await integration.async_migrate_entry(hass, entry)
     assert entry.version == 1
-    assert entry.minor_version == 1
-    assert entry.data == {}
+    assert entry.minor_version == 2
+    assert entry.data == {"device_identity": ""}
     assert len(hass.config_entries.updates) == 1
 
 
