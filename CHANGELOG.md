@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.0](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.2...1.2.0) (2026-10-31)
+
+
+### Features
+
+* support VOLIX P1800 (hardware revision 0.3) ([#195](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/195)) ([e7ba6a1](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/e7ba6a194214e5985071706252c61cb6419cf256))
+
+
+### Bug Fixes
+
+* **ble:** preserve verified device identity across proxy advertisements ([#199](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/199)) ([4ed760f](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/4ed760f940fd830bd098b088fb1ddc4e140485a1))
+* **ble:** prevent unsafe dependent writes and lost command confirmations ([#198](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/198)) ([b460f7c](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/b460f7c6fb31e7e2e93e5ed585626dbf2282d3b9))
+* ensure config-entry reload compatibility with Home Assistant 2026.12 ([#204](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/204)) ([74ba2a5](https://github.com/dedalodaelus/home-assistant-allpowers-ble/commit/74ba2a5949fbd5096416a1cb981f781c27ec5e3d))
+
 ## [1.1.2](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare/1.1.1...1.1.2) (2026-07-29)
 
 
