@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from homeassistant.helpers.device_registry import DeviceEntry
+from homeassistant.config_entries import ConfigEntryState
 
 from custom_components.allpowers_ble import diagnostics
 from custom_components.allpowers_ble.protocol import WorkMode
@@ -18,6 +19,13 @@ from tests.helpers import ADDRESS, configured_entry
 @pytest.mark.asyncio
 async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> None:
     entry, client, _, hass = configured_entry()
+    entry.data.update(
+        {
+            "registry_id": "1234567890abcdef1234567890abcdef",
+            "previous_registry_id": "11:22:33:44:55:66",
+            "entity_id_prefix": "1234567890abcdef1234567890abcdef",
+        }
+    )
     client.set_snapshot(
         replace(
             client.snapshot(),
@@ -29,6 +37,9 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
     assert payload["entry"]["data"]["address"] == "**REDACTED**"
+    assert payload["entry"]["data"]["registry_id"] == "**REDACTED**"
+    assert payload["entry"]["data"]["previous_registry_id"] == "**REDACTED**"
+    assert payload["entry"]["data"]["entity_id_prefix"] == "**REDACTED**"
     assert payload["entry"]["title"] == "**REDACTED_NAME**"
     assert "device_name" not in payload["entry"]["data"]
     assert payload["entry"]["options"]["status_interval"] == 20
@@ -58,6 +69,18 @@ async def test_device_diagnostics_include_registry_metadata() -> None:
     assert payload["device_registry"]["name"] == "**REDACTED_NAME**"
     assert payload["device_registry"]["model"] == "R600"
     assert payload["device_registry"]["manufacturer"] == "ALLPOWERS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_unload", [False, True])
+async def test_diagnostics_expose_core_state_and_restart_requirement(failed_unload):
+    entry, _, _, hass = configured_entry()
+    entry.state = (
+        ConfigEntryState.FAILED_UNLOAD if failed_unload else ConfigEntryState.LOADED
+    )
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+    assert payload["entry"]["state"] == entry.state.value
+    assert payload["entry"]["restart_required"] is failed_unload
 
 
 @pytest.mark.asyncio

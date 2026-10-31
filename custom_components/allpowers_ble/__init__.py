@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import CONF_ADDRESS, Platform
@@ -18,6 +19,10 @@ from .const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
+    CONF_ENTITY_ID_PREFIX,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+    CONF_REPLACE_DEVICE,
     DOMAIN,
 )
 from .model_support import (
@@ -26,7 +31,15 @@ from .model_support import (
     identify_model,
 )
 from .options import ConnectionOptions
-from .repairs import ISSUE_INVALID_MIGRATION, AllpowersRepairsManager
+from .repairs import (
+    ISSUE_INVALID_MIGRATION,
+    AllpowersRepairsManager,
+    async_create_unload_failed_issue,
+    async_delete_unload_failed_issue,
+    async_mark_setup_cleanup_failed,
+    async_observe_unload_result,
+    async_unload_block_reason,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,125 +160,257 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     from homeassistant.components import bluetooth
     from homeassistant.components.bluetooth.match import BluetoothCallbackMatcher
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 
     from .client import AllpowersBLEClient
     from .const import CONF_DEVICE_NAME, INITIAL_DATA_TIMEOUT
     from .coordinator import AllpowersCoordinator, AllpowersRuntimeData
     from .options import ConnectionOptions
 
-    address = str(entry.data[CONF_ADDRESS]).upper()
-    options = ConnectionOptions.from_mapping(entry.options)
-    stored_name = entry.data.get(CONF_DEVICE_NAME)
-    stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
-    stored_identity = stored_identity if isinstance(stored_identity, str) else ""
-    stored_model_identity = canonical_model_identity(stored_identity)
-    rejected_stored_identity = bool(
-        stored_model_identity and not identify_model(stored_model_identity).supported
-    )
-
-    def _persist_model_identity(identity: str) -> None:
-        if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
-            return
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+    if async_unload_block_reason(hass, entry):
+        raise HomeAssistantError(
+            "Restart Home Assistant before setting up this entry: "
+            "previous platform cleanup did not complete"
         )
 
-    def _persist_identity_conflict(conflicted: bool) -> None:
-        if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
-            return
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    advertisement_unsubscribe: Callable[[], None] | None = None
+
+    def _unsubscribe_advertisement() -> None:
+        nonlocal advertisement_unsubscribe
+        if advertisement_unsubscribe is not None:
+            advertisement_unsubscribe()
+            advertisement_unsubscribe = None
+
+    entry.async_on_unload(_unsubscribe_advertisement)
+
+    while True:
+        address = str(entry.data[CONF_ADDRESS]).upper()
+        config_data = dict(entry.data)
+        config_title = entry.title
+        config_options = dict(entry.options)
+        options = ConnectionOptions.from_mapping(config_options)
+        stored_name = entry.data.get(CONF_DEVICE_NAME)
+        stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
+        stored_identity = stored_identity if isinstance(stored_identity, str) else ""
+        stored_model_identity = canonical_model_identity(stored_identity)
+        rejected_stored_identity = bool(
+            stored_model_identity
+            and not identify_model(stored_model_identity).supported
         )
 
-    if rejected_stored_identity:
-        _persist_identity_conflict(True)
+        def _persist_model_identity(
+            identity: str,
+            *,
+            persisted_data: dict[str, Any] = config_data,
+            persisted_title: str = config_title,
+        ) -> None:
+            if entry.data != persisted_data or entry.title != persisted_title:
+                return
+            if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
+                return
+            persisted_data[CONF_DEVICE_IDENTITY] = identity
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+            )
 
-    initial_device = bluetooth.async_ble_device_from_address(
-        hass, address, connectable=True
-    )
-    if initial_device is None:
-        raise ConfigEntryNotReady(f"No connectable Bluetooth path found for {address}")
+        def _persist_identity_conflict(
+            conflicted: bool,
+            *,
+            persisted_data: dict[str, Any] = config_data,
+            persisted_title: str = config_title,
+        ) -> None:
+            if entry.data != persisted_data or entry.title != persisted_title:
+                return
+            if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
+                return
+            persisted_data[CONF_DEVICE_IDENTITY_CONFLICT] = conflicted
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+            )
 
-    client = AllpowersBLEClient(
-        hass=hass,
-        address=address,
-        advertised_name=str(stored_name or entry.title),
-        device_identity=stored_identity,
-        identity_conflicted=bool(
-            entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
-            or rejected_stored_identity
-        ),
-        model_identity_callback=_persist_model_identity,
-        identity_conflict_callback=_persist_identity_conflict,
-        options=options,
-    )
-    coordinator = AllpowersCoordinator(hass, entry, client)
-    initial_snapshot = client.snapshot()
-    repairs = AllpowersRepairsManager(
-        hass,
-        entry_id=entry.entry_id,
-        entry_title=entry.title,
-        initial_snapshot=initial_snapshot,
-    )
-    coordinator.set_repairs_manager(repairs)
-    repairs.evaluate(initial_snapshot, status_is_fresh=initial_snapshot.connected)
+        if rejected_stored_identity:
+            _persist_identity_conflict(True)
 
-    def _advertisement_callback(service_info: Any, change: Any) -> None:
-        del change
-        client.update_advertisement(service_info)
+        initial_device = bluetooth.async_ble_device_from_address(
+            hass, address, connectable=True
+        )
+        if initial_device is None:
+            raise ConfigEntryNotReady(
+                f"No connectable Bluetooth path found for {address}"
+            )
 
-    entry.async_on_unload(
-        bluetooth.async_register_callback(
+        client = AllpowersBLEClient(
+            hass=hass,
+            address=address,
+            advertised_name=str(stored_name or entry.title),
+            device_identity=stored_identity,
+            identity_conflicted=bool(
+                entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+                or rejected_stored_identity
+            ),
+            model_identity_callback=_persist_model_identity,
+            identity_conflict_callback=_persist_identity_conflict,
+            options=options,
+        )
+        coordinator = AllpowersCoordinator(hass, entry, client)
+        initial_snapshot = client.snapshot()
+        repairs = AllpowersRepairsManager(
+            hass,
+            entry_id=entry.entry_id,
+            entry_title=entry.title,
+            initial_snapshot=initial_snapshot,
+        )
+        coordinator.set_repairs_manager(repairs)
+        repairs.evaluate(initial_snapshot, status_is_fresh=initial_snapshot.connected)
+
+        def _advertisement_callback(
+            service_info: Any,
+            change: Any,
+            *,
+            active_client: AllpowersBLEClient = client,
+        ) -> None:
+            del change
+            active_client.update_advertisement(service_info)
+
+        advertisement_unsubscribe = bluetooth.async_register_callback(
             hass,
             _advertisement_callback,
             BluetoothCallbackMatcher(address=address),
             bluetooth.BluetoothScanningMode.PASSIVE,
         )
-    )
 
-    await coordinator.async_start()
-    try:
-        await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
-    except TimeoutError as ex:
-        await coordinator.async_shutdown()
-        raise ConfigEntryNotReady(
-            "Connected path exists, but no valid status frame was received "
-            f"from {address}"
-        ) from ex
+        setup_complete = False
+        forwarding_started = False
+        try:
+            await coordinator.async_start()
+            try:
+                await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
+            except TimeoutError as ex:
+                if entry.data != config_data or entry.title != config_title:
+                    continue
+                raise ConfigEntryNotReady(
+                    "Connected path exists, but no valid status frame was received "
+                    f"from {address}"
+                ) from ex
 
-    entry.runtime_data = AllpowersRuntimeData(client=client, coordinator=coordinator)
+            while entry.options != config_options:
+                config_options = dict(entry.options)
+                await coordinator.async_apply_options(
+                    ConnectionOptions.from_mapping(config_options)
+                )
 
-    async def _async_stop(_event: Any) -> None:
-        await coordinator.async_shutdown()
+            if entry.data != config_data or entry.title != config_title:
+                continue
 
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
-    )
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    return True
+            if CONF_PREVIOUS_REGISTRY_ID in entry.data:
+                from .registry import async_apply_registry_transition
+
+                async_apply_registry_transition(hass, entry)
+                if config_data[CONF_REPLACE_DEVICE]:
+                    config_data[CONF_ENTITY_ID_PREFIX] = config_data[CONF_REGISTRY_ID]
+                config_data.pop(CONF_PREVIOUS_REGISTRY_ID)
+                config_data.pop(CONF_REPLACE_DEVICE)
+                hass.config_entries.async_update_entry(entry, data=dict(config_data))
+
+            entry.runtime_data = AllpowersRuntimeData(
+                client=client,
+                coordinator=coordinator,
+                config_data=config_data,
+                config_title=config_title,
+            )
+
+            async def _async_stop(
+                _event: Any, *, active_coordinator: AllpowersCoordinator = coordinator
+            ) -> None:
+                await active_coordinator.async_shutdown()
+
+            entry.async_on_unload(
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
+            )
+            forwarding_started = True
+            await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+            async_delete_unload_failed_issue(hass, entry)
+            setup_complete = True
+            return True
+        finally:
+            if not setup_complete:
+                try:
+                    if (
+                        forwarding_started
+                        and not await hass.config_entries.async_unload_platforms(
+                            entry, PLATFORMS
+                        )
+                    ):
+                        _LOGGER.error(
+                            "Failed to unload partially initialized platforms for "
+                            "config entry %s; restart Home Assistant",
+                            entry.entry_id,
+                        )
+                        async_mark_setup_cleanup_failed(hass, entry)
+                except Exception:
+                    async_mark_setup_cleanup_failed(hass, entry)
+                    raise
+                finally:
+                    try:
+                        await coordinator.async_shutdown()
+                    finally:
+                        _unsubscribe_advertisement()
+                        if forwarding_started:
+                            del entry.runtime_data
 
 
 async def _async_update_listener(
     hass: HomeAssistant, entry: AllpowersConfigEntry
 ) -> None:
-    """Apply option changes without reloading the Bluetooth connection."""
+    """Apply options live, or schedule one reload for changed runtime config."""
+    from homeassistant.config_entries import ConfigEntryState
+
     from .options import ConnectionOptions
 
-    await entry.runtime_data.coordinator.async_apply_options(
+    if async_unload_block_reason(hass, entry):
+        return
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        if entry.state is not ConfigEntryState.SETUP_IN_PROGRESS:
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+    if runtime.reload_pending:
+        return
+    if entry.data != runtime.config_data or entry.title != runtime.config_title:
+        runtime.reload_pending = True
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+    await runtime.coordinator.async_apply_options(
         ConnectionOptions.from_mapping(entry.options)
     )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
     """Unload an ALLPOWERS BLE config entry and release its connection slot."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.coordinator.async_shutdown()
+    async_observe_unload_result(hass, entry)
+    try:
+        unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        if unloaded:
+            await entry.runtime_data.coordinator.async_shutdown()
+    except Exception:
+        async_create_unload_failed_issue(hass, entry)
+        raise
+    if not unloaded:
+        _LOGGER.error(
+            "Platform unload failed for config entry %s; restart Home Assistant "
+            "before reloading or reconfiguring this entry",
+            entry.entry_id,
+        )
+        async_create_unload_failed_issue(hass, entry)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> None:
+    """Delete the persistent unload Repair when its config entry is removed."""
+    async_delete_unload_failed_issue(hass, entry)
 
 
 def _migration_issue_id(entry: AllpowersConfigEntry) -> str:

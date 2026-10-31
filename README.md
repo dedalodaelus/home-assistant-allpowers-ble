@@ -304,17 +304,59 @@ Defaults are deliberately conservative and match observed R600 behavior.
 | Settings keepalive interval | 540 s | 60–540 s; settings timeout must be longer |
 | Car charger control | Off | Experimental; exposes no writable control until enabled |
 
-Options are applied live. A full integration reload is not required.
+Options are applied live, including changes saved during initialization, without
+restarting the Bluetooth client. A full integration reload is not required.
 
 ## Reconfigure entry data
 
 Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
 need to update entry-level setup data without removing the integration entry.
 
+Unsuccessful startup shuts down the BLE client before handing the failure back
+to Core, including unexpected errors and cancellation. Partially initialized
+platforms are unloaded and failed runtime data is removed before a retry.
+If partial-platform cleanup fails, further setup attempts are blocked for that
+entry until Home Assistant restarts; an integration reload is not sufficient.
+
 - Supported reconfigure fields: Bluetooth address and display name.
+- Changing the address requires an explicit physical-device choice:
+  - **Same physical device:** migrate registry identities while preserving entity
+    IDs, the device ID, names, areas, and other user customizations. After the first
+    address change, a stable opaque registry identity is independent of Bluetooth.
+  - **Replacement device:** remove the entity and device records owned by this
+    entry and create fresh identities. Automations and dashboards are not
+    transferred automatically. Returning to a previously used address does not
+    restore the replaced device's customizations or default entity IDs. New
+    default entity IDs include a persistent generation prefix; existing migrated
+    or customized IDs are not renamed.
+- If a replacement fails before touching the source registries, returning to the
+  registered source address with **Same physical device** cancels the pending
+  replacement and preserves the original records and references.
+- A pending transition can be recovered at its current target address: choose
+  **Same physical device** to retry migration or **Replacement device** to discard
+  this entry's old records. Already migrated records are recognized on retry.
+- Physical identity cannot be verified by the BLE protocol; choose the relationship
+  yourself. Registry transitions occur only after valid startup telemetry and
+  never modify records belonging to other config entries. Registry collisions
+  reject conflicting same-device migration before it starts. If an unexpected
+  registry update fails mid-migration, the pending transition remains retryable;
+  no source records are deleted by same-device migration.
 - Reconfigure performs an active probe before applying changes.
+- If Core reports `FAILED_UNLOAD`, restart Home Assistant rather than reloading.
+  Reconfiguration is blocked and saved options remain pending until restart.
+  Repairs and diagnostics expose the requirement; registry identities are kept.
+  During `UNLOAD_IN_PROGRESS`, updates also stay pending and reconfiguration is
+  blocked. Core cleanup failures are reported even after listeners are removed;
+  deleting the entry removes its persistent unload Repair.
+  See [unload recovery](docs/troubleshooting.md#integration-unload-failed).
 - Duplicate targets are rejected to preserve one-entry-per-device behavior.
 - If you cancel the flow, no entry data is changed.
+- Changed setup data triggers one reload; unchanged reconfiguration does not.
+  An unchanged reconfiguration retries setup immediately when the entry is in
+  `SETUP_RETRY` or `SETUP_ERROR`, but does not start an explicitly unloaded entry.
+- Setup reconciles data changes received during initialization. If the obsolete
+  Bluetooth client times out, the new configuration is initialized in the same
+  setup attempt instead of waiting for Home Assistant's retry timer.
 
 Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
 settings). Do not use reconfigure for those option values.

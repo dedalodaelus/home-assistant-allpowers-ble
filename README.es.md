@@ -293,17 +293,59 @@ valores por defecto salvo que tengas una razón medida para ajustarlos.
 | Intervalo de keepalive | 540 s | 60–540 s; la caducidad de ajustes debe ser mayor |
 | Cargador de coche | Desactivado | Experimental y requiere activación expresa |
 
-Los cambios de opciones se aplican en caliente, sin recargar la integración.
+Los cambios de opciones se aplican en caliente, incluso durante la inicialización,
+sin reiniciar el cliente Bluetooth ni recargar la integración.
 
 ## Reconfiguracion de la entrada
 
 Usa **Ajustes -> Dispositivos y servicios -> ALLPOWERS BLE -> Reconfigurar**
 cuando necesites cambiar datos de configuracion de la entrada sin eliminarla.
 
+Un arranque fallido cierra el cliente BLE antes de devolver el error a Core,
+incluidos errores inesperados y cancelaciones. Se descargan las plataformas
+parcialmente inicializadas y se elimina el runtime fallido antes del reintento.
+Si falla esa limpieza parcial, se bloquean nuevos arranques de la entrada hasta
+reiniciar Home Assistant; no basta con recargar la integracion.
+
 - Campos reconfigurables: direccion Bluetooth y nombre visible.
+- Cambiar la direccion requiere elegir expresamente la relacion fisica:
+  - **Mismo dispositivo:** migra el registro conservando los IDs de entidades y
+    dispositivo, nombres, areas y otras personalizaciones. Tras el primer cambio,
+    una identidad opaca estable deja de depender de la direccion Bluetooth.
+  - **Dispositivo de sustitucion:** elimina los registros de entidades y
+    dispositivos de esta entrada y crea identidades nuevas. Las automatizaciones
+    y los paneles no se transfieren automaticamente. Volver a una direccion
+    anterior no restaura las personalizaciones ni los IDs predeterminados del
+    dispositivo sustituido. Los nuevos IDs incluyen un prefijo persistente por
+    generacion; los IDs migrados o personalizados no se renombran.
+- Si una sustitucion falla antes de modificar los registros originales, volver
+  a la direccion registrada original eligiendo **Mismo dispositivo** cancela la
+  sustitucion pendiente sin perder registros ni referencias.
+- Una transicion pendiente se recupera sin cambiar la direccion de destino:
+  **Mismo dispositivo** reintenta la migracion; **Dispositivo de sustitucion**
+  descarta los registros anteriores. El reintento reconoce registros ya migrados.
+- El protocolo BLE no permite verificar la identidad fisica; debes confirmarla.
+  Los registros solo cambian tras recibir telemetria valida durante el arranque,
+  sin modificar otras entradas. Las colisiones se rechazan antes de iniciar la
+  migracion. Un fallo inesperado durante la actualizacion conserva la transicion
+  pendiente para reintentarla; migrar no elimina los registros originales.
 - La reconfiguracion ejecuta un probe activo antes de aplicar cambios.
+- Si Core indica `FAILED_UNLOAD`, reinicia Home Assistant en vez de recargar.
+  Se bloquea la reconfiguracion y las opciones guardadas quedan pendientes hasta
+  el reinicio. Repairs y diagnosticos indican el requisito sin perder identidades.
+  Durante `UNLOAD_IN_PROGRESS` tambien se bloquea la reconfiguracion y los cambios
+  quedan pendientes. Se detectan los fallos de limpieza posteriores de Core; borrar
+  la entrada elimina su Repair persistente de descarga.
+  Consulta la [recuperacion](docs/troubleshooting.md#integration-unload-failed).
 - Los objetivos duplicados se rechazan para mantener una entrada por dispositivo.
 - Si cancelas el flujo, la entrada no se modifica.
+- Los cambios de configuracion provocan una sola recarga; si no hay cambios, no
+  se recarga. Como excepcion, una entrada en `SETUP_RETRY` o `SETUP_ERROR` vuelve
+  a intentar la inicializacion de inmediato. Una entrada descargada expresamente
+  no se inicia si la reconfiguracion no cambia sus datos.
+- La inicializacion comprueba los cambios recibidos mientras arranca el cliente.
+  Si el cliente obsoleto agota el tiempo de espera, la nueva configuracion se
+  inicia en el mismo intento, sin esperar al temporizador de Home Assistant.
 
 Usa **Opciones** para el ajuste en runtime (`status_interval`, watchdog y
 keepalive). No uses reconfiguracion para esos valores opcionales.

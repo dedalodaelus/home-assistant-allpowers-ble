@@ -199,8 +199,12 @@ class FakeConfigEntriesManager:
         self.updates: list[tuple[ConfigEntry[Any], dict[str, Any]]] = []
         self.forwarded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
         self.unloaded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
+        self.scheduled_reloads: list[str] = []
         self.entries: list[ConfigEntry[Any]] = []
         self.unload_result = True
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        self.scheduled_reloads.append(entry_id)
 
     def async_update_entry(
         self,
@@ -264,6 +268,7 @@ class FakeHass:
     def __init__(self) -> None:
         self.config_entries = FakeConfigEntriesManager()
         self.bus = FakeBus()
+        self.data: dict[str, Any] = {}
 
 
 def configured_entry(
@@ -287,7 +292,12 @@ def configured_entry(
     fake_hass = hass or FakeHass()
     client = FakeIntegrationClient(state=state, options=runtime_options)
     coordinator = AllpowersCoordinator(fake_hass, entry, client)  # type: ignore[arg-type]
-    entry.runtime_data = AllpowersRuntimeData(client=client, coordinator=coordinator)  # type: ignore[arg-type]
+    entry.runtime_data = AllpowersRuntimeData(
+        client=client,  # type: ignore[arg-type]
+        coordinator=coordinator,
+        config_data=dict(entry.data),
+        config_title=entry.title,
+    )
     return entry, client, coordinator, fake_hass
 
 

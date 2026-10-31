@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -13,16 +15,29 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.const import CONF_ADDRESS
+from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.frame import ReportBehavior
 
 from custom_components.allpowers_ble import diagnostics
+from custom_components.allpowers_ble.config_flow import (
+    AllpowersConfigFlow,
+    SECTION_ADVANCED_TIMING,
+    SECTION_CONNECTION_HEALTH,
+    SECTION_EXPERIMENTAL_CONTROLS,
+)
+from custom_components.allpowers_ble.client import ProbeStatusTimeoutError
 from custom_components.allpowers_ble.const import (
     CONF_DEVICE_IDENTITY,
     CONF_DEVICE_IDENTITY_CONFLICT,
+    CONF_DEVICE_NAME,
+    CONF_DEVICE_CHANGE,
+    CONF_REGISTRY_ID,
     DOMAIN,
+    SERVICE_UUID,
 )
 from custom_components.allpowers_ble.options import ConnectionOptions
 
@@ -140,6 +155,19 @@ def reset_stateful_client() -> None:
     StatefulFakeClient.default_state = snapshot()
 
 
+@pytest.fixture(autouse=True)
+def strict_reload_listener_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enforce Core's announced reload/listener error before 2026.12 is released."""
+    monkeypatch.setattr(
+        config_entries,
+        "report_usage",
+        partial(
+            config_entries.report_usage,
+            custom_integration_behavior=ReportBehavior.ERROR,
+        ),
+    )
+
+
 @pytest.fixture
 def bluetooth_callbacks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
     """Patch Bluetooth APIs used by setup_entry and capture passive callbacks."""
@@ -182,7 +210,7 @@ def _make_entry(address: str, *, title: str) -> MockConfigEntry:
 
 def _keys_for_address(hass, address: str) -> set[str]:
     registry = er.async_get(hass)
-    prefix = f"{address.upper()}_"
+    prefix = f"{address}_"
     return {
         entry.unique_id[len(prefix) :]
         for entry in registry.entities.values()
@@ -232,12 +260,25 @@ async def test_setup_options_reload_unload_and_diagnostics(
     callback(SimpleNamespace(name="ALLPOWERS R600 Updated", rssi=-48), object())
     assert first_client.advertisements
 
-    hass.config_entries.async_update_entry(
-        entry,
-        options=ConnectionOptions(status_interval=15, stale_timeout=31).as_dict(),
+    options_result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert options_result["type"] == "form"
+    options_result = await hass.config_entries.options.async_configure(
+        options_result["flow_id"],
+        {
+            SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+            SECTION_ADVANCED_TIMING: {},
+            SECTION_EXPERIMENTAL_CONTROLS: {},
+        },
     )
+    assert options_result["type"] == "create_entry"
     await hass.async_block_till_done()
     assert any(call[0] == "apply_options" for call in first_client.calls)
+    assert first_client.options.status_interval == 15
+    assert first_client.options.stale_timeout == 31
+    assert StatefulFakeClient.instances == [first_client]
+    assert not first_client.stopped
+    assert len(bluetooth_callbacks) == 1
+    assert len(entry.update_listeners) == 1
 
     payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
     assert payload["entry"]["data"]["address"] == "**REDACTED**"
@@ -254,6 +295,1646 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client.stopped
     assert reloaded_client.callback is None
     assert bluetooth_callbacks == []
+    assert entry.update_listeners == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "expected_reload"),
+    [
+        ("address", True),
+        ("display_name", True),
+        ("model_identity", True),
+        ("unchanged", False),
+        ("failed", False),
+        ("cancelled", False),
+    ],
+)
+async def test_reconfigure_manages_one_lifecycle_update(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    change: str,
+    expected_reload: bool,
+) -> None:
+    """Drive the real flow manager, listener, reload, platforms, and cleanup."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address = "AA:BB:CC:DD:EE:FF"
+    target_address = "11:22:33:44:55:66" if change in {"address", "failed"} else address
+    entry = _make_entry(address, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    first_client = entry.runtime_data.client
+    initial_data = dict(entry.data)
+    initial_options = dict(entry.options)
+    initial_title = entry.title
+    initial_unique_id = entry.unique_id
+    initial_keys = _keys_for_address(hass, address)
+    initial_entities = tuple(
+        er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    )
+    initial_devices = tuple(
+        dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+    )
+    name = "AP S300" if change == "model_identity" else "ALLPOWERS R600"
+    discovery = SimpleNamespace(
+        address=target_address, name=name, service_uuids=[SERVICE_UUID]
+    )
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+        if change == "failed":
+            raise ProbeStatusTimeoutError("No valid status")
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [discovery],
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    scheduled: list[str] = []
+    original_schedule = hass.config_entries.async_schedule_reload
+
+    def schedule(entry_id: str) -> None:
+        scheduled.append(entry_id)
+        original_schedule(entry_id)
+
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", schedule)
+    updates: list[dict[str, Any]] = []
+    original_update = hass.config_entries.async_update_entry
+
+    def update(entry, **kwargs):
+        updates.append(kwargs)
+        return original_update(entry, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", update)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    assert result["type"] == "form"
+    if change == "cancelled":
+        hass.config_entries.flow.async_abort(result["flow_id"])
+    else:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: target_address,
+                CONF_DEVICE_CHANGE: "same_device",
+                CONF_DEVICE_NAME: "Patio"
+                if change == "display_name"
+                else "ALLPOWERS R600",
+            },
+        )
+        if change == "failed":
+            assert result["type"] == "form"
+            assert result["errors"] == {"base": "timeout"}
+            hass.config_entries.flow.async_abort(result["flow_id"])
+        else:
+            assert result["type"] == "abort"
+            assert result["reason"] == "reconfigure_successful"
+            assert len(updates) == (2 if change == "address" else 1)
+    await hass.async_block_till_done()
+    assert scheduled == ([entry.entry_id] if expected_reload else [])
+    assert len(StatefulFakeClient.instances) == (2 if expected_reload else 1)
+    assert len(bluetooth_callbacks) == 1
+    assert len(entry.update_listeners) == 1
+    active_client = entry.runtime_data.client
+    assert active_client.address == (target_address if expected_reload else address)
+    registry_id = entry.data.get(CONF_REGISTRY_ID, active_client.address)
+    assert _keys_for_address(hass, registry_id) == initial_keys
+    assert all(
+        _count_unique_id(hass, f"{registry_id}_{key}", domain="switch") == 1
+        for key in ("ac_output", "dc_output", "light")
+    )
+    if expected_reload:
+        assert first_client.stopped
+        assert first_client.callback is None
+        assert active_client.snapshot().advertised_name == entry.data[CONF_DEVICE_NAME]
+        assert (
+            active_client.snapshot().model_identity == entry.data[CONF_DEVICE_IDENTITY]
+        )
+        assert entry.runtime_data.coordinator.name == entry.title
+        device = dr.async_get(hass).async_get_device_by_identifier(
+            (DOMAIN, registry_id), entry.entry_id
+        )
+        assert device is not None
+        assert device.name == entry.title
+        callback, matcher = bluetooth_callbacks[0]
+        assert matcher["address"] == target_address
+        callback(discovery, object())
+        await hass.async_block_till_done()
+        assert active_client.advertisements == [discovery]
+        assert first_client.advertisements == []
+        assert scheduled == [entry.entry_id]
+    else:
+        assert active_client is first_client
+        assert not first_client.stopped
+        assert entry.data == initial_data
+        assert entry.title == initial_title
+        assert entry.unique_id == initial_unique_id
+        if change in {"failed", "cancelled"}:
+            assert updates == []
+            assert (
+                tuple(
+                    er.async_entries_for_config_entry(
+                        er.async_get(hass), entry.entry_id
+                    )
+                )
+                == initial_entities
+            )
+            assert (
+                tuple(
+                    dr.async_entries_for_config_entry(
+                        dr.async_get(hass), entry.entry_id
+                    )
+                )
+                == initial_devices
+            )
+    assert entry.options == initial_options
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+    assert entry.update_listeners == []
+    assert active_client.callback is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_op", [False, True])
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [
+        ("retry", ConfigEntryState.SETUP_RETRY),
+        ("error", ConfigEntryState.SETUP_ERROR),
+    ],
+)
+async def test_reconfigure_recovers_setup_without_update_listener(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    failure: str,
+    expected_state: ConfigEntryState,
+    no_op: bool,
+) -> None:
+    """A successful reconfigure must restart entries with no setup listener."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    lookup_failure = True
+
+    def find_ble_device(hass, address: str, *, connectable: bool):
+        del hass, address, connectable
+        if lookup_failure:
+            if failure == "retry":
+                return None
+            raise RuntimeError("synthetic setup error")
+        return object()
+
+    monkeypatch.setattr(bluetooth, "async_ble_device_from_address", find_ble_device)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is expected_state
+    assert entry.update_listeners == []
+
+    lookup_failure = False
+    initial_data = dict(entry.data)
+    target_address = entry.data[CONF_ADDRESS] if no_op else "11:22:33:44:55:66"
+    discovery = SimpleNamespace(
+        address=target_address,
+        name="ALLPOWERS R600",
+        service_uuids=[SERVICE_UUID],
+    )
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [discovery],
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ADDRESS: target_address,
+            CONF_DEVICE_CHANGE: "same_device",
+            CONF_DEVICE_NAME: "ALLPOWERS R600" if no_op else "Recovered station",
+        },
+    )
+    assert result["type"] == "abort"
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data[CONF_ADDRESS] == target_address
+    assert entry.runtime_data.client.address == target_address
+    assert entry.update_listeners
+    assert len(StatefulFakeClient.instances) == 1
+    if no_op:
+        assert entry.data == initial_data
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_setup_reconciles_options_changed_during_initialization(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Options saved during startup are applied without replacing the BLE client."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    first_wait_started = asyncio.Event()
+    allow_first_wait = asyncio.Event()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del timeout
+        if client is StatefulFakeClient.instances[0]:
+            first_wait_started.set()
+            await allow_first_wait.wait()
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+
+    setup_task = hass.async_create_task(hass.config_entries.async_setup(entry.entry_id))
+    await first_wait_started.wait()
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+            SECTION_ADVANCED_TIMING: {},
+            SECTION_EXPERIMENTAL_CONTROLS: {},
+        },
+    )
+    assert result["type"] == "create_entry"
+    allow_first_wait.set()
+
+    assert await setup_task
+    await hass.async_block_till_done()
+    assert len(StatefulFakeClient.instances) == 1
+    active_client = StatefulFakeClient.instances[0]
+    assert not active_client.stopped
+    assert active_client.options.status_interval == 15
+    assert active_client.options.stale_timeout == 31
+    assert entry.runtime_data.client is active_client
+    assert len(bluetooth_callbacks) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_setup_reconciles_reconfigure_when_obsolete_startup_times_out(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """An obsolete client's timeout must start the new address in the same setup."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address = "AA:BB:CC:DD:EE:FF"
+    target_address = "11:22:33:44:55:66"
+    wait_started = asyncio.Event()
+    time_out = asyncio.Event()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del timeout
+        if client.address == address:
+            wait_started.set()
+            await time_out.wait()
+            raise TimeoutError("Old address never delivered telemetry")
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [
+            SimpleNamespace(
+                address=target_address,
+                name="ALLPOWERS R600",
+                service_uuids=[SERVICE_UUID],
+            )
+        ],
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+
+    entry = _make_entry(address, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    states = []
+    unsubscribe = entry.async_on_state_change(lambda: states.append(entry.state))
+    setup_task = hass.async_create_task(hass.config_entries.async_setup(entry.entry_id))
+    await wait_started.wait()
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {
+            CONF_ADDRESS: target_address,
+            CONF_DEVICE_NAME: "Latest station",
+            CONF_DEVICE_CHANGE: "same_device",
+        },
+    )
+    assert result["type"] == "abort"
+    time_out.set()
+
+    assert await setup_task
+    await hass.async_block_till_done()
+    unsubscribe()
+    assert ConfigEntryState.SETUP_RETRY not in states
+    assert entry.state is ConfigEntryState.LOADED
+    assert [client.address for client in StatefulFakeClient.instances] == [
+        address,
+        target_address,
+    ]
+    first_client, active_client = StatefulFakeClient.instances
+    assert first_client.stopped
+    assert first_client.callback is None
+    assert entry.runtime_data.client is active_client
+    assert active_client.snapshot().advertised_name == "Latest station"
+    assert len(bluetooth_callbacks) == 1
+    assert bluetooth_callbacks[0][1]["address"] == target_address
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_no_op_reconfigure_does_not_reload_an_unloaded_entry(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Without a listener, unchanged data only triggers recovery for failed setup."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    initial_data = dict(entry.data)
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [],
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_ADDRESS: entry.data[CONF_ADDRESS], CONF_DEVICE_NAME: "ALLPOWERS R600"},
+    )
+    assert result["type"] == "abort"
+    await hass.async_block_till_done()
+    assert entry.data == initial_data
+    assert entry.state is ConfigEntryState.NOT_LOADED
+    assert len(StatefulFakeClient.instances) == 1
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_first", [False, True])
+async def test_setup_reconciles_config_changed_during_pending_reload(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    replace_first: bool,
+) -> None:
+    """A second reconfigure during reload setup wins before the new client is ready."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    first_address = "AA:BB:CC:DD:EE:FF"
+    pending_address = "11:22:33:44:55:66"
+    latest_address = "22:33:44:55:66:77"
+    entry = _make_entry(first_address, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    original_device = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )[0]
+    replacement_started = asyncio.Event()
+    allow_replacement = asyncio.Event()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del timeout
+        if client.address == pending_address:
+            replacement_started.set()
+            await allow_replacement.wait()
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    discovered_address = pending_address
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [
+            SimpleNamespace(
+                address=discovered_address,
+                name="ALLPOWERS R600",
+                service_uuids=[SERVICE_UUID],
+            )
+        ],
+    )
+
+    async def reconfigure(address: str, name: str) -> None:
+        nonlocal discovered_address
+        discovered_address = address
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: name,
+                CONF_DEVICE_CHANGE: (
+                    "replacement"
+                    if replace_first and address == pending_address
+                    else "same_device"
+                ),
+            },
+        )
+        assert result["type"] == "abort"
+
+    await reconfigure(pending_address, "Pending station")
+    await replacement_started.wait()
+    assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+
+    await reconfigure(latest_address, "Latest station")
+    allow_replacement.set()
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data[CONF_ADDRESS] == latest_address
+    assert entry.data[CONF_DEVICE_NAME] == "Latest station"
+    assert entry.runtime_data.client.address == latest_address
+    assert [client.address for client in StatefulFakeClient.instances] == [
+        first_address,
+        pending_address,
+        latest_address,
+    ]
+    assert StatefulFakeClient.instances[0].stopped
+    assert StatefulFakeClient.instances[1].stopped
+    active_devices = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )
+    assert len(active_devices) == 1
+    assert (active_devices[0].id == original_device.id) is not replace_first
+    assert active_devices[0].connections == {("bluetooth", latest_address)}
+    assert len(bluetooth_callbacks) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("device_change", ["same_device", "replacement"])
+async def test_address_transitions_preserve_or_replace_complete_registries(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    device_change: str,
+) -> None:
+    """Inspect all records and user customizations through A -> B -> A."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+    from homeassistant.helpers import area_registry as ar
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    customized_id = "switch.my_cabin_power"
+    entity_id = entities.async_get_entity_id("switch", DOMAIN, f"{address_a}_ac_output")
+    entities.async_update_entity(
+        entity_id, new_entity_id=customized_id, name="My outlet", icon="mdi:power"
+    )
+    light_id = entities.async_get_entity_id("switch", DOMAIN, f"{address_a}_light")
+    entities.async_update_entity(light_id, disabled_by=er.RegistryEntryDisabler.USER)
+    area = ar.async_get(hass).async_create("Cabin")
+    original_device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(
+        original_device.id, name_by_user="My battery", area_id=area.id
+    )
+    original_entities = {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_keys = {
+        (record.domain, record.unique_id.removeprefix(f"{address_a}_"))
+        for record in original_entities.values()
+    }
+    other_entry = _make_entry("33:44:55:66:77:88", title="Other station")
+    other_entry.add_to_hass(hass)
+    other_device = devices.async_get_or_create(
+        config_entry_id=other_entry.entry_id,
+        identifiers={(DOMAIN, "unrelated")},
+        connections={("bluetooth", other_entry.data[CONF_ADDRESS])},
+    )
+    other_entity = entities.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        "unrelated_battery",
+        config_entry=other_entry,
+        device_id=other_device.id,
+    )
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    previous_entities = set(original_entities)
+    previous_device_id = original_device.id
+    registry_ids = []
+    for address in (address_b, address_a):
+        monkeypatch.setattr(
+            flow_module.bluetooth,
+            "async_discovered_service_info",
+            lambda hass, connectable, address=address: [
+                SimpleNamespace(
+                    address=address, name="ALLPOWERS R600", service_uuids=[SERVICE_UUID]
+                )
+            ],
+        )
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: "ALLPOWERS R600",
+                CONF_DEVICE_CHANGE: device_change,
+            },
+        )
+        assert result["type"] == "abort"
+        await hass.async_block_till_done()
+        registry_id = entry.data[CONF_REGISTRY_ID]
+        registry_ids.append(registry_id)
+        current_entities = {
+            record.entity_id: record
+            for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+        }
+        current_devices = dr.async_entries_for_config_entry(devices, entry.entry_id)
+        assert len(current_entities) == len(original_entities)
+        assert len(current_devices) == 1
+        device = current_devices[0]
+        assert device.identifiers == {(DOMAIN, registry_id)}
+        assert device.connections == {("bluetooth", address)}
+        assert {
+            (record.domain, record.unique_id.removeprefix(f"{registry_id}_"))
+            for record in current_entities.values()
+        } == original_keys
+        assert all(
+            record.unique_id.startswith(f"{registry_id}_")
+            and record.device_id == device.id
+            for record in current_entities.values()
+        )
+        if device_change == "same_device":
+            assert set(current_entities) == set(original_entities)
+            assert device.id == original_device.id
+            assert device.name_by_user == "My battery"
+            assert device.area_id == area.id
+            assert current_entities[customized_id].name == "My outlet"
+            assert current_entities[customized_id].icon == "mdi:power"
+            for entity_id, original in original_entities.items():
+                current = current_entities[entity_id]
+                assert (
+                    current.name,
+                    current.icon,
+                    current.disabled_by,
+                    current.hidden_by,
+                    current.area_id,
+                    current.labels,
+                    current.options,
+                ) == (
+                    original.name,
+                    original.icon,
+                    original.disabled_by,
+                    original.hidden_by,
+                    original.area_id,
+                    original.labels,
+                    original.options,
+                )
+        else:
+            assert set(current_entities).isdisjoint(previous_entities)
+            assert set(current_entities).isdisjoint(original_entities)
+            assert entities.async_get(customized_id) is None
+            assert device.id != previous_device_id
+            assert device.name_by_user is None
+            assert device.area_id is None
+        assert entities.async_get(other_entity.entity_id) == other_entity
+        assert devices.async_get(other_device.id) == other_device
+        assert len(entities.entities) == len(current_entities) + 1
+        assert len(devices.devices) == 2
+        previous_entities = set(current_entities)
+        previous_device_id = device.id
+        assert len(bluetooth_callbacks) == 1
+    assert (registry_ids[0] == registry_ids[1]) == (device_change == "same_device")
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.fixture
+def reconfigure_address(hass, monkeypatch: pytest.MonkeyPatch, bluetooth_callbacks):
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+
+    async def reconfigure(entry, address, choice):
+        monkeypatch.setattr(
+            flow_module.bluetooth,
+            "async_discovered_service_info",
+            lambda hass, connectable: [
+                SimpleNamespace(
+                    address=address, name="ALLPOWERS R600", service_uuids=[SERVICE_UUID]
+                )
+            ],
+        )
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_NAME: "ALLPOWERS R600",
+                CONF_DEVICE_CHANGE: choice,
+            },
+        )
+        await hass.async_block_till_done()
+        return result
+
+    return reconfigure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_registry_id", [None, "stable-source"])
+async def test_failed_replacement_can_roll_back_to_original_device(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    reconfigure_address,
+    source_registry_id,
+) -> None:
+    """An uncompleted replacement must not destroy the restored source identity."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    if source_registry_id:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_REGISTRY_ID: source_registry_id}
+        )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    entity_id = entities.async_get_entity_id(
+        "switch", DOMAIN, f"{source_registry_id or address_a}_ac_output"
+    )
+    entities.async_update_entity(
+        entity_id, new_entity_id="switch.my_power", name="My outlet", icon="mdi:power"
+    )
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    devices.async_update_device(device.id, name_by_user="Original battery")
+    original_entities = {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_device = devices.async_get(device.id)
+
+    async def wait_ready(client, timeout):
+        del timeout
+        if client.address == address_b:
+            raise TimeoutError("Replacement never delivered telemetry")
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    result = await reconfigure_address(entry, address_b, "replacement")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    } == original_entities
+    assert devices.async_get(device.id) == original_device
+    result = await reconfigure_address(entry, address_a, "same_device")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    assert {
+        record.entity_id: record
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    } == original_entities
+    restored = devices.async_get(device.id)
+    assert restored.id == original_device.id
+    assert restored.identifiers == original_device.identifiers
+    assert restored.connections == original_device.connections
+    assert restored.name_by_user == original_device.name_by_user
+    assert restored.area_id == original_device.area_id
+    assert len(devices.devices) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_choice", ["same_device", "replacement"])
+@pytest.mark.parametrize("fail_after", [1, 3])
+async def test_partial_migration_recovers_at_the_same_address(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    reconfigure_address,
+    recovery_choice,
+    fail_after,
+) -> None:
+    """A partially migrated registry can retry or explicitly replace at target B."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    original_ids = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+    original_device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    update_entity = entities.async_update_entity
+    calls = 0
+
+    def injected_update(entity_id, **kwargs):
+        nonlocal calls
+        if "new_unique_id" in kwargs:
+            calls += 1
+            if calls >= fail_after + 1:
+                raise HomeAssistantError("Injected migration failure")
+        return update_entity(entity_id, **kwargs)
+
+    monkeypatch.setattr(entities, "async_update_entity", injected_update)
+    result = await reconfigure_address(entry, address_b, "same_device")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    assert (
+        sum(
+            record.unique_id.startswith(f"{entry.data[CONF_REGISTRY_ID]}_")
+            for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+        )
+        == fail_after
+    )
+    monkeypatch.setattr(entities, "async_update_entity", update_entity)
+    result = await reconfigure_address(entry, address_b, recovery_choice)
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    current = er.async_entries_for_config_entry(entities, entry.entry_id)
+    assert len(current) == len(original_ids)
+    assert all(
+        record.unique_id.startswith(f"{entry.data[CONF_REGISTRY_ID]}_")
+        for record in current
+    )
+    current_ids = {record.entity_id for record in current}
+    device = dr.async_entries_for_config_entry(devices, entry.entry_id)[0]
+    if recovery_choice == "same_device":
+        assert current_ids == original_ids
+        assert device.id == original_device.id
+    else:
+        assert current_ids.isdisjoint(original_ids)
+        assert device.id != original_device.id
+    assert device.connections == {("bluetooth", address_b)}
+    assert len(devices.devices) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_pending_registry_conflict_can_be_replaced_at_the_same_address(
+    hass, enable_custom_integrations, monkeypatch, reconfigure_address
+) -> None:
+    """An unexpected owned record discovered during startup has an explicit recovery."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.const import CONF_PREVIOUS_REGISTRY_ID
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    address_a = "AA:BB:CC:DD:EE:FF"
+    address_b = "11:22:33:44:55:66"
+    entry = _make_entry(address_a, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    entities = er.async_get(hass)
+    original_ids = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(entities, entry.entry_id)
+    }
+
+    async def wait_ready(client, timeout):
+        del timeout
+        if client.address == address_b:
+            entities.async_get_or_create(
+                "sensor", DOMAIN, "unexpected_battery", config_entry=entry
+            )
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    assert (await reconfigure_address(entry, address_b, "same_device"))[
+        "type"
+    ] == "abort"
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert CONF_PREVIOUS_REGISTRY_ID in entry.data
+    before = dict(entry.data)
+    result = await reconfigure_address(entry, address_b, "same_device")
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "registry_conflict"}
+    assert entry.data == before
+    result = await reconfigure_address(entry, address_b, "replacement")
+    assert result["type"] == "abort"
+    assert entry.state is ConfigEntryState.LOADED
+    assert CONF_PREVIOUS_REGISTRY_ID not in entry.data
+    current = er.async_entries_for_config_entry(entities, entry.entry_id)
+    assert len(current) == len(original_ids)
+    assert {record.entity_id for record in current}.isdisjoint(original_ids)
+    assert entities.async_get_entity_id("sensor", DOMAIN, "unexpected_battery") is None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["false", "platform_exception", "shutdown_exception"]
+)
+@pytest.mark.parametrize("trigger", ["manual", "update"])
+async def test_failed_unload_is_terminal_and_updates_require_restart(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    reconfigure_address,
+    failure,
+    trigger,
+) -> None:
+    """Core FAILED_UNLOAD must not produce futile reloads or hide restart recovery."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.config_entries import OperationNotAllowed
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    client = runtime.client
+    original_entities = dict(er.async_get(hass).entities)
+    original_devices = dr.async_entries_for_config_entry(
+        dr.async_get(hass), entry.entry_id
+    )
+    state_subscriptions = []
+    subscribe = entry.async_on_state_change
+
+    def track_state_subscription(callback):
+        state_subscriptions.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            state_subscriptions.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track_state_subscription)
+    shutdown = runtime.coordinator.async_shutdown
+
+    async def fail_platforms(*args):
+        del args
+        if failure == "platform_exception":
+            raise HomeAssistantError("Injected platform unload error")
+        return False
+
+    async def fail_shutdown():
+        raise HomeAssistantError("Injected coordinator shutdown error")
+
+    if failure == "shutdown_exception":
+        monkeypatch.setattr(runtime.coordinator, "async_shutdown", fail_shutdown)
+    else:
+        monkeypatch.setattr(
+            hass.config_entries, "async_unload_platforms", fail_platforms
+        )
+
+    scheduled = []
+    schedule_reload = hass.config_entries.async_schedule_reload
+
+    def track_reload(entry_id):
+        scheduled.append(entry_id)
+        schedule_reload(entry_id)
+
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", track_reload)
+    if trigger == "manual":
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+    else:
+        hass.config_entries.async_update_entry(entry, title="Pending new title")
+        await hass.async_block_till_done()
+        assert scheduled == [entry.entry_id]
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    await hass.async_block_till_done()
+    assert state_subscriptions == []
+    assert not entry.state.recoverable
+    monkeypatch.setattr(runtime.coordinator, "async_shutdown", shutdown)
+    assert entry.runtime_data is runtime
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{entry.entry_id}_failed_unload"
+    )
+    assert issue is not None
+    assert issue.severity is ir.IssueSeverity.ERROR
+    assert issue.is_persistent
+    assert not issue.is_fixable
+    client.set_snapshot(client.snapshot())
+    await hass.async_block_till_done()
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is not None
+    )
+    with pytest.raises(OperationNotAllowed):
+        await hass.config_entries.async_reload(entry.entry_id)
+    before_scheduled = list(scheduled)
+    before_calls = list(client.calls)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, CONF_DEVICE_NAME: "Pending name"},
+        title="Latest pending title",
+    )
+    await hass.async_block_till_done()
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+            SECTION_ADVANCED_TIMING: {},
+            SECTION_EXPERIMENTAL_CONTROLS: {},
+        },
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options["status_interval"] == 15
+    assert client.calls == before_calls
+    assert scheduled == before_scheduled
+    before_data = dict(entry.data)
+    result = await reconfigure_address(entry, "11:22:33:44:55:66", "replacement")
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "failed_unload"}
+    assert entry.data == before_data
+    assert scheduled == before_scheduled
+    assert er.async_get(hass).entities == original_entities
+    assert (
+        dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+        == original_devices
+    )
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+    assert payload["entry"]["state"] == "failed_unload"
+    assert payload["entry"]["restart_required"] is True
+    # Release the fake transport for test teardown without changing Core's state.
+    await shutdown()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert await hass.config_entries.async_remove(entry.entry_id) == {
+        "require_restart": True
+    }
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_fresh_setup_dismisses_previous_unload_repair_only_on_success(
+    hass, enable_custom_integrations, monkeypatch, bluetooth_callbacks, timeout
+) -> None:
+    """A fresh Core lifecycle after restart clears the Repair only when loaded."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from custom_components.allpowers_ble.repairs import async_create_unload_failed_issue
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    async_create_unload_failed_issue(hass, entry)
+    issue_id = f"{entry.entry_id}_failed_unload"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    async def wait_ready(client, timeout):
+        del client, timeout
+        raise TimeoutError("Startup after restart still lacks telemetry")
+
+    if timeout:
+        monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    assert await hass.config_entries.async_setup(entry.entry_id) is not timeout
+    await hass.async_block_till_done()
+    if timeout:
+        assert entry.state is ConfigEntryState.SETUP_RETRY
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+    else:
+        assert entry.state is ConfigEntryState.LOADED
+        assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_updates_during_suspended_unload_remain_pending(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    reconfigure_address,
+) -> None:
+    """No client mutation or extra reload is allowed before a failing unload ends."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = entry.runtime_data.client
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def unload_platforms(*args):
+        del args
+        entered.set()
+        await finish.wait()
+        return False
+
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload_platforms)
+    scheduled = []
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", scheduled.append)
+    unload_task = hass.async_create_background_task(
+        hass.config_entries.async_unload(entry.entry_id), "suspended unload"
+    )
+    await entered.wait()
+    try:
+        assert entry.state is ConfigEntryState.UNLOAD_IN_PROGRESS
+        before_calls = list(client.calls)
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+                SECTION_ADVANCED_TIMING: {},
+                SECTION_EXPERIMENTAL_CONTROLS: {},
+            },
+        )
+        assert result["type"] == "create_entry"
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_NAME: "Pending"},
+            title="Pending title",
+        )
+        await hass.async_block_till_done(wait_background_tasks=False)
+        assert client.calls == before_calls
+        assert scheduled == []
+        assert entry.options["status_interval"] == 15
+        before_data = dict(entry.data)
+        result = await reconfigure_address(entry, "11:22:33:44:55:66", "replacement")
+        assert result["errors"] == {"base": "unload_in_progress"}
+        assert entry.data == before_data
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"{entry.entry_id}_failed_unload"
+            )
+            is None
+        )
+    finally:
+        finish.set()
+        assert not await unload_task
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert scheduled == []
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_failed_unload")
+        is not None
+    )
+    await entry.runtime_data.coordinator.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remove_entry", [False, True])
+async def test_core_cleanup_failure_creates_repair_without_update_listener(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    remove_entry,
+) -> None:
+    """Observe Core's final state after successful integration unload and cleanup error."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.helpers import issue_registry as ir
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    runtime = entry.runtime_data
+    listener_count = len(entry.update_listeners)
+    observed = []
+    subscribe = entry.async_on_state_change
+
+    def track_state_subscription(callback):
+        observed.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            observed.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track_state_subscription)
+
+    def cleanup_failure():
+        assert runtime.client.stopped
+        raise HomeAssistantError("Injected Core unload callback failure")
+
+    entry.async_on_unload(cleanup_failure)
+    entry.async_on_unload(entry.add_update_listener(lambda *args: None))
+    # Core processes callbacks in reverse order; explicitly remove the integration
+    # update listener before the injected failure to reproduce the blind spot.
+    integration_listeners = entry.update_listeners[:listener_count]
+
+    def remove_integration_listeners():
+        for listener in integration_listeners:
+            entry.update_listeners.remove(listener)
+
+    entry.async_on_unload(remove_integration_listeners)
+    if remove_entry:
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": True}
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+    else:
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.FAILED_UNLOAD
+    assert observed == []
+    assert entry.update_listeners == []
+    assert entry.runtime_data is runtime
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{entry.entry_id}_failed_unload"
+    )
+    if remove_entry:
+        assert issue is None
+    else:
+        assert issue is not None
+        assert issue.is_persistent
+        assert not issue.is_fixable
+        result = await hass.config_entries.async_remove(entry.entry_id)
+        assert result == {"require_restart": True}
+        assert (
+            ir.async_get(hass).async_get_issue(
+                DOMAIN, f"{entry.entry_id}_failed_unload"
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_unloads_release_final_state_observers(
+    hass, enable_custom_integrations, monkeypatch, bluetooth_callbacks
+) -> None:
+    """Two successful unload cycles must not accumulate final-state observers."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    active = []
+    subscribe = entry.async_on_state_change
+
+    def track(callback):
+        active.append(callback)
+        unsubscribe = subscribe(callback)
+
+        def remove():
+            unsubscribe()
+            active.remove(callback)
+
+        return remove
+
+    monkeypatch.setattr(entry, "async_on_state_change", track)
+    for _ in range(2):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.NOT_LOADED
+        assert active == []
+        assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_phase",
+    ["start", "ready", "options", "forward", "partial_forward", "cancel"],
+)
+async def test_failed_setup_stops_real_client_tasks_and_connection(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    failure_phase,
+) -> None:
+    """Inject failures around real client startup and require complete cleanup."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.const import Platform
+
+    clients = []
+    transports = []
+    owned_tasks = []
+    failure_active = True
+
+    class Transport:
+        is_connected = True
+        notification_callback = object()
+
+        async def disconnect(self):
+            self.is_connected = False
+            self.notification_callback = None
+
+    class TaskClient(client_module.AllpowersBLEClient):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            clients.append(self)
+
+        def snapshot(self):
+            return replace(snapshot(), model_identity="ALLPOWERS R600")
+
+        async def _connection_loop(self):
+            transport = Transport()
+            transports.append(transport)
+            self._client = transport
+            self._connected = True
+            self._ready_event.set()
+            await asyncio.Event().wait()
+
+        async def _maintenance_loop(self):
+            await asyncio.Event().wait()
+
+        async def async_start(self):
+            await super().async_start()
+            self._refresh_task = asyncio.create_task(asyncio.Event().wait())
+            owned_tasks.extend(
+                [self._connection_task, self._maintenance_task, self._refresh_task]
+            )
+            await self._ready_event.wait()
+            if failure_active and failure_phase == "start":
+                raise HomeAssistantError("Injected start failure after tasks exist")
+
+        async def async_wait_ready(self, timeout):
+            await super().async_wait_ready(timeout)
+            if failure_active and failure_phase == "ready":
+                raise HomeAssistantError("Injected readiness failure")
+            if failure_active and failure_phase == "options":
+                hass.config_entries.async_update_entry(
+                    entry,
+                    options=ConnectionOptions(
+                        status_interval=15, stale_timeout=31
+                    ).as_dict(),
+                )
+
+        async def async_apply_options(self, options):
+            if failure_active:
+                raise HomeAssistantError("Injected startup option failure")
+            await super().async_apply_options(options)
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", TaskClient)
+    forward = hass.config_entries.async_forward_entry_setups
+    forward_started = asyncio.Event()
+
+    async def fail_forward(config_entry, platforms):
+        del platforms
+        if failure_phase == "partial_forward":
+            await forward(config_entry, [Platform.SENSOR])
+        forward_started.set()
+        if failure_phase == "cancel":
+            await asyncio.Event().wait()
+        raise HomeAssistantError("Injected platform initialization failure")
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", fail_forward)
+    import custom_components.allpowers_ble as integration
+
+    setup = integration.async_setup_entry
+    cleanup_observed = []
+
+    async def observe_failed_setup(hass, entry):
+        try:
+            return await setup(hass, entry)
+        except Exception, asyncio.CancelledError:
+            assert len(owned_tasks) == 3
+            assert len(transports) == 1
+            assert all(task.done() for task in owned_tasks)
+            assert all(not transport.is_connected for transport in transports)
+            assert clients[0]._update_callback is None
+            assert bluetooth_callbacks == []
+            assert not hasattr(entry, "runtime_data")
+            cleanup_observed.append(True)
+            raise
+
+    monkeypatch.setattr(integration, "async_setup_entry", observe_failed_setup)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    try:
+        if failure_phase == "cancel":
+            setup_task = hass.async_create_background_task(
+                hass.config_entries.async_setup(entry.entry_id), "cancel failed setup"
+            )
+            await forward_started.wait()
+            setup_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await setup_task
+        else:
+            assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert cleanup_observed == [True]
+        assert all(task.done() for task in owned_tasks)
+        assert all(not transport.is_connected for transport in transports)
+        assert all(transport.notification_callback is None for transport in transports)
+        client = clients[0]
+        assert client._connection_task is None
+        assert client._maintenance_task is None
+        assert client._refresh_task is None
+        assert client._client is None
+        assert client._update_callback is None
+        assert bluetooth_callbacks == []
+        assert entry.update_listeners == []
+        assert not hasattr(entry, "runtime_data")
+        if failure_phase == "partial_forward":
+            for record in er.async_entries_for_config_entry(
+                er.async_get(hass), entry.entry_id
+            ):
+                state = hass.states.get(record.entity_id)
+                assert state is None or state.state == "unavailable"
+        failure_active = False
+        monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert len(clients) == 2
+        assert entry.runtime_data.client is clients[1]
+        assert clients[0]._connection_task is None
+        assert len(bluetooth_callbacks) == 1
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert bluetooth_callbacks == []
+    finally:
+        for client in clients:
+            await client.async_stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_result", ["false", "exception"])
+@pytest.mark.parametrize("setup_failure", ["error", "retry"])
+async def test_failed_partial_cleanup_blocks_core_recovery(
+    hass,
+    enable_custom_integrations,
+    monkeypatch,
+    bluetooth_callbacks,
+    cleanup_result,
+    setup_failure,
+) -> None:
+    """Recoverable Core states must not restart incompletely unloaded platforms."""
+    del enable_custom_integrations
+    from datetime import UTC, datetime, timedelta
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    import custom_components.allpowers_ble.client as client_module
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
+    from homeassistant.exceptions import ConfigEntryNotReady
+    from homeassistant.helpers import issue_registry as ir
+    from homeassistant.helpers import entity_platform
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    forward = hass.config_entries.async_forward_entry_setups
+    unload = hass.config_entries.async_unload_platforms
+    forward_calls = []
+
+    async def fail_forward(entry, platforms):
+        del platforms
+        forward_calls.append(entry.entry_id)
+        await forward(entry, [Platform.SENSOR])
+        if setup_failure == "retry":
+            raise ConfigEntryNotReady("Injected platform setup retry")
+        raise HomeAssistantError("Injected platform setup failure")
+
+    async def fail_unload(entry, platforms):
+        del entry, platforms
+        if cleanup_result == "exception":
+            raise HomeAssistantError("Injected partial cleanup failure")
+        return False
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", fail_forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", fail_unload)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    expected_state = (
+        ConfigEntryState.SETUP_RETRY
+        if setup_failure == "retry" and cleanup_result == "false"
+        else ConfigEntryState.SETUP_ERROR
+    )
+    assert entry.state is expected_state
+    registry_records = {
+        record.entity_id
+        for record in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+    }
+    assert registry_records
+    platform_resources = [
+        (platform, dict(platform.entities))
+        for platform in entity_platform.async_get_platforms(hass, DOMAIN)
+    ]
+    assert any(entities for _, entities in platform_resources)
+    assert len(StatefulFakeClient.instances) == 1
+    assert StatefulFakeClient.instances[0].stopped
+    assert bluetooth_callbacks == []
+    issue_id = f"{entry.entry_id}_failed_unload"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", forward)
+    monkeypatch.setattr(hass.config_entries, "async_unload_platforms", unload)
+    try:
+        if expected_state is ConfigEntryState.SETUP_RETRY:
+            hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+            async_fire_time_changed(hass, datetime.now(UTC) + timedelta(seconds=60))
+            await hass.async_block_till_done(wait_background_tasks=True)
+            assert entry.state is ConfigEntryState.SETUP_ERROR
+            assert len(StatefulFakeClient.instances) == 1
+        for _ in range(2):
+            assert not await hass.config_entries.async_reload(entry.entry_id)
+            await hass.async_block_till_done()
+            assert len(StatefulFakeClient.instances) == 1
+            assert forward_calls == [entry.entry_id]
+            assert not hasattr(entry, "runtime_data")
+            assert bluetooth_callbacks == []
+            assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is not None
+            assert {
+                record.entity_id
+                for record in er.async_entries_for_config_entry(
+                    er.async_get(hass), entry.entry_id
+                )
+            } == registry_records
+            assert [
+                (platform, dict(platform.entities))
+                for platform in entity_platform.async_get_platforms(hass, DOMAIN)
+            ] == platform_resources
+    finally:
+        # The injected unload deliberately retained real sensor platform resources.
+        assert await unload(entry, [Platform.SENSOR])
+    assert await hass.config_entries.async_remove(entry.entry_id) == {
+        "require_restart": False
+    }
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id) is None
+
+
+@pytest.mark.asyncio
+async def test_strict_contract_rejects_old_reloading_helper(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Negative control: the real Core report path rejects the previous helper."""
+    del enable_custom_integrations, bluetooth_callbacks
+    import custom_components.allpowers_ble.client as client_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    flow = AllpowersConfigFlow()
+    flow.hass = hass
+    flow.handler = DOMAIN
+    flow.context = {"source": "reconfigure", "entry_id": entry.entry_id}
+    with pytest.raises(RuntimeError, match="has an update listener"):
+        flow.async_update_reload_and_abort(entry)
 
 
 @pytest.mark.parametrize("r600_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
@@ -329,6 +2010,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     assert not first_client._runtime_model_support().capabilities.write_output_controls
     first_callback(SimpleNamespace(name=r600_name, rssi=-50), object())
     await hass.async_block_till_done()
+    assert entry.runtime_data.client is first_client
     assert first_client.snapshot().advertised_name == r600_name
     assert first_client.snapshot().model_identity == "R600"
     assert entry.data["device_identity"] == "R600"
@@ -374,6 +2056,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
 
     reload_callback(SimpleNamespace(name="AP S300", rssi=-49), object())
     await hass.async_block_till_done()
+    assert entry.runtime_data.client is reloaded_client
     assert reloaded_client.snapshot().model_identity == "R600"
     assert entry.data["device_identity"] == "R600"
     assert entry.data["device_identity_conflict"] is True

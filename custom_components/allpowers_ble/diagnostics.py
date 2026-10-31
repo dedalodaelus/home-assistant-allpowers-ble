@@ -10,14 +10,26 @@ from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from .const import CONF_DEVICE_IDENTITY_CONFLICT, CONF_DEVICE_NAME
+from .const import (
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    CONF_DEVICE_NAME,
+    CONF_ENTITY_ID_PREFIX,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_REGISTRY_ID,
+)
 from .coordinator import AllpowersConfigEntry
 from .model_support import resolve_runtime_model_support
 
-TO_REDACT = {CONF_ADDRESS}
+TO_REDACT = {
+    CONF_ADDRESS,
+    CONF_REGISTRY_ID,
+    CONF_PREVIOUS_REGISTRY_ID,
+    CONF_ENTITY_ID_PREFIX,
+}
 REDACTED_NAME = "**REDACTED_NAME**"
 REDACTED_ADDRESS = "**REDACTED_ADDRESS**"
 _SENSITIVE_NAME_FIELDS = {
@@ -89,6 +101,8 @@ def _diagnostics_payload(
     payload: dict[str, Any] = {
         "entry": {
             "title": entry.title,
+            "state": entry.state.value,
+            "restart_required": entry.state is ConfigEntryState.FAILED_UNLOAD,
             "data": dict(entry.data),
             "options": entry.runtime_data.client.options.as_dict(),
         },
