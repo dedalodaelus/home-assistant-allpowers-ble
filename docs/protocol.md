@@ -245,13 +245,20 @@ Write access is not determined by advertised name or service discovery alone. A 
 
 | Profile | Read telemetry | Write output | Write settings |
 |---|---|---|---|
-| Verified R600 (hw 0.3) | ✓ | ✓ | ✓ |
-| Verified VOLIX P1800 (hw 0.3, R600 protocol profile) | ✓ | ✓ | ✓ |
+| Verified R600 code profile (hw 0.3) | ✓ | ✓ | ✓ |
+| Verified VOLIX P1800 code profile (hw 0.3, R600 protocol profile) | ✓ | ✓ | ✓ |
 | R600 unverified revision | ✓ | ✗ | ✗ |
 | AP S* experimental | ✓ | ✗ | ✗ |
 | Generic ALLPOWERS | ✓ | ✗ | ✗ |
 | Service UUID candidate | ✓ | ✗ | ✗ |
 | Rejected (S500, S700 V2) | ✗ | ✗ | ✗ |
+
+This matrix describes runtime code capabilities, not completed physical HIL
+qualification. VOLIX discovery uses a broad name prefix, but writable capabilities
+require a recognized canonical identity and the verified hardware revision;
+unrecognized identities and other or missing revisions remain read-only. Physical
+qualification status is tracked separately in
+[`tests/hil/qualification_matrix.json`](../tests/hil/qualification_matrix.json).
 
 Settings keepalive follows the same capability boundary and is writable only for
 profiles that expose `write_settings_keepalive`.

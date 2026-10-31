@@ -2,22 +2,31 @@
 
 ## Support levels
 
-The repository distinguishes three levels:
+The repository distinguishes three runtime code-profile levels:
 
-- **Verified**: protocol behavior has been exercised on the named hardware and is
-  covered by known vectors and integration behavior.
+- **Verified code profile**: the model identity and hardware revision match a
+  supported profile, so the integration can expose its capabilities after the
+  runtime safety checks. This label does not mean that the full physical HIL
+  qualification is complete.
 - **Experimental**: the device advertises a candidate name and passes the active
   GATT/protocol probe, but the exact hardware revision has not been fully
   validated. These devices run in read-only mode.
 - **Rejected**: available evidence indicates another protocol revision; setup is
   stopped before a persistent entry is created.
 
+Physical HIL qualification is tracked separately in
+[`tests/hil/qualification_matrix.json`](../tests/hil/qualification_matrix.json).
+Only its route, scenario, and write-capability results describe completed
+physical qualification; a passing default matrix-validator run accepts pending
+results and does not qualify hardware.
+
 ## Current matrix
 
 | Model or advertised family | Level | Setup behavior |
 |---|---|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
-| VOLIX P1800 with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Accepted after active probe using the verified R600 protocol profile, with writable controls subject to the same output-bit and settings-semantic safety checks. |
+| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
+| Canonical VOLIX P1800 identity with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Accepted after active probe using the R600 protocol profile and the same runtime write safety checks. PR #183 reports one physical unit with firmware `0xF1`; route-specific and full HIL qualification remain pending. |
+| VOLIX P1800 discovery candidate with an unrecognized identity or missing/unverified revision | Experimental | A broad discovery match is not identity verification. Accepted candidates remain telemetry-only; writable entities are not created. |
 | AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. Telemetry only; writable entities are not created. |
 | AP S500 | Rejected | Aborted as a known different protocol family. |
 | AP S700 V2 | Rejected | Aborted as a known different protocol family. |
@@ -27,11 +36,17 @@ The repository distinguishes three levels:
 ## Why advertisement matching is broad
 
 Bluetooth advertisements can vary by firmware and proxy. The manifest includes
-candidate local-name patterns and the FFF0 service UUID so Home Assistant can route
-discovery to the config flow. This is only the first filter.
+candidate local-name patterns (including `VOLIX P1800*`) and the FFF0 service UUID
+so Home Assistant can route discovery to the config flow. This is only the first
+filter; for example, `VOLIX P1800-ABCD` can match discovery without establishing a
+canonical VOLIX identity.
 
-The second filter is model policy. The final and authoritative filter is the active
-probe, which requires:
+Model identity is then resolved with stricter canonical-name matching. VOLIX P1800
+write capabilities require a recognized canonical identity and the exact verified
+hardware signature. Unrecognized VOLIX names and other or missing revisions stay
+experimental/read-only, even if they match the discovery prefix or pass the probe.
+
+The final protocol filter is the active probe, which requires:
 
 1. a connectable route selected by Home Assistant;
 2. service FFF0;
@@ -48,7 +63,7 @@ change a rejected family to supported merely because it exposes one matching UUI
 
 ## Verified revision evidence lane
 
-Every profile that remains marked as **Verified** must keep an evidence record in
+Every profile classified as a **Verified code profile** must keep an evidence record in
 `tests/hil/qualification_matrix.json` with:
 
 - a route result for `local_adapter`;
@@ -60,6 +75,12 @@ Every profile that remains marked as **Verified** must keep an evidence record i
 Capture artifacts must stay sanitized and stored under
 `tests/hil/fixtures/<revision-id>/`. Do not publish Bluetooth addresses, serial
 numbers, Home Assistant identifiers, or topology details.
+
+The matrix records qualification progress, not the software classifier result.
+Pending routes, scenarios, or write capabilities must remain pending; do not infer
+coverage from unit tests or an undifferentiated hardware-validation report. The
+current VOLIX P1800 evidence scope and its missing route-specific captures are
+recorded under `tests/hil/fixtures/volix-p1800-hw03/`.
 
 Use the [HIL qualification runbook](hil-qualification.md) for the end-to-end
 capture, matrix update, and validation flow.

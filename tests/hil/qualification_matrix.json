@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-29",
+  "generated_at": "2026-10-31",
   "retention": "Store only sanitized captures and summaries. Do not include MAC addresses, serial numbers, Home Assistant IDs, or local topology.",
   "verified_revisions": [
     {
@@ -27,6 +27,51 @@
             "tests/hil/fixtures/r600-hw03/proxy-settings.sample.jsonl"
           ],
           "notes": "Pending qualification run on an active ESPHome proxy lane."
+        }
+      },
+      "scenarios": {
+        "golden_vector_replay": "pending",
+        "reconnect_failover": "pending",
+        "rapid_consecutive_writes": "pending",
+        "stale_timeout_recovery": "pending",
+        "soak_24h": "pending",
+        "upgrade_reload": "pending",
+        "vendor_app_contention": "pending"
+      },
+      "write_capabilities": {
+        "ac_output": "pending",
+        "dc_output": "pending",
+        "light_output": "pending",
+        "eco_mode": "pending",
+        "work_mode": "pending",
+        "eco_timeout": "pending",
+        "car_charger": "pending"
+      }
+    },
+    {
+      "id": "volix-p1800-hw03",
+      "model": "VOLIX P1800",
+      "hardware_version": "0.3",
+      "raw_hardware_version": "0x03",
+      "firmware_scope": "One reported unit with firmware 0xF1 (PR #183); no broader firmware qualification.",
+      "qualification_status": "pending",
+      "privacy_review": "pass",
+      "routes": {
+        "local_adapter": {
+          "status": "pending",
+          "last_tested": "1970-01-01",
+          "evidence": [
+            "tests/hil/fixtures/volix-p1800-hw03/README.md"
+          ],
+          "notes": "PR #183 does not identify a local adapter run; route qualification is pending."
+        },
+        "active_proxy": {
+          "status": "pending",
+          "last_tested": "1970-01-01",
+          "evidence": [
+            "tests/hil/fixtures/volix-p1800-hw03/README.md"
+          ],
+          "notes": "PR #183 mentions the ESPHome component but does not establish an active proxy route; route qualification is pending."
         }
       },
       "scenarios": {
