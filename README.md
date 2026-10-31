@@ -25,9 +25,10 @@ There is no vendor cloud, no direct BlueZ access, and no ESPHome component is
 required on the power station side.
 
 > [!IMPORTANT]
-> The **ALLPOWERS R600** is the verified target. Similar names do not prove
-> protocol compatibility. Every device is actively checked for the expected GATT
-> service, characteristics, and a checksum-valid status frame before setup.
+> The **ALLPOWERS R600** and **VOLIX P1800** are verified for hardware revision
+> `0.3` (`raw_hardware_version=0x03`). Similar names do not prove protocol
+> compatibility. Every device is actively checked for the expected GATT service,
+> characteristics, and a checksum-valid status frame before setup.
 
 ## Highlights
 
@@ -48,6 +49,7 @@ required on the power station side.
 | Model / advertisement | Status | Notes |
 |---|---:|---|
 | ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Primary development and protocol target with writable controls enabled. |
+| VOLIX P1800 with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Uses the verified R600 protocol profile with writable controls enabled. |
 | AP S300 and similar `AP S*` units | Experimental read-only | Accepted only after an active GATT and protocol probe. Telemetry entities are exposed, but writable controls remain disabled. |
 | AP S500 / AP S700 V2 family | Rejected | Known to use a different protocol revision. |
 | Generic `ALLPOWERS*` or FFF0 advertisement | Experimental read-only | Setup proceeds only after protocol validation. Telemetry is exposed, but writable controls remain disabled. |
