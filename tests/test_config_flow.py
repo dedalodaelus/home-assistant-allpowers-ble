@@ -18,7 +18,10 @@ from custom_components.allpowers_ble.client import (
     ProbeStatusTimeoutError,
     UnsupportedDeviceError,
 )
-from custom_components.allpowers_ble.const import SERVICE_UUID
+from custom_components.allpowers_ble.const import (
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    SERVICE_UUID,
+)
 from custom_components.allpowers_ble.options import ConnectionOptions
 
 from tests.ha_stubs import FakeBleakError
@@ -465,7 +468,11 @@ async def test_reconfigure_success_updates_existing_entry(
     new_address = "11:22:33:44:55:66"
     entry = ConfigEntry(
         title="ALLPOWERS R600 EEFF",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            CONF_DEVICE_IDENTITY_CONFLICT: True,
+        },
         options=ConnectionOptions().as_dict(),
         unique_id=ADDRESS,
     )
@@ -503,6 +510,8 @@ async def test_reconfigure_success_updates_existing_entry(
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert entry.data["address"] == new_address
     assert entry.data["device_name"] == "Station Patio"
+    assert entry.data["device_identity"] == "ALLPOWERS R600"
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is False
     assert entry.unique_id == new_address
     assert entry.title == "Station Patio 5566"
 
@@ -756,7 +765,11 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
 ) -> None:
     entry = ConfigEntry(
         title="ALLPOWERS R600 EEFF",
-        data={"address": ADDRESS, "device_name": "ALLPOWERS R600"},
+        data={
+            "address": ADDRESS,
+            "device_name": "ALLPOWERS R600",
+            CONF_DEVICE_IDENTITY_CONFLICT: True,
+        },
         options=ConnectionOptions().as_dict(),
         unique_id=ADDRESS,
     )
@@ -802,9 +815,12 @@ async def test_reconfigure_same_address_and_title_skips_metadata_update(
             "data": {
                 "address": ADDRESS,
                 "device_name": "ALLPOWERS R600",
+                "device_identity": "ALLPOWERS R600",
+                CONF_DEVICE_IDENTITY_CONFLICT: True,
             }
         }
     ]
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is True
 
 
 @pytest.mark.asyncio
@@ -849,6 +865,50 @@ async def test_reconfigure_same_address_reuses_active_session(
     assert result == {"type": "abort", "reason": "reconfigure_successful"}
     assert entry.data["address"] == ADDRESS
     assert entry.data["device_name"] == "Station Patio"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_synthetic_current_device_does_not_promote_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = ConfigEntry(
+        title="AP R600 V2.0",
+        data={"address": ADDRESS, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+        unique_id=ADDRESS,
+    )
+
+    class _RuntimeData:
+        class coordinator:
+            status_is_fresh = True
+
+    entry.runtime_data = _RuntimeData()
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("the reusable active session should skip probing")
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    result = await flow.async_step_reconfigure(
+        {"address": ADDRESS, "device_name": "AP R600 V2.0"}
+    )
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert entry.data["device_name"] == "AP R600 V2.0"
+    assert entry.data["device_identity"] == ""
 
 
 @pytest.mark.asyncio

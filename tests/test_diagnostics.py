@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -16,7 +17,14 @@ from tests.helpers import ADDRESS, configured_entry
 
 @pytest.mark.asyncio
 async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> None:
-    entry, _, _, hass = configured_entry()
+    entry, client, _, hass = configured_entry()
+    client.set_snapshot(
+        replace(
+            client.snapshot(),
+            session_hardware_version="0.3",
+            session_raw_hardware_version=0x03,
+        )
+    )
 
     payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
 
@@ -50,6 +58,17 @@ async def test_device_diagnostics_include_registry_metadata() -> None:
     assert payload["device_registry"]["name"] == "**REDACTED_NAME**"
     assert payload["device_registry"]["model"] == "R600"
     assert payload["device_registry"]["manufacturer"] == "ALLPOWERS"
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_report_conflicted_identity_as_read_only() -> None:
+    entry, _, _, hass = configured_entry()
+    entry.data["device_identity_conflict"] = True
+
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+    assert payload["model_support"]["classification"] == "identity_conflict"
+    assert not payload["model_support"]["capabilities"]["write_output_controls"]
 
 
 @pytest.mark.asyncio

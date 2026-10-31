@@ -15,7 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .client import AllpowersClientError, NotConnectedError
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
-from .model_support import ModelSupport, identify_model
+from .model_support import ModelSupport, resolve_runtime_model_support
 from .protocol import StateUnavailableError
 
 
@@ -73,13 +73,23 @@ def raise_command_error(error: Exception) -> NoReturn:
 
 
 def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
-    """Return revision-aware model support from the latest snapshot."""
+    """Return model support using the same session and conflict evidence as client."""
     data = coordinator.data
-    settings = data.settings
-    return identify_model(
-        data.advertised_name,
-        hardware_version=settings.hardware_version if settings else None,
-        raw_hardware_version=settings.raw_hardware_version if settings else None,
+    hardware_version = data.session_hardware_version
+    raw_hardware_version = data.session_raw_hardware_version
+    if (
+        hardware_version is None
+        and raw_hardware_version is None
+        and coordinator.settings_are_fresh
+    ):
+        settings = data.settings
+        hardware_version = settings.hardware_version if settings else None
+        raw_hardware_version = settings.raw_hardware_version if settings else None
+    return resolve_runtime_model_support(
+        data.model_identity,
+        hardware_version=hardware_version,
+        raw_hardware_version=raw_hardware_version,
+        identity_conflicted=data.identity_conflicted,
     )
 
 

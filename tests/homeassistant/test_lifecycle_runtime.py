@@ -7,6 +7,7 @@ from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+import re
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -18,7 +19,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.allpowers_ble import diagnostics
-from custom_components.allpowers_ble.const import DOMAIN
+from custom_components.allpowers_ble.const import (
+    CONF_DEVICE_IDENTITY,
+    CONF_DEVICE_IDENTITY_CONFLICT,
+    DOMAIN,
+)
 from custom_components.allpowers_ble.options import ConnectionOptions
 
 from tests.helpers import settings, snapshot, status
@@ -38,11 +43,18 @@ class StatefulFakeClient:
         hass: Any,
         address: str,
         advertised_name: str,
+        device_identity: str,
         options: ConnectionOptions,
+        identity_conflicted: bool = False,
+        model_identity_callback: Callable[[str], None] | None = None,
+        identity_conflict_callback: Callable[[bool], None] | None = None,
     ) -> None:
         del hass
         self.address = address.upper()
         self.options = options
+        self.identity_conflicted = identity_conflicted
+        self.model_identity_callback = model_identity_callback
+        self.identity_conflict_callback = identity_conflict_callback
         self.callback: Callable[[], None] | None = None
         self.advertisements: list[Any] = []
         self.calls: list[tuple[str, Any]] = []
@@ -52,6 +64,7 @@ class StatefulFakeClient:
         self._snapshot = replace(
             StatefulFakeClient.default_state,
             advertised_name=advertised_name,
+            model_identity=device_identity,
         )
         StatefulFakeClient.instances.append(self)
 
@@ -69,9 +82,20 @@ class StatefulFakeClient:
     def update_advertisement(self, service_info: Any) -> None:
         self.advertisements.append(service_info)
         advertised_name = service_info.name or self._snapshot.advertised_name
+        model_identity = self._snapshot.model_identity
+        if service_info.name and "R600" in service_info.name.upper():
+            if service_info.name != model_identity:
+                model_identity = service_info.name
+            if (
+                model_identity == service_info.name
+                and service_info.name != self._snapshot.model_identity
+                and self.model_identity_callback is not None
+            ):
+                self.model_identity_callback(model_identity)
         self._snapshot = replace(
             self._snapshot,
             advertised_name=advertised_name,
+            model_identity=model_identity,
             rssi=getattr(service_info, "rssi", self._snapshot.rssi),
         )
         if self.callback is not None:
@@ -144,13 +168,14 @@ def bluetooth_callbacks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]
 
 
 def _make_entry(address: str, *, title: str) -> MockConfigEntry:
+    device_name = re.sub(r"\s+[0-9A-Fa-f]{4}$", "", title)
     return MockConfigEntry(
         domain=DOMAIN,
         unique_id=address,
         version=1,
         minor_version=1,
         title=title,
-        data={CONF_ADDRESS: address, "device_name": title.replace(" AABB", "")},
+        data={CONF_ADDRESS: address, "device_name": device_name},
         options=ConnectionOptions().as_dict(),
     )
 
@@ -229,6 +254,365 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client.stopped
     assert reloaded_client.callback is None
     assert bluetooth_callbacks == []
+
+
+@pytest.mark.parametrize("r600_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
+@pytest.mark.asyncio
+async def test_production_client_identity_survives_proxy_advertisements_and_reload(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    notification_builder,
+    r600_name: str,
+) -> None:
+    """Use the production client for identity, entity, and reload behavior."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.coordinator as coordinator_module
+
+    async def start_with_telemetry(client) -> None:
+        client._connected = True
+        client._settings = settings()
+        client._status = status()
+        client._settings_monotonic = monotonic()
+        client._status_monotonic = monotonic()
+        client._ready_event.set()
+        client._emit_update()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_start", start_with_telemetry
+    )
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=address,
+        version=1,
+        minor_version=2,
+        title="Cabin Power",
+        data={
+            CONF_ADDRESS: address,
+            "device_name": r600_name,
+        },
+        options=ConnectionOptions().as_dict(),
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    first_client = entry.runtime_data.client
+    first_callback, _ = bluetooth_callbacks[0]
+    first_client._rssi = -50
+    entry_updates: list[dict[str, Any]] = []
+    original_update_entry = hass.config_entries.async_update_entry
+
+    def track_update_entry(config_entry: Any, **kwargs: Any) -> None:
+        if "device_identity" in kwargs.get("data", {}):
+            entry_updates.append(dict(kwargs["data"]))
+        original_update_entry(config_entry, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update_entry)
+    first_callback(SimpleNamespace(name=None, rssi=-50), object())
+    assert first_client.snapshot().model_identity == ""
+    assert not first_client._runtime_model_support().capabilities.write_output_controls
+    first_callback(SimpleNamespace(name=r600_name, rssi=-50), object())
+    await hass.async_block_till_done()
+    assert first_client.snapshot().advertised_name == r600_name
+    assert first_client.snapshot().model_identity == "R600"
+    assert entry.data["device_identity"] == "R600"
+    first_callback(SimpleNamespace(name=r600_name, rssi=-50), object())
+    assert len(entry_updates) == 1
+    assert first_client._runtime_model_support().capabilities.write_output_controls
+
+    first_callback(SimpleNamespace(name=address, rssi=-50), object())
+    assert first_client.snapshot().advertised_name == address
+    assert first_client.snapshot().model_identity == "R600"
+
+    registry = er.async_get(hass)
+    entity_ids = {
+        key: registry.async_get_entity_id("switch", DOMAIN, f"{address}_{key}")
+        for key in ("ac_output", "dc_output", "light")
+    }
+    settings_entity_ids = {
+        "eco_mode": registry.async_get_entity_id(
+            "switch", DOMAIN, f"{address}_eco_mode"
+        ),
+        "work_mode": registry.async_get_entity_id(
+            "select", DOMAIN, f"{address}_work_mode"
+        ),
+    }
+    assert all(entity_ids.values())
+    assert all(settings_entity_ids.values())
+    for entity_id in entity_ids.values():
+        assert hass.states.get(entity_id).state != "unavailable"
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    reloaded_client = entry.runtime_data.client
+    reload_callback, _ = bluetooth_callbacks[0]
+    reload_callback(SimpleNamespace(name=address, rssi=-49), object())
+    assert reloaded_client.snapshot().model_identity == "R600"
+    assert reloaded_client._runtime_model_support().capabilities.write_output_controls
+    assert entry.data.get("device_identity_conflict", False) is False
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
+        for key in ("ac_output", "dc_output", "light")
+    )
+
+    reload_callback(SimpleNamespace(name="AP S300", rssi=-49), object())
+    await hass.async_block_till_done()
+    assert reloaded_client.snapshot().model_identity == "R600"
+    assert entry.data["device_identity"] == "R600"
+    assert entry.data["device_identity_conflict"] is True
+    assert reloaded_client.snapshot().identity_conflicted
+    assert (
+        not reloaded_client._runtime_model_support().capabilities.write_output_controls
+    )
+    conflict_diagnostics = await diagnostics.async_get_config_entry_diagnostics(
+        hass, entry
+    )
+    assert conflict_diagnostics["model_support"]["classification"] == (
+        "identity_conflict"
+    )
+    await hass.async_block_till_done()
+    for entity_id in (*entity_ids.values(), *settings_entity_ids.values()):
+        assert hass.states.get(entity_id).state == "unavailable"
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    contradictory_client = entry.runtime_data.client
+    contradictory_callback, _ = bluetooth_callbacks[0]
+    contradictory_callback(SimpleNamespace(name=address, rssi=-48), object())
+    assert contradictory_client.snapshot().model_identity == "R600"
+    assert contradictory_client._identity_conflicted
+    assert not contradictory_client._runtime_model_support().capabilities.write_output_controls
+
+    contradictory_client._settings_monotonic = monotonic() - 1000
+    contradictory_client._status_monotonic = monotonic() - 1000
+    contradictory_client._emit_update()
+    await hass.async_block_till_done()
+    for entity_id in entity_ids.values():
+        assert hass.states.get(entity_id).state == "unavailable"
+
+    contradictory_client._settings = None
+    contradictory_client._status = None
+    contradictory_client._settings_monotonic = None
+    contradictory_client._status_monotonic = None
+    contradictory_client._emit_update()
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_ids["ac_output"]).state == "unavailable"
+
+    contradictory_client._settings = settings()
+    contradictory_client._status = status()
+    contradictory_client._settings_monotonic = monotonic()
+    contradictory_client._status_monotonic = monotonic()
+    contradictory_callback(SimpleNamespace(name=r600_name, rssi=-48), object())
+    await hass.async_block_till_done()
+    assert not contradictory_client._identity_conflicted
+    assert entry.data["device_identity_conflict"] is False
+    assert (
+        contradictory_client._runtime_model_support().capabilities.write_output_controls
+    )
+    await hass.async_block_till_done()
+    for entity_id in (*entity_ids.values(), *settings_entity_ids.values()):
+        assert hass.states.get(entity_id).state != "unavailable"
+
+    clock = {"now": monotonic()}
+    contradictory_client._loop_time = lambda: clock["now"]  # type: ignore[method-assign]
+    monkeypatch.setattr(coordinator_module, "monotonic", lambda: clock["now"])
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+    contradictory_client._notification_handler(object(), bytearray(settings_frame))
+    contradictory_client._notification_handler(object(), bytearray(status_frame))
+    for _ in range(61):
+        clock["now"] += 20
+        contradictory_client._notification_handler(object(), bytearray(status_frame))
+    await hass.async_block_till_done()
+
+    assert clock["now"] - contradictory_client.snapshot().settings_monotonic > 20 * 60
+    assert not contradictory_client._settings_are_fresh()
+    assert (
+        contradictory_client._runtime_model_support().capabilities.write_output_controls
+    )
+    assert contradictory_client._safe_output_snapshot() == (False, False, True)
+    for entity_id in entity_ids.values():
+        assert hass.states.get(entity_id).state != "unavailable"
+    for entity_id in settings_entity_ids.values():
+        assert hass.states.get(entity_id).state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_entry_title_and_hardware_revision_do_not_establish_identity(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """A title plus verified revision cannot authorize model-specific writes."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    async def start_with_telemetry(client) -> None:
+        client._connected = True
+        client._settings = settings()
+        client._status = status()
+        client._settings_monotonic = monotonic()
+        client._status_monotonic = monotonic()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_start", start_with_telemetry
+    )
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=address,
+        version=1,
+        minor_version=2,
+        title="AP R600 V2.0",
+        data={CONF_ADDRESS: address, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = entry.runtime_data.client
+    assert not client.snapshot().model_identity
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    output_keys = ("ac_output", "dc_output", "light")
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 0
+        for key in output_keys
+    )
+    callback, _ = bluetooth_callbacks[0]
+    client._settings = replace(
+        settings(), hardware_version="0.4", raw_hardware_version=0x04
+    )
+    callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    await hass.async_block_till_done()
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert all(
+        _count_unique_id(hass, f"{address}_{key}", domain="switch") == 0
+        for key in output_keys
+    )
+
+    client._settings = settings()
+    client._emit_update()
+    await hass.async_block_till_done()
+    assert client._runtime_model_support().capabilities.write_output_controls
+    registry = er.async_get(hass)
+    for key in output_keys:
+        assert _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
+        entity_id = registry.async_get_entity_id("switch", DOMAIN, f"{address}_{key}")
+        assert entity_id is not None
+        assert hass.states.get(entity_id).state != "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_first_rejected_identity_restarts_read_only_and_recovers(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """An initial S500/S700 label must not persist a reconnect-blocking identity."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+
+    async def start_with_telemetry(client) -> None:
+        client._connected = True
+        client._settings = settings()
+        client._status = status()
+        client._settings_monotonic = monotonic()
+        client._status_monotonic = monotonic()
+        client._ready_event.set()
+        client._emit_update()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_start", start_with_telemetry
+    )
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=address,
+        version=1,
+        minor_version=2,
+        title="Power station",
+        data={CONF_ADDRESS: address, "device_name": "ALLPOWERS power station"},
+        options=ConnectionOptions().as_dict(),
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    first_client = entry.runtime_data.client
+    callback, _ = bluetooth_callbacks[0]
+    callback(SimpleNamespace(name="AP S500", rssi=-50), object())
+    await hass.async_block_till_done()
+
+    assert entry.data.get(CONF_DEVICE_IDENTITY, "") == ""
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is True
+    assert first_client.snapshot().identity_conflicted
+    assert not first_client._runtime_model_support().capabilities.write_output_controls
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    restarted_client = entry.runtime_data.client
+    callback, _ = bluetooth_callbacks[0]
+    callback(SimpleNamespace(name=address, rssi=-49), object())
+    assert restarted_client.snapshot().model_identity == ""
+    assert restarted_client.snapshot().identity_conflicted
+    assert (
+        not restarted_client._runtime_model_support().capabilities.write_output_controls
+    )
+
+    callback(SimpleNamespace(name="AP R600 V2.0", rssi=-49), object())
+    await hass.async_block_till_done()
+    assert entry.data[CONF_DEVICE_IDENTITY] == "R600"
+    assert entry.data[CONF_DEVICE_IDENTITY_CONFLICT] is False
+    assert not restarted_client.snapshot().identity_conflicted
+
+    registry = er.async_get(hass)
+    for key in ("ac_output", "dc_output", "light"):
+        entity_id = registry.async_get_entity_id("switch", DOMAIN, f"{address}_{key}")
+        assert entity_id is not None
+        assert hass.states.get(entity_id).state != "unavailable"
+        assert _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
 
 
 @pytest.mark.asyncio

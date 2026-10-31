@@ -63,6 +63,7 @@ def _connected_client(options: ConnectionOptions | None = None):
         hass=object(),
         address="aa:bb:cc:dd:ee:ff",
         advertised_name="ALLPOWERS R600",
+        device_identity="ALLPOWERS R600",
         options=options or ConnectionOptions(),
     )
     fake = FakeClient()
@@ -71,6 +72,7 @@ def _connected_client(options: ConnectionOptions | None = None):
     client._connected = True
     client._active_session_generation = 1
     client._settings = _settings()
+    client._settings_monotonic = monotonic()
     client._schedule_status_refresh = lambda: None
     return client, fake
 
@@ -561,6 +563,27 @@ def test_snapshot_guards_reject_disconnected_state() -> None:
     with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
         client._safe_settings_snapshot()
 
+    client._connected = True
+    client._settings_monotonic = None
+    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        client._safe_settings_snapshot()
+
+
+def test_settings_revision_is_not_fresh_outside_current_gatt_session() -> None:
+    client, _ = _connected_client()
+    assert client._settings_are_fresh()
+
+    client._disconnect_event.set()
+    assert not client._settings_are_fresh()
+    client._disconnect_event.clear()
+
+    client._connected = False
+    assert not client._settings_are_fresh()
+    client._connected = True
+
+    client._settings_monotonic = monotonic() - client.options.settings_stale_timeout - 1
+    assert not client._settings_are_fresh()
+
 
 @pytest.mark.asyncio
 async def test_output_command_requires_fresh_status() -> None:
@@ -679,10 +702,12 @@ async def test_multiple_clients_keep_transactions_isolated(
 
 @pytest.mark.asyncio
 async def test_settings_command_requires_fresh_settings() -> None:
-    client, _ = _connected_client()
+    client, fake = _connected_client()
+    client._settings_monotonic = None
 
-    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+    with pytest.raises(client_module.StateUnavailableError):
         await client.async_set_eco(True)
+    assert not fake.writes
 
 
 @pytest.mark.asyncio
@@ -1224,6 +1249,539 @@ def test_update_advertisement_emits_only_on_change() -> None:
     assert callbacks == 1
     assert client._advertisement_generation == 2
     assert client._advertisement_event.is_set()
+
+
+@pytest.mark.parametrize(
+    "advertised_name",
+    [None, "", "AA:BB:CC:DD:EE:FF", "ALLPOWERS", "BLE power station"],
+)
+@pytest.mark.parametrize("model_identity", ["AP R600 V2.0", "VOLIX P1800"])
+def test_restart_identity_survives_unreliable_advertisements(
+    model_identity: str,
+    advertised_name: str | None,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=model_identity,
+        device_identity=model_identity,
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name=advertised_name, rssi=-55))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.profile == "r600-hw-0.3"
+    assert support.capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
+async def test_non_identifying_device_name_notification_preserves_identity(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+    frame = notification_builder(0x35, b"Kitchen")
+
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.profile == "r600-hw-0.3"
+    assert not persisted
+
+
+@pytest.mark.parametrize("device_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
+def test_identifying_device_name_notification_persists_identity(
+    device_name: str,
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    client._device_identity = ""
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+    frame = notification_builder(0x35, device_name.encode())
+
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
+
+
+@pytest.mark.parametrize("device_name", ["AP R600 V2.0", "AP R600 V2.0 CE3A"])
+def test_model_identity_persistence_waits_for_current_session_settings(
+    device_name: str,
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    client._device_identity = ""
+    client._settings_monotonic = None
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+
+    client.update_advertisement(SimpleNamespace(name=device_name, rssi=-61))
+    assert client.snapshot().model_identity == "R600"
+    assert not persisted
+
+    frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    assert persisted == ["R600"]
+
+
+@pytest.mark.parametrize(
+    "stored_name", [None, "", "AA:BB:CC:DD:EE:FF", "Station Patio"]
+)
+def test_unverified_stored_identity_stays_read_only_until_valid_name(
+    stored_name: str | None,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=stored_name or "",
+        device_identity=stored_name,
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+
+    support = client._runtime_model_support()
+    assert support.verified
+    assert support.capabilities.write_output_controls
+
+
+def test_contradictory_model_advertisement_is_read_only_until_resolved() -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="AP R600 V2.0",
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name="AP S300", rssi=-55))
+    assert client.snapshot().model_identity == "R600"
+    assert client._identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    assert not client._identity_conflicted
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.parametrize(
+    ("stored_identity", "contradictory_name"),
+    [("R600", "VOLIX P1800"), ("VOLIX P1800", "R600")],
+)
+def test_verified_family_contradiction_stays_read_only_across_restart(
+    stored_identity: str,
+    contradictory_name: str,
+    notification_builder,
+) -> None:
+    persisted = {"identity": stored_identity, "conflict": False}
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=stored_identity,
+        device_identity=stored_identity,
+        options=ConnectionOptions(),
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name=contradictory_name, rssi=-55))
+
+    assert persisted == {"identity": stored_identity, "conflict": True}
+    assert client.snapshot().model_identity == stored_identity
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    restarted = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=contradictory_name,
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        options=ConnectionOptions(),
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+    )
+    restarted._connected = True
+    restarted.update_advertisement(SimpleNamespace(name="AA:BB:CC:DD:EE:FF", rssi=-54))
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert persisted == {"identity": stored_identity, "conflict": True}
+    assert restarted.snapshot().model_identity == stored_identity
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    restarted.update_advertisement(SimpleNamespace(name=stored_identity, rssi=-54))
+    assert persisted == {"identity": stored_identity, "conflict": False}
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.parametrize("contradiction", ["AP S300", "AP S500", "AP S700"])
+def test_identity_conflict_persists_across_restart_and_recovers_safely(
+    contradiction: str,
+    notification_builder,
+) -> None:
+    persisted = {"identity": "R600", "conflict": False}
+    first_client, _ = _connected_client()
+    first_client._model_identity_callback = lambda identity: persisted.update(
+        identity=identity
+    )
+    first_client._identity_conflict_callback = lambda conflicted: persisted.update(
+        conflict=conflicted
+    )
+
+    first_client.update_advertisement(SimpleNamespace(name=contradiction, rssi=-55))
+
+    assert first_client.snapshot().model_identity == "R600"
+    assert persisted == {"identity": "R600", "conflict": True}
+    assert not first_client._runtime_model_support().capabilities.write_output_controls
+
+    restarted = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=contradiction,
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    restarted._connected = True
+    restarted._active_session_generation = 2
+    restarted.update_advertisement(SimpleNamespace(name="AA:BB:CC:DD:EE:FF", rssi=-54))
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert restarted._identity_conflicted
+    restarted.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-54))
+
+    assert persisted == {"identity": "R600", "conflict": False}
+    assert restarted.snapshot().model_identity == "R600"
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
+def test_new_rejected_observation_invalidates_pending_supported_identity(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+
+    client.update_advertisement(SimpleNamespace(name="AP S500", rssi=-55))
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    client.update_advertisement(SimpleNamespace(name="AP S500", rssi=-55))
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    support = client._runtime_model_support()
+    assert not support.capabilities.write_output_controls
+    assert not support.capabilities.write_settings_controls
+
+
+def test_preconnection_identity_candidate_binds_to_next_gatt_session(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._observe_model_identity("AP R600 V2.0")
+
+    generation = client._activate_session_generation()
+
+    assert client._pending_model_identity_generation == generation
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == "R600"
+    assert not client.snapshot().identity_conflicted
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_pending_identity_from_previous_gatt_session_is_discarded(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._session_generation_counter = 1
+    client._active_session_generation = 1
+    client._pending_model_identity = "R600"
+    client._pending_model_identity_generation = 1
+
+    client._activate_session_generation()
+
+    assert client._pending_model_identity is None
+    assert client._pending_model_identity_generation is None
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+
+
+def test_pending_identity_is_not_validated_by_a_different_gatt_generation(
+    notification_builder,
+) -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        identity_conflicted=True,
+        options=ConnectionOptions(),
+    )
+    client._active_session_generation = 2
+    client._pending_model_identity = "R600"
+    client._pending_model_identity_generation = 1
+    client._connected = True
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    assert not client._runtime_model_support().capabilities.write_settings_controls
+
+
+@pytest.mark.parametrize("rejected_identity", ["AP S500", "AP S700"])
+def test_first_rejected_identity_stays_recoverable_after_restart(
+    rejected_identity: str,
+    notification_builder,
+) -> None:
+    persisted = {"identity": "", "conflict": False}
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+
+    client.update_advertisement(SimpleNamespace(name=rejected_identity, rssi=-55))
+    client.update_advertisement(SimpleNamespace(name=rejected_identity, rssi=-55))
+
+    assert persisted == {"identity": "", "conflict": True}
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    restarted = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    restarted._connected = True
+    restarted.update_advertisement(SimpleNamespace(name="AA:BB:CC:DD:EE:FF", rssi=-54))
+    assert restarted.snapshot().model_identity == ""
+    assert restarted.snapshot().identity_conflicted
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    restarted.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-54))
+
+    assert persisted == {"identity": "R600", "conflict": False}
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted.snapshot().identity_conflicted
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
+def test_first_rejected_identity_latches_without_persistence_callbacks() -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="ALLPOWERS power station",
+        options=ConnectionOptions(),
+    )
+
+    client.update_advertisement(SimpleNamespace(name="AP S500", rssi=-55))
+
+    assert client.snapshot().model_identity == ""
+    assert client.snapshot().identity_conflicted
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_missing_advertisement_does_not_promote_display_name() -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="",
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name=None, rssi=None))
+
+    assert client.snapshot().advertised_name == "AP R600 V2.0"
+    assert client.snapshot().model_identity == ""
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_identity_only_advertisement_emits_update_and_persists_once() -> None:
+    persisted: list[str] = []
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="",
+        model_identity_callback=persisted.append,
+        options=ConnectionOptions(),
+    )
+    updates: list[None] = []
+    client._connected = True
+    client._rssi = -55
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+    client.set_update_callback(lambda: updates.append(None))
+    service_info = SimpleNamespace(name="AP R600 V2.0", rssi=-55)
+
+    client.update_advertisement(service_info)
+    client.update_advertisement(service_info)
+
+    assert persisted == ["R600"]
+    assert len(updates) == 1
+    assert client.snapshot().model_identity == "R600"
+
+
+def test_equivalent_r600_names_share_identity_and_persist_once() -> None:
+    persisted: list[str] = []
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="Unknown",
+        device_identity="",
+        model_identity_callback=persisted.append,
+        options=ConnectionOptions(),
+    )
+    updates: list[None] = []
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+    client.set_update_callback(lambda: updates.append(None))
+
+    for name in (
+        "AP R600 V2.0",
+        "ALLPOWERS R600",
+        "allpowers r600",
+        "allpowers r600",
+    ):
+        client.update_advertisement(SimpleNamespace(name=name, rssi=-55))
+
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
+    assert client.snapshot().advertised_name == "allpowers r600"
+    assert len(updates) == 3
+
+
+@pytest.mark.asyncio
+async def test_cached_revision_cannot_authorize_after_reconnect_before_settings(
+    notification_builder,
+) -> None:
+    client, fake = _connected_client()
+    client._session_hardware_revision = ("0.3", 0x03)
+    client._activate_session_generation()
+    assert client._session_hardware_revision is None
+    client._settings_monotonic = None
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_ac(True)
+    assert not fake.writes
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+    await client._disconnect_client()
+    assert client._session_hardware_revision is None
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_verified_revision_survives_twenty_minutes_of_status_only_telemetry(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    now = 100.0
+    client._loop_time = lambda: now  # type: ignore[method-assign]
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    for _ in range(61):
+        now += 20
+        client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+
+    assert now - client._settings_monotonic > 20 * 60
+    assert not client._settings_are_fresh()
+    assert client._runtime_model_support().capabilities.write_output_controls
+    assert client._safe_output_snapshot() == (False, False, True)
+    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        client._safe_settings_snapshot()
 
 
 def test_update_advertisement_debounces_rssi_only_changes() -> None:

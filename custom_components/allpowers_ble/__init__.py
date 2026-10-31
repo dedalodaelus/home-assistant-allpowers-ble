@@ -15,8 +15,15 @@ if TYPE_CHECKING:
 from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
+    CONF_DEVICE_IDENTITY,
+    CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
     DOMAIN,
+)
+from .model_support import (
+    canonical_model_identity,
+    has_specific_model_identity,
+    identify_model,
 )
 from .options import ConnectionOptions
 from .repairs import ISSUE_INVALID_MIGRATION, AllpowersRepairsManager
@@ -31,6 +38,13 @@ PLATFORMS: tuple[Platform, ...] = (
     Platform.BUTTON,
     Platform.NUMBER,
 )
+
+
+def _migrated_identity_from_display_name(name: str) -> str:
+    """Trust only specific legacy names from protocol families not rejected here."""
+    if has_specific_model_identity(name) and identify_model(name).supported:
+        return name.strip()
+    return ""
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -> bool:
@@ -54,6 +68,28 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
         _delete_migration_issue(hass, entry)
         return True
 
+    if entry.version == CONFIG_ENTRY_VERSION and entry.minor_version == 1:
+        migrated_data = dict(entry.data)
+        stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
+        stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
+        migrated_data[CONF_DEVICE_IDENTITY] = _migrated_identity_from_display_name(
+            stored_name
+        )
+        hass.config_entries.async_update_entry(
+            entry,
+            data=migrated_data,
+            version=CONFIG_ENTRY_VERSION,
+            minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        )
+        _LOGGER.info(
+            "Migrated config entry %s from version 1.1 to %s.%s",
+            entry.entry_id,
+            CONFIG_ENTRY_VERSION,
+            CONFIG_ENTRY_MINOR_VERSION,
+        )
+        _delete_migration_issue(hass, entry)
+        return True
+
     if entry.version == 1 and entry.minor_version == 0:
         try:
             migrated_options = ConnectionOptions.from_mapping(entry.options).as_dict()
@@ -70,7 +106,16 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
         if CONF_ADDRESS in migrated_data:
             migrated_data[CONF_ADDRESS] = str(migrated_data[CONF_ADDRESS]).upper()
         if CONF_DEVICE_NAME in migrated_data:
-            migrated_data[CONF_DEVICE_NAME] = str(migrated_data[CONF_DEVICE_NAME])
+            migrated_data[CONF_DEVICE_NAME] = (
+                str(migrated_data[CONF_DEVICE_NAME])
+                if isinstance(migrated_data[CONF_DEVICE_NAME], str)
+                else ""
+            )
+        stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
+        stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
+        migrated_data[CONF_DEVICE_IDENTITY] = _migrated_identity_from_display_name(
+            stored_name
+        )
 
         hass.config_entries.async_update_entry(
             entry,
@@ -111,6 +156,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
 
     address = str(entry.data[CONF_ADDRESS]).upper()
     options = ConnectionOptions.from_mapping(entry.options)
+    stored_name = entry.data.get(CONF_DEVICE_NAME)
+    stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
+    stored_identity = stored_identity if isinstance(stored_identity, str) else ""
+    stored_model_identity = canonical_model_identity(stored_identity)
+    rejected_stored_identity = bool(
+        stored_model_identity and not identify_model(stored_model_identity).supported
+    )
+
+    def _persist_model_identity(identity: str) -> None:
+        if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
+            return
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+        )
+
+    def _persist_identity_conflict(conflicted: bool) -> None:
+        if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
+            return
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+        )
+
+    if rejected_stored_identity:
+        _persist_identity_conflict(True)
+
     initial_device = bluetooth.async_ble_device_from_address(
         hass, address, connectable=True
     )
@@ -120,7 +192,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     client = AllpowersBLEClient(
         hass=hass,
         address=address,
-        advertised_name=str(entry.data.get(CONF_DEVICE_NAME, entry.title)),
+        advertised_name=str(stored_name or entry.title),
+        device_identity=stored_identity,
+        identity_conflicted=bool(
+            entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+            or rejected_stored_identity
+        ),
+        model_identity_callback=_persist_model_identity,
+        identity_conflict_callback=_persist_identity_conflict,
         options=options,
     )
     coordinator = AllpowersCoordinator(hass, entry, client)
