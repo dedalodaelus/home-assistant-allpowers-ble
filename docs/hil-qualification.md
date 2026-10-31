@@ -3,6 +3,13 @@
 This runbook explains how to execute and document real hardware qualification for
 verified profiles.
 
+The runtime `verified` classification is a software model/revision decision, not a
+claim that physical qualification is complete. Track that separately in the
+qualification matrix, and leave routes, scenarios, or write capabilities pending
+until their required evidence is captured. For example, the current VOLIX P1800
+report covers one unit running firmware `0xF1`; it does not identify a Bluetooth
+route or establish results for the required scenario and write-capability set.
+
 ## Scope
 
 Use this process when you need to:
@@ -116,6 +123,10 @@ The validator checks:
 - fixture file existence;
 - stale evidence in require-pass mode;
 - redaction failures such as raw Bluetooth MAC addresses.
+
+The default command validates structure and privacy while allowing `pending`
+results. It is not a hardware qualification pass. Use `--require-pass` to reject
+pending or failed results for all required routes, scenarios, and capabilities.
 
 ## 6. Privacy and publication rules
 

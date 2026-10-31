@@ -23,9 +23,11 @@ No utiliza la nube del fabricante, no accede directamente a BlueZ y no necesita 
 componente ESPHome específico para la estación.
 
 > [!IMPORTANT]
-> La **ALLPOWERS R600** es el objetivo verificado. Un nombre parecido no demuestra
-> compatibilidad. Antes de crear la entrada, la integración comprueba activamente
-> el servicio GATT, las características y una trama de estado con checksum válido.
+> El código reconoce identidades canónicas **ALLPOWERS R600** y **VOLIX P1800**
+> con revisión de hardware `0.3` (`raw_hardware_version=0x03`). La coincidencia
+> amplia de discovery no establece la identidad. La clasificación de código es
+> distinta de la cualificación HIL física: la única VOLIX reportada usó firmware
+> `0xF1` y la cualificación completa sigue pendiente.
 
 ## Funciones principales
 
@@ -43,7 +45,10 @@ componente ESPHome específico para la estación.
 
 | Modelo o anuncio | Estado | Observaciones |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) con firma de revisión verificada (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verificado | Objetivo principal de desarrollo y protocolo con controles de escritura habilitados. |
+| Identidad canónica R600 reconocida por la integración con firma de revisión (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Perfil de código verificado; HIL pendiente | Objetivo principal de desarrollo y protocolo; la cualificación física sigue pendiente. |
+| Candidato R600 detectado con identidad no reconocida (por ejemplo, `R6000` o `AP R1500`) | Experimental de solo lectura | La coincidencia amplia de discovery por sí sola no concede identidad verificada ni capacidades de escritura. |
+| Identidad canónica VOLIX P1800 con firma de revisión (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Perfil de código verificado; HIL pendiente | Utiliza el perfil de protocolo R600. El PR #183 reporta una unidad con firmware `0xF1`; otras versiones no están cualificadas físicamente, pero el firmware no es una lista de autorización en tiempo de ejecución. |
+| Candidato VOLIX P1800 detectado con identidad o revisión no reconocida | Experimental de solo lectura | La coincidencia de discovery por sí sola no concede identidad verificada ni capacidades de escritura. |
 | AP S300 y unidades similares `AP S*` | Experimental de solo lectura | Solo se aceptan tras una prueba activa GATT y de protocolo. Se exponen entidades de telemetría, pero no controles de escritura. |
 | AP S500 / AP S700 V2 | Rechazado | Utilizan una revisión de protocolo diferente. |
 | Anuncio genérico `ALLPOWERS*` o servicio FFF0 | Experimental de solo lectura | La configuración continúa únicamente si la validación de protocolo termina correctamente. Se expone telemetría, pero no controles de escritura. |

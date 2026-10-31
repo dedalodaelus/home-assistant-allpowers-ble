@@ -32,6 +32,7 @@ decision date.
 | [0014](0014-apply-runtime-options-without-reloading-the-entry.md) | Accepted | 2026-07-26 | Apply runtime options without reloading the config entry. |
 | [0015](0015-redact-device-identifiers-from-diagnostics.md) | Accepted | 2026-07-26 | Redact device identifiers from exported diagnostics. |
 | [0016](0016-emit-persistent-repairs-only-for-actionable-failures.md) | Accepted | 2026-07-28 | Emit persistent Repairs only for actionable failures. |
+| [0017](0017-reconcile-hil-qualification-with-write-capability-policy.md) | Proposed | 2026-10-31 | Reconcile HIL qualification requirements with write-capable code profiles. |
 
 ## Relationship map
 
@@ -54,6 +55,7 @@ flowchart TB
     A14[0014 Live option application]
     A15[0015 Diagnostic redaction]
     A16[0016 Persistent actionable Repairs]
+    A17[0017 HIL and write-capability policy gap, proposed]
 
     A0 --> A1
     A0 --> A5
@@ -78,6 +80,7 @@ flowchart TB
     A13 --> A16
     A14 --> A16
     A15 --> A16
+    A8 --> A17
 ```
 
 ## Governance
