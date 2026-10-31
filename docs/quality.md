@@ -19,7 +19,7 @@ marked as `Blocked` with an issue reference, or `N/A` with an explicit rationale
 | IQS-02 rule-by-rule quality contract is maintained | This section exists with measurable criteria, evidence links, and explicit status per criterion | [Quality contract](#10-readiness-contract), [Repository validator](../scripts/validate_repository.py) | Done | None |
 | IQS-03 lifecycle, reconfigure, and repairs behavior is regression-tested | CI executes lifecycle, config-flow, and repairs tests and enforces coverage thresholds | [Lifecycle tests](../tests/homeassistant/test_lifecycle_runtime.py), [Config flow tests](../tests/test_config_flow.py), [Repairs tests](../tests/test_repairs.py), [CI workflow](../.github/workflows/ci.yml) | Done | None |
 | IQS-04 diagnostics redaction and repository safety checks are enforced | Diagnostics tests and repository checks verify redaction, required files, metadata, and static-analysis contracts | [Diagnostics tests](../tests/test_diagnostics.py), [Repository validator](../scripts/validate_repository.py) | Done | None |
-| IQS-05 hardware qualification evidence exists for verified revisions | Qualification matrix and sanitized fixtures are present and validated in CI | [Qualification matrix](../tests/hil/qualification_matrix.json), [HIL runbook](hil-qualification.md), [HIL validator](../scripts/validate_hil_qualification.py) | Done | None |
+| IQS-05 HIL qualification status and evidence scope are tracked for every verified code profile | Matrix records routes, scenarios, write capabilities, evidence scope, and pending results without implying completion | [Qualification matrix](../tests/hil/qualification_matrix.json), [HIL runbook](hil-qualification.md), [HIL validator](../scripts/validate_hil_qualification.py) | Done | None |
 | IQS-06 stable promotion is blocked until release blockers are cleared | Stable milestone close requires zero open `release-blocker` issues and all criteria marked `Done` or justified `N/A` | [Release checklist](release-checklist.md), [Merge gate workflow](../.github/workflows/merge-gate.yml), [Issue #55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55) | Done | None |
 | IQS-07 Home Assistant Core maintainership requirement | Not applicable to this repository because it is intentionally distributed as a custom integration through HACS/manual install | [README project status](../README.md#project-status), [Roadmap quality flow](roadmap.md#release-and-quality-flow) | N/A | Not applicable by scope |
 
@@ -106,7 +106,9 @@ Hardware qualification evidence is tracked in
 `tests/hil/qualification_matrix.json` with sanitized captures under
 `tests/hil/fixtures/`. CI validates schema and redaction via
 `python scripts/validate_hil_qualification.py` so fixture regressions are visible
-even when hardware is not attached.
+even when hardware is not attached. The default validator accepts `pending` results
+and does not establish physical qualification; `--require-pass` is a separate
+strict check.
 
 The operational procedure for collecting real-device evidence is documented in
 `docs/hil-qualification.md`.
@@ -132,6 +134,14 @@ Critical sequence scenarios include:
 - independent clients for separate config entries.
 
 Automated tests cannot prove radio behavior or command safety on an untested
-hardware revision. A model remains experimental until hardware-in-the-loop results
-cover telemetry, each writable control, reconnects, proxy failover, and prolonged
-operation.
+hardware revision. Software code-profile classification and physical HIL
+qualification are separate. On `devel`, R600 and canonical VOLIX P1800 hardware
+revision 0.3 receive write-capable code profiles while the required route,
+scenario, and write-capability results in the matrix remain pending. This is an
+unresolved conformance gap with accepted [ADR 0008](architecture/decisions/0008-authorize-writes-with-verified-capabilities-and-semantic-state.md),
+whose fitness functions require HIL validation before a profile gains write
+capabilities. No exception is accepted by this documentation. Proposed [ADR
+0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
+tracks the policy resolution; until a decision is accepted, ADR 0008 remains
+unchanged and authoritative. Do not describe pending profiles as physically
+HIL-qualified.

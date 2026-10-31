@@ -204,14 +204,20 @@ See [Adding models](adding-models.md).
 
 ### Verified profiles
 
-A device is marked as *verified* when it meets all of the following:
+A device can receive a verified code profile only when all of the following hold:
 
-1. Advertised name matches a known hardware family pattern.
-2. Active GATT probe confirms the expected service UUID, notification, and write characteristics.
-3. The device returns a valid status frame that passes header, length, checksum, and payload validation.
-4. The hardware revision signature (for example `hardware_version=0.3`, `raw_hardware_version=0x03`) matches a known verified revision.
+1. A canonical family identity is recognized from the setup advertisement or was established earlier and persisted; broad discovery-name matching alone is insufficient.
+2. Initial setup completes an active GATT probe for the expected service UUID, notification and write characteristics, and a valid status frame.
+3. Settings telemetry from the current GATT session reports a hardware revision signature (for example, `hardware_version=0.3`, `raw_hardware_version=0x03`) that matches a supported profile.
+4. No unresolved identity conflict is active.
 
 Only verified profiles are permitted to accept **output and settings write commands**. Verified devices can issue output control and settings updates to change power-station behavior.
+
+The latest advertisement does not have to repeat a persisted canonical identity:
+generic or missing names do not erase it. A conflicting specific model identity
+blocks writable capabilities until a later identity observation and current-session
+settings telemetry resolve the conflict. Cached settings from an earlier GATT
+session cannot satisfy the revision check.
 
 At runtime, the BLE client re-evaluates revision-aware profile capabilities for
 every write inside the operation lock. Output, settings, and settings-keepalive
@@ -240,6 +246,12 @@ The protocol provides no cryptographic authentication. Write authorization depen
 3. **Semantic constraints**: Each verified profile has documented constraints on valid state transitions and flag combinations (e.g., unknown status bits trigger write rejection).
 
 Write access is not determined by advertised name or service discovery alone. A device that advertises `ALLPOWERS R600` but has an unverified hardware revision remains read-only.
+
+Firmware is not a runtime authorization input in the current implementation; there
+is no firmware-version allowlist. The reported VOLIX P1800 evidence is limited to
+one physical unit running firmware `0xF1`. Other firmware versions lack that
+physical qualification evidence, but are not automatically read-only when the
+canonical identity and current-session hardware revision match.
 
 ### Capability matrix
 

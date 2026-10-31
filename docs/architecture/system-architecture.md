@@ -334,17 +334,22 @@ flowchart TD
     CAND --> PROBE
     PROBE --> PROFILE
     PROFILE -->|recognized R600 or VOLIX P1800 identity, hw 0.3, raw 0x03| VERIFIED
-    PROFILE -->|unverified revision or VOLIX candidate with unrecognized identity, AP S, generic| EXP
+    PROFILE -->|unrecognized R600/VOLIX identity or revision, AP S, generic| EXP
     PROFILE -->|known incompatible S500 or S700 family| REJECT
 ```
 
 Capability flags are data, not scattered name checks. Only recognized R600 and
 VOLIX P1800 identities with the hardware 0.3 / raw 0x03 signature share the
 verified code profile and can read telemetry and use output/settings writes.
-Broad discovery matching is only a candidate filter: a VOLIX advertisement with
-an unrecognized canonical identity, or an unverified/missing hardware revision,
-remains telemetry-only. This software classification is distinct from physical
-HIL qualification; see the qualification matrix for route and control evidence.
+Broad discovery matching is only a candidate filter: R600 names such as `R6000`
+or `AP R1500`, and VOLIX names such as `VOLIX P1800-ABCD`, may be discovered
+without matching a canonical identity. Unrecognized identities and
+unverified/missing hardware revisions remain telemetry-only. Persisted canonical
+identity survives generic or missing advertisements, while a conflicting specific
+identity blocks writes until resolved using a later identity observation and
+current-session settings telemetry. This software classification is distinct from
+physical HIL qualification; see the qualification matrix for route and control
+evidence.
 Known incompatible families are rejected explicitly before broad name or
 service-UUID matches.
 

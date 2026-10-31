@@ -24,7 +24,8 @@ results and does not qualify hardware.
 
 | Model or advertised family | Level | Setup behavior |
 |---|---|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
+| Canonical R600 identity recognized by the integration with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
+| R600 discovery candidate with an unrecognized identity (for example, `R6000` or `AP R1500`) | Experimental | A discovery-prefix match is not canonical identity verification. Accepted candidates remain telemetry-only; writable entities are not created. |
 | Canonical VOLIX P1800 identity with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Accepted after active probe using the R600 protocol profile and the same runtime write safety checks. PR #183 reports one physical unit with firmware `0xF1`; route-specific and full HIL qualification remain pending. |
 | VOLIX P1800 discovery candidate with an unrecognized identity or missing/unverified revision | Experimental | A broad discovery match is not identity verification. Accepted candidates remain telemetry-only; writable entities are not created. |
 | AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. Telemetry only; writable entities are not created. |
@@ -35,16 +36,20 @@ results and does not qualify hardware.
 
 ## Why advertisement matching is broad
 
-Bluetooth advertisements can vary by firmware and proxy. The manifest includes
-candidate local-name patterns (including `VOLIX P1800*`) and the FFF0 service UUID
-so Home Assistant can route discovery to the config flow. This is only the first
-filter; for example, `VOLIX P1800-ABCD` can match discovery without establishing a
-canonical VOLIX identity.
+Bluetooth advertisements can vary by firmware and proxy. Broad discovery filters
+such as `R600*`, `AP R*`, and `VOLIX P1800*`, together with the FFF0 service UUID,
+route candidates to the config flow. This is only the first filter: names such as
+`R6000`, `AP R1500`, and `VOLIX P1800-ABCD` can match discovery without establishing
+a canonical model identity.
 
-Model identity is then resolved with stricter canonical-name matching. VOLIX P1800
-write capabilities require a recognized canonical identity and the exact verified
-hardware signature. Unrecognized VOLIX names and other or missing revisions stay
-experimental/read-only, even if they match the discovery prefix or pass the probe.
+Model identity is resolved separately with stricter canonical-name matching.
+Writable R600 and VOLIX P1800 profiles require a recognized canonical identity and
+the exact verified hardware signature. Unrecognized identities and other or
+missing revisions stay experimental/read-only, even if they match a discovery
+prefix or pass the probe. A persisted canonical identity can survive generic or
+missing advertisements; a conflicting specific identity blocks writes until the
+conflict is resolved using a later identity observation and current-session
+settings telemetry.
 
 The final protocol filter is the active probe, which requires:
 
@@ -155,14 +160,22 @@ current protocol evidence does not provide a verified battery-flow field.
 The BLE protocol used by ALLPOWERS devices does not provide cryptographic device
 authentication. Write authorization therefore depends on:
 
-1. **Hardware identity verification**: The exact hardware revision and firmware
-   must be confirmed to match the integration's tested and documented capability
-   profile.
+1. **Hardware identity verification**: The canonical model identity and exact
+  hardware revision must match a supported code profile. Firmware version is
+  recorded as qualification evidence, but the current runtime authorization code
+  does not enforce a firmware allowlist.
 2. **Protocol stability**: Flag bits, reserved fields, and payload structure must
    be fully understood to perform safe read-modify-write operations without
    corrupting device state.
 3. **Semantic validation**: Detected inconsistencies in state (e.g., unknown flag
    bits in status) trigger write rejection rather than guessing at safe behavior.
+
+For VOLIX P1800, the only reported physical evidence is one unit running firmware
+`0xF1` (PR #183). Other firmware versions are not physically qualified by that
+report, but they are not automatically read-only: the current code may grant the
+write-capable profile when canonical identity and the current-session hardware
+revision match. This is an evidence-scope limitation, not a firmware authorization
+gate.
 
 ### Read-only mode for experimental devices
 

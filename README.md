@@ -25,11 +25,11 @@ There is no vendor cloud, no direct BlueZ access, and no ESPHome component is
 required on the power station side.
 
 > [!IMPORTANT]
-> The code recognizes the **ALLPOWERS R600** and canonical **VOLIX P1800** as
-> hardware revision `0.3` (`raw_hardware_version=0x03`) profiles. Similar names do
-> not prove identity or protocol compatibility. This software classification is
-> separate from physical HIL qualification; the single reported VOLIX unit used
-> firmware `0xF1`, and full qualification remains pending.
+> The code recognizes canonical **ALLPOWERS R600** and **VOLIX P1800** identities
+> with hardware revision `0.3` (`raw_hardware_version=0x03`). Broad discovery
+> matches do not establish identity. Code-profile classification is separate
+> from physical HIL qualification; the single reported VOLIX unit used firmware
+> `0xF1`, and full qualification remains pending.
 
 ## Highlights
 
@@ -49,8 +49,9 @@ required on the power station side.
 
 | Model / advertisement | Status | Notes |
 |---|---:|---|
-| ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Primary development and protocol target; physical qualification remains pending. |
-| Canonical VOLIX P1800 identity with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Uses the R600 protocol profile. PR #183 reports one unit on firmware `0xF1`; other firmware and full HIL qualification are unverified. |
+| Canonical R600 identity recognized by the integration with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Primary development and protocol target; physical qualification remains pending. |
+| R600 discovery candidate with an unrecognized identity (for example, `R6000` or `AP R1500`) | Experimental read-only | Broad discovery matching alone does not grant verified identity or writable capabilities. |
+| Canonical VOLIX P1800 identity with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Uses the R600 protocol profile. PR #183 reports one unit on firmware `0xF1`; other firmware is not physically qualified, but firmware is not a runtime allowlist. |
 | VOLIX P1800 discovery candidate with unrecognized identity or revision | Experimental read-only | Discovery matching alone does not grant verified identity or writable capabilities. |
 | AP S300 and similar `AP S*` units | Experimental read-only | Accepted only after an active GATT and protocol probe. Telemetry entities are exposed, but writable controls remain disabled. |
 | AP S500 / AP S700 V2 family | Rejected | Known to use a different protocol revision. |
