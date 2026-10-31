@@ -124,7 +124,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = self._probe_error or "unknown"
 
         self._set_confirm_only()
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="confirm",
             data_schema=vol.Schema({}),
             errors=errors,
@@ -153,7 +153,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
 
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="user",
             data_schema=vol.Schema(
                 {
@@ -257,7 +257,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         reload_even_if_entry_is_unchanged=False,
                     )
 
-        return self.async_show_form(
+        return cast(Any, self.async_show_form)(
             step_id="reconfigure",
             data_schema=vol.Schema(
                 {
@@ -442,11 +442,12 @@ class AllpowersOptionsFlow(OptionsFlow):
                 return self.async_create_entry(title="", data=options.as_dict())
 
         current = ConnectionOptions.from_mapping(self.config_entry.options)
-        return self.async_show_form(
+        section = cast(Any, data_entry_flow.section)
+        return cast(Any, self.async_show_form)(
             step_id="init",
             data_schema=vol.Schema(
                 {
-                    vol.Required(SECTION_CONNECTION_HEALTH): data_entry_flow.section(
+                    vol.Required(SECTION_CONNECTION_HEALTH): section(
                         vol.Schema(
                             {
                                 vol.Required(
@@ -482,7 +483,7 @@ class AllpowersOptionsFlow(OptionsFlow):
                             }
                         ),
                     ),
-                    vol.Required(SECTION_ADVANCED_TIMING): data_entry_flow.section(
+                    vol.Required(SECTION_ADVANCED_TIMING): section(
                         vol.Schema(
                             {
                                 vol.Required(
@@ -523,9 +524,7 @@ class AllpowersOptionsFlow(OptionsFlow):
                         ),
                         {"collapsed": True},
                     ),
-                    vol.Required(
-                        SECTION_EXPERIMENTAL_CONTROLS
-                    ): data_entry_flow.section(
+                    vol.Required(SECTION_EXPERIMENTAL_CONTROLS): section(
                         vol.Schema(
                             {
                                 vol.Required(
