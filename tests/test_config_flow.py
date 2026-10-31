@@ -854,6 +854,50 @@ async def test_reconfigure_same_address_reuses_active_session(
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_synthetic_current_device_does_not_promote_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = ConfigEntry(
+        title="AP R600 V2.0",
+        data={"address": ADDRESS, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+        unique_id=ADDRESS,
+    )
+
+    class _RuntimeData:
+        class coordinator:
+            status_is_fresh = True
+
+    entry.runtime_data = _RuntimeData()
+    flow = new_reconfigure_flow(entry)
+
+    async def request_scan(hass: Any) -> None:
+        del hass
+
+    async def probe(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        raise AssertionError("the reusable active session should skip probing")
+
+    monkeypatch.setattr(
+        config_flow.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        config_flow.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [],
+    )
+    monkeypatch.setattr(config_flow, "async_probe_device", probe)
+
+    result = await flow.async_step_reconfigure(
+        {"address": ADDRESS, "device_name": "AP R600 V2.0"}
+    )
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert entry.data["device_name"] == "AP R600 V2.0"
+    assert entry.data["device_identity"] == ""
+
+
+@pytest.mark.asyncio
 async def test_reconfigure_same_address_with_stale_session_runs_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

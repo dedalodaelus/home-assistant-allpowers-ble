@@ -72,6 +72,7 @@ def _connected_client(options: ConnectionOptions | None = None):
     client._connected = True
     client._active_session_generation = 1
     client._settings = _settings()
+    client._settings_monotonic = monotonic()
     client._schedule_status_refresh = lambda: None
     return client, fake
 
@@ -562,6 +563,27 @@ def test_snapshot_guards_reject_disconnected_state() -> None:
     with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
         client._safe_settings_snapshot()
 
+    client._connected = True
+    client._settings_monotonic = None
+    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        client._safe_settings_snapshot()
+
+
+def test_settings_revision_is_not_fresh_outside_current_gatt_session() -> None:
+    client, _ = _connected_client()
+    assert client._settings_are_fresh()
+
+    client._disconnect_event.set()
+    assert not client._settings_are_fresh()
+    client._disconnect_event.clear()
+
+    client._connected = False
+    assert not client._settings_are_fresh()
+    client._connected = True
+
+    client._settings_monotonic = monotonic() - client.options.settings_stale_timeout - 1
+    assert not client._settings_are_fresh()
+
 
 @pytest.mark.asyncio
 async def test_output_command_requires_fresh_status() -> None:
@@ -680,10 +702,12 @@ async def test_multiple_clients_keep_transactions_isolated(
 
 @pytest.mark.asyncio
 async def test_settings_command_requires_fresh_settings() -> None:
-    client, _ = _connected_client()
+    client, fake = _connected_client()
+    client._settings_monotonic = None
 
-    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+    with pytest.raises(client_module.StateUnavailableError):
         await client.async_set_eco(True)
+    assert not fake.writes
 
 
 @pytest.mark.asyncio
@@ -1243,7 +1267,9 @@ def test_restart_identity_survives_unreliable_advertisements(
         device_identity=model_identity,
         options=ConnectionOptions(),
     )
+    client._connected = True
     client._settings = _settings()
+    client._settings_monotonic = monotonic()
 
     client.update_advertisement(SimpleNamespace(name=advertised_name, rssi=-55))
 
@@ -1258,6 +1284,8 @@ async def test_non_identifying_device_name_notification_preserves_identity(
     notification_builder,
 ) -> None:
     client, _ = _connected_client()
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
     frame = notification_builder(0x35, b"Kitchen")
 
     client._notification_handler(FakeCharacteristic(), bytearray(frame))
@@ -1265,6 +1293,41 @@ async def test_non_identifying_device_name_notification_preserves_identity(
     support = client._runtime_model_support()
     assert support.verified
     assert support.profile == "r600-hw-0.3"
+    assert not persisted
+
+
+def test_identifying_device_name_notification_persists_identity(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    client._device_identity = ""
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+    frame = notification_builder(0x35, b"AP R600 V2.0")
+
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    assert persisted == ["AP R600 V2.0"]
+    assert client.snapshot().model_identity == "AP R600 V2.0"
+
+
+def test_model_identity_persistence_waits_for_current_session_settings(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    client._device_identity = ""
+    client._settings_monotonic = None
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+
+    client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-61))
+    assert client.snapshot().model_identity == "AP R600 V2.0"
+    assert not persisted
+
+    frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(frame))
+
+    assert persisted == ["AP R600 V2.0"]
 
 
 @pytest.mark.parametrize(
@@ -1280,7 +1343,9 @@ def test_unverified_stored_identity_stays_read_only_until_valid_name(
         device_identity=stored_name,
         options=ConnectionOptions(),
     )
+    client._connected = True
     client._settings = _settings()
+    client._settings_monotonic = monotonic()
 
     assert not client._runtime_model_support().capabilities.write_output_controls
 
@@ -1299,12 +1364,80 @@ def test_contradictory_model_advertisement_is_read_only_until_resolved() -> None
         device_identity="AP R600 V2.0",
         options=ConnectionOptions(),
     )
+    client._connected = True
     client._settings = _settings()
+    client._settings_monotonic = monotonic()
 
     client.update_advertisement(SimpleNamespace(name="AP S300", rssi=-55))
     assert not client._runtime_model_support().capabilities.write_output_controls
 
     client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_missing_advertisement_does_not_promote_display_name() -> None:
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="",
+        options=ConnectionOptions(),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name=None, rssi=None))
+
+    assert client.snapshot().advertised_name == "AP R600 V2.0"
+    assert client.snapshot().model_identity == ""
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_identity_only_advertisement_emits_update_and_persists_once() -> None:
+    persisted: list[str] = []
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="AP R600 V2.0",
+        device_identity="",
+        model_identity_callback=persisted.append,
+        options=ConnectionOptions(),
+    )
+    updates: list[None] = []
+    client._connected = True
+    client._rssi = -55
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+    client.set_update_callback(lambda: updates.append(None))
+    service_info = SimpleNamespace(name="AP R600 V2.0", rssi=-55)
+
+    client.update_advertisement(service_info)
+    client.update_advertisement(service_info)
+
+    assert persisted == ["AP R600 V2.0"]
+    assert len(updates) == 1
+    assert client.snapshot().model_identity == "AP R600 V2.0"
+
+
+@pytest.mark.asyncio
+async def test_cached_revision_cannot_authorize_after_reconnect_before_settings(
+    notification_builder,
+) -> None:
+    client, fake = _connected_client()
+    client._settings_monotonic = None
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_ac(True)
+    assert not fake.writes
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
     assert client._runtime_model_support().capabilities.write_output_controls
 
 

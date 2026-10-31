@@ -58,7 +58,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
 
     if entry.version == CONFIG_ENTRY_VERSION and entry.minor_version == 1:
         migrated_data = dict(entry.data)
-        stored_name = str(migrated_data.get(CONF_DEVICE_NAME, ""))
+        stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
+        stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
         migrated_data[CONF_DEVICE_IDENTITY] = (
             stored_name.strip() if has_specific_model_identity(stored_name) else ""
         )
@@ -93,8 +94,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) 
         if CONF_ADDRESS in migrated_data:
             migrated_data[CONF_ADDRESS] = str(migrated_data[CONF_ADDRESS]).upper()
         if CONF_DEVICE_NAME in migrated_data:
-            migrated_data[CONF_DEVICE_NAME] = str(migrated_data[CONF_DEVICE_NAME])
-        stored_name = str(migrated_data.get(CONF_DEVICE_NAME, ""))
+            migrated_data[CONF_DEVICE_NAME] = (
+                str(migrated_data[CONF_DEVICE_NAME])
+                if isinstance(migrated_data[CONF_DEVICE_NAME], str)
+                else ""
+            )
+        stored_name_value = migrated_data.get(CONF_DEVICE_NAME)
+        stored_name = stored_name_value if isinstance(stored_name_value, str) else ""
         migrated_data[CONF_DEVICE_IDENTITY] = (
             stored_name.strip() if has_specific_model_identity(stored_name) else ""
         )
@@ -140,6 +146,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     options = ConnectionOptions.from_mapping(entry.options)
     stored_name = entry.data.get(CONF_DEVICE_NAME)
     stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
+    stored_identity = stored_identity if isinstance(stored_identity, str) else ""
+
+    def _persist_model_identity(identity: str) -> None:
+        if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
+            return
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+        )
+
     initial_device = bluetooth.async_ble_device_from_address(
         hass, address, connectable=True
     )
@@ -150,7 +166,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         hass=hass,
         address=address,
         advertised_name=str(stored_name or entry.title),
-        device_identity=str(stored_identity or ""),
+        device_identity=stored_identity,
+        model_identity_callback=_persist_model_identity,
         options=options,
     )
     coordinator = AllpowersCoordinator(hass, entry, client)

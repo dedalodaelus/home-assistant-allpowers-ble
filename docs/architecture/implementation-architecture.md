@@ -104,10 +104,20 @@ status request, and waits for a valid decoded status response.
 
 The reconfigure step follows the same active-probe contract before updating
 mutable entry fields (Bluetooth address and display name). Model identity is
-stored separately from the display name: a newly observed family can update it,
-while a placeholder advertisement on the same address preserves it. A changed
-address never inherits the previous device identity. Reconfigure updates the
-existing entry and aborts with success, rather than creating a new entry.
+stored separately from the editable display name: only a genuinely observed BLE
+family name can establish or replace it. A missing/generic advertisement or a
+synthetic current-address fallback preserves identity on the same address; a
+changed address never inherits the previous identity. Runtime observations are
+persisted only when identity changes, including conservative downgrades for
+contradictory families. Reconfigure updates the existing entry and aborts with
+success, rather than creating a new entry.
+
+Schema 1.2 migrates a legacy display name to model identity only when it contains
+a recognized family marker. Legacy storage cannot prove that such a name was not
+manually edited, so the migrated value alone grants no write capability. The
+client additionally requires a matching, fresh hardware-revision settings packet
+from the current GATT session; cached settings from a previous connection remain
+diagnostic-only until refreshed.
 
 ## Persistent connection state machine
 
@@ -173,6 +183,9 @@ tracks monotonic timestamps for status, settings, and the last valid packet.
 - Freshness transitions are emitted even when no new BLE notification arrives.
 - Cached data remains available to diagnostics, but cannot authorize writes after
   disconnect or expiry.
+- Revision-based model write capabilities require fresh settings from the active
+  GATT session; a status packet or cached settings from a prior session is not
+  sufficient.
 - Control platforms subscribe to coordinator updates and add newly authorized
   writable entities exactly once when revision-verified capabilities become
   available after setup.

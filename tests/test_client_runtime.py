@@ -407,6 +407,42 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_requires_current_session_settings_for_write_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    client = make_client()
+    client._settings_monotonic = monotonic()
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert client._settings is not None
+    assert client._settings_monotonic is None
+    assert fake.notification_callback is not None
+
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+    fake.notification_callback(FakeCharacteristic(), bytearray(status_frame))
+    assert not client._runtime_model_support().capabilities.write_output_controls
+    with pytest.raises(StateUnavailableError):
+        await client.async_set_ac(True)
+    assert fake.writes == [client_module.encode_status_request()]
+
+    settings_notification = notification_builder(
+        0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11))
+    )
+    fake.notification_callback(FakeCharacteristic(), bytearray(settings_notification))
+    assert client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
 async def test_connect_once_disconnects_when_gatt_validation_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -513,6 +549,8 @@ async def test_disconnect_waits_for_in_flight_write(
     client._active_session_generation = 1
     client._status = status(dc_enabled=False, ac_enabled=False, light_enabled=False)
     client._status_monotonic = monotonic()
+    client._settings = settings()
+    client._settings_monotonic = monotonic()
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
 
     write_task = asyncio.create_task(client.async_set_ac(True))
@@ -952,12 +990,9 @@ async def test_settings_status_only_cycles_renew_session_without_replaying_mutat
         assert client._settings_version == original_version
         assert waits[-1] is None
         assert fake.writes in ([], [original_frame])
-        expected_guard = (
-            "fresh settings"
-            if client._settings is not None
-            else "Unsupported settings keepalive"
-        )
-        with pytest.raises(StateUnavailableError, match=expected_guard):
+        with pytest.raises(
+            StateUnavailableError, match="Unsupported settings keepalive"
+        ):
             await client.async_send_settings_keepalive()
 
         old_handler = client._make_notification_handler(1, fake)

@@ -40,10 +40,12 @@ class StatefulFakeClient:
         advertised_name: str,
         device_identity: str,
         options: ConnectionOptions,
+        model_identity_callback: Callable[[str], None] | None = None,
     ) -> None:
         del hass
         self.address = address.upper()
         self.options = options
+        self.model_identity_callback = model_identity_callback
         self.callback: Callable[[], None] | None = None
         self.advertisements: list[Any] = []
         self.calls: list[tuple[str, Any]] = []
@@ -73,7 +75,14 @@ class StatefulFakeClient:
         advertised_name = service_info.name or self._snapshot.advertised_name
         model_identity = self._snapshot.model_identity
         if service_info.name and "R600" in service_info.name.upper():
-            model_identity = service_info.name
+            if service_info.name != model_identity:
+                model_identity = service_info.name
+            if (
+                model_identity == service_info.name
+                and service_info.name != self._snapshot.model_identity
+                and self.model_identity_callback is not None
+            ):
+                self.model_identity_callback(model_identity)
         self._snapshot = replace(
             self._snapshot,
             advertised_name=advertised_name,
@@ -280,8 +289,7 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
         title="Cabin Power",
         data={
             CONF_ADDRESS: address,
-            "device_name": "Station Patio",
-            "device_identity": "AP R600 V2.0",
+            "device_name": "AP R600 V2.0",
         },
         options=ConnectionOptions().as_dict(),
     )
@@ -292,10 +300,31 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
 
     first_client = entry.runtime_data.client
     first_callback, _ = bluetooth_callbacks[0]
+    first_client._rssi = -50
+    entry_updates: list[dict[str, Any]] = []
+    original_update_entry = hass.config_entries.async_update_entry
+
+    def track_update_entry(config_entry: Any, **kwargs: Any) -> None:
+        if "device_identity" in kwargs.get("data", {}):
+            entry_updates.append(dict(kwargs["data"]))
+        original_update_entry(config_entry, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update_entry)
+    first_callback(SimpleNamespace(name=None, rssi=-50), object())
+    assert first_client.snapshot().model_identity == ""
+    assert not first_client._runtime_model_support().capabilities.write_output_controls
+    first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    await hass.async_block_till_done()
+    assert first_client.snapshot().advertised_name == "AP R600 V2.0"
+    assert first_client.snapshot().model_identity == "AP R600 V2.0"
+    assert entry.data["device_identity"] == "AP R600 V2.0"
+    first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
+    assert len(entry_updates) == 1
+    assert first_client._runtime_model_support().capabilities.write_output_controls
+
     first_callback(SimpleNamespace(name=address, rssi=-50), object())
     assert first_client.snapshot().advertised_name == address
     assert first_client.snapshot().model_identity == "AP R600 V2.0"
-    assert first_client._runtime_model_support().capabilities.write_output_controls
 
     registry = er.async_get(hass)
     entity_ids = {
@@ -319,18 +348,34 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
         for key in ("ac_output", "dc_output", "light")
     )
 
-    reloaded_client._settings_monotonic = monotonic() - 1000
-    reloaded_client._status_monotonic = monotonic() - 1000
-    reloaded_client._emit_update()
+    reload_callback(SimpleNamespace(name="AP S300", rssi=-49), object())
+    await hass.async_block_till_done()
+    assert reloaded_client.snapshot().model_identity == "AP S300"
+    assert entry.data["device_identity"] == "AP S300"
+    assert (
+        not reloaded_client._runtime_model_support().capabilities.write_output_controls
+    )
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    contradictory_client = entry.runtime_data.client
+    contradictory_callback, _ = bluetooth_callbacks[0]
+    contradictory_callback(SimpleNamespace(name=address, rssi=-48), object())
+    assert contradictory_client.snapshot().model_identity == "AP S300"
+    assert not contradictory_client._runtime_model_support().capabilities.write_output_controls
+
+    contradictory_client._settings_monotonic = monotonic() - 1000
+    contradictory_client._status_monotonic = monotonic() - 1000
+    contradictory_client._emit_update()
     await hass.async_block_till_done()
     for entity_id in entity_ids.values():
         assert hass.states.get(entity_id).state == "unavailable"
 
-    reloaded_client._settings = None
-    reloaded_client._status = None
-    reloaded_client._settings_monotonic = None
-    reloaded_client._status_monotonic = None
-    reloaded_client._emit_update()
+    contradictory_client._settings = None
+    contradictory_client._status = None
+    contradictory_client._settings_monotonic = None
+    contradictory_client._status_monotonic = None
+    contradictory_client._emit_update()
     await hass.async_block_till_done()
     assert hass.states.get(entity_ids["ac_output"]).state == "unavailable"
 

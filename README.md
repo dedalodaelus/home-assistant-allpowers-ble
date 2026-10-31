@@ -114,8 +114,9 @@ it permanently to one proxy.
 This integration assumes a trusted local Home Assistant environment:
 
 - write commands are accepted only from Home Assistant users who can control entities;
-- capability checks use a persisted model identity established by setup, not an editable entry title or a later placeholder advertisement name;
-- writes additionally require fresh hardware-revision telemetry matching the verified profile;
+- capability checks use an observed BLE model identity stored separately from the editable display name and entry title; placeholders and synthetic reconfigure entries cannot establish or replace it;
+- legacy entries migrate only recognizable model-family names, but their history cannot prove that a family-looking display name was never edited; writes still require matching hardware-revision settings received in the current GATT session;
+- a later contradictory model-family observation is persisted as a conservative downgrade rather than being forgotten across restarts;
 - BLE proximity limits command reach, but nearby radio access is still part of the risk model;
 - ESPHome proxies are transport relays and must be managed like trusted local infrastructure;
 - there is no cloud credential boundary to rotate if local access is compromised.

@@ -34,6 +34,7 @@ class RepairFakeClient:
         address: str,
         advertised_name: str,
         device_identity: str,
+        model_identity_callback: Callable[[str], None] | None,
         options: ConnectionOptions,
     ) -> None:
         del hass

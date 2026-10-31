@@ -143,6 +143,7 @@ class AllpowersBLEClient:
         address: str,
         advertised_name: str,
         device_identity: str | None = None,
+        model_identity_callback: Callable[[str], None] | None = None,
         options: ConnectionOptions,
     ) -> None:
         self._hass = hass
@@ -153,6 +154,7 @@ class AllpowersBLEClient:
             if device_identity and has_specific_model_identity(device_identity)
             else ""
         )
+        self._model_identity_callback = model_identity_callback
         self._options = options
 
         self._client: BleakClient | None = None
@@ -225,13 +227,14 @@ class AllpowersBLEClient:
         self._advertisement_event.set()
 
         changed = False
+        observed_name = str(service_info.name or "").strip()
         name = str(service_info.name or self._advertised_name)
         rssi = int(service_info.rssi) if service_info.rssi is not None else None
         if name != self._advertised_name:
             self._advertised_name = name
             changed = True
-        if has_specific_model_identity(name):
-            self._device_identity = name
+        if observed_name and self._observe_model_identity(observed_name):
+            changed = True
         if rssi != self._rssi:
             self._rssi = rssi
             if self._should_publish_rssi(rssi):
@@ -616,12 +619,39 @@ class AllpowersBLEClient:
 
     def _runtime_model_support(self) -> ModelSupport:
         """Return model support resolved from the latest revision-aware snapshot."""
-        settings = self._settings
+        settings = self._settings if self._settings_are_fresh() else None
         return identify_model(
             self._device_identity,
             hardware_version=settings.hardware_version if settings else None,
             raw_hardware_version=settings.raw_hardware_version if settings else None,
         )
+
+    def _settings_are_fresh(self) -> bool:
+        return (
+            self._connected
+            and not self._disconnect_event.is_set()
+            and self._settings is not None
+            and self._settings_monotonic is not None
+            and self._loop_time() - self._settings_monotonic
+            <= self._options.settings_stale_timeout
+        )
+
+    def _observe_model_identity(self, name: str) -> bool:
+        """Record a specifically observed model family in the runtime snapshot."""
+        if not has_specific_model_identity(name) or name == self._device_identity:
+            return False
+        self._device_identity = name
+        self._persist_model_identity_if_validated()
+        return True
+
+    def _persist_model_identity_if_validated(self) -> None:
+        """Persist identity only after this GATT session supplied settings telemetry."""
+        if (
+            self._settings_are_fresh()
+            and has_specific_model_identity(self._device_identity)
+            and self._model_identity_callback is not None
+        ):
+            self._model_identity_callback(self._device_identity)
 
     def _require_output_write_capability_unlocked(self) -> None:
         """Reject output writes when the active model profile is read-only."""
@@ -969,6 +999,7 @@ class AllpowersBLEClient:
             elif isinstance(packet, SettingsData):
                 self._settings = packet
                 self._settings_monotonic = now
+                self._persist_model_identity_if_validated()
                 self._settings_version += 1
                 if (
                     self._settings_blocked_until_version is not None
@@ -1013,8 +1044,7 @@ class AllpowersBLEClient:
                     self._last_settings_keepalive_attempt_monotonic = None
             elif isinstance(packet, DeviceNameData) and packet.name:
                 self._advertised_name = packet.name
-                if has_specific_model_identity(packet.name):
-                    self._device_identity = packet.name
+                self._observe_model_identity(packet.name.strip())
 
         if packets or discarded or discarded_bytes:
             self._reported_freshness = self._freshness(self._loop_time())

@@ -104,8 +104,9 @@ permanente a uno concreto.
 Esta integración asume un entorno local de Home Assistant de confianza:
 
 - los comandos de escritura solo se aceptan desde usuarios con permisos sobre entidades;
-- las capacidades usan una identidad de modelo persistida durante la configuración, no el título editable de la entrada ni un nombre placeholder posterior;
-- además, las escrituras requieren telemetría reciente de una revisión de hardware que coincida con el perfil verificado;
+- las capacidades usan una identidad de modelo observada por BLE y guardada separada del nombre visible y del título editable; los placeholders y las entradas sintéticas de reconfiguración no pueden establecerla ni reemplazarla;
+- las entradas antiguas solo migran nombres que reconocen una familia, pero su historial no permite demostrar que ese nombre nunca se editó; las escrituras también requieren ajustes de revisión de hardware coincidentes recibidos en la sesión GATT actual;
+- una observación posterior de una familia contradictoria se guarda como degradación conservadora para no perderla al reiniciar;
 - la proximidad BLE limita el alcance, pero el acceso por radio cercano sigue siendo parte del riesgo;
 - los proxies ESPHome son relés de transporte y deben gestionarse como infraestructura local de confianza;
 - no existe una frontera de credenciales en nube que rotar si el acceso local se compromete.

@@ -183,6 +183,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
 
         await bluetooth.async_request_active_scan(self.hass)
         discovered_devices = self._discover_reconfigure_candidates(reconfigure_entry)
+        genuinely_discovered_addresses = set(discovered_devices)
         if current_address and current_address not in discovered_devices:
             # Keep the current route selectable when the device is temporarily silent.
             discovered_devices[current_address] = BluetoothServiceInfoBleak(
@@ -203,7 +204,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             address = str(user_input[CONF_ADDRESS]).upper()
             device_name = str(user_input[CONF_DEVICE_NAME]).strip() or current_name
-            was_discovered = address in discovered_devices
+            was_discovered = address in genuinely_discovered_addresses
 
             if self._is_address_in_use(reconfigure_entry, address):
                 errors[CONF_ADDRESS] = "already_configured"
@@ -239,8 +240,14 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                 elif self._probe_error is not None:
                     errors["base"] = self._probe_error
                 else:
-                    model_identity = str(
-                        reconfigure_entry.data.get(CONF_DEVICE_IDENTITY, "")
+                    stored_identity = reconfigure_entry.data.get(
+                        CONF_DEVICE_IDENTITY, ""
+                    )
+                    model_identity = (
+                        stored_identity
+                        if isinstance(stored_identity, str)
+                        and has_specific_model_identity(stored_identity)
+                        else ""
                     )
                     if address != current_address:
                         model_identity = ""

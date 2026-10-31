@@ -65,7 +65,9 @@ def _diagnostics_payload(
     device_name: str | None = None,
 ) -> dict[str, Any]:
     snapshot = entry.runtime_data.coordinator.data
-    settings = snapshot.settings
+    settings = (
+        snapshot.settings if entry.runtime_data.coordinator.settings_are_fresh else None
+    )
     support = identify_model(
         snapshot.model_identity,
         hardware_version=settings.hardware_version if settings else None,

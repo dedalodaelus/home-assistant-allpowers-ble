@@ -75,7 +75,7 @@ def raise_command_error(error: Exception) -> NoReturn:
 def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
     """Return revision-aware model support from the latest snapshot."""
     data = coordinator.data
-    settings = data.settings
+    settings = data.settings if coordinator.settings_are_fresh else None
     return identify_model(
         data.model_identity,
         hardware_version=settings.hardware_version if settings else None,

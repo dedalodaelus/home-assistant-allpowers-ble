@@ -151,6 +151,21 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     assert entry.runtime_data.coordinator is coordinator
     assert hass.config_entries.forwarded == [(entry, integration.PLATFORMS)]
 
+    identity_updates: list[dict[str, Any]] = []
+    original_update_entry = hass.config_entries.async_update_entry
+
+    def track_update_entry(config_entry: Any, **kwargs: Any) -> None:
+        if "device_identity" in kwargs.get("data", {}):
+            identity_updates.append(dict(kwargs["data"]))
+        original_update_entry(config_entry, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update_entry)
+    persist_identity = client.kwargs["model_identity_callback"]
+    persist_identity("AP R600 V2.0")
+    persist_identity("AP R600 V2.0")
+    assert entry.data["device_identity"] == "AP R600 V2.0"
+    assert len(identity_updates) == 1
+
     advertisement = SimpleNamespace(name="R600 updated", rssi=-50)
     registered["callback"](advertisement, object())
     assert client.advertisements == [advertisement]
@@ -289,6 +304,86 @@ async def test_migrate_entry_from_1_1_separates_identity_from_display_name(
     assert await integration.async_migrate_entry(hass, entry)
     assert entry.minor_version == 2
     assert entry.data["device_identity"] == expected_identity
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_ignores_malformed_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="AP R600",
+        data={"address": ADDRESS, "device_name": ["AP R600 V2.0"]},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+    updates: list[dict[str, Any]] = []
+    original_update = hass.config_entries.async_update_entry
+
+    def track_update(entry_to_update: Any, **kwargs: Any) -> None:
+        updates.append(dict(kwargs))
+        original_update(entry_to_update, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update)
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.data["device_identity"] == ""
+    assert len(updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_entry_from_1_1_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = ConfigEntry(
+        title="AP R600 V2.0",
+        data={"address": ADDRESS, "device_name": "AP R600 V2.0"},
+        options=ConnectionOptions().as_dict(),
+        version=1,
+        minor_version=1,
+        unique_id=ADDRESS,
+    )
+    updates: list[dict[str, Any]] = []
+    original_update = hass.config_entries.async_update_entry
+
+    def track_update(entry_to_update: Any, **kwargs: Any) -> None:
+        updates.append(dict(kwargs))
+        original_update(entry_to_update, **kwargs)
+
+    monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update)
+
+    assert await integration.async_migrate_entry(hass, entry)
+    assert await integration.async_migrate_entry(hass, entry)
+    assert entry.data["device_identity"] == "AP R600 V2.0"
+    assert len(updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_ignores_malformed_stored_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = FakeHass()
+    entry = make_entry()
+    entry.data["device_identity"] = ["ALLPOWERS R600"]
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", SetupClient)
+    monkeypatch.setattr(coordinator_module, "AllpowersCoordinator", SetupCoordinator)
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(
+        bluetooth,
+        "async_ble_device_from_address",
+        lambda hass, address, connectable: object(),
+    )
+    monkeypatch.setattr(
+        bluetooth, "async_register_callback", lambda *args, **kwargs: lambda: None
+    )
+
+    assert await integration.async_setup_entry(hass, entry)
+    assert SetupClient.instances[0].kwargs["device_identity"] == ""
 
 
 @pytest.mark.asyncio
