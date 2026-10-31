@@ -220,9 +220,15 @@ snapshot. Disconnect clears session-scoped state.
 
 Service completion represents submission, not physical confirmation. Versions and
 generation reject old state/session callbacks, but the protocol has no transaction
-ID and matching telemetry does not establish causation. Automatic keepalive waits
-past a pending settings deadline and uses bounded status-request recovery, never
-the requested target. Settings response timing and physical output behavior remain
+ID and matching telemetry does not establish causation. No-op commands return only
+after freshness, capability, semantic, pending/unknown and session guards pass.
+Explicit keepalive is not a no-op. Automatic maintenance renews the session when
+settings are unsafe at the next keepalive interval, before the longer confirmation
+deadline. Early initial-keepalive recovery can request status with bounded backoff;
+status is never assumed to yield settings. New sessions require fresh `0x03` and
+never replay a prior target. If settings remain absent, controls stay unavailable
+and further session recovery is paced by that interval. No physical inactivity
+cutoff prevention is guaranteed. Settings response timing and output behavior remain
 subject to the [HIL checklist](../hil-qualification.md#transaction-safety-regression).
 
 Any new safety claim must include matching protocol evidence and regression tests

@@ -76,6 +76,142 @@ def _connected_client(options: ConnectionOptions | None = None):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "control", ["ac", "dc", "light", "eco", "work_mode", "eco_timeout", "car_charger"]
+)
+async def test_noop_confirmed_control_does_not_block_real_change(control: str) -> None:
+    client, fake = _connected_client(ConnectionOptions(enable_car_charger=True))
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    requests = {
+        "ac": (client.async_set_ac, False),
+        "dc": (client.async_set_dc, False),
+        "light": (client.async_set_light, True),
+        "eco": (client.async_set_eco, False),
+        "work_mode": (client.async_set_work_mode, WorkMode.MUTE),
+        "eco_timeout": (client.async_set_eco_timeout, 2),
+        "car_charger": (client.async_set_car_charger, False),
+    }
+    command, value = requests[control]
+    for _ in range(2):
+        await command(value)
+    assert fake.writes == []
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
+
+    if control in {"ac", "dc", "light"}:
+        await client.async_set_ac(True)
+    else:
+        await client.async_set_work_mode(WorkMode.FAST)
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+@pytest.mark.parametrize("write_error", [False, True])
+async def test_transaction_expiration_during_write_keeps_group_ambiguous(
+    group: str, write_error: bool, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, fake = _connected_client()
+    now = 100.0
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    original_write = fake.write_gatt_char
+    notification = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA1, 2, 0, 0, 0x03, 0x11)),
+    )
+
+    async def write_and_expire(*args, **kwargs) -> None:
+        nonlocal now
+        await original_write(*args, **kwargs)
+        pending = (
+            client._pending_output_transaction
+            if group == "output"
+            else client._pending_settings_transaction
+        )
+        now = pending.confirm_deadline_monotonic + 1
+        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+        if write_error:
+            raise RuntimeError("expired ambiguous write")
+
+    monkeypatch.setattr(fake, "write_gatt_char", write_and_expire)
+    command = client.async_set_ac if group == "output" else client.async_set_eco
+    if write_error:
+        with pytest.raises(RuntimeError, match="expired ambiguous"):
+            await command(True)
+    else:
+        await command(True)
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
+    blocked = (
+        client._output_blocked_until_version
+        if group == "output"
+        else client._settings_blocked_until_version
+    )
+    assert blocked == 2
+    with pytest.raises(client_module.StateUnavailableError, match="ambiguous"):
+        await command(True)
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "pending",
+        "ambiguous",
+        "stale",
+        "semantic",
+        "unsupported",
+        "disconnected",
+        "generation",
+    ],
+)
+async def test_noop_cannot_bypass_snapshot_guards(group: str, guard: str) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    command = client.async_set_ac if group == "output" else client.async_set_eco
+    if guard == "pending":
+        await command(True)
+    elif guard == "ambiguous":
+        if group == "output":
+            client._output_blocked_until_version = client._status_version + 1
+        else:
+            client._settings_blocked_until_version = client._settings_version + 1
+    elif guard == "stale":
+        client._status_monotonic = now - client.options.stale_timeout - 1
+        client._settings_monotonic = now - client.options.settings_stale_timeout - 1
+    elif guard == "semantic":
+        client._status = _status(raw_flags=0x14)
+        client._settings = _settings(work_mode=None)
+    elif guard == "unsupported":
+        client._settings = _settings(hardware_version="1.0", raw_hardware_version=0x10)
+    elif guard == "disconnected":
+        client._connected = False
+    else:
+        client._active_session_generation = None
+    expected_error = (
+        NotConnectedError
+        if guard == "generation"
+        else client_module.StateUnavailableError
+    )
+    with pytest.raises(expected_error):
+        await command(False)
+    assert len(fake.writes) == (1 if guard == "pending" else 0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("group", ["output", "settings"])
 async def test_transaction_notification_during_write(
     group: str, notification_builder, monkeypatch: pytest.MonkeyPatch
@@ -412,7 +548,7 @@ async def test_output_timeout_blocks_dependent_writes_until_fresh_status(
         await client.async_set_dc(True)
 
     client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
-    await client.async_set_dc(True)
+    await client.async_set_dc(False)
     assert len(fake.writes) == 2
 
 

@@ -348,13 +348,19 @@ class AllpowersBLEClient:
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
             target_light = current_light if light is None else light
+            active_generation = self._active_session_generation
+            if active_generation is None:
+                raise NotConnectedError("The ALLPOWERS device is not connected")
+            if (target_dc, target_ac, target_light) == (
+                current_dc,
+                current_ac,
+                current_light,
+            ):
+                return
             frame = encode_output_control(
                 dc=target_dc, ac=target_ac, light=target_light
             )
             now = self._loop_time()
-            active_generation = self._active_session_generation
-            if active_generation is None:
-                raise NotConnectedError("The ALLPOWERS device is not connected")
             transaction = PendingOutputTransaction(
                 session_generation=active_generation,
                 source_version=self._status_version,
@@ -406,11 +412,13 @@ class AllpowersBLEClient:
                 car_charger_enabled=car_charger_enabled,
                 eco_timeout_hours=eco_timeout_hours,
             )
-            frame = encode_settings_control(target)
-            now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
                 raise NotConnectedError("The ALLPOWERS device is not connected")
+            if target == current:
+                return
+            frame = encode_settings_control(target)
+            now = self._loop_time()
             transaction = PendingSettingsTransaction(
                 session_generation=active_generation,
                 source_version=self._settings_version,
@@ -1110,19 +1118,31 @@ class AllpowersBLEClient:
                             self.address,
                             ex,
                         )
-                        try:
-                            await self.async_request_status()
-                        except (
-                            NotConnectedError,
-                            TimeoutError,
-                            *BLEAK_RETRY_EXCEPTIONS,
-                        ) as refresh_ex:
-                            _LOGGER.debug(
-                                "Settings keepalive recovery status request failed "
-                                "for %s: %s",
-                                self.address,
-                                refresh_ex,
+                        reference = (
+                            self._last_settings_keepalive_monotonic
+                            or self._settings_monotonic
+                            or self._connected_monotonic
+                        )
+                        if reference is not None and (
+                            now - reference >= self._options.settings_keepalive_interval
+                        ):
+                            await self.async_reconnect(
+                                "Settings confirmation unavailable; renewing BLE session"
                             )
+                        else:
+                            try:
+                                await self.async_request_status()
+                            except (
+                                NotConnectedError,
+                                TimeoutError,
+                                *BLEAK_RETRY_EXCEPTIONS,
+                            ) as refresh_ex:
+                                _LOGGER.debug(
+                                    "Settings keepalive recovery status request failed "
+                                    "for %s: %s",
+                                    self.address,
+                                    refresh_ex,
+                                )
                     except (
                         NotConnectedError,
                         TimeoutError,
@@ -1147,7 +1167,11 @@ class AllpowersBLEClient:
                 action_taken = True
 
             wait_reference = self._loop_time()
-            next_deadline = self._next_maintenance_deadline(wait_reference)
+            next_deadline = (
+                self._next_maintenance_deadline(wait_reference)
+                if self._connected
+                else None
+            )
             timeout: float | None = None
             if next_deadline is not None:
                 timeout = max(0.001, next_deadline - wait_reference)
@@ -1241,10 +1265,6 @@ class AllpowersBLEClient:
             if reference is None:
                 return None
             deadline = reference + self._options.settings_keepalive_interval
-
-        pending = self._pending_settings_transaction
-        if pending is not None:
-            deadline = max(deadline, pending.confirm_deadline_monotonic + 0.001)
 
         last_attempt = self._last_settings_keepalive_attempt_monotonic
         if last_attempt is not None and last_attempt >= deadline:

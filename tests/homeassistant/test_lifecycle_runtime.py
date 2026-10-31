@@ -395,7 +395,13 @@ async def test_pending_transaction_blocks_real_service_until_notification(
         if group == "keepalive"
         else "eco_mode"
     )
-    second_service = "press" if group == "keepalive" else "turn_on"
+    second_service = (
+        "press"
+        if group == "keepalive"
+        else "turn_off"
+        if group == "settings"
+        else "turn_on"
+    )
     second_id = registry.async_get_entity_id(
         second_domain, DOMAIN, f"{address}_{second_key}"
     )

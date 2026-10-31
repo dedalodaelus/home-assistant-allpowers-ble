@@ -167,9 +167,19 @@ agotado también exige una instantánea nueva, no reutilizar datos en caché.
 
 Las automatizaciones secuenciales deben esperar al estado coincidente antes de
 modificar otra salida o ajuste. El keepalive nunca reenvía un objetivo pendiente:
-el manual se rechaza y el automático se aplaza, con solicitudes de estado de
-recuperación espaciadas. La respuesta de ajustes `0x03` aún no está cualificada
-en hardware R600 físico; las simulaciones no demuestran una corrección física.
+el manual se rechaza mientras esté pendiente. El mantenimiento automático renueva
+la sesión BLE si los ajustes siguen sin ser seguros al siguiente intervalo, en
+vez de esperar indefinidamente que una petición de estado produzca ajustes. La
+nueva sesión necesita un `0x03` reciente antes de escribir ajustes; no se reenvían
+objetivos en caché. Si solo llegan `0x01` incluso tras reconectar, los controles de
+ajustes siguen no disponibles y la recuperación se espacia por el intervalo de
+keepalive. Esto no garantiza evitar el corte físico por inactividad. La respuesta
+`0x03` aún no está cualificada en hardware R600 físico; las simulaciones no
+demuestran una corrección física.
+
+Los comandos que ya coinciden con una instantánea reciente y validada no envían
+tramas ni crean transacciones. Todos los guards siguen activos, incluso con
+transacciones pendientes o ambiguas. El keepalive explícito sí envía una trama.
 
 Consulta [Arquitectura](docs/architecture/README.md) y [Protocolo](docs/protocol.md).
 

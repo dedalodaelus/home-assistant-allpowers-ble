@@ -66,7 +66,7 @@ Maintenance scheduler tests use monotonic-time fixtures to prove:
 - settings keepalive never runs faster than `settings_keepalive_interval`;
 - watchdog and reconnect recovery traffic is isolated from normal polling cadence.
 
-The repository sets a coverage failure threshold of 98 percent with branch coverage
+The repository sets a coverage failure threshold of 100 percent with branch coverage
 enabled. New code should test behavior and failure modes rather than adding lines
 only to satisfy the metric.
 

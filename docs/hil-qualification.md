@@ -156,8 +156,24 @@ capture evidence, and do not automatically retry an ambiguous power command.
   for actual mutations and unchanged keepalive. Do not assume an acknowledgement
   cadence or promise a bounded physical-confirmation time without this evidence.
 - While settings are pending, invoke manual and automatic keepalive and verify
-  that no unconfirmed target is replayed. Check bounded recovery without spinning.
+  that no unconfirmed target is replayed. With only `0x01`, verify session renewal
+  by the next keepalive interval, no write before the new session supplies `0x03`,
+  and no rapid reconnect loop. Repeat multiple intervals and measure actual cutoff
+  behavior; session renewal alone is not a qualified cutoff-prevention strategy.
 - Capture contradictory, missing, and late telemetry, cancellation, route loss,
   and reload. Confirm recovery requires new session-appropriate safe telemetry.
 - Repeat with vendor-app contention. A matching snapshot is convergence only;
   without transaction IDs the responsible actor cannot be authenticated.
+
+### ESPHome comparison
+
+The working reference [esphome-allpowers-ble at c0bfd88](https://github.com/dedalodaelus/esphome-allpowers-ble/blob/c0bfd88a78726087dc0c309bdb5b3a6faa4c7c01/components/allpowers_ble/allpowers_ble.cpp)
+re-sends the last complete settings snapshot learned in the current connection
+without requiring a new `0x03` after each keepalive. Its control paths also use
+optimistic requested values. It avoids redundant ECO/work-mode/timeout/car-charger
+commands and renews unhealthy sessions. Those implementation choices do not prove
+that unchanged settings frames emit `0x03` or that status requests produce it.
+This integration deliberately keeps confirmed and requested state separate and
+requires fresh settings after session renewal instead of adopting optimistic
+replay. Physical capture must compare both implementations on the same R600
+revision and routes, including whether reconnect reacquires settings.

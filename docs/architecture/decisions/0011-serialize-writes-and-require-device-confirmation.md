@@ -36,7 +36,14 @@ during the await. An unknown group is represented by its blocked version thresho
 not a rolled-back requested state.
 
 Manual keepalive obeys the same guard. Automatic keepalive defers pending settings
-and recovers with bounded status requests rather than replaying user mutations.
+until the next keepalive interval, then renews an unsafe session rather than
+replaying user mutations or relying indefinitely on status requests to yield
+settings. The new session requires its own fresh `0x03`. Early initial-keepalive
+recovery uses bounded status requests. Without settings across sessions, controls
+remain unavailable and session renewal is paced by the keepalive interval; no
+physical inactivity-cutoff prevention is promised. Genuine no-op commands create
+no transaction, but cannot bypass any existing guard. Explicit keepalive remains
+an intentional unchanged write.
 Existing freshness timeouts are conservative guard deadlines, not qualified R600
 `0x03` response timing. The protocol has no transaction ID; matching same-session
 telemetry proves observed convergence, not which write or actor caused it.

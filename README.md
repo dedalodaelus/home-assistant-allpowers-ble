@@ -3,7 +3,7 @@
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-%3E98%25-brightgreen.svg)](docs/quality.md)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](docs/quality.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Español](README.es.md)
@@ -177,9 +177,19 @@ Confirmation timeout also requires a new snapshot, not reuse of cached state.
 
 Sequential automations must wait for matching device state before changing another
 output or setting. Settings keepalive never re-sends a pending user target: manual
-keepalive is rejected and automatic keepalive is deferred, with bounded recovery
-status requests. Settings `0x03` response timing remains unqualified on physical
-R600 hardware; simulation tests do not demonstrate a physical safety fix.
+keepalive is rejected while pending. Automatic maintenance renews the BLE session
+if settings are still unsafe at the next keepalive interval, rather than waiting
+indefinitely for a status request to produce settings. The new session must receive
+fresh `0x03` before any settings write; cached targets are never replayed.
+If the device supplies only `0x01` across new sessions, settings controls stay
+unavailable and session recovery remains bounded by the keepalive interval.
+This cannot guarantee prevention of the physical inactivity cutoff. Settings
+`0x03` response timing remains unqualified on physical R600 hardware; simulation
+tests do not demonstrate a physical safety fix.
+
+Commands already matching a fresh, validated snapshot are no-ops: no frame or
+transaction is created. All guards still apply, including pending or ambiguous
+transactions. Explicit settings keepalive intentionally remains a write.
 
 See [Architecture](docs/architecture/README.md) and [Protocol](docs/protocol.md).
 
