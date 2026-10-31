@@ -17,6 +17,7 @@ The repository distinguishes three levels:
 | Model or advertised family | Level | Setup behavior |
 |---|---|---|
 | ALLPOWERS R600 (`R600*`, `AP R*`) with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Accepted after active probe with writable controls enabled. Output writes are rejected if status includes unknown output-related bits; settings writes are rejected when semantic safety checks fail. |
+| VOLIX P1800 with verified revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified | Accepted after active probe using the verified R600 protocol profile, with writable controls subject to the same output-bit and settings-semantic safety checks. |
 | AP S300 / other `AP S*` candidates | Experimental | Accepted only if FFF0/FFF1/FFF2 and a valid status response are confirmed. Telemetry only; writable entities are not created. |
 | AP S500 | Rejected | Aborted as a known different protocol family. |
 | AP S700 V2 | Rejected | Aborted as a known different protocol family. |

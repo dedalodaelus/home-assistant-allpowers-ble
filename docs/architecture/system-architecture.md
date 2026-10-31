@@ -7,7 +7,7 @@ stations. It discovers a station, validates that it speaks the expected BLE
 protocol, maintains a local GATT session, converts protocol notifications into
 Home Assistant entities, and exposes a deliberately constrained set of controls.
 
-This document describes the as-is architecture observed on `devel` on 2026-07-28.
+This document describes the as-is architecture observed on `devel` on 2026-10-31.
 The architecture documentation target release is `0.3.1`.
 
 ## 2. Scope and non-goals
@@ -333,13 +333,14 @@ flowchart TD
 
     CAND --> PROBE
     PROBE --> PROFILE
-    PROFILE -->|R600 hardware 0.3 and raw 0x03| VERIFIED
+    PROFILE -->|R600 or VOLIX P1800, hardware 0.3 and raw 0x03| VERIFIED
     PROFILE -->|unverified R600, AP S candidate, generic candidate| EXP
     PROFILE -->|known incompatible S500 or S700 family| REJECT
 ```
 
-Capability flags are data, not scattered name checks. Verified R600 hardware
-signatures can read telemetry and use output/settings writes. Unverified
+Capability flags are data, not scattered name checks. Verified R600 and VOLIX
+P1800 devices with the hardware 0.3 / raw 0x03 signature share the verified
+profile and can read telemetry and use output/settings writes. Unverified
 candidates remain telemetry-only. Known incompatible families are rejected
 explicitly before broad name or service-UUID matches.
 
@@ -366,7 +367,7 @@ is released and the coordinator callback is cleared.
 ```mermaid
 flowchart TB
     subgraph Persisted[Home Assistant config entry]
-        DATA[address and device label]
+        DATA[address, mutable device label, and model identity]
         OPT[validated runtime options]
     end
 
@@ -382,10 +383,13 @@ flowchart TB
     Memory -->|never restored as authoritative state| X[discard on restart or unload]
 ```
 
-The current config-entry schema is `1.1`. Migration from `1.0` normalizes the
-address and options, fills safe defaults, and rejects unsupported future versions.
-Telemetry, parser fragments, transactions, counters, and freshness timestamps are
-not persisted, so a restart cannot accidentally trust old device state.
+The current config-entry schema is `1.2`. Model identity is stored separately
+from the mutable display label. Migration from `1.0` and `1.1` recognizes only
+known family markers in legacy labels; migrated identity alone never grants
+write capability. Runtime writes require a matching hardware revision observed
+in the active GATT session. Telemetry, parser fragments, transactions, counters,
+and freshness timestamps are not persisted, so a restart cannot accidentally
+trust old device state.
 
 ## 16. Options
 

@@ -246,6 +246,7 @@ Write access is not determined by advertised name or service discovery alone. A 
 | Profile | Read telemetry | Write output | Write settings |
 |---|---|---|---|
 | Verified R600 (hw 0.3) | ✓ | ✓ | ✓ |
+| Verified VOLIX P1800 (hw 0.3, R600 protocol profile) | ✓ | ✓ | ✓ |
 | R600 unverified revision | ✓ | ✗ | ✗ |
 | AP S* experimental | ✓ | ✗ | ✗ |
 | Generic ALLPOWERS | ✓ | ✗ | ✗ |
