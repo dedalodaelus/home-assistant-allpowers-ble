@@ -217,6 +217,9 @@ evidence.
    status/settings monotonic timestamps. Inspect `client_task_health` to spot
    a stopped connection or maintenance loop. The live counters may advance even
    when a rejected callback cannot publish a new coordinator snapshot.
+   Compare `publication.entity_state_reports` for battery and connected with
+   REST `last_reported`. These counters show actual entity state-write calls,
+   without exposing entity IDs.
 3. On `local_adapter`, capture HCI traffic with `btmon` on the selected
    adapter. Count ATT Handle Value Notifications for the R600 connection handle
    and attribute handle `0x0006` during exactly the REST/diagnostics interval;
@@ -235,8 +238,10 @@ HCI/proxy notifications with stationary live `notifications` need subscription,
 callback ownership, or competing-client investigation. Rising notifications
 with stationary `valid_packets` need decoder/error inspection. Rising valid
 packets with stationary coordinator updates need callback/exception inspection.
-Rising coordinator updates with stationary REST `last_reported` need entity and
-Home Assistant state-report inspection. A passing simulation or CI run does
+Rising coordinator updates with stationary entity report counts indicate a
+listener/platform lifecycle problem. Rising entity report counts with stationary
+REST `last_reported` indicate an entity-ID mismatch or Home Assistant state
+machine problem. A passing simulation or CI run does
 not establish physical HIL success.
 
 Before sharing evidence, remove Bluetooth addresses, device names, serial

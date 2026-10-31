@@ -113,6 +113,8 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert coordinator.data.statistics.notifications == 4
     assert coordinator.data.statistics.valid_packets == 4
     assert client.statistics.emitted_updates == coordinator.client_updates
+    assert coordinator.entity_state_reports["AllpowersSensor.battery"] >= 2
+    assert coordinator.entity_state_reports["AllpowersBinarySensor.connected"] >= 2
     assert coordinator.data.last_packet_at > first_snapshot.last_packet_at
     assert coordinator.data.status_monotonic > first_snapshot.status_monotonic
     assert coordinator.data.settings_monotonic > first_snapshot.settings_monotonic

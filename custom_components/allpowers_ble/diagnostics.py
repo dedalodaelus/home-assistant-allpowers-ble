@@ -114,6 +114,9 @@ def _diagnostics_payload(
             "coordinator_client_updates": (
                 entry.runtime_data.coordinator.client_updates
             ),
+            "entity_state_reports": dict(
+                entry.runtime_data.coordinator.entity_state_reports
+            ),
         },
         "protocol": {
             "safety": {
