@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import CONF_ADDRESS, Platform
@@ -154,96 +155,134 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     from .coordinator import AllpowersCoordinator, AllpowersRuntimeData
     from .options import ConnectionOptions
 
-    address = str(entry.data[CONF_ADDRESS]).upper()
-    config_data = dict(entry.data)
-    config_title = entry.title
-    options = ConnectionOptions.from_mapping(entry.options)
-    stored_name = entry.data.get(CONF_DEVICE_NAME)
-    stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
-    stored_identity = stored_identity if isinstance(stored_identity, str) else ""
-    stored_model_identity = canonical_model_identity(stored_identity)
-    rejected_stored_identity = bool(
-        stored_model_identity and not identify_model(stored_model_identity).supported
-    )
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    advertisement_unsubscribe: Callable[[], None] | None = None
 
-    def _persist_model_identity(identity: str) -> None:
-        if entry.data != config_data or entry.title != config_title:
-            return
-        if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
-            return
-        # The active client already applied this identity; do not reload it.
-        config_data[CONF_DEVICE_IDENTITY] = identity
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+    def _unsubscribe_advertisement() -> None:
+        nonlocal advertisement_unsubscribe
+        if advertisement_unsubscribe is not None:
+            advertisement_unsubscribe()
+            advertisement_unsubscribe = None
+
+    entry.async_on_unload(_unsubscribe_advertisement)
+
+    while True:
+        address = str(entry.data[CONF_ADDRESS]).upper()
+        config_data = dict(entry.data)
+        config_title = entry.title
+        config_options = dict(entry.options)
+        options = ConnectionOptions.from_mapping(config_options)
+        stored_name = entry.data.get(CONF_DEVICE_NAME)
+        stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
+        stored_identity = stored_identity if isinstance(stored_identity, str) else ""
+        stored_model_identity = canonical_model_identity(stored_identity)
+        rejected_stored_identity = bool(
+            stored_model_identity
+            and not identify_model(stored_model_identity).supported
         )
 
-    def _persist_identity_conflict(conflicted: bool) -> None:
-        if entry.data != config_data or entry.title != config_title:
-            return
-        if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
-            return
-        config_data[CONF_DEVICE_IDENTITY_CONFLICT] = conflicted
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+        def _persist_model_identity(
+            identity: str,
+            *,
+            persisted_data: dict[str, Any] = config_data,
+            persisted_title: str = config_title,
+        ) -> None:
+            if entry.data != persisted_data or entry.title != persisted_title:
+                return
+            if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
+                return
+            persisted_data[CONF_DEVICE_IDENTITY] = identity
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, CONF_DEVICE_IDENTITY: identity},
+            )
+
+        def _persist_identity_conflict(
+            conflicted: bool,
+            *,
+            persisted_data: dict[str, Any] = config_data,
+            persisted_title: str = config_title,
+        ) -> None:
+            if entry.data != persisted_data or entry.title != persisted_title:
+                return
+            if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
+                return
+            persisted_data[CONF_DEVICE_IDENTITY_CONFLICT] = conflicted
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+            )
+
+        if rejected_stored_identity:
+            _persist_identity_conflict(True)
+
+        initial_device = bluetooth.async_ble_device_from_address(
+            hass, address, connectable=True
         )
+        if initial_device is None:
+            raise ConfigEntryNotReady(
+                f"No connectable Bluetooth path found for {address}"
+            )
 
-    if rejected_stored_identity:
-        _persist_identity_conflict(True)
+        client = AllpowersBLEClient(
+            hass=hass,
+            address=address,
+            advertised_name=str(stored_name or entry.title),
+            device_identity=stored_identity,
+            identity_conflicted=bool(
+                entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+                or rejected_stored_identity
+            ),
+            model_identity_callback=_persist_model_identity,
+            identity_conflict_callback=_persist_identity_conflict,
+            options=options,
+        )
+        coordinator = AllpowersCoordinator(hass, entry, client)
+        initial_snapshot = client.snapshot()
+        repairs = AllpowersRepairsManager(
+            hass,
+            entry_id=entry.entry_id,
+            entry_title=entry.title,
+            initial_snapshot=initial_snapshot,
+        )
+        coordinator.set_repairs_manager(repairs)
+        repairs.evaluate(initial_snapshot, status_is_fresh=initial_snapshot.connected)
 
-    initial_device = bluetooth.async_ble_device_from_address(
-        hass, address, connectable=True
-    )
-    if initial_device is None:
-        raise ConfigEntryNotReady(f"No connectable Bluetooth path found for {address}")
+        def _advertisement_callback(
+            service_info: Any,
+            change: Any,
+            *,
+            active_client: AllpowersBLEClient = client,
+        ) -> None:
+            del change
+            active_client.update_advertisement(service_info)
 
-    client = AllpowersBLEClient(
-        hass=hass,
-        address=address,
-        advertised_name=str(stored_name or entry.title),
-        device_identity=stored_identity,
-        identity_conflicted=bool(
-            entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
-            or rejected_stored_identity
-        ),
-        model_identity_callback=_persist_model_identity,
-        identity_conflict_callback=_persist_identity_conflict,
-        options=options,
-    )
-    coordinator = AllpowersCoordinator(hass, entry, client)
-    initial_snapshot = client.snapshot()
-    repairs = AllpowersRepairsManager(
-        hass,
-        entry_id=entry.entry_id,
-        entry_title=entry.title,
-        initial_snapshot=initial_snapshot,
-    )
-    coordinator.set_repairs_manager(repairs)
-    repairs.evaluate(initial_snapshot, status_is_fresh=initial_snapshot.connected)
-
-    def _advertisement_callback(service_info: Any, change: Any) -> None:
-        del change
-        client.update_advertisement(service_info)
-
-    entry.async_on_unload(
-        bluetooth.async_register_callback(
+        advertisement_unsubscribe = bluetooth.async_register_callback(
             hass,
             _advertisement_callback,
             BluetoothCallbackMatcher(address=address),
             bluetooth.BluetoothScanningMode.PASSIVE,
         )
-    )
 
-    await coordinator.async_start()
-    try:
-        await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
-    except TimeoutError as ex:
-        await coordinator.async_shutdown()
-        raise ConfigEntryNotReady(
-            "Connected path exists, but no valid status frame was received "
-            f"from {address}"
-        ) from ex
+        await coordinator.async_start()
+        try:
+            await coordinator.async_wait_ready(INITIAL_DATA_TIMEOUT)
+        except TimeoutError as ex:
+            await coordinator.async_shutdown()
+            raise ConfigEntryNotReady(
+                "Connected path exists, but no valid status frame was received "
+                f"from {address}"
+            ) from ex
+
+        if (
+            entry.data != config_data
+            or entry.title != config_title
+            or entry.options != config_options
+        ):
+            await coordinator.async_shutdown()
+            _unsubscribe_advertisement()
+            continue
+        break
 
     entry.runtime_data = AllpowersRuntimeData(
         client=client,
@@ -258,7 +297,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     entry.async_on_unload(
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
     )
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -269,7 +307,12 @@ async def _async_update_listener(
     """Apply options live, or schedule one reload for changed runtime config."""
     from .options import ConnectionOptions
 
-    runtime = entry.runtime_data
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        state = getattr(getattr(entry, "state", None), "value", None)
+        if state != "setup_in_progress":
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
     if runtime.reload_pending:
         return
     if entry.data != runtime.config_data or entry.title != runtime.config_title:

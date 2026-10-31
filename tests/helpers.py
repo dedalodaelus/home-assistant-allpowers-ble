@@ -199,8 +199,12 @@ class FakeConfigEntriesManager:
         self.updates: list[tuple[ConfigEntry[Any], dict[str, Any]]] = []
         self.forwarded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
         self.unloaded: list[tuple[ConfigEntry[Any], tuple[str, ...]]] = []
+        self.scheduled_reloads: list[str] = []
         self.entries: list[ConfigEntry[Any]] = []
         self.unload_result = True
+
+    def async_schedule_reload(self, entry_id: str) -> None:
+        self.scheduled_reloads.append(entry_id)
 
     def async_update_entry(
         self,

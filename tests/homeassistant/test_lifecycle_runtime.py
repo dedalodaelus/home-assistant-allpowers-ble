@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
@@ -441,6 +442,233 @@ async def test_reconfigure_manages_one_lifecycle_update(
     assert bluetooth_callbacks == []
     assert entry.update_listeners == []
     assert active_client.callback is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [
+        ("retry", ConfigEntryState.SETUP_RETRY),
+        ("error", ConfigEntryState.SETUP_ERROR),
+    ],
+)
+async def test_reconfigure_recovers_setup_without_update_listener(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+    failure: str,
+    expected_state: ConfigEntryState,
+) -> None:
+    """A successful reconfigure must restart entries with no setup listener."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+    from homeassistant.components import bluetooth
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    lookup_failure = True
+
+    def find_ble_device(hass, address: str, *, connectable: bool):
+        del hass, address, connectable
+        if lookup_failure:
+            if failure == "retry":
+                return None
+            raise RuntimeError("synthetic setup error")
+        return object()
+
+    monkeypatch.setattr(bluetooth, "async_ble_device_from_address", find_ble_device)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.state is expected_state
+    assert entry.update_listeners == []
+
+    lookup_failure = False
+    target_address = "11:22:33:44:55:66"
+    discovery = SimpleNamespace(
+        address=target_address,
+        name="ALLPOWERS R600",
+        service_uuids=[SERVICE_UUID],
+    )
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [discovery],
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_ADDRESS: target_address, CONF_DEVICE_NAME: "Recovered station"},
+    )
+    assert result["type"] == "abort"
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data[CONF_ADDRESS] == target_address
+    assert entry.runtime_data.client.address == target_address
+    assert entry.update_listeners
+    assert len(StatefulFakeClient.instances) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_setup_reconciles_options_changed_during_initialization(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Setup restarts its client with options persisted while it awaited startup."""
+    del enable_custom_integrations, bluetooth_callbacks
+    import custom_components.allpowers_ble.client as client_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    first_wait_started = asyncio.Event()
+    allow_first_wait = asyncio.Event()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del timeout
+        if client is StatefulFakeClient.instances[0]:
+            first_wait_started.set()
+            await allow_first_wait.wait()
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+    entry = _make_entry("AA:BB:CC:DD:EE:FF", title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+
+    setup_task = hass.async_create_task(hass.config_entries.async_setup(entry.entry_id))
+    await first_wait_started.wait()
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            SECTION_CONNECTION_HEALTH: {"status_interval": 15, "stale_timeout": 31},
+            SECTION_ADVANCED_TIMING: {},
+            SECTION_EXPERIMENTAL_CONTROLS: {},
+        },
+    )
+    assert result["type"] == "create_entry"
+    allow_first_wait.set()
+
+    assert await setup_task
+    await hass.async_block_till_done()
+    assert len(StatefulFakeClient.instances) == 2
+    first_client, active_client = StatefulFakeClient.instances
+    assert first_client.stopped
+    assert active_client.options.status_interval == 15
+    assert active_client.options.stale_timeout == 31
+    assert entry.runtime_data.client is active_client
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_setup_reconciles_config_changed_during_pending_reload(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """A second reconfigure during reload setup wins before the new client is ready."""
+    del enable_custom_integrations
+    import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.config_flow as flow_module
+
+    monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
+    first_address = "AA:BB:CC:DD:EE:FF"
+    pending_address = "11:22:33:44:55:66"
+    latest_address = "22:33:44:55:66:77"
+    entry = _make_entry(first_address, title="ALLPOWERS R600 EEFF")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    replacement_started = asyncio.Event()
+    allow_replacement = asyncio.Event()
+
+    async def wait_ready(client, timeout: float) -> None:
+        del timeout
+        if client.address == pending_address:
+            replacement_started.set()
+            await allow_replacement.wait()
+
+    monkeypatch.setattr(StatefulFakeClient, "async_wait_ready", wait_ready)
+
+    async def request_scan(_hass) -> None:
+        pass
+
+    async def probe(_hass, **kwargs) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        flow_module.bluetooth, "async_request_active_scan", request_scan
+    )
+    monkeypatch.setattr(flow_module, "async_probe_device", probe)
+    discovered_address = pending_address
+    monkeypatch.setattr(
+        flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda hass, connectable: [
+            SimpleNamespace(
+                address=discovered_address,
+                name="ALLPOWERS R600",
+                service_uuids=[SERVICE_UUID],
+            )
+        ],
+    )
+
+    async def reconfigure(address: str, name: str) -> None:
+        nonlocal discovered_address
+        discovered_address = address
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {CONF_ADDRESS: address, CONF_DEVICE_NAME: name},
+        )
+        assert result["type"] == "abort"
+
+    await reconfigure(pending_address, "Pending station")
+    await replacement_started.wait()
+    assert entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+
+    await reconfigure(latest_address, "Latest station")
+    allow_replacement.set()
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.data[CONF_ADDRESS] == latest_address
+    assert entry.data[CONF_DEVICE_NAME] == "Latest station"
+    assert entry.runtime_data.client.address == latest_address
+    assert [client.address for client in StatefulFakeClient.instances] == [
+        first_address,
+        pending_address,
+        latest_address,
+    ]
+    assert StatefulFakeClient.instances[0].stopped
+    assert StatefulFakeClient.instances[1].stopped
+    assert len(bluetooth_callbacks) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bluetooth_callbacks == []
 
 
 @pytest.mark.asyncio

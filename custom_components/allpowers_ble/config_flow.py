@@ -264,13 +264,18 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                     }
                     if address != current_address:
                         data_updates[CONF_DEVICE_IDENTITY_CONFLICT] = False
-                    return self.async_update_and_abort(
+                    result = self.async_update_and_abort(
                         reconfigure_entry,
                         unique_id=address,
                         title=entry_title,
                         data_updates=data_updates,
                         reason="reconfigure_successful",
                     )
+                    if not getattr(reconfigure_entry, "update_listeners", ()):
+                        self.hass.config_entries.async_schedule_reload(
+                            reconfigure_entry.entry_id
+                        )
+                    return result
 
         return cast(Any, self.async_show_form)(
             step_id="reconfigure",
