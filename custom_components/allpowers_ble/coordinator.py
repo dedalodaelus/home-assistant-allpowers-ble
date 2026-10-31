@@ -62,6 +62,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             entry.data.get(CONF_REGISTRY_ID, entry.data.get(CONF_ADDRESS, ""))
         )
         self._repairs_manager: AllpowersRepairsManager | None = None
+        self.client_updates = 0
         self.client.set_update_callback(self._handle_client_update)
         self.async_set_updated_data(client.snapshot())
 
@@ -97,6 +98,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
 
     @callback
     def _handle_client_update(self) -> None:
+        self.client_updates += 1
         self.async_set_updated_data(self.client.snapshot())
         self._async_refresh_device_registry_metadata()
         if self._repairs_manager is not None:

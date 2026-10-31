@@ -1077,10 +1077,13 @@ async def test_callback_factories_ignore_stale_generation_and_client_mismatch(
     stale_notify = client._make_notification_handler(2, first)
     stale_notify(FakeCharacteristic(), bytearray(status_frame))
     assert client._status is None
+    assert client.statistics.stale_session_notifications == 1
 
     wrong_client_notify = client._make_notification_handler(1, second)
     wrong_client_notify(FakeCharacteristic(), bytearray(status_frame))
     assert client._status is None
+    assert client.statistics.foreign_client_notifications == 1
+    assert client.statistics.notifications == 0
 
 
 def test_callback_factory_ignores_disconnect_when_loop_is_missing() -> None:

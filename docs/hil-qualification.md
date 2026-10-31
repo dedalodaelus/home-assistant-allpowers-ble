@@ -188,3 +188,57 @@ This integration deliberately keeps confirmed and requested state separate and
 requires fresh settings after session renewal instead of adopting optimistic
 replay. Physical capture must compare both implementations on the same R600
 revision and routes, including whether reconnect reacquires settings.
+
+## Issue #213: frozen telemetry retest
+
+Use a dedicated Home Assistant instance with R600 V2 hardware 0.3 and the exact
+build under test. Record the loaded integration path and `manifest.json` version
+from inside the Home Assistant process/container; record the source commit or
+release archive checksum. A repository checkout alone does not identify the
+code Home Assistant imported. Keep settings keepalive enabled to reproduce the
+reported setup, but do not attribute the freeze to it without measurements.
+
+Run the following procedure separately on `local_adapter` and `active_proxy`.
+Make only the named route available for the run and confirm the selected route
+in Home Assistant Bluetooth logs. Keep the GATT connection entity and the
+disabled-by-default `telemetry_available` entity distinct: enable the latter
+for this test. Do not modify the HIL matrix until both routes have measured
+evidence.
+
+1. Start a timestamped, 10-second REST poll of battery and connection states.
+   Record `state`, `last_updated`, and `last_reported` for each. Record
+   `telemetry_available` with the same fields. Use a monotonic test clock for
+   elapsed time and UTC timestamps for correlation.
+2. Download two sanitized integration diagnostics snapshots 60–120 seconds
+   apart while `last_reported` is stationary. Compare
+   `publication.live_client_statistics` (including rejected session/client
+   callbacks, notifications, valid packets, parser errors, and emitted updates),
+   `publication.coordinator_client_updates`, snapshot packet timestamps, and
+   status/settings monotonic timestamps. Inspect `client_task_health` to spot
+   a stopped connection or maintenance loop. The live counters may advance even
+   when a rejected callback cannot publish a new coordinator snapshot.
+3. On `local_adapter`, capture HCI traffic with `btmon` on the selected
+   adapter. Count ATT Handle Value Notifications for the R600 connection handle
+   and attribute handle `0x0006` during exactly the REST/diagnostics interval;
+   separate status `0x01` from settings `0x03`. Confirm the handle is for this
+   session. On `active_proxy`, collect timestamped notification counts from
+   the proxy's BLE transport/debug logs. An HCI capture on the Home Assistant
+   host cannot establish notification receipt at a remote ESPHome proxy.
+4. Reconnect once through the integration and repeat the same interval.
+   Record whether callbacks, accepted packets, coordinator updates, and
+   `last_reported` resume together or separate again. Also record the behavior
+   after telemetry becomes stale: battery should become unavailable while
+   GATT connectivity can remain on.
+
+Interpret the first counter that stops advancing as the failure boundary.
+HCI/proxy notifications with stationary live `notifications` need subscription,
+callback ownership, or competing-client investigation. Rising notifications
+with stationary `valid_packets` need decoder/error inspection. Rising valid
+packets with stationary coordinator updates need callback/exception inspection.
+Rising coordinator updates with stationary REST `last_reported` need entity and
+Home Assistant state-report inspection. A passing simulation or CI run does
+not establish physical HIL success.
+
+Before sharing evidence, remove Bluetooth addresses, device names, serial
+numbers, Home Assistant IDs, tokens, and unrelated traffic. Share only counts,
+timestamps, sanitized diagnostics, and the two already published frame shapes.

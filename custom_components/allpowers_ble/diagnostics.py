@@ -108,6 +108,13 @@ def _diagnostics_payload(
         },
         "model_support": asdict(support),
         "snapshot": _serialize(snapshot),
+        "publication": {
+            "live_client_statistics": _serialize(entry.runtime_data.client.statistics),
+            "client_task_health": entry.runtime_data.client.task_health,
+            "coordinator_client_updates": (
+                entry.runtime_data.coordinator.client_updates
+            ),
+        },
         "protocol": {
             "safety": {
                 "combined_output_writes": True,

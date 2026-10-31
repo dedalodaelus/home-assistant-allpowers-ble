@@ -17,7 +17,10 @@ class ConnectionStatistics:
     disconnects: int = 0
     reconnects: int = 0
     notifications: int = 0
+    stale_session_notifications: int = 0
+    foreign_client_notifications: int = 0
     valid_packets: int = 0
+    emitted_updates: int = 0
     parser_discards: int = 0
     protocol_errors: int = 0
     write_errors: int = 0

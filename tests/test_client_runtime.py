@@ -125,10 +125,15 @@ async def test_start_is_idempotent_and_stop_cancels_owned_tasks(
     await client.async_start()
     assert client._connection_task is first_task
     assert client._maintenance_task is not None
+    assert client.task_health == {"connection": "running", "maintenance": "running"}
 
     await client.async_stop()
     assert client._connection_task is None
     assert client._maintenance_task is None
+    assert client.task_health == {
+        "connection": "not_started",
+        "maintenance": "not_started",
+    }
     assert client._refresh_task is None
     assert client._update_callback is None
     assert updates == 0

@@ -125,6 +125,14 @@ class FakeIntegrationClient:
     def snapshot(self) -> AllpowersSnapshot:
         return self._snapshot
 
+    @property
+    def statistics(self) -> ConnectionStatistics:
+        return self._snapshot.statistics
+
+    @property
+    def task_health(self) -> dict[str, str]:
+        return {"connection": "not_started", "maintenance": "not_started"}
+
     def set_snapshot(self, value: AllpowersSnapshot, *, emit: bool = True) -> None:
         self._snapshot = value
         if emit and self.callback is not None:

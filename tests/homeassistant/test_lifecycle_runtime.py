@@ -46,6 +46,122 @@ from tests.helpers import settings, snapshot, status
 pytestmark = pytest.mark.homeassistant
 
 
+@pytest.mark.asyncio
+async def test_issue_213_identical_real_frames_report_battery_state(
+    hass,
+    enable_custom_integrations,
+    monkeypatch: pytest.MonkeyPatch,
+    bluetooth_callbacks: list[tuple[Any, Any]],
+) -> None:
+    """Trace repeated captured frames through the real HA state machine."""
+    del enable_custom_integrations, bluetooth_callbacks
+    import custom_components.allpowers_ble.client as client_module
+
+    status_frame = bytes.fromhex("a565b100010801004e0000000012b590")
+    settings_frame = bytes.fromhex("a565b1000106030101ffff030274")
+    transport = object()
+
+    async def start(client) -> None:
+        client._client = transport
+        client._active_session_generation = 1
+        client._connected = True
+        client._connected_monotonic = monotonic()
+        notify = client._make_notification_handler(1, transport)
+        notify(object(), bytearray(status_frame))
+        notify(object(), bytearray(settings_frame))
+
+    async def wait_ready(client, timeout: float) -> None:
+        del client, timeout
+
+    async def stop(client) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_start", start)
+    monkeypatch.setattr(
+        client_module.AllpowersBLEClient, "async_wait_ready", wait_ready
+    )
+    monkeypatch.setattr(client_module.AllpowersBLEClient, "async_stop", stop)
+
+    address = "AA:BB:CC:DD:EE:FF"
+    entry = _make_entry(address, title="ALLPOWERS R600 AABB")
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    client = entry.runtime_data.client
+    coordinator = entry.runtime_data.coordinator
+    battery_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{address}_battery"
+    )
+    assert battery_id is not None
+    first = hass.states.get(battery_id)
+    assert first is not None and first.state == "78"
+    first_reported = first.last_reported
+    first_snapshot = coordinator.data
+    assert first_snapshot.statistics.notifications == 2
+    assert first_snapshot.statistics.valid_packets == 2
+    assert first_snapshot.status_monotonic is not None
+    assert first_snapshot.settings_monotonic is not None
+
+    await asyncio.sleep(0.01)
+    notify = client._make_notification_handler(1, transport)
+    notify(object(), bytearray(status_frame))
+    notify(object(), bytearray(settings_frame))
+    await hass.async_block_till_done()
+    second = hass.states.get(battery_id)
+    assert second is not None and second.state == "78"
+    assert second.last_reported > first_reported
+    assert coordinator.data.statistics.notifications == 4
+    assert coordinator.data.statistics.valid_packets == 4
+    assert client.statistics.emitted_updates == coordinator.client_updates
+    assert coordinator.data.last_packet_at > first_snapshot.last_packet_at
+    assert coordinator.data.status_monotonic > first_snapshot.status_monotonic
+    assert coordinator.data.settings_monotonic > first_snapshot.settings_monotonic
+
+    invalid = bytearray(status_frame)
+    invalid[-1] ^= 1
+    reported_before_bad_frame = second.last_reported
+    packet_time_before_bad_frame = coordinator.data.last_packet_at
+    notify(object(), invalid)
+    await hass.async_block_till_done()
+    assert coordinator.data.statistics.valid_packets == 4
+    assert coordinator.data.last_packet_at == packet_time_before_bad_frame
+    assert hass.states.get(battery_id).last_reported >= reported_before_bad_frame
+
+    old_notify = notify
+    new_transport = object()
+    client._client = new_transport
+    client._active_session_generation = 2
+    reports_before_old_callback = hass.states.get(battery_id).last_reported
+    old_notify(object(), bytearray(status_frame))
+    assert client.statistics.stale_session_notifications == 1
+    assert hass.states.get(battery_id).last_reported == reports_before_old_callback
+    assert coordinator.data.statistics.valid_packets == 4
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+    assert (
+        payload["publication"]["live_client_statistics"]["stale_session_notifications"]
+        == 1
+    )
+    assert payload["snapshot"]["statistics"]["stale_session_notifications"] == 0
+
+    client._status_monotonic = monotonic() - client.options.stale_timeout - 1
+    client._emit_update()
+    assert hass.states.get(battery_id).state == "unavailable"
+    assert client.snapshot().connected
+    new_notify = client._make_notification_handler(2, new_transport)
+    new_notify(object(), bytearray(status_frame))
+    await hass.async_block_till_done()
+    assert hass.states.get(battery_id).state == "78"
+    assert coordinator.data.statistics.valid_packets == 5
+    changed = bytearray(status_frame)
+    changed[8] = 79
+    changed[-1] ^= 1
+    new_notify(object(), changed)
+    await hass.async_block_till_done()
+    assert hass.states.get(battery_id).state == "79"
+    assert coordinator.data.statistics.valid_packets == 6
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 class StatefulFakeClient:
     """Integration-facing fake BLE transport used for real HA lifecycle tests."""
 
@@ -88,6 +204,14 @@ class StatefulFakeClient:
 
     def snapshot(self):
         return self._snapshot
+
+    @property
+    def statistics(self):
+        return self._snapshot.statistics
+
+    @property
+    def task_health(self):
+        return {"connection": "not_started", "maintenance": "not_started"}
 
     def set_snapshot(self, value) -> None:
         self._snapshot = value
