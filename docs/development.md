@@ -171,6 +171,32 @@ A release is valid only when:
 - the checksum file matches the published ZIP digest;
 - compatibility claims match tested hardware.
 
+### Promote development changes
+
+To prepare a promotion, open **Actions → Promote devel to main** on the `main`
+branch and run it manually. It creates one draft PR from `devel` to `main` using
+the dedicated promotion checklist. The workflow needs the `PROMOTION_APP_ID` and
+`PROMOTION_APP_PRIVATE_KEY` repository secrets for a GitHub App installed with
+Contents: read and Pull requests: write permissions. The App token ensures the PR
+event starts the normal validation workflows; the workflow does not use a broad
+personal access token or bypass required checks.
+
+Repeated runs return an existing open promotion PR unchanged. An identical branch
+comparison creates no PR. A diverged comparison fails with instructions to merge
+`main` into `devel` through a reviewed synchronization PR using a merge commit,
+not a squash or rebase. This preserves the ancestry required by the promotion
+workflow; neither branch is rewritten automatically. The workflow blocks changes
+to `CHANGELOG.md` and `.release-please-manifest.json`; it permits unrelated
+integration manifest edits while checking that the version does not regress. The
+Merge gate repeats the version check against the current PR base and head SHAs on
+every update, including draft PRs.
+
+Review the generated change groups, test-file summary, all changes, and promotion checklist.
+Mark the draft ready for review to run the strict Merge gate, then merge manually
+only after required checks pass. Promotion does not publish a release. Release
+Please remains responsible for its separate release PR, version and changelog
+updates, tags, GitHub release, and HACS assets.
+
 ## Manual Home Assistant development
 
 For interactive work, copy or symlink `custom_components/allpowers_ble` into a test

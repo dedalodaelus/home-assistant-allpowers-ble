@@ -31,6 +31,36 @@ jobs:
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
+      - name: Check out trusted base and history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Run the validator from the trusted base revision, not PR-controlled code.
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the immutable PR head revision
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags origin \
+            "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/promotion-validation-head"
+          test "$(git rev-parse refs/remotes/origin/promotion-validation-head)" = "$PR_HEAD_SHA"
+
+      - name: Validate release metadata at current PR revisions
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: >-
+          python3 -m scripts.promotion_metadata
+          --base-sha "$PR_BASE_SHA"
+          --head-sha "$PR_HEAD_SHA"
+          --base-ref "$PR_BASE_REF"
+          --head-ref "$PR_HEAD_REF"
+
       - name: Wait for required checks on PR head
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
@@ -115,7 +145,10 @@ jobs:
               per_page: 100,
             });
 
-            const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
+            const changedPaths = new Set(
+              files.flatMap((file) => [file.filename, file.previous_filename].filter(Boolean))
+            );
+            const touchesChangelog = changedPaths.has("CHANGELOG.md");
             const isFeatureToDevel = baseRef === "devel";
             const isPromotionToMain = baseRef === "main";
             const isMainToDevelSync = baseRef === "devel" && headRef === "main";
@@ -241,6 +274,22 @@ jobs:
 
               // Success condition: no missing checks and no pending runs.
               if (missing.length === 0 && pending.length === 0) {
+                // Fail closed if either immutable revision moved while required
+                // checks were running. A fresh PR event must validate the new pair.
+                const latestPull = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                });
+                if (
+                  latestPull.data.head.sha !== headSha
+                  || latestPull.data.base.sha !== pr.base.sha
+                ) {
+                  core.setFailed(
+                    "PR base or head changed while checks were running. Wait for validation of the current revisions before merging."
+                  );
+                  return;
+                }
                 core.info("All required checks completed successfully.");
                 return;
               }

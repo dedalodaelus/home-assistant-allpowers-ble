@@ -91,6 +91,29 @@ A pull request should include:
 - no generated caches, local configuration, diagnostics, or packet captures with
   identifying data.
 
+### Promoting `devel` to `main`
+
+Use **Actions → Promote devel to main → Run workflow** while the workflow is on
+`main`. The workflow requires the repository secrets `PROMOTION_APP_ID` and
+`PROMOTION_APP_PRIVATE_KEY` for a GitHub App installed on this repository with
+Contents: read and Pull requests: write permissions. Its installation token is
+used only to read the comparison and create a draft PR, and allows the ordinary
+PR checks to start. The workflow concurrency group prevents overlapping runs.
+
+An existing open promotion PR, including a draft, is returned as-is; the workflow
+does not edit its body or review metadata. If the branches are identical, it exits
+without opening a PR. If they have diverged, synchronize `main` into `devel` with a
+reviewed PR that uses a merge commit (never squash or rebase it), then try again.
+If Release Please managed metadata appears in the comparison, reconcile it through
+the reviewed release process before retrying. Integration manifest metadata may
+change, but its version must not regress.
+
+Review the generated change and test-file summaries, the full comparison, and the
+promotion checklist in `.github/PULL_REQUEST_TEMPLATE/promotion.md`. Mark the PR
+ready only after review; the Merge gate then waits for required checks. Promotion
+is a manual merge decision. It does not publish a release. Release Please
+continues independently on `main` after the promotion is merged.
+
 ## Protocol changes
 
 Keep protocol parsing and encoding under

@@ -19,9 +19,12 @@ SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+].+)?$")
 REQUIRED_REPOSITORY_FILES = {
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
+    ".github/PULL_REQUEST_TEMPLATE/promotion.md",
     ".github/workflows/ci.yml",
     ".github/workflows/hacs.yml",
     ".github/workflows/hassfest.yml",
+    ".github/workflows/merge-gate.yml",
+    ".github/workflows/promote-devel.yml",
     ".github/workflows/release.yml",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
@@ -31,6 +34,8 @@ REQUIRED_REPOSITORY_FILES = {
     "hacs.json",
     "pyproject.toml",
     "scripts/validate_release_metadata.py",
+    "scripts/promote_devel.py",
+    "scripts/promotion_metadata.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
