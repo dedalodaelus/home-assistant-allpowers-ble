@@ -323,39 +323,41 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                                 "Registry identity collision for config entry %s",
                                 reconfigure_entry.entry_id,
                             )
-                            return self.async_show_form(
-                                step_id="reconfigure",
-                                data_schema=schema,
-                                errors={"base": "registry_conflict"},
+                            errors["base"] = "registry_conflict"
+                        else:
+                            data_updates.update(
+                                {
+                                    CONF_REGISTRY_ID: registry_id,
+                                    CONF_PREVIOUS_REGISTRY_ID: source,
+                                    CONF_REPLACE_DEVICE: replace_device,
+                                }
                             )
-                        data_updates.update(
-                            {
-                                CONF_REGISTRY_ID: registry_id,
-                                CONF_PREVIOUS_REGISTRY_ID: source,
-                                CONF_REPLACE_DEVICE: replace_device,
-                            }
+                    if not errors:
+                        changed = (
+                            reconfigure_entry.data
+                            != reconfigure_entry.data | data_updates
+                            or reconfigure_entry.title != entry_title
+                            or reconfigure_entry.unique_id != address
                         )
-                    changed = (
-                        reconfigure_entry.data != reconfigure_entry.data | data_updates
-                        or reconfigure_entry.title != entry_title
-                        or reconfigure_entry.unique_id != address
-                    )
-                    result = self.async_update_and_abort(
-                        reconfigure_entry,
-                        unique_id=address,
-                        title=entry_title,
-                        data_updates=data_updates,
-                        reason="reconfigure_successful",
-                    )
-                    if not reconfigure_entry.update_listeners and (
-                        changed
-                        or reconfigure_entry.state
-                        in (ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR)
-                    ):
-                        self.hass.config_entries.async_schedule_reload(
-                            reconfigure_entry.entry_id
+                        result = self.async_update_and_abort(
+                            reconfigure_entry,
+                            unique_id=address,
+                            title=entry_title,
+                            data_updates=data_updates,
+                            reason="reconfigure_successful",
                         )
-                    return result
+                        if not reconfigure_entry.update_listeners and (
+                            changed
+                            or reconfigure_entry.state
+                            in (
+                                ConfigEntryState.SETUP_RETRY,
+                                ConfigEntryState.SETUP_ERROR,
+                            )
+                        ):
+                            self.hass.config_entries.async_schedule_reload(
+                                reconfigure_entry.entry_id
+                            )
+                        return result
 
         return cast(Any, self.async_show_form)(
             step_id="reconfigure",
