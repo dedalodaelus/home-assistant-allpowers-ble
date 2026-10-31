@@ -88,9 +88,22 @@ A positive status probe does not automatically make write features safe. Each
 shared bit field and hardware revision must be verified independently before
 write controls are enabled.
 
-For verified profiles, write authorization depends on both freshness and semantic
-validation of the latest snapshot. Structurally valid packets can still be shown
-for diagnostics even when they are not trusted for writes.
+For verified profiles, the hardware revision must be observed in the active GATT
+session. That verification remains valid for the session even when no new settings
+notification arrives; a disconnect or new session invalidates it. Output writes
+still require a fresh status snapshot and semantic validation. Settings mutations
+still require a fresh settings snapshot and semantic validation. Structurally valid
+packets can still be shown for diagnostics even when they are not trusted for writes.
+
+Model identities are persisted as canonical family names, while the latest
+advertised name remains available separately for diagnostics. A conflicting
+specific identity latches the entry into read-only mode without replacing its last
+known identity. MAC-only advertisements do not clear that state. Recovery requires
+a later identifying observation and current-session settings telemetry that either
+verify the observed revision or confirm the preserved supported identity. A
+persisted rejected-family identity that conflicts with the entry's original model
+name is allowed to reconnect for telemetry, but remains read-only until that
+recovery check succeeds.
 
 ## Security and trust model
 

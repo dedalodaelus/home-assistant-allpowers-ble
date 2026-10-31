@@ -1307,8 +1307,8 @@ def test_identifying_device_name_notification_persists_identity(
 
     client._notification_handler(FakeCharacteristic(), bytearray(frame))
 
-    assert persisted == ["AP R600 V2.0"]
-    assert client.snapshot().model_identity == "AP R600 V2.0"
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
 
 
 def test_model_identity_persistence_waits_for_current_session_settings(
@@ -1321,13 +1321,13 @@ def test_model_identity_persistence_waits_for_current_session_settings(
     client._model_identity_callback = persisted.append
 
     client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-61))
-    assert client.snapshot().model_identity == "AP R600 V2.0"
+    assert client.snapshot().model_identity == "R600"
     assert not persisted
 
     frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
     client._notification_handler(FakeCharacteristic(), bytearray(frame))
 
-    assert persisted == ["AP R600 V2.0"]
+    assert persisted == ["R600"]
 
 
 @pytest.mark.parametrize(
@@ -1369,10 +1369,61 @@ def test_contradictory_model_advertisement_is_read_only_until_resolved() -> None
     client._settings_monotonic = monotonic()
 
     client.update_advertisement(SimpleNamespace(name="AP S300", rssi=-55))
+    assert client.snapshot().model_identity == "R600"
+    assert client._identity_conflicted
     assert not client._runtime_model_support().capabilities.write_output_controls
 
     client.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-55))
+    assert not client._identity_conflicted
     assert client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.parametrize("contradiction", ["AP S300", "AP S500", "AP S700"])
+def test_identity_conflict_persists_across_restart_and_recovers_safely(
+    contradiction: str,
+    notification_builder,
+) -> None:
+    persisted = {"identity": "R600", "conflict": False}
+    first_client, _ = _connected_client()
+    first_client._model_identity_callback = lambda identity: persisted.update(
+        identity=identity
+    )
+    first_client._identity_conflict_callback = lambda conflicted: persisted.update(
+        conflict=conflicted
+    )
+
+    first_client.update_advertisement(SimpleNamespace(name=contradiction, rssi=-55))
+
+    assert first_client.snapshot().model_identity == "R600"
+    assert persisted == {"identity": "R600", "conflict": True}
+    assert not first_client._runtime_model_support().capabilities.write_output_controls
+
+    restarted = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=contradiction,
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+        options=ConnectionOptions(),
+    )
+    restarted._connected = True
+    restarted._active_session_generation = 2
+    restarted.update_advertisement(SimpleNamespace(name="AA:BB:CC:DD:EE:FF", rssi=-54))
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    assert restarted._identity_conflicted
+    restarted.update_advertisement(SimpleNamespace(name="AP R600 V2.0", rssi=-54))
+
+    assert persisted == {"identity": "R600", "conflict": False}
+    assert restarted.snapshot().model_identity == "R600"
+    assert restarted._runtime_model_support().capabilities.write_output_controls
 
 
 def test_missing_advertisement_does_not_promote_display_name() -> None:
@@ -1415,9 +1466,39 @@ def test_identity_only_advertisement_emits_update_and_persists_once() -> None:
     client.update_advertisement(service_info)
     client.update_advertisement(service_info)
 
-    assert persisted == ["AP R600 V2.0"]
+    assert persisted == ["R600"]
     assert len(updates) == 1
-    assert client.snapshot().model_identity == "AP R600 V2.0"
+    assert client.snapshot().model_identity == "R600"
+
+
+def test_equivalent_r600_names_share_identity_and_persist_once() -> None:
+    persisted: list[str] = []
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name="Unknown",
+        device_identity="",
+        model_identity_callback=persisted.append,
+        options=ConnectionOptions(),
+    )
+    updates: list[None] = []
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+    client.set_update_callback(lambda: updates.append(None))
+
+    for name in (
+        "AP R600 V2.0",
+        "ALLPOWERS R600",
+        "allpowers r600",
+        "allpowers r600",
+    ):
+        client.update_advertisement(SimpleNamespace(name=name, rssi=-55))
+
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
+    assert client.snapshot().advertised_name == "allpowers r600"
+    assert len(updates) == 3
 
 
 @pytest.mark.asyncio
@@ -1425,6 +1506,9 @@ async def test_cached_revision_cannot_authorize_after_reconnect_before_settings(
     notification_builder,
 ) -> None:
     client, fake = _connected_client()
+    client._session_hardware_revision = ("0.3", 0x03)
+    client._activate_session_generation()
+    assert client._session_hardware_revision is None
     client._settings_monotonic = None
     client._status = _status()
     client._status_monotonic = monotonic()
@@ -1439,6 +1523,33 @@ async def test_cached_revision_cannot_authorize_after_reconnect_before_settings(
     settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
     client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
     assert client._runtime_model_support().capabilities.write_output_controls
+
+    await client._disconnect_client()
+    assert client._session_hardware_revision is None
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+def test_verified_revision_survives_twenty_minutes_of_status_only_telemetry(
+    notification_builder,
+) -> None:
+    client, _ = _connected_client()
+    now = 100.0
+    client._loop_time = lambda: now  # type: ignore[method-assign]
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
+
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    for _ in range(61):
+        now += 20
+        client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+
+    assert now - client._settings_monotonic > 20 * 60
+    assert not client._settings_are_fresh()
+    assert client._runtime_model_support().capabilities.write_output_controls
+    assert client._safe_output_snapshot() == (False, False, True)
+    with pytest.raises(client_module.StateUnavailableError, match="fresh settings"):
+        client._safe_settings_snapshot()
 
 
 def test_update_advertisement_debounces_rssi_only_changes() -> None:

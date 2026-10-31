@@ -53,6 +53,17 @@ async def test_device_diagnostics_include_registry_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_report_conflicted_identity_as_read_only() -> None:
+    entry, _, _, hass = configured_entry()
+    entry.data["device_identity_conflict"] = True
+
+    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+    assert payload["model_support"]["classification"] == "identity_conflict"
+    assert not payload["model_support"]["capabilities"]["write_output_controls"]
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_recursively_redact_nested_identifiers() -> None:
     payload = {
         "snapshot": {

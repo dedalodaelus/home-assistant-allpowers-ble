@@ -36,6 +36,8 @@ class RepairFakeClient:
         device_identity: str,
         model_identity_callback: Callable[[str], None] | None,
         options: ConnectionOptions,
+        identity_conflicted: bool = False,
+        identity_conflict_callback: Callable[[bool], None] | None = None,
     ) -> None:
         del hass
         self.address = address

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime
 from enum import Enum
 import re
@@ -13,9 +13,9 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from .const import CONF_DEVICE_NAME
+from .const import CONF_DEVICE_IDENTITY_CONFLICT, CONF_DEVICE_NAME
 from .coordinator import AllpowersConfigEntry
-from .model_support import identify_model
+from .model_support import READ_ONLY_CAPABILITIES, identify_model
 
 TO_REDACT = {CONF_ADDRESS}
 REDACTED_NAME = "**REDACTED_NAME**"
@@ -73,6 +73,15 @@ def _diagnostics_payload(
         hardware_version=settings.hardware_version if settings else None,
         raw_hardware_version=settings.raw_hardware_version if settings else None,
     )
+    if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False):
+        support = replace(
+            support,
+            verified=False,
+            classification="identity_conflict",
+            profile="identity-conflict-read-only",
+            capabilities=READ_ONLY_CAPABILITIES,
+            reason="Conflicting model identities require a fresh identifying observation",
+        )
     payload: dict[str, Any] = {
         "entry": {
             "title": entry.title,

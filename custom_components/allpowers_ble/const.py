@@ -15,6 +15,7 @@ WRITE_UUID: Final = "0000fff2-0000-1000-8000-00805f9b34fb"
 
 CONF_DEVICE_NAME: Final = "device_name"
 CONF_DEVICE_IDENTITY: Final = "device_identity"
+CONF_DEVICE_IDENTITY_CONFLICT: Final = "device_identity_conflict"
 CONF_STATUS_INTERVAL: Final = "status_interval"
 CONF_STALE_TIMEOUT: Final = "stale_timeout"
 CONF_WATCHDOG_TIMEOUT: Final = "watchdog_timeout"

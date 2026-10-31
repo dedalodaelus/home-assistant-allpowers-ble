@@ -407,6 +407,31 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AP S500", "AP S700"])
+async def test_conflicted_rejected_identity_reconnects_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    client = make_client(name=name)
+    client._identity_conflicted = True
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client._connect_once()
+
+    assert client.snapshot().connected
+    assert client._runtime_model_support().classification == "identity_conflict"
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
 async def test_reconnect_requires_current_session_settings_for_write_capability(
     monkeypatch: pytest.MonkeyPatch,
     notification_builder,

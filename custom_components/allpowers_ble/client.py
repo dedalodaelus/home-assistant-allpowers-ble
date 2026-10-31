@@ -32,7 +32,13 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
-from .model_support import ModelSupport, has_specific_model_identity, identify_model
+from .model_support import (
+    READ_ONLY_CAPABILITIES,
+    ModelSupport,
+    canonical_model_identity,
+    has_specific_model_identity,
+    identify_model,
+)
 from .models import AllpowersSnapshot, ConnectionStatistics
 from .options import ConnectionOptions
 from .protocol import (
@@ -143,18 +149,19 @@ class AllpowersBLEClient:
         address: str,
         advertised_name: str,
         device_identity: str | None = None,
+        identity_conflicted: bool = False,
         model_identity_callback: Callable[[str], None] | None = None,
+        identity_conflict_callback: Callable[[bool], None] | None = None,
         options: ConnectionOptions,
     ) -> None:
         self._hass = hass
         self.address = address.upper()
         self._advertised_name = advertised_name
-        self._device_identity = (
-            device_identity.strip()
-            if device_identity and has_specific_model_identity(device_identity)
-            else ""
-        )
+        self._device_identity = canonical_model_identity(device_identity) or ""
+        self._identity_conflicted = identity_conflicted
+        self._pending_model_identity: str | None = None
         self._model_identity_callback = model_identity_callback
+        self._identity_conflict_callback = identity_conflict_callback
         self._options = options
 
         self._client: BleakClient | None = None
@@ -182,6 +189,7 @@ class AllpowersBLEClient:
         self._connected_monotonic: float | None = None
         self._status: StatusData | None = None
         self._settings: SettingsData | None = None
+        self._session_hardware_revision: tuple[str | None, int | None] | None = None
         self._status_monotonic: float | None = None
         self._settings_monotonic: float | None = None
         self._status_version = 0
@@ -618,13 +626,32 @@ class AllpowersBLEClient:
         return self._settings
 
     def _runtime_model_support(self) -> ModelSupport:
-        """Return model support resolved from the latest revision-aware snapshot."""
-        settings = self._settings if self._settings_are_fresh() else None
-        return identify_model(
+        """Resolve support from revision evidence received in this GATT session."""
+        revision = self._session_hardware_revision
+        if (
+            revision is None
+            and self._settings_are_fresh()
+            and self._settings is not None
+        ):
+            revision = (
+                self._settings.hardware_version,
+                self._settings.raw_hardware_version,
+            )
+        support = identify_model(
             self._device_identity,
-            hardware_version=settings.hardware_version if settings else None,
-            raw_hardware_version=settings.raw_hardware_version if settings else None,
+            hardware_version=revision[0] if revision else None,
+            raw_hardware_version=revision[1] if revision else None,
         )
+        if self._identity_conflicted:
+            return replace(
+                support,
+                verified=False,
+                classification="identity_conflict",
+                profile="identity-conflict-read-only",
+                capabilities=READ_ONLY_CAPABILITIES,
+                reason="Conflicting model identities require a fresh identifying observation",
+            )
+        return support
 
     def _settings_are_fresh(self) -> bool:
         return (
@@ -637,19 +664,59 @@ class AllpowersBLEClient:
         )
 
     def _observe_model_identity(self, name: str) -> bool:
-        """Record a specifically observed model family in the runtime snapshot."""
-        if not has_specific_model_identity(name) or name == self._device_identity:
+        """Track specific model observations without replacing identity on conflict."""
+        observed_identity = canonical_model_identity(name)
+        if observed_identity is None:
             return False
-        self._device_identity = name
+        if not self._device_identity:
+            self._device_identity = observed_identity
+            self._persist_model_identity_if_validated()
+            return True
+        if observed_identity == self._device_identity and not self._identity_conflicted:
+            return False
+
+        previous_identity = self._device_identity
+        previous_conflict = self._identity_conflicted
+        self._pending_model_identity = observed_identity
+        if not self._identity_conflicted:
+            self._identity_conflicted = True
         self._persist_model_identity_if_validated()
-        return True
+        if (
+            not previous_conflict
+            and self._identity_conflicted
+            and self._identity_conflict_callback is not None
+        ):
+            self._identity_conflict_callback(True)
+        return (
+            self._device_identity != previous_identity
+            or self._identity_conflicted != previous_conflict
+        )
 
     def _persist_model_identity_if_validated(self) -> None:
-        """Persist identity only after this GATT session supplied settings telemetry."""
+        """Persist identities only after current-session settings telemetry."""
+        if not self._settings_are_fresh() or self._settings is None:
+            return
+        pending_identity = self._pending_model_identity
+        if pending_identity is not None:
+            pending_support = identify_model(
+                pending_identity,
+                hardware_version=self._settings.hardware_version,
+                raw_hardware_version=self._settings.raw_hardware_version,
+            )
+            if pending_support.verified or (
+                pending_identity == self._device_identity and pending_support.supported
+            ):
+                self._device_identity = pending_identity
+                self._pending_model_identity = None
+                self._identity_conflicted = False
+                if self._identity_conflict_callback is not None:
+                    self._identity_conflict_callback(False)
+                if self._model_identity_callback is not None:
+                    self._model_identity_callback(self._device_identity)
+            return
         if (
-            self._settings_are_fresh()
-            and has_specific_model_identity(self._device_identity)
-            and self._model_identity_callback is not None
+            has_specific_model_identity(self._device_identity)
+            and self._model_identity_callback
         ):
             self._model_identity_callback(self._device_identity)
 
@@ -757,7 +824,7 @@ class AllpowersBLEClient:
             return self._fresh_ble_device() or device
 
         support = identify_model(self._device_identity)
-        if not support.supported:
+        if not support.supported and not self._identity_conflicted:
             raise UnsupportedDeviceError(support.reason or "Unsupported model")
 
         client = await establish_connection(
@@ -835,6 +902,7 @@ class AllpowersBLEClient:
             self._write_characteristic = None
             self._connected = False
             self._connected_monotonic = None
+            self._session_hardware_revision = None
             self._pending_output_transaction = None
             self._pending_settings_transaction = None
             self._output_blocked_until_version = None
@@ -884,6 +952,7 @@ class AllpowersBLEClient:
         """Start a new BLE session generation and reset session-scoped state."""
         self._session_generation_counter += 1
         self._active_session_generation = self._session_generation_counter
+        self._session_hardware_revision = None
         self._decoder = NotificationStreamDecoder()
         self._ready_event.clear()
         return self._session_generation_counter
@@ -999,6 +1068,10 @@ class AllpowersBLEClient:
             elif isinstance(packet, SettingsData):
                 self._settings = packet
                 self._settings_monotonic = now
+                self._session_hardware_revision = (
+                    packet.hardware_version,
+                    packet.raw_hardware_version,
+                )
                 self._persist_model_identity_if_validated()
                 self._settings_version += 1
                 if (

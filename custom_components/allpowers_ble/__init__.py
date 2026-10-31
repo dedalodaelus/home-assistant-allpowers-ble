@@ -16,10 +16,15 @@ from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     CONF_DEVICE_IDENTITY,
+    CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_DEVICE_NAME,
     DOMAIN,
 )
-from .model_support import has_specific_model_identity
+from .model_support import (
+    canonical_model_identity,
+    has_specific_model_identity,
+    identify_model,
+)
 from .options import ConnectionOptions
 from .repairs import ISSUE_INVALID_MIGRATION, AllpowersRepairsManager
 
@@ -147,6 +152,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
     stored_name = entry.data.get(CONF_DEVICE_NAME)
     stored_identity = entry.data.get(CONF_DEVICE_IDENTITY)
     stored_identity = stored_identity if isinstance(stored_identity, str) else ""
+    stored_name_identity = canonical_model_identity(
+        stored_name if isinstance(stored_name, str) else ""
+    )
+    stored_model_identity = canonical_model_identity(stored_identity)
+    legacy_identity_conflict = bool(
+        stored_name_identity
+        and stored_model_identity
+        and stored_name_identity != stored_model_identity
+        and not identify_model(stored_model_identity).supported
+    )
 
     def _persist_model_identity(identity: str) -> None:
         if entry.data.get(CONF_DEVICE_IDENTITY) == identity:
@@ -155,6 +170,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             entry,
             data={**entry.data, CONF_DEVICE_IDENTITY: identity},
         )
+
+    def _persist_identity_conflict(conflicted: bool) -> None:
+        if entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False) == conflicted:
+            return
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_DEVICE_IDENTITY_CONFLICT: conflicted},
+        )
+
+    if legacy_identity_conflict:
+        _persist_identity_conflict(True)
 
     initial_device = bluetooth.async_ble_device_from_address(
         hass, address, connectable=True
@@ -167,7 +193,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
         address=address,
         advertised_name=str(stored_name or entry.title),
         device_identity=stored_identity,
+        identity_conflicted=bool(
+            entry.data.get(CONF_DEVICE_IDENTITY_CONFLICT, False)
+            or legacy_identity_conflict
+        ),
         model_identity_callback=_persist_model_identity,
+        identity_conflict_callback=_persist_identity_conflict,
         options=options,
     )
     coordinator = AllpowersCoordinator(hass, entry, client)

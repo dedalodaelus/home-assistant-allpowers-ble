@@ -106,11 +106,28 @@ def make_legacy_entry(*, options: dict[str, Any]) -> ConfigEntry[Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("device_name", "device_identity", "identity_conflicted"),
+    (
+        ("ALLPOWERS R600", "ALLPOWERS R600", False),
+        ("AP R600 V2.0", "AP S300", False),
+        ("AP R600 V2.0", "AP S500", True),
+        ("AP R600 V2.0", "AP S700", True),
+    ),
+)
 async def test_setup_entry_success_registers_callbacks_and_platforms(
     monkeypatch: pytest.MonkeyPatch,
+    device_name: str,
+    device_identity: str,
+    identity_conflicted: bool,
 ) -> None:
     hass = FakeHass()
     entry = make_entry()
+    entry.data = {
+        **entry.data,
+        "device_name": device_name,
+        "device_identity": device_identity,
+    }
     registered: dict[str, Any] = {}
 
     monkeypatch.setattr(
@@ -143,8 +160,9 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
     client = SetupClient.instances[0]
     coordinator = SetupCoordinator.instances[0]
     assert client.kwargs["address"] == ADDRESS
-    assert client.kwargs["advertised_name"] == "ALLPOWERS R600"
-    assert client.kwargs["device_identity"] == "ALLPOWERS R600"
+    assert client.kwargs["advertised_name"] == device_name
+    assert client.kwargs["device_identity"] == device_identity
+    assert client.kwargs["identity_conflicted"] is identity_conflicted
     assert coordinator.started
     assert coordinator.timeout == INITIAL_DATA_TIMEOUT
     assert entry.runtime_data.client is client
@@ -161,10 +179,13 @@ async def test_setup_entry_success_registers_callbacks_and_platforms(
 
     monkeypatch.setattr(hass.config_entries, "async_update_entry", track_update_entry)
     persist_identity = client.kwargs["model_identity_callback"]
-    persist_identity("AP R600 V2.0")
-    persist_identity("AP R600 V2.0")
-    assert entry.data["device_identity"] == "AP R600 V2.0"
+    persist_identity("R600")
+    persist_identity("R600")
+    assert entry.data["device_identity"] == "R600"
     assert len(identity_updates) == 1
+    persist_conflict = client.kwargs["identity_conflict_callback"]
+    persist_conflict(identity_conflicted)
+    persist_conflict(identity_conflicted)
 
     advertisement = SimpleNamespace(name="R600 updated", rssi=-50)
     registered["callback"](advertisement, object())

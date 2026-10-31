@@ -2,7 +2,32 @@
 
 import pytest
 
-from custom_components.allpowers_ble.model_support import identify_model
+from custom_components.allpowers_ble.model_support import (
+    canonical_model_identity,
+    has_specific_model_identity,
+    identify_model,
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    (
+        ("AP R600 V2.0", "R600"),
+        ("ALLPOWERS R600", "R600"),
+        ("allpowers r600", "R600"),
+        ("R600", "R600"),
+        ("Living room R600", None),
+        ("AP R600 kitchen", None),
+        ("AP R6000", None),
+        ("AP S", None),
+        ("AP S300", "AP S300"),
+    ),
+)
+def test_model_identity_is_specific_and_canonical(
+    name: str, expected: str | None
+) -> None:
+    assert canonical_model_identity(name) == expected
+    assert has_specific_model_identity(name) is (expected is not None)
 
 
 @pytest.mark.parametrize(

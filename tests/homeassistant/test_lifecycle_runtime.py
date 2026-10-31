@@ -7,6 +7,7 @@ from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+import re
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -40,12 +41,16 @@ class StatefulFakeClient:
         advertised_name: str,
         device_identity: str,
         options: ConnectionOptions,
+        identity_conflicted: bool = False,
         model_identity_callback: Callable[[str], None] | None = None,
+        identity_conflict_callback: Callable[[bool], None] | None = None,
     ) -> None:
         del hass
         self.address = address.upper()
         self.options = options
+        self.identity_conflicted = identity_conflicted
         self.model_identity_callback = model_identity_callback
+        self.identity_conflict_callback = identity_conflict_callback
         self.callback: Callable[[], None] | None = None
         self.advertisements: list[Any] = []
         self.calls: list[tuple[str, Any]] = []
@@ -159,13 +164,14 @@ def bluetooth_callbacks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]
 
 
 def _make_entry(address: str, *, title: str) -> MockConfigEntry:
+    device_name = re.sub(r"\s+[0-9A-Fa-f]{4}$", "", title)
     return MockConfigEntry(
         domain=DOMAIN,
         unique_id=address,
         version=1,
         minor_version=1,
         title=title,
-        data={CONF_ADDRESS: address, "device_name": title.replace(" AABB", "")},
+        data={CONF_ADDRESS: address, "device_name": device_name},
         options=ConnectionOptions().as_dict(),
     )
 
@@ -316,15 +322,15 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
     await hass.async_block_till_done()
     assert first_client.snapshot().advertised_name == "AP R600 V2.0"
-    assert first_client.snapshot().model_identity == "AP R600 V2.0"
-    assert entry.data["device_identity"] == "AP R600 V2.0"
+    assert first_client.snapshot().model_identity == "R600"
+    assert entry.data["device_identity"] == "R600"
     first_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-50), object())
     assert len(entry_updates) == 1
     assert first_client._runtime_model_support().capabilities.write_output_controls
 
     first_callback(SimpleNamespace(name=address, rssi=-50), object())
     assert first_client.snapshot().advertised_name == address
-    assert first_client.snapshot().model_identity == "AP R600 V2.0"
+    assert first_client.snapshot().model_identity == "R600"
 
     registry = er.async_get(hass)
     entity_ids = {
@@ -341,8 +347,9 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     reloaded_client = entry.runtime_data.client
     reload_callback, _ = bluetooth_callbacks[0]
     reload_callback(SimpleNamespace(name=address, rssi=-49), object())
-    assert reloaded_client.snapshot().model_identity == "AP R600 V2.0"
-    assert reloaded_client._runtime_model_support().verified
+    assert reloaded_client.snapshot().model_identity == "R600"
+    assert reloaded_client._runtime_model_support().capabilities.write_output_controls
+    assert entry.data.get("device_identity_conflict", False) is False
     assert all(
         _count_unique_id(hass, f"{address}_{key}", domain="switch") == 1
         for key in ("ac_output", "dc_output", "light")
@@ -350,8 +357,9 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
 
     reload_callback(SimpleNamespace(name="AP S300", rssi=-49), object())
     await hass.async_block_till_done()
-    assert reloaded_client.snapshot().model_identity == "AP S300"
-    assert entry.data["device_identity"] == "AP S300"
+    assert reloaded_client.snapshot().model_identity == "R600"
+    assert entry.data["device_identity"] == "R600"
+    assert entry.data["device_identity_conflict"] is True
     assert (
         not reloaded_client._runtime_model_support().capabilities.write_output_controls
     )
@@ -361,7 +369,8 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     contradictory_client = entry.runtime_data.client
     contradictory_callback, _ = bluetooth_callbacks[0]
     contradictory_callback(SimpleNamespace(name=address, rssi=-48), object())
-    assert contradictory_client.snapshot().model_identity == "AP S300"
+    assert contradictory_client.snapshot().model_identity == "R600"
+    assert contradictory_client._identity_conflicted
     assert not contradictory_client._runtime_model_support().capabilities.write_output_controls
 
     contradictory_client._settings_monotonic = monotonic() - 1000
@@ -378,6 +387,18 @@ async def test_production_client_identity_survives_proxy_advertisements_and_relo
     contradictory_client._emit_update()
     await hass.async_block_till_done()
     assert hass.states.get(entity_ids["ac_output"]).state == "unavailable"
+
+    contradictory_client._settings = settings()
+    contradictory_client._status = status()
+    contradictory_client._settings_monotonic = monotonic()
+    contradictory_client._status_monotonic = monotonic()
+    contradictory_callback(SimpleNamespace(name="AP R600 V2.0", rssi=-48), object())
+    await hass.async_block_till_done()
+    assert not contradictory_client._identity_conflicted
+    assert entry.data["device_identity_conflict"] is False
+    assert (
+        contradictory_client._runtime_model_support().capabilities.write_output_controls
+    )
 
 
 @pytest.mark.asyncio
