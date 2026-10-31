@@ -138,3 +138,26 @@ For a qualification PR, include:
 
 For stable promotion that requires strict HIL gating, ensure repository variable
 REQUIRE_HIL_STABLE_GATE is true so CI enforces require-pass mode.
+
+## Transaction safety regression
+
+Issue #197 has deterministic simulation coverage, not new physical qualification.
+For R600 hardware 0.3 / raw `0x03`, execute this checklist on both routes with
+noncritical test loads. Do not mark matrix scenarios passed without sanitized
+capture evidence, and do not automatically retry an ambiguous power command.
+
+- Send AC on followed immediately by DC on without intervening matching telemetry:
+  verify rejection of DC and absence of a second combined write on the wire.
+- After matching AC status, repeat DC and verify the AC/DC/light bitmap, including
+  explicit off transitions and every documented sibling output state.
+- Repeat ECO, work mode, timeout, and optional car-charger changes; verify that
+  dependent settings writes remain blocked and unknown flag bits are preserved.
+- Capture when the station emits settings `0x03` relative to command `0x02`, both
+  for actual mutations and unchanged keepalive. Do not assume an acknowledgement
+  cadence or promise a bounded physical-confirmation time without this evidence.
+- While settings are pending, invoke manual and automatic keepalive and verify
+  that no unconfirmed target is replayed. Check bounded recovery without spinning.
+- Capture contradictory, missing, and late telemetry, cancellation, route loss,
+  and reload. Confirm recovery requires new session-appropriate safe telemetry.
+- Repeat with vendor-app contention. A matching snapshot is convergence only;
+  without transaction IDs the responsible actor cannot be authenticated.

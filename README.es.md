@@ -142,8 +142,11 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
    no se afirma seguridad para semánticas no documentadas del comando de salida.
 2. ECO, modo de trabajo, cargador de coche y temporizador requieren ajustes
    recientes y conservan todos los bits no relacionados.
-3. Cada escritura abre una transacción versionada y espera una confirmación en
-   notificación antes de reutilizar ese estado para otra escritura.
+3. Cada escritura publica una transacción versionada antes de esperar a GATT.
+   Otra escritura del mismo grupo requiere una notificación posterior y
+   coincidente de la misma sesión. Los comandos dependientes se rechazan, no se
+   encolan, mientras la confirmación esté pendiente; el objetivo solicitado nunca
+   se utiliza como instantánea para otra escritura.
 4. Las transacciones pendientes y la frescura se invalidan al desconectar o
    iniciar otra sesión GATT.
 5. El cliente BLE aplica capacidades de escritura por perfil y revisión en el
@@ -153,6 +156,20 @@ modificar accidentalmente otra salida, la integración aplica estas reglas:
 
 Cualquier garantía futura de seguridad en escritura debe apoyarse en evidencia
 capturada del hardware objetivo y en pruebas de regresión equivalentes.
+
+La finalización del servicio significa envío al transporte, no confirmación
+física. Las entidades solo cambian de estado mediante telemetría del dispositivo.
+Una notificación coincidente demuestra convergencia observada, no causalidad del
+comando: el protocolo no tiene identificadores de transacción. Se registran las
+notificaciones recibidas durante la espera GATT, pero un error o una cancelación
+bloquea el grupo hasta recibir otra instantánea segura. El tiempo de confirmación
+agotado también exige una instantánea nueva, no reutilizar datos en caché.
+
+Las automatizaciones secuenciales deben esperar al estado coincidente antes de
+modificar otra salida o ajuste. El keepalive nunca reenvía un objetivo pendiente:
+el manual se rechaza y el automático se aplaza, con solicitudes de estado de
+recuperación espaciadas. La respuesta de ajustes `0x03` aún no está cualificada
+en hardware R600 físico; las simulaciones no demuestran una corrección física.
 
 Consulta [Arquitectura](docs/architecture/README.md) y [Protocolo](docs/protocol.md).
 

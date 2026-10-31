@@ -154,8 +154,10 @@ therefore applies the following invariants:
    output-command semantics are not claimed safe.
 2. ECO, work mode, car charger, and ECO timeout changes require a fresh settings
    snapshot and preserve every unrelated raw flag bit.
-3. Each write starts a versioned command transaction and waits for a matching
-   on-device confirmation before the next write can reuse that state.
+3. Each write publishes a versioned transaction before awaiting GATT. A newer,
+   matching notification from the same session is required before another write
+   in that control group. Dependent commands are rejected, not queued, while
+   confirmation is pending; requested targets never become write snapshots.
 4. Pending transactions and freshness are invalidated on every disconnect and
    new GATT session.
 5. The BLE client enforces revision-aware write capabilities at the transport
@@ -165,6 +167,19 @@ therefore applies the following invariants:
 
 Any future write-safety guarantee must be supported by captured evidence from the
 target hardware revision and a matching regression test.
+
+Service completion means transport submission, not physical confirmation. Entity
+state changes only from device telemetry. A matching notification establishes
+observed convergence, not command causality: the protocol has no transaction ID.
+Notifications received during the GATT await are tracked, but a failed or canceled
+write still leaves the group blocked until a new safe snapshot is received.
+Confirmation timeout also requires a new snapshot, not reuse of cached state.
+
+Sequential automations must wait for matching device state before changing another
+output or setting. Settings keepalive never re-sends a pending user target: manual
+keepalive is rejected and automatic keepalive is deferred, with bounded recovery
+status requests. Settings `0x03` response timing remains unqualified on physical
+R600 hardware; simulation tests do not demonstrate a physical safety fix.
 
 See [Architecture](docs/architecture/README.md) and [Protocol](docs/protocol.md).
 

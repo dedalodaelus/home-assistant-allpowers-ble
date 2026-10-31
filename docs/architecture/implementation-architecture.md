@@ -205,9 +205,25 @@ capabilities at the transport boundary under the operation lock:
 Entity availability remains a UI guard only. Runtime profile downgrades are
 therefore enforced even for direct internal client calls.
 
-Transactions complete only when the matching notification arrives from the same
-session generation. They are in-memory only and are cleared on disconnect, on new
-GATT session, or when confirmation times out and a newer safe version is required.
+Confirmed snapshots and requested targets are separate. Pending targets cannot
+authorize another combined output/settings write or a keepalive. Commands in a
+pending group fail closed with `command_unconfirmed`, without automatic queuing.
+
+A transaction is visible in `SENDING` before yielding to GATT. Matching, newer,
+semantically safe same-session telemetry marks observed `CONFIRMED` convergence
+during that await; contradictory telemetry revokes it. Only successful transport
+return retires that provisional transaction. Otherwise it enters
+`AWAITING_CONFIRMATION` until a matching notification arrives. Error or cancellation
+clears the transaction and leaves an unknown group blocked until a newer snapshot;
+cached pre-error telemetry cannot recover it. Timeout likewise requires a new
+snapshot. Disconnect clears session-scoped state.
+
+Service completion represents submission, not physical confirmation. Versions and
+generation reject old state/session callbacks, but the protocol has no transaction
+ID and matching telemetry does not establish causation. Automatic keepalive waits
+past a pending settings deadline and uses bounded status-request recovery, never
+the requested target. Settings response timing and physical output behavior remain
+subject to the [HIL checklist](../hil-qualification.md#transaction-safety-regression).
 
 Any new safety claim must include matching protocol evidence and regression tests
 before it is documented as guaranteed behavior.

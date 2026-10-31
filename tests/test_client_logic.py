@@ -76,12 +76,254 @@ def _connected_client(options: ConnectionOptions | None = None):
 
 
 @pytest.mark.asyncio
-async def test_sequential_output_commands_use_shadow_snapshot() -> None:
+@pytest.mark.parametrize("group", ["output", "settings"])
+async def test_transaction_notification_during_write(
+    group: str, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    original_write = fake.write_gatt_char
+    notification = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA1, 2, 0, 0, 0x03, 0x11)),
+    )
+
+    async def write_and_notify(*args, **kwargs) -> None:
+        pending = (
+            client._pending_output_transaction
+            if group == "output"
+            else client._pending_settings_transaction
+        )
+        assert pending.phase is client_module.TransactionPhase.SENDING
+        await original_write(*args, **kwargs)
+        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+
+    monkeypatch.setattr(fake, "write_gatt_char", write_and_notify)
+    if group == "output":
+        await client.async_set_ac(True)
+        assert client._pending_output_transaction is None
+        assert client._status.ac_enabled is True
+    else:
+        await client.async_set_eco(True)
+        assert client._pending_settings_transaction is None
+        assert client._settings.eco_enabled is True
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+async def test_transaction_rejects_unconfirmed_dependent_write(group: str) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+
+    if group == "output":
+        await client.async_set_ac(True)
+        with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+            await client.async_set_dc(True)
+        assert client._status.ac_enabled is False
+    else:
+        await client.async_set_eco(True)
+        with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+            await client.async_set_work_mode(WorkMode.FAST)
+        assert client._settings.eco_enabled is False
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_transaction_keepalive_rejects_pending_settings() -> None:
+    client, fake = _connected_client()
+    client._settings_monotonic = asyncio.get_running_loop().time()
+    await client.async_set_eco(True)
+
+    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+        await client.async_send_settings_keepalive()
+
+    assert len(fake.writes) == 1
+    assert client._settings.eco_enabled is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["error", "cancel", "disconnect", "generation", "matched_error", "timeout"],
+)
+async def test_transaction_failed_write_requires_new_telemetry(
+    group: str, outcome: str, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    entered = asyncio.Event()
+    notification = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA1, 2, 0, 0, 0x03, 0x11)),
+    )
+
+    async def failing_write(*args, **kwargs) -> None:
+        del args, kwargs
+        entered.set()
+        if outcome == "cancel":
+            await asyncio.Event().wait()
+        if outcome == "matched_error":
+            client._notification_handler(FakeCharacteristic(), bytearray(notification))
+        if outcome == "disconnect":
+            fake.is_connected = False
+            return
+        if outcome == "generation":
+            client._active_session_generation = 2
+            return
+        if outcome == "timeout":
+            raise TimeoutError("ambiguous write")
+        raise RuntimeError("ambiguous write")
+
+    monkeypatch.setattr(fake, "write_gatt_char", failing_write)
+    command = client.async_set_ac if group == "output" else client.async_set_eco
+    task = asyncio.create_task(command(True))
+    await entered.wait()
+    if outcome == "cancel":
+        task.cancel()
+    error = (
+        asyncio.CancelledError
+        if outcome == "cancel"
+        else NotConnectedError
+        if outcome in {"disconnect", "generation"}
+        else TimeoutError
+        if outcome == "timeout"
+        else RuntimeError
+    )
+    with pytest.raises(error):
+        await task
+
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
+    if outcome == "generation":
+        return
+    blocked = (
+        client._output_blocked_until_version
+        if group == "output"
+        else client._settings_blocked_until_version
+    )
+    version = client._status_version if group == "output" else client._settings_version
+    assert blocked == version + 1
+    with pytest.raises(client_module.StateUnavailableError):
+        await command(False)
+    assert fake.writes == []
+
+    if outcome not in {"disconnect", "timeout"}:
+        monkeypatch.undo()
+        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+        await command(False)
+        assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+async def test_transaction_contradiction_during_write_revokes_convergence(
+    group: str, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    original_write = fake.write_gatt_char
+    matching = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA1, 2, 0, 0, 0x03, 0x11)),
+    )
+    contradictory = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x10, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA0, 2, 0, 0, 0x03, 0x11)),
+    )
+
+    async def write_and_notify(*args, **kwargs) -> None:
+        await original_write(*args, **kwargs)
+        for notification in (matching, matching, contradictory):
+            client._notification_handler(FakeCharacteristic(), bytearray(notification))
+
+    monkeypatch.setattr(fake, "write_gatt_char", write_and_notify)
+    command = client.async_set_ac if group == "output" else client.async_set_eco
+    await command(True)
+    pending = (
+        client._pending_output_transaction
+        if group == "output"
+        else client._pending_settings_transaction
+    )
+    assert pending.phase is client_module.TransactionPhase.AWAITING_CONFIRMATION
+    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+        await command(False)
+    assert len(fake.writes) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["output", "settings"])
+async def test_transaction_pre_send_notification_is_not_confirmation(
+    group: str, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    encoder_name = (
+        "encode_output_control" if group == "output" else "encode_settings_control"
+    )
+    encoder = getattr(client_module, encoder_name)
+    notification = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x12, 50, 0, 100, 0, 25, 0, 90))
+        if group == "output"
+        else bytes((0xA1, 2, 0, 0, 0x03, 0x11)),
+    )
+
+    def encode_and_notify(*args, **kwargs) -> bytes:
+        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+        return encoder(*args, **kwargs)
+
+    monkeypatch.setattr(client_module, encoder_name, encode_and_notify)
+    command = client.async_set_ac if group == "output" else client.async_set_eco
+    await command(True)
+    pending = (
+        client._pending_output_transaction
+        if group == "output"
+        else client._pending_settings_transaction
+    )
+    assert pending is not None
+    assert pending.source_version == 1
+    assert pending.phase is client_module.TransactionPhase.AWAITING_CONFIRMATION
+    client._notification_handler(FakeCharacteristic(), bytearray(notification))
+    assert client._pending_output_transaction is None
+    assert client._pending_settings_transaction is None
+
+
+@pytest.mark.asyncio
+async def test_sequential_output_commands_use_confirmed_snapshot(
+    notification_builder,
+) -> None:
     client, fake = _connected_client()
     client._status = _status()
     client._status_monotonic = asyncio.get_running_loop().time()
 
     await client.async_set_ac(True)
+    matching = notification_builder(0x01, bytes((0x12, 50, 0, 100, 0, 25, 0, 90)))
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
     await client.async_set_dc(True)
 
     assert fake.writes[0][7] == 0x22
@@ -98,10 +340,12 @@ async def test_stale_status_notification_does_not_clear_pending_output_transacti
 
     await client.async_set_ac(True)
     client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
-    await client.async_set_dc(True)
+    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+        await client.async_set_dc(True)
 
     assert fake.writes[0][7] == 0x22
-    assert fake.writes[1][7] == 0x23
+    assert len(fake.writes) == 1
+    assert client._pending_output_transaction is not None
 
 
 @pytest.mark.asyncio
@@ -113,6 +357,12 @@ async def test_consecutive_output_commands_handle_delayed_and_duplicate_confirma
     client._status_monotonic = asyncio.get_running_loop().time()
 
     await client.async_set_ac(True)
+    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+        await client.async_set_dc(True)
+    ac_only = notification_builder(
+        0x01, bytes((0x02, 73, 0x01, 0x2C, 0x00, 0x96, 0x00, 0x78))
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(ac_only))
     await client.async_set_dc(True)
 
     pending = client._pending_output_transaction
@@ -201,12 +451,16 @@ async def test_output_command_rejects_unknown_status_bits_on_verified_profile() 
 
 
 @pytest.mark.asyncio
-async def test_sequential_settings_commands_preserve_unknown_bits() -> None:
+async def test_sequential_settings_commands_preserve_unknown_bits(
+    notification_builder,
+) -> None:
     client, fake = _connected_client()
     client._settings = _settings()
     client._settings_monotonic = asyncio.get_running_loop().time()
 
     await client.async_set_eco(True)
+    matching = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(matching))
     await client.async_set_work_mode(WorkMode.FAST)
 
     assert fake.writes[0][7] == 0xA1
@@ -223,6 +477,10 @@ async def test_consecutive_settings_commands_handle_contradictory_and_duplicate_
     client._settings_monotonic = asyncio.get_running_loop().time()
 
     await client.async_set_eco(True)
+    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+        await client.async_set_work_mode(WorkMode.FAST)
+    eco_only = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    client._notification_handler(FakeCharacteristic(), bytearray(eco_only))
     await client.async_set_work_mode(WorkMode.FAST)
 
     pending = client._pending_settings_transaction

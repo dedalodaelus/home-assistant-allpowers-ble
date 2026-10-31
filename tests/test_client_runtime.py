@@ -95,6 +95,7 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._write_characteristic = FakeCharacteristic()
     client._connected = True
     client._active_session_generation = 1
+    client._disconnect_event.clear()
     client._settings = settings()
     client._connected_monotonic = monotonic()
     return fake
@@ -895,7 +896,60 @@ async def test_maintenance_keepalive_sends_real_settings_frame(
     assert fake.writes == [client_module.encode_settings_control(current_settings)]
     assert client._last_settings_keepalive_monotonic == pytest.approx(now)
     assert client._last_settings_keepalive_attempt_monotonic is None
-    assert waits == [pytest.approx(60.0)]
+    assert client._pending_settings_transaction is not None
+    assert (
+        client._settings_keepalive_deadline(now) > now + options.settings_stale_timeout
+    )
+    assert waits == [pytest.approx(240.0)]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_defers_pending_settings_then_recovers_with_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=20,
+        watchdog_timeout=300,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client = make_client(options)
+    fake = connect_fake(client)
+    now = 100.0
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    client._settings_monotonic = now
+    await client.async_set_eco(False)
+    pending = client._pending_settings_transaction
+    assert pending is not None
+    original_frame = fake.writes[0]
+    waits: list[float | None] = []
+
+    async def wait_for_wakeup(timeout: float | None) -> None:
+        waits.append(timeout)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "_wait_for_maintenance_wakeup", wait_for_wakeup)
+    now = 160.0
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    await client._maintenance_loop()
+    assert fake.writes == [original_frame]
+    assert client._pending_settings_transaction is pending
+    assert waits == [pytest.approx(20.0)]
+
+    client._stop_event.clear()
+    now = pending.confirm_deadline_monotonic + 1
+    client._status_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    await client._maintenance_loop()
+    assert fake.writes == [original_frame, client_module.encode_status_request()]
+    assert client._pending_settings_transaction is None
+    assert client._settings_blocked_until_version == client._settings_version + 1
+    assert client._settings_keepalive_deadline(now) == pytest.approx(now + 20)
+    assert waits[-1] == pytest.approx(20.0)
 
 
 @pytest.mark.asyncio
