@@ -103,8 +103,10 @@ PR checks to start. The workflow concurrency group prevents overlapping runs.
 An existing open promotion PR, including a draft, is returned as-is; the workflow
 does not edit its body or review metadata. If the branches are identical, it exits
 without opening a PR. If they have diverged, synchronize `main` into `devel` with a
-reviewed PR and try again. If Release Please managed metadata appears in the
-comparison, reconcile it through the reviewed release process before retrying.
+reviewed PR that uses a merge commit (never squash or rebase it), then try again.
+If Release Please managed metadata appears in the comparison, reconcile it through
+the reviewed release process before retrying. Integration manifest metadata may
+change, but its version must not regress.
 
 Review the generated change and test-file summaries, the full comparison, and the
 promotion checklist in `.github/PULL_REQUEST_TEMPLATE/promotion.md`. Mark the PR

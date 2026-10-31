@@ -183,11 +183,13 @@ personal access token or bypass required checks.
 
 Repeated runs return an existing open promotion PR unchanged. An identical branch
 comparison creates no PR. A diverged comparison fails with instructions to merge
-`main` into `devel` through a reviewed synchronization PR; neither branch is
-rewritten automatically. The workflow also stops if Release Please managed
-metadata (`CHANGELOG.md`, `.release-please-manifest.json`, or the integration
-manifest) is in the proposed diff. Resolve such metadata through the reviewed
-Release Please process.
+`main` into `devel` through a reviewed synchronization PR using a merge commit,
+not a squash or rebase. This preserves the ancestry required by the promotion
+workflow; neither branch is rewritten automatically. The workflow blocks changes
+to `CHANGELOG.md` and `.release-please-manifest.json`; it permits unrelated
+integration manifest edits while checking that the version does not regress. The
+Merge gate repeats the version check against the current PR base and head SHAs on
+every update, including draft PRs.
 
 Review the generated change groups, test-file summary, all changes, and promotion checklist.
 Mark the draft ready for review to run the strict Merge gate, then merge manually

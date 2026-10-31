@@ -11,6 +11,8 @@ This PR promotes the current `devel` changes to `main`.
 
 ### Tests
 
+Changed test files, not test results:
+
 <!-- GENERATED_TESTS -->
 
 ### Previous release PRs
@@ -43,4 +45,3 @@ Do not mark checks as passed before they finish.
 - [ ] Review all included changes and confirm release metadata/history is not downgraded or lost.
 - [ ] Mark ready for review and wait for required checks to pass.
 - [ ] Merge manually after review; this PR does not publish a release.
-

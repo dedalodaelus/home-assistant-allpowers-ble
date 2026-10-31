@@ -31,8 +31,9 @@
 1. From **Actions → Promote devel to main**, run the workflow on `main`.
 2. If an open promotion PR exists, inspect it; reruns return its URL and preserve
    its description and review metadata.
-3. If branches diverged, create a reviewed `main` to `devel` synchronization PR,
-   merge it, then retry. Do not rewrite either branch.
+3. If branches diverged, create a reviewed `main` to `devel` synchronization PR
+   and merge it with a merge commit. Do not squash or rebase this sync, or rewrite
+   either branch; the promotion preflight requires `main` to be an ancestor.
 4. Review the generated change groups, test-file summary, and complete diff. Reconcile any
    Release Please managed metadata before promotion.
 5. Mark the draft ready for review. Wait for Merge gate and every required check.
