@@ -407,6 +407,57 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
 
 
 @pytest.mark.asyncio
+async def test_notifications_during_start_notify_persist_identity_once_and_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    name_frame = notification_builder(0x35, b"AP R600 V2.0")
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+
+    class EarlyNotifyClient(FakeClient):
+        async def start_notify(
+            self,
+            characteristic: object,
+            callback: Any,
+        ) -> None:
+            await super().start_notify(characteristic, callback)
+            callback(characteristic, bytearray(name_frame))
+            callback(characteristic, bytearray(settings_frame))
+
+    client = make_client(name="ALLPOWERS power station")
+    client._device_identity = ""
+    persisted: list[str] = []
+    client._model_identity_callback = persisted.append
+    fake = EarlyNotifyClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> EarlyNotifyClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await client._connect_once()
+
+    assert persisted == ["R600"]
+    assert client.snapshot().model_identity == "R600"
+
+    restarted = AllpowersBLEClient(
+        hass=FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS power station",
+        device_identity=persisted[0],
+        options=ConnectionOptions(),
+    )
+    restarted._settings = settings()
+    restarted._connected = True
+    restarted.update_advertisement(SimpleNamespace(name="aa:bb:cc:dd:ee:ff", rssi=-54))
+
+    assert restarted.snapshot().model_identity == "R600"
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["AP S500", "AP S700"])
 async def test_conflicted_rejected_identity_reconnects_read_only(
     monkeypatch: pytest.MonkeyPatch,

@@ -1378,6 +1378,63 @@ def test_contradictory_model_advertisement_is_read_only_until_resolved() -> None
     assert client._runtime_model_support().capabilities.write_output_controls
 
 
+@pytest.mark.parametrize(
+    ("stored_identity", "contradictory_name"),
+    [("R600", "VOLIX P1800"), ("VOLIX P1800", "R600")],
+)
+def test_verified_family_contradiction_stays_read_only_across_restart(
+    stored_identity: str,
+    contradictory_name: str,
+    notification_builder,
+) -> None:
+    persisted = {"identity": stored_identity, "conflict": False}
+    client = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=stored_identity,
+        device_identity=stored_identity,
+        options=ConnectionOptions(),
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+    )
+    client._connected = True
+    client._settings = _settings()
+    client._settings_monotonic = monotonic()
+
+    client.update_advertisement(SimpleNamespace(name=contradictory_name, rssi=-55))
+
+    assert persisted == {"identity": stored_identity, "conflict": True}
+    assert client.snapshot().model_identity == stored_identity
+    assert not client._runtime_model_support().capabilities.write_output_controls
+
+    restarted = AllpowersBLEClient(
+        hass=object(),
+        address="AA:BB:CC:DD:EE:FF",
+        advertised_name=contradictory_name,
+        device_identity=persisted["identity"],
+        identity_conflicted=persisted["conflict"],
+        options=ConnectionOptions(),
+        model_identity_callback=lambda identity: persisted.update(identity=identity),
+        identity_conflict_callback=lambda conflicted: persisted.update(
+            conflict=conflicted
+        ),
+    )
+    restarted._connected = True
+    restarted.update_advertisement(SimpleNamespace(name="AA:BB:CC:DD:EE:FF", rssi=-54))
+    settings_frame = notification_builder(0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11)))
+    restarted._notification_handler(FakeCharacteristic(), bytearray(settings_frame))
+
+    assert persisted == {"identity": stored_identity, "conflict": True}
+    assert restarted.snapshot().model_identity == stored_identity
+    assert not restarted._runtime_model_support().capabilities.write_output_controls
+
+    restarted.update_advertisement(SimpleNamespace(name=stored_identity, rssi=-54))
+    assert persisted == {"identity": stored_identity, "conflict": False}
+    assert restarted._runtime_model_support().capabilities.write_output_controls
+
+
 @pytest.mark.parametrize("contradiction", ["AP S300", "AP S500", "AP S700"])
 def test_identity_conflict_persists_across_restart_and_recovers_safely(
     contradiction: str,

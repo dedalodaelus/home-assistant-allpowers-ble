@@ -718,6 +718,8 @@ class AllpowersBLEClient:
                 raw_hardware_version=self._settings.raw_hardware_version,
             )
             if (
+                pending_identity == self._device_identity or not self._device_identity
+            ) and (
                 pending_support.verified
                 or (
                     pending_identity == self._device_identity
@@ -894,6 +896,7 @@ class AllpowersBLEClient:
                 self._connected_monotonic = now
                 self._last_connected_at = _utcnow()
                 self._last_error = None
+                self._persist_model_identity_if_validated()
                 self._statistics = replace(
                     self._statistics,
                     successful_connections=self._statistics.successful_connections + 1,
