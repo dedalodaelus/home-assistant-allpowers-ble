@@ -1,0 +1,268 @@
+{
+  "samples": [
+    {
+      "started_at": "2026-11-01T01:07:59.255407+00:00",
+      "live_sampled_at": "2026-11-01T01:07:59.285001+00:00",
+      "finished_at": "2026-11-01T01:07:59.290401+00:00",
+      "entities": {
+        "battery": {
+          "rest_before": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T00:37:28.719187+00:00"
+          },
+          "live": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T01:07:59.208379+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T00:37:28.719187+00:00"
+          }
+        },
+        "connected": {
+          "rest_before": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T00:37:28.719326+00:00"
+          },
+          "live": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T01:07:59.208793+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T00:37:28.719326+00:00"
+          }
+        },
+        "telemetry_available": {
+          "rest_before": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T00:37:28.719339+00:00"
+          },
+          "live": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T01:07:59.208828+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T00:37:28.719339+00:00"
+          }
+        }
+      },
+      "diagnostics": {
+        "snapshot": {
+          "connected": true,
+          "last_packet_at": "2026-11-01T01:07:59.207859+00:00",
+          "status_monotonic": 18911.097463115,
+          "settings_monotonic": 18911.197428297
+        },
+        "snapshot_statistics": {
+          "notifications": 3176,
+          "valid_packets": 3176,
+          "parser_discards": 0,
+          "protocol_errors": 0,
+          "stale_session_notifications": null,
+          "foreign_client_notifications": null,
+          "emitted_updates": null,
+          "connection_attempts": 1,
+          "successful_connections": 1,
+          "disconnects": 0,
+          "reconnects": 0
+        },
+        "live_client_statistics": {
+          "notifications": null,
+          "valid_packets": null,
+          "parser_discards": null,
+          "protocol_errors": null,
+          "stale_session_notifications": null,
+          "foreign_client_notifications": null,
+          "emitted_updates": null,
+          "connection_attempts": null,
+          "successful_connections": null,
+          "disconnects": null,
+          "reconnects": null
+        },
+        "coordinator_client_updates": null,
+        "coordinator_listener_count": null,
+        "entity_update_callbacks": {
+          "AllpowersSensor.battery": null,
+          "AllpowersBinarySensor.connected": null,
+          "AllpowersBinarySensor.telemetry_available": null
+        },
+        "started_at": "2026-11-01T01:07:59.285456+00:00",
+        "finished_at": "2026-11-01T01:07:59.287951+00:00"
+      }
+    },
+    {
+      "started_at": "2026-11-01T01:09:29.290729+00:00",
+      "live_sampled_at": "2026-11-01T01:09:29.303712+00:00",
+      "finished_at": "2026-11-01T01:09:29.317845+00:00",
+      "entities": {
+        "battery": {
+          "rest_before": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T00:37:28.719187+00:00"
+          },
+          "live": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T01:09:28.796330+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "78",
+            "last_changed": "2026-11-01T00:37:28.281738+00:00",
+            "last_updated": "2026-11-01T00:37:28.281738+00:00",
+            "last_reported": "2026-11-01T00:37:28.719187+00:00"
+          }
+        },
+        "connected": {
+          "rest_before": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T00:37:28.719326+00:00"
+          },
+          "live": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T01:09:28.796695+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283550+00:00",
+            "last_updated": "2026-11-01T00:37:28.283550+00:00",
+            "last_reported": "2026-11-01T00:37:28.719326+00:00"
+          }
+        },
+        "telemetry_available": {
+          "rest_before": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T00:37:28.719339+00:00"
+          },
+          "live": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T01:09:28.796732+00:00",
+            "present": true,
+            "same_entry": true,
+            "allpowers_entry": true,
+            "entry_loaded": true
+          },
+          "rest_after": {
+            "state": "on",
+            "last_changed": "2026-11-01T00:37:28.283708+00:00",
+            "last_updated": "2026-11-01T00:37:28.283708+00:00",
+            "last_reported": "2026-11-01T00:37:28.719339+00:00"
+          }
+        }
+      },
+      "diagnostics": {
+        "snapshot": {
+          "connected": true,
+          "last_packet_at": "2026-11-01T01:09:28.795778+00:00",
+          "status_monotonic": 19000.681408032,
+          "settings_monotonic": 19000.785346211
+        },
+        "snapshot_statistics": {
+          "notifications": 3332,
+          "valid_packets": 3332,
+          "parser_discards": 0,
+          "protocol_errors": 0,
+          "stale_session_notifications": null,
+          "foreign_client_notifications": null,
+          "emitted_updates": null,
+          "connection_attempts": 1,
+          "successful_connections": 1,
+          "disconnects": 0,
+          "reconnects": 0
+        },
+        "live_client_statistics": {
+          "notifications": null,
+          "valid_packets": null,
+          "parser_discards": null,
+          "protocol_errors": null,
+          "stale_session_notifications": null,
+          "foreign_client_notifications": null,
+          "emitted_updates": null,
+          "connection_attempts": null,
+          "successful_connections": null,
+          "disconnects": null,
+          "reconnects": null
+        },
+        "coordinator_client_updates": null,
+        "coordinator_listener_count": null,
+        "entity_update_callbacks": {
+          "AllpowersSensor.battery": null,
+          "AllpowersBinarySensor.connected": null,
+          "AllpowersBinarySensor.telemetry_available": null
+        },
+        "started_at": "2026-11-01T01:09:29.304901+00:00",
+        "finished_at": "2026-11-01T01:09:29.309645+00:00"
+      }
+    }
+  ],
+  "comparison": {
+    "battery": {
+      "ownership_verified": true,
+      "live_report_advanced": true,
+      "rest_report_stationary": true,
+      "cached_rest_discrepancy_observed": true
+    },
+    "connected": {
+      "ownership_verified": true,
+      "live_report_advanced": true,
+      "rest_report_stationary": true,
+      "cached_rest_discrepancy_observed": true
+    },
+    "telemetry_available": {
+      "ownership_verified": true,
+      "live_report_advanced": true,
+      "rest_report_stationary": true,
+      "cached_rest_discrepancy_observed": true
+    }
+  }
+}

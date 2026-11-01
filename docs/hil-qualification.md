@@ -205,8 +205,46 @@ availability. No integration workaround, forced reports, or Core patch is applie
 The earlier tests inspected `hass.states.get(...).last_reported` without making
 HTTP requests. They therefore missed this difference between live reports and
 their REST representation. A stationary REST timestamp alone cannot establish
-that the integration stopped publishing. The physical report still needs the
-following comparison on its own host before assigning this cause to #213.
+that the integration stopped publishing. The physical comparison below now
+confirms this observation discrepancy on the affected host for the captured
+interval; it does not establish that every historical symptom has this cause.
+
+### Physical comparison received 2026-11-01
+
+The maintainer ran the capture script from commit `4df29a2` against the existing
+dedicated instance. The sanitized output is retained as
+[`issue213-live-rest-2026-11-01.json`](../tests/hil/fixtures/r600-hw03/issue213-live-rest-2026-11-01.json).
+Live samples span 01:07:59.285001Z–01:09:29.303712Z (90.018711 seconds).
+
+| Measurement | First sample | Second sample | Change |
+| --- | --- | --- | --- |
+| Notifications / valid packets | 3176 / 3176 | 3332 / 3332 | +156 / +156 |
+| Status freshness, monotonic seconds | 18911.097463115 | 19000.681408032 | +89.583945 s |
+| Settings freshness, monotonic seconds | 18911.197428297 | 19000.785346211 | +89.587918 s |
+| Battery live `last_reported`, UTC | 01:07:59.208379 | 01:09:28.796330 | +89.587951 s |
+| Connected live `last_reported`, UTC | 01:07:59.208793 | 01:09:28.796695 | +89.587902 s |
+| Telemetry availability live `last_reported`, UTC | 01:07:59.208828 | 01:09:28.796732 | +89.587904 s |
+| Battery REST `last_reported`, UTC | 00:37:28.719187 | 00:37:28.719187 | 0 s |
+| Connected REST `last_reported`, UTC | 00:37:28.719326 | 00:37:28.719326 | 0 s |
+| Telemetry availability REST `last_reported`, UTC | 00:37:28.719339 | 00:37:28.719339 | 0 s |
+
+Battery stays at 78%; connected and telemetry availability stay on. All target
+ownership/presence/loaded-entry checks are true in both samples. Parser discards,
+protocol errors, disconnects, and reconnects remain zero. The second live reports
+are approximately 0.507 seconds old, despite REST being about 32 minutes behind.
+The capture confirms advancing valid telemetry and actual state-machine reports
+while the REST representation remains stale, matching the Core cache behavior
+reproduced by the HTTP tests. No BLE/session recovery was needed to obtain this
+evidence, and no repair of Core's serialization has been demonstrated.
+
+The installed build does not expose the PR's instrumentation: live statistics,
+coordinator callback/listener counts, and per-entity callback counts are `null`.
+These are unmeasured, not zero. This capture independently observes publication
+through scalar template reads; it does not validate the new counters on hardware.
+It is evidence for the specific observation boundary, not a physical qualification
+pass for all routes/scenarios. The HIL matrix stays pending and #213 stays open.
+
+### Repeat the live/REST comparison
 
 On any machine with Python 3 and access to the dedicated HA instance, run:
 
@@ -314,10 +352,11 @@ parser error counters change. Active entities may therefore advance
 advance `valid_packets`, `last_packet_at`, `status_monotonic`, or
 `settings_monotonic`; compare these separately from HA publication timestamps.
 Repeated captured-frame, reload, and simulated elapsed-time tests cover the
-existing publication path. HTTP tests additionally reproduce the reported
-observation discrepancy on the pinned runtime; they do not establish its cause
-on the physical installation. Keep #213 open and its HIL qualification pending
-until the live/REST boundary and any required recovery are demonstrated there.
+existing publication path. HTTP tests reproduce the observation discrepancy on
+the pinned runtime; the retained physical capture confirms it on the affected
+host for its interval. Keep #213 open while Core serialization follow-up remains
+unresolved, and keep general HIL qualification pending until the required route,
+scenario, and recovery evidence exists.
 
 Before sharing evidence, remove Bluetooth addresses, device names, serial
 numbers, Home Assistant IDs, tokens, and unrelated traffic. Share only counts,
