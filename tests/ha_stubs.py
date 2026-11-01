@@ -391,6 +391,7 @@ class DataUpdateCoordinator(Generic[T]):
         self.config_entry = config_entry
         self.data: T
         self.update_count = 0
+        self._listeners: dict[int, Any] = {}
 
     def async_set_updated_data(self, data: T) -> None:
         self.data = data

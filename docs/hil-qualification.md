@@ -220,6 +220,8 @@ evidence.
    Compare `publication.entity_state_reports` for battery and connected with
    REST `last_reported`. These counters show actual entity state-write calls,
    without exposing entity IDs.
+   Record `publication.coordinator_listener_count` in both snapshots to detect
+   a listener lifecycle change while the client remains active.
 3. On `local_adapter`, capture HCI traffic with `btmon` on the selected
    adapter. Count ATT Handle Value Notifications for the R600 connection handle
    and attribute handle `0x0006` during exactly the REST/diagnostics interval;

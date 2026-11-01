@@ -99,6 +99,7 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     first_snapshot = coordinator.data
     assert first_snapshot.statistics.notifications == 2
     assert first_snapshot.statistics.valid_packets == 2
+    assert coordinator.listener_count > 0
     assert first_snapshot.status_monotonic is not None
     assert first_snapshot.settings_monotonic is not None
 

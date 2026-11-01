@@ -114,6 +114,11 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             self.entity_state_reports.get(entity_key, 0) + 1
         )
 
+    @property
+    def listener_count(self) -> int:
+        """Report the number of current coordinator listeners for diagnostics."""
+        return len(self._listeners)
+
     @callback
     def _async_refresh_device_registry_metadata(self) -> None:
         """Refresh persisted version metadata when valid settings arrive or change."""

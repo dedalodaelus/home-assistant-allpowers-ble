@@ -134,6 +134,7 @@ async def test_coordinator_lifecycle_and_push_updates() -> None:
     entry, client, coordinator, _ = configured_entry()
 
     assert coordinator.data == client.snapshot()
+    assert coordinator.listener_count == 0
     assert coordinator.connected
     assert coordinator.status_is_fresh
     assert coordinator.settings_are_fresh
