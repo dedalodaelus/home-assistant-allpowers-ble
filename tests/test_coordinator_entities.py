@@ -11,6 +11,7 @@ from typing import Any, Callable
 import pytest
 
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from custom_components.allpowers_ble import (
     binary_sensor,
@@ -59,6 +60,33 @@ def test_replacement_default_entity_ids_use_a_persistent_generation_prefix():
     assert entity.suggested_object_id == getattr(entity, "_attr_name", None)
     entry.data[CONF_ENTITY_ID_PREFIX] = "replacement-generation"
     assert entity.suggested_object_id == "replacement-generation_ac_output"
+
+
+def test_entity_report_counter_follows_successful_state_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry, _, coordinator, _ = configured_entry()
+    entity = sensor.AllpowersSensor(entry, sensor.SENSOR_DESCRIPTIONS[0])
+    writes: list[object] = []
+
+    def write_state(current: object) -> None:
+        writes.append(current)
+
+    monkeypatch.setattr(
+        CoordinatorEntity, "_handle_coordinator_update", write_state, raising=False
+    )
+    entity._handle_coordinator_update()
+    entity._handle_coordinator_update()
+    assert writes == [entity, entity]
+    assert coordinator.entity_state_reports == {"AllpowersSensor.battery": 2}
+
+    def fail_write(_current: object) -> None:
+        raise RuntimeError("state write failed")
+
+    monkeypatch.setattr(CoordinatorEntity, "_handle_coordinator_update", fail_write)
+    with pytest.raises(RuntimeError, match="state write failed"):
+        entity._handle_coordinator_update()
+    assert coordinator.entity_state_reports == {"AllpowersSensor.battery": 2}
 
 
 class _RegistryDevice:
