@@ -8,7 +8,6 @@ from typing import NoReturn
 from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
 
 from homeassistant.const import CONF_ADDRESS
-from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -106,14 +105,6 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
         self._registry_id = str(entry.data.get(CONF_REGISTRY_ID, self._address))
         self._attr_unique_id = f"{self._registry_id}_{key}"
         self._key = key
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        """Count completed coordinator callbacks, even if HA skips the state write."""
-        super()._handle_coordinator_update()
-        self.coordinator.record_entity_update_callback(
-            f"{type(self).__name__}.{self._key}"
-        )
 
     @property
     def suggested_object_id(self) -> str | None:

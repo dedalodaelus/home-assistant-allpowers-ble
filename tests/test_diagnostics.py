@@ -54,15 +54,6 @@ async def test_config_entry_diagnostics_redact_address_and_serialize_state() -> 
     }
     assert payload["snapshot"]["settings"]["work_mode"] == 1
     assert payload["snapshot"]["last_packet_at"].endswith("+00:00")
-    assert payload["publication"]["live_client_statistics"]["notifications"] == 10
-    assert payload["publication"]["coordinator_client_updates"] >= 1
-    assert payload["publication"]["coordinator_listener_count"] == 0
-    assert payload["publication"]["entity_update_callbacks"] == {}
-    assert "entity_state_reports" not in payload["publication"]
-    assert payload["publication"]["client_task_health"] == {
-        "connection": "not_started",
-        "maintenance": "not_started",
-    }
     assert payload["protocol"]["safety"]["preserve_unknown_settings_bits"]
     assert ADDRESS not in str(payload)
     assert "ALLPOWERS R600" not in str(payload)

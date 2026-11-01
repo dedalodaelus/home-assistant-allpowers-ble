@@ -237,27 +237,6 @@ class AllpowersBLEClient:
         """Register the coordinator callback invoked for every state change."""
         self._update_callback = callback
 
-    @property
-    def statistics(self) -> ConnectionStatistics:
-        """Return live counters, including callbacks rejected before publication."""
-        return self._statistics
-
-    @property
-    def task_health(self) -> dict[str, str]:
-        """Expose whether the connection and freshness loops are still alive."""
-
-        def state(task: asyncio.Task[None] | None) -> str:
-            if task is None:
-                return "not_started"
-            if task.cancelled():
-                return "cancelled"
-            return "done" if task.done() else "running"
-
-        return {
-            "connection": state(self._connection_task),
-            "maintenance": state(self._maintenance_task),
-        }
-
     def update_advertisement(self, service_info: Any) -> None:
         """Consume a Home Assistant Bluetooth advertisement callback."""
         self._advertisement_generation += 1
@@ -1059,20 +1038,8 @@ class AllpowersBLEClient:
             data: bytearray,
         ) -> None:
             if generation != self._active_session_generation:
-                self._statistics = replace(
-                    self._statistics,
-                    stale_session_notifications=(
-                        self._statistics.stale_session_notifications + 1
-                    ),
-                )
                 return
             if self._client is not expected_client:
-                self._statistics = replace(
-                    self._statistics,
-                    foreign_client_notifications=(
-                        self._statistics.foreign_client_notifications + 1
-                    ),
-                )
                 return
             self._notification_handler(characteristic, data)
 
@@ -1579,10 +1546,6 @@ class AllpowersBLEClient:
 
     def _emit_update(self) -> None:
         if self._update_callback is not None:
-            self._statistics = replace(
-                self._statistics,
-                emitted_updates=self._statistics.emitted_updates + 1,
-            )
             self._update_callback()
 
 

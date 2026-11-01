@@ -125,15 +125,10 @@ async def test_start_is_idempotent_and_stop_cancels_owned_tasks(
     await client.async_start()
     assert client._connection_task is first_task
     assert client._maintenance_task is not None
-    assert client.task_health == {"connection": "running", "maintenance": "running"}
 
     await client.async_stop()
     assert client._connection_task is None
     assert client._maintenance_task is None
-    assert client.task_health == {
-        "connection": "not_started",
-        "maintenance": "not_started",
-    }
     assert client._refresh_task is None
     assert client._update_callback is None
     assert updates == 0
@@ -148,25 +143,6 @@ async def test_stop_without_running_tasks_is_safe() -> None:
     assert client._connection_task is None
     assert client._maintenance_task is None
     assert client._refresh_task is None
-
-
-@pytest.mark.asyncio
-async def test_task_health_distinguishes_finished_and_cancelled_loops() -> None:
-    client = make_client()
-
-    async def finish() -> None:
-        return
-
-    finished = asyncio.create_task(finish())
-    await finished
-    cancelled = asyncio.create_task(asyncio.sleep(10))
-    cancelled.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled
-
-    client._connection_task = finished
-    client._maintenance_task = cancelled
-    assert client.task_health == {"connection": "done", "maintenance": "cancelled"}
 
 
 @pytest.mark.asyncio

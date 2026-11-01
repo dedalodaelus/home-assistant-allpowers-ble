@@ -62,8 +62,6 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
             entry.data.get(CONF_REGISTRY_ID, entry.data.get(CONF_ADDRESS, ""))
         )
         self._repairs_manager: AllpowersRepairsManager | None = None
-        self.client_updates = 0
-        self.entity_update_callbacks: dict[str, int] = {}
         self.client.set_update_callback(self._handle_client_update)
         self.async_set_updated_data(client.snapshot())
 
@@ -99,7 +97,6 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
 
     @callback
     def _handle_client_update(self) -> None:
-        self.client_updates += 1
         self.async_set_updated_data(self.client.snapshot())
         self._async_refresh_device_registry_metadata()
         if self._repairs_manager is not None:
@@ -107,17 +104,6 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
                 self.data,
                 status_is_fresh=self.status_is_fresh,
             )
-
-    def record_entity_update_callback(self, entity_key: str) -> None:
-        """Count completed entity update callbacks; HA may skip state publication."""
-        self.entity_update_callbacks[entity_key] = (
-            self.entity_update_callbacks.get(entity_key, 0) + 1
-        )
-
-    @property
-    def listener_count(self) -> int:
-        """Report the number of current coordinator listeners for diagnostics."""
-        return len(self._listeners)
 
     @callback
     def _async_refresh_device_registry_metadata(self) -> None:

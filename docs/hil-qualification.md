@@ -189,175 +189,73 @@ requires fresh settings after session renewal instead of adopting optimistic
 replay. Physical capture must compare both implementations on the same R600
 revision and routes, including whether reconnect reacquires settings.
 
-## Issue #213: frozen telemetry retest
+## Issue #213: REST/live state observation
 
-### Check the observation path first
-
-The pinned Home Assistant 2026.10.4 runtime reproduces stationary REST
-`last_reported` with advancing state-machine reports. `StateMachine.async_set_internal`
-updates an existing `State.last_reported` in place for identical state/attributes,
-but the REST entity endpoint serves the cached `State.as_dict_json`. That JSON
-retains its earlier `last_reported`. A changed state creates a new `State` and
-REST catches up. This is reproduced both without BLE and through the captured
-R600 status/settings notification path for battery, connected, and telemetry
-availability. No integration workaround, forced reports, or Core patch is applied.
-
-The earlier tests inspected `hass.states.get(...).last_reported` without making
-HTTP requests. They therefore missed this difference between live reports and
-their REST representation. A stationary REST timestamp alone cannot establish
-that the integration stopped publishing. The physical comparison below now
-confirms this observation discrepancy on the affected host for the captured
-interval; it does not establish that every historical symptom has this cause.
+A stationary REST `last_reported` does not establish a telemetry freeze. In Core
+2026.10.4, identical writes advance the live `State.last_reported` while cached
+serialization can retain an older timestamp. This behavior is tracked in
+[Core #181392](https://github.com/home-assistant/core/issues/181392) and
+[Core PR #181577](https://github.com/home-assistant/core/pull/181577).
+The upstream PR remains open; maintainers have raised cache-invalidation overhead
+and API-semantics concerns. This integration does not patch Core or force state
+changes to refresh its serialization.
 
 ### Physical comparison received 2026-11-01
 
-The maintainer ran the capture script from commit `4df29a2` against the existing
-dedicated instance. The sanitized output is retained as
-[`issue213-live-rest-2026-11-01.json`](../tests/hil/fixtures/r600-hw03/issue213-live-rest-2026-11-01.json).
+The maintainer's sanitized capture from the dedicated R600 instance is retained
+as [`issue213-live-rest-2026-11-01.json`](../tests/hil/fixtures/r600-hw03/issue213-live-rest-2026-11-01.json).
 Live samples span 01:07:59.285001Z–01:09:29.303712Z (90.018711 seconds).
 
-| Measurement | First sample | Second sample | Change |
-| --- | --- | --- | --- |
-| Notifications / valid packets | 3176 / 3176 | 3332 / 3332 | +156 / +156 |
-| Status freshness, monotonic seconds | 18911.097463115 | 19000.681408032 | +89.583945 s |
-| Settings freshness, monotonic seconds | 18911.197428297 | 19000.785346211 | +89.587918 s |
-| Battery live `last_reported`, UTC | 01:07:59.208379 | 01:09:28.796330 | +89.587951 s |
-| Connected live `last_reported`, UTC | 01:07:59.208793 | 01:09:28.796695 | +89.587902 s |
-| Telemetry availability live `last_reported`, UTC | 01:07:59.208828 | 01:09:28.796732 | +89.587904 s |
-| Battery REST `last_reported`, UTC | 00:37:28.719187 | 00:37:28.719187 | 0 s |
-| Connected REST `last_reported`, UTC | 00:37:28.719326 | 00:37:28.719326 | 0 s |
-| Telemetry availability REST `last_reported`, UTC | 00:37:28.719339 | 00:37:28.719339 | 0 s |
+| Measurement | Observed change |
+| --- | --- |
+| Notifications / valid packets | 3176 → 3332 each (+156) |
+| Status / settings monotonic freshness | +89.583945 s / +89.587918 s |
+| Battery live report | +89.587951 s |
+| Connected live report | +89.587902 s |
+| Telemetry-availability live report | +89.587904 s |
+| All three REST report timestamps | Stationary near 00:37:28Z |
 
-Battery stays at 78%; connected and telemetry availability stay on. All target
-ownership/presence/loaded-entry checks are true in both samples. Parser discards,
-protocol errors, disconnects, and reconnects remain zero. The second live reports
-are approximately 0.507 seconds old, despite REST being about 32 minutes behind.
-The capture confirms advancing valid telemetry and actual state-machine reports
-while the REST representation remains stale, matching the Core cache behavior
-reproduced by the HTTP tests. No BLE/session recovery was needed to obtain this
-evidence, and no repair of Core's serialization has been demonstrated.
+All three targets were present and belonged to the same loaded ALLPOWERS entry.
+Battery stayed at 78%; connected and telemetry availability stayed on. Parser
+errors/discards, disconnects, and reconnects remained zero. The second live
+reports were about 0.507 seconds old. These observations support a stale REST
+serialization boundary for this interval, rather than an R600 BLE publication
+freeze. They do not establish a Core repair or exclude other historical faults.
 
-The installed build does not expose the PR's instrumentation: live statistics,
-coordinator callback/listener counts, and per-entity callback counts are `null`.
-These are unmeasured, not zero. This capture independently observes publication
-through scalar template reads; it does not validate the new counters on hardware.
-It is evidence for the specific observation boundary, not a physical qualification
-pass for all routes/scenarios. The HIL matrix stays pending and #213 stays open.
+The retained historical capture includes null investigation-only counters.
+Those counters were not measured on hardware and have been removed from the
+final integration changes; null is not zero. Existing snapshot statistics and
+freshness timestamps remain available without adding runtime instrumentation.
 
 ### Repeat the live/REST comparison
 
-On any machine with Python 3 and access to the dedicated HA instance, run:
+On a machine with Python 3 and access to the dedicated HA instance, run:
 
 ```bash
 python3 scripts/capture_telemetry_publication.py \
   --interval 90 --output /tmp/telemetry-publication.json
 ```
 
-The script prompts for the HA URL, the exact battery, connected, and enabled
-telemetry-availability entity IDs, and an existing admin token (hidden input).
-It reads each REST state before/after a live `/api/template` query and fetches
-integration diagnostics between them, twice 90 seconds apart. The template
-reads scalar timestamps directly and verifies that all three entities belong
-to one loaded ALLPOWERS config entry. Shared output uses logical aliases and a
-whitelist of timestamps, states, counters, and ownership booleans; it excludes
-tokens, URLs, IDs, attributes, device names, and raw diagnostics. New diagnostic
-fields are `null` on an older integration build. A diagnostics HTTP error is
-recorded by status only. The script issues no state or device writes, reloads,
-reconnects, or BLE commands. It can be used before installing this PR.
+The script prompts for the HA URL, exact battery/connected/enabled
+telemetry-availability IDs, and an existing admin token using hidden input.
+It brackets direct scalar `/api/template` readings and existing integration
+diagnostics with REST reads, twice 90 seconds apart, and checks target ownership.
+Shared output contains logical aliases and whitelisted states, timestamps, and
+snapshot counters; credentials, URLs, IDs, names, attributes, and raw diagnostics
+are excluded. Diagnostics HTTP failures are recorded by status only. The script
+sends no state/device writes, reconnects, reloads, or BLE commands.
 
-If `cached_rest_discrepancy_observed` is true, live state-machine reports advanced
-for the verified entity despite its stationary REST representation. If live
-reports also stop, continue tracing the publication chain below. This does not
-infer telemetry freshness from publication: compare valid packet counters and
-status/settings freshness separately. Do not classify a missing/foreign entity
-or an unloaded config entry as a confirmed cache discrepancy.
+`cached_rest_discrepancy_observed` reports an observation, not a required runtime
+behavior. It is false when REST advances. Integration tests require valid packet
+processing, coordinator propagation, actual live reports, rejection of old-session
+callbacks, malformed-frame freshness protection, and listener cleanup after reload.
+They do not require the upstream serialization behavior to remain unfixed.
+Parser errors may publish diagnostics without refreshing valid telemetry.
 
-### Controlled BLE publication capture
-
-Use a dedicated Home Assistant instance with R600 V2 hardware 0.3 and the exact
-build under test. Record the loaded integration path and `manifest.json` version
-from inside the Home Assistant process/container; record the source commit or
-release archive checksum. A repository checkout alone does not identify the
-code Home Assistant imported. Keep settings keepalive enabled to reproduce the
-reported setup, but do not attribute the freeze to it without measurements.
-
-Run the following procedure separately on `local_adapter` and `active_proxy`.
-Make only the named route available for the run and confirm the selected route
-in Home Assistant Bluetooth logs. Keep the GATT connection entity and the
-disabled-by-default `telemetry_available` entity distinct: enable the latter
-for this test. Do not modify the HIL matrix until both routes have measured
-evidence.
-
-1. Privately verify in the entity registry that the sampled battery, connected,
-   and `telemetry_available` IDs are enabled, use the `allpowers_ble` platform,
-   and belong to the active config entry. Retain the exact ID-to-alias mapping
-   locally; use consistent logical aliases in shared evidence. Repeat this
-   verification after reload/reconnect so retired entity IDs are not sampled.
-   Start a timestamped, 10-second REST poll of battery and connection states.
-   Record `state`, `last_updated`, and `last_reported` for each. Record
-   `telemetry_available` with the same fields. Use a monotonic test clock for
-   elapsed time and UTC timestamps for correlation.
-2. Download two sanitized integration diagnostics snapshots 60–120 seconds
-   apart while `last_reported` is stationary. Compare
-   `publication.live_client_statistics` (including rejected session/client
-   callbacks, notifications, valid packets, parser errors, and emitted updates),
-   `publication.coordinator_client_updates`, snapshot packet timestamps, and
-   status/settings monotonic timestamps. Inspect `client_task_health` to spot
-   a stopped connection or maintenance loop. The live counters may advance even
-   when a rejected callback cannot publish a new coordinator snapshot.
-   For each snapshot, record UTC start/end times and sample REST immediately
-   before and after the diagnostics request. Compare
-   `publication.entity_update_callbacks` for `AllpowersSensor.battery`,
-   `AllpowersBinarySensor.connected`, and
-   `AllpowersBinarySensor.telemetry_available` with REST `last_reported`.
-   These counters count completed coordinator callbacks by static entity key.
-   They do not prove publication: Home Assistant can return from a state-write
-   request without reaching the state machine when the entity is not ADDED.
-   Read live `last_reported` via the scalar template query as well as REST;
-   cached REST alone is not evidence of missing state-machine reports. No
-   entity IDs are added to diagnostics.
-   Record `publication.coordinator_listener_count` in both snapshots to detect
-   a listener lifecycle change while the client remains active. This is an
-   aggregate; a nonzero count does not prove any particular entity is subscribed.
-   Use each target's callback deltas to check whether its callback runs.
-3. On `local_adapter`, capture HCI traffic with `btmon` on the selected
-   adapter. Count ATT Handle Value Notifications for the R600 connection handle
-   and attribute handle `0x0006` during exactly the REST/diagnostics interval;
-   separate status `0x01` from settings `0x03`. Confirm the handle is for this
-   session. On `active_proxy`, collect timestamped notification counts from
-   the proxy's BLE transport/debug logs. An HCI capture on the Home Assistant
-   host cannot establish notification receipt at a remote ESPHome proxy.
-4. Reconnect once through the integration and repeat the same interval.
-   Record whether callbacks, accepted packets, coordinator updates, and
-   `last_reported` resume together or separate again. Also record the behavior
-   after telemetry becomes stale: battery should become unavailable while
-   GATT connectivity can remain on.
-
-Interpret the first counter that stops advancing as the failure boundary.
-HCI/proxy notifications with stationary live `notifications` need subscription,
-callback ownership, or competing-client investigation. Rising notifications
-with stationary `valid_packets` need decoder/error inspection. Rising valid
-packets with stationary coordinator updates need callback/exception inspection.
-Rising coordinator updates with stationary target callback counts narrow the
-investigation to target subscription, callback exceptions, or platform lifecycle.
-Rising target callback counts with stationary live template `last_reported`
-require checking entity lifecycle/platform registration and the private ID mapping;
-callback completion alone does not establish a state-machine write. Correlate
-all deltas over the same interval, including each target's actual state-machine
-reports. A passing simulation or CI run does not establish physical HIL success.
-
-Malformed frames intentionally emit client/coordinator diagnostic updates when
-parser error counters change. Active entities may therefore advance
-`last_reported` even though no valid telemetry arrived. Such frames must not
-advance `valid_packets`, `last_packet_at`, `status_monotonic`, or
-`settings_monotonic`; compare these separately from HA publication timestamps.
-Repeated captured-frame, reload, and simulated elapsed-time tests cover the
-existing publication path. HTTP tests reproduce the observation discrepancy on
-the pinned runtime; the retained physical capture confirms it on the affected
-host for its interval. Keep #213 open while Core serialization follow-up remains
-unresolved, and keep general HIL qualification pending until the required route,
-scenario, and recovery evidence exists.
-
-Before sharing evidence, remove Bluetooth addresses, device names, serial
-numbers, Home Assistant IDs, tokens, and unrelated traffic. Share only counts,
-timestamps, sanitized diagnostics, and the two already published frame shapes.
+If live reports also stop, compare existing valid-packet counters and status/
+settings freshness before investigating target listeners and platform lifecycle.
+For BLE qualification, verify the loaded build and selected route; correlate
+synchronized diagnostics/live reports with HCI counts on the local adapter or
+proxy-side counts on an active ESPHome proxy. Follow the route/scenario and
+recovery requirements above. Keep #213 open for the upstream follow-up and keep
+the general HIL matrix pending; this scoped capture is not a qualification pass.

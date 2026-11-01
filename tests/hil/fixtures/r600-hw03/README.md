@@ -42,8 +42,9 @@ REST and scalar template reads, together with integration diagnostics.
 Across 90.018711 seconds, valid packets increase by 156, status/settings freshness
 advances, and all three live report timestamps advance by about 89.588 seconds.
 REST report timestamps remain fixed. All ownership checks pass and there are no
-parser/protocol errors or reconnects. The installed integration does not expose
-the PR's additional counters: `null` means unmeasured, not zero.
+parser/protocol errors or reconnects. The historical capture includes investigation-only counters that were not measured
+on the installed build and have since been removed from the PR. `null` means
+unmeasured, not zero.
 
 This is observation-boundary evidence for #213, not a golden-frame notification
 fixture, recovery test, or local-adapter/active-proxy qualification pass. The

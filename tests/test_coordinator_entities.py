@@ -11,7 +11,6 @@ from typing import Any, Callable
 import pytest
 
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from custom_components.allpowers_ble import (
     binary_sensor,
@@ -62,33 +61,6 @@ def test_replacement_default_entity_ids_use_a_persistent_generation_prefix():
     assert entity.suggested_object_id == "replacement-generation_ac_output"
 
 
-def test_entity_callback_counter_tracks_completed_callbacks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    entry, _, coordinator, _ = configured_entry()
-    entity = sensor.AllpowersSensor(entry, sensor.SENSOR_DESCRIPTIONS[0])
-    callbacks: list[object] = []
-
-    def handle_update(current: object) -> None:
-        callbacks.append(current)
-
-    monkeypatch.setattr(
-        CoordinatorEntity, "_handle_coordinator_update", handle_update, raising=False
-    )
-    entity._handle_coordinator_update()
-    entity._handle_coordinator_update()
-    assert callbacks == [entity, entity]
-    assert coordinator.entity_update_callbacks == {"AllpowersSensor.battery": 2}
-
-    def fail_callback(_current: object) -> None:
-        raise RuntimeError("coordinator callback failed")
-
-    monkeypatch.setattr(CoordinatorEntity, "_handle_coordinator_update", fail_callback)
-    with pytest.raises(RuntimeError, match="coordinator callback failed"):
-        entity._handle_coordinator_update()
-    assert coordinator.entity_update_callbacks == {"AllpowersSensor.battery": 2}
-
-
 class _RegistryDevice:
     """Tiny mutable record emulating Home Assistant device entries."""
 
@@ -134,7 +106,6 @@ async def test_coordinator_lifecycle_and_push_updates() -> None:
     entry, client, coordinator, _ = configured_entry()
 
     assert coordinator.data == client.snapshot()
-    assert coordinator.listener_count == 0
     assert coordinator.connected
     assert coordinator.status_is_fresh
     assert coordinator.settings_are_fresh

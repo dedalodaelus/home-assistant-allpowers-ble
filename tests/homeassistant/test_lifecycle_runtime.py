@@ -124,7 +124,6 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     first_snapshot = coordinator.data
     assert first_snapshot.statistics.notifications == 2
     assert first_snapshot.statistics.valid_packets == 2
-    assert coordinator.listener_count > 0
     assert first_snapshot.status_monotonic is not None
     assert first_snapshot.settings_monotonic is not None
     target_ids = _publication_entities(hass, entry, coordinator)
@@ -132,11 +131,6 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert await async_setup_component(hass, "api", {})
     assert await async_setup_component(hass, "diagnostics", {})
     http = await hass_client()
-    first_rest = {}
-    for key, entity_id in target_ids.items():
-        response = await http.get(f"/api/states/{entity_id}")
-        assert response.status == 200
-        first_rest[key] = await response.json()
     endpoint = str(http.make_url("/")).rstrip("/")
     capture_before = await hass.async_add_executor_job(
         capture_sample, endpoint, hass_access_token, target_ids
@@ -152,47 +146,22 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert second.last_reported > first_reported
     assert coordinator.data.statistics.notifications == 4
     assert coordinator.data.statistics.valid_packets == 4
-    assert client.statistics.emitted_updates == coordinator.client_updates
-    assert coordinator.entity_update_callbacks["AllpowersSensor.battery"] >= 2
-    assert coordinator.entity_update_callbacks["AllpowersBinarySensor.connected"] >= 2
     assert coordinator.data.last_packet_at > first_snapshot.last_packet_at
     assert coordinator.data.status_monotonic > first_snapshot.status_monotonic
     assert coordinator.data.settings_monotonic > first_snapshot.settings_monotonic
-    # Core 2026.10.4 caches REST JSON even as identical reports update live state.
-    # This is the observation path missing from the original in-memory-only test.
-    for key, entity_id in target_ids.items():
-        response = await http.get(f"/api/states/{entity_id}")
-        assert response.status == 200
-        rest = await response.json()
-        live_reported = hass.states.get(entity_id).last_reported.isoformat()
-        assert rest["last_reported"] == first_rest[key]["last_reported"]
-        assert rest["last_reported"] != live_reported
-        response = await http.post(
-            "/api/template",
-            json={
-                "template": "{{ states[entity_id].last_reported.isoformat() }}",
-                "variables": {"entity_id": entity_id},
-            },
-        )
-        assert response.status == 200
-        assert await response.text() == live_reported
     capture_after = await hass.async_add_executor_job(
         capture_sample, endpoint, hass_access_token, target_ids
     )
     comparison = compare_samples(capture_before, capture_after)
     for result in comparison.values():
-        assert result == {
-            "ownership_verified": True,
-            "live_report_advanced": True,
-            "rest_report_stationary": True,
-            "cached_rest_discrepancy_observed": True,
-        }
+        assert result["ownership_verified"]
+        assert result["live_report_advanced"]
     evidence = json.dumps([capture_before, capture_after, comparison])
     assert hass_access_token not in evidence
     assert entry.entry_id not in evidence
     assert all(entity_id not in evidence for entity_id in target_ids.values())
     assert address not in evidence
-    assert capture_after["diagnostics"]["live_client_statistics"]["valid_packets"] == 4
+    assert capture_after["diagnostics"]["snapshot_statistics"]["valid_packets"] == 4
 
     for frame in (status_frame, settings_frame):
         invalid = bytearray(frame)
@@ -202,7 +171,6 @@ async def test_issue_213_identical_real_frames_report_battery_state(
             key: hass.states.get(entity_id).last_reported
             for key, entity_id in target_ids.items()
         }
-        callbacks_before = dict(coordinator.entity_update_callbacks)
         notify(object(), invalid)
         await hass.async_block_till_done()
         after = coordinator.data
@@ -215,36 +183,20 @@ async def test_issue_213_identical_real_frames_report_battery_state(
         assert after.settings == before.settings
         assert after.statistics.parser_discards > before.statistics.parser_discards
         assert after.statistics.protocol_errors == before.statistics.protocol_errors + 1
-        assert after.statistics.emitted_updates == before.statistics.emitted_updates + 1
         # Parser-error diagnostics intentionally publish without refreshing telemetry.
         for key, entity_id in target_ids.items():
             assert hass.states.get(entity_id).last_reported > reports_before[key]
-            callback_key = (
-                "AllpowersSensor.battery"
-                if key == "battery"
-                else f"AllpowersBinarySensor.{key}"
-            )
-            assert (
-                coordinator.entity_update_callbacks[callback_key]
-                == callbacks_before[callback_key] + 1
-            )
 
     old_notify = notify
     new_transport = object()
     client._client = new_transport
     client._active_session_generation = 2
     reports_before_old_callback = hass.states.get(battery_id).last_reported
+    snapshot_before_old_callback = client.snapshot()
     old_notify(object(), bytearray(status_frame))
-    assert client.statistics.stale_session_notifications == 1
+    assert client.snapshot() == snapshot_before_old_callback
     assert hass.states.get(battery_id).last_reported == reports_before_old_callback
     assert coordinator.data.statistics.valid_packets == 4
-    payload = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
-    assert (
-        payload["publication"]["live_client_statistics"]["stale_session_notifications"]
-        == 1
-    )
-    assert payload["snapshot"]["statistics"]["stale_session_notifications"] == 0
-
     client._status_monotonic = monotonic() - client.options.stale_timeout - 1
     client._emit_update()
     assert hass.states.get(battery_id).state == "unavailable"
@@ -326,14 +278,6 @@ class StatefulFakeClient:
 
     def snapshot(self):
         return self._snapshot
-
-    @property
-    def statistics(self):
-        return self._snapshot.statistics
-
-    @property
-    def task_health(self):
-        return {"connection": "not_started", "maintenance": "not_started"}
 
     def set_snapshot(self, value) -> None:
         self._snapshot = value
@@ -526,7 +470,6 @@ async def test_setup_options_reload_unload_and_diagnostics(
     first_client = StatefulFakeClient.instances[-1]
     first_coordinator = entry.runtime_data.coordinator
     first_ids = _publication_entities(hass, entry, first_coordinator)
-    assert first_coordinator.listener_count >= len(first_ids)
     for _ in range(3):
         before = {
             key: hass.states.get(entity_id).last_reported
@@ -576,7 +519,7 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client is not first_client
     assert first_client.stopped
     assert first_client.callback is None
-    assert first_coordinator.listener_count == 0
+    assert not first_coordinator._listeners
     coordinator = entry.runtime_data.coordinator
     assert coordinator is not first_coordinator
     assert _publication_entities(hass, entry, coordinator) == first_ids
@@ -588,30 +531,13 @@ async def test_setup_options_reload_unload_and_diagnostics(
         reloaded_client.set_snapshot(reloaded_client.snapshot())
         for key, entity_id in first_ids.items():
             assert hass.states.get(entity_id).last_reported > before[key]
-    # A removed entity can complete a callback while HA declines to write state.
-    battery_entity = next(
-        entity
-        for platform in async_get_platforms(hass, DOMAIN)
-        for entity in platform.entities.values()
-        if entity.entity_id == first_ids["battery"]
-    )
-
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert reloaded_client.stopped
     assert reloaded_client.callback is None
     assert bluetooth_callbacks == []
     assert entry.update_listeners == []
-    assert coordinator.listener_count == 0
-    battery_id = first_ids["battery"]
-    removed_state = hass.states.get(battery_id)
-    callback_count = coordinator.entity_update_callbacks["AllpowersSensor.battery"]
-    battery_entity._handle_coordinator_update()
-    assert (
-        coordinator.entity_update_callbacks["AllpowersSensor.battery"]
-        == callback_count + 1
-    )
-    assert hass.states.get(battery_id) is removed_state
+    assert not coordinator._listeners
 
 
 @pytest.mark.asyncio

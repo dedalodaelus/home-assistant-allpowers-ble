@@ -22,9 +22,6 @@ COUNTERS = (
     "valid_packets",
     "parser_discards",
     "protocol_errors",
-    "stale_session_notifications",
-    "foreign_client_notifications",
-    "emitted_updates",
     "connection_attempts",
     "successful_connections",
     "disconnects",
@@ -97,7 +94,6 @@ def capture_sample(base_url: str, token: str, entity_ids: dict[str, str]) -> dic
                 base_url, token, f"/api/diagnostics/config_entry/{entry_id}"
             )["data"]
             snapshot = payload["snapshot"]
-            publication = payload.get("publication", {})
             diagnostics = {
                 "snapshot": {
                     key: snapshot.get(key)
@@ -110,24 +106,6 @@ def capture_sample(base_url: str, token: str, entity_ids: dict[str, str]) -> dic
                 },
                 "snapshot_statistics": {
                     key: snapshot.get("statistics", {}).get(key) for key in COUNTERS
-                },
-                "live_client_statistics": {
-                    key: publication.get("live_client_statistics", {}).get(key)
-                    for key in COUNTERS
-                },
-                "coordinator_client_updates": publication.get(
-                    "coordinator_client_updates"
-                ),
-                "coordinator_listener_count": publication.get(
-                    "coordinator_listener_count"
-                ),
-                "entity_update_callbacks": {
-                    key: publication.get("entity_update_callbacks", {}).get(key)
-                    for key in (
-                        "AllpowersSensor.battery",
-                        "AllpowersBinarySensor.connected",
-                        "AllpowersBinarySensor.telemetry_available",
-                    )
                 },
             }
         except HTTPError as error:
