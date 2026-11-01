@@ -9,6 +9,7 @@ from functools import partial
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+import json
 import re
 
 import pytest
@@ -22,6 +23,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.frame import ReportBehavior
+from homeassistant.setup import async_setup_component
 
 from custom_components.allpowers_ble import diagnostics
 from custom_components.allpowers_ble.config_flow import (
@@ -43,6 +45,7 @@ from custom_components.allpowers_ble.const import (
 from custom_components.allpowers_ble.options import ConnectionOptions
 
 from tests.helpers import settings, snapshot, status
+from scripts.capture_telemetry_publication import capture_sample, compare_samples
 
 pytestmark = pytest.mark.homeassistant
 
@@ -67,6 +70,8 @@ def enable_telemetry_sensor(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_issue_213_identical_real_frames_report_battery_state(
     hass,
+    hass_client,
+    hass_access_token,
     enable_custom_integrations,
     enable_telemetry_sensor,
     monkeypatch: pytest.MonkeyPatch,
@@ -124,6 +129,18 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert first_snapshot.settings_monotonic is not None
     target_ids = _publication_entities(hass, entry, coordinator)
     assert target_ids["battery"] == battery_id
+    assert await async_setup_component(hass, "api", {})
+    assert await async_setup_component(hass, "diagnostics", {})
+    http = await hass_client()
+    first_rest = {}
+    for key, entity_id in target_ids.items():
+        response = await http.get(f"/api/states/{entity_id}")
+        assert response.status == 200
+        first_rest[key] = await response.json()
+    endpoint = str(http.make_url("/")).rstrip("/")
+    capture_before = await hass.async_add_executor_job(
+        capture_sample, endpoint, hass_access_token, target_ids
+    )
 
     await asyncio.sleep(0.01)
     notify = client._make_notification_handler(1, transport)
@@ -141,6 +158,41 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert coordinator.data.last_packet_at > first_snapshot.last_packet_at
     assert coordinator.data.status_monotonic > first_snapshot.status_monotonic
     assert coordinator.data.settings_monotonic > first_snapshot.settings_monotonic
+    # Core 2026.10.4 caches REST JSON even as identical reports update live state.
+    # This is the observation path missing from the original in-memory-only test.
+    for key, entity_id in target_ids.items():
+        response = await http.get(f"/api/states/{entity_id}")
+        assert response.status == 200
+        rest = await response.json()
+        live_reported = hass.states.get(entity_id).last_reported.isoformat()
+        assert rest["last_reported"] == first_rest[key]["last_reported"]
+        assert rest["last_reported"] != live_reported
+        response = await http.post(
+            "/api/template",
+            json={
+                "template": "{{ states[entity_id].last_reported.isoformat() }}",
+                "variables": {"entity_id": entity_id},
+            },
+        )
+        assert response.status == 200
+        assert await response.text() == live_reported
+    capture_after = await hass.async_add_executor_job(
+        capture_sample, endpoint, hass_access_token, target_ids
+    )
+    comparison = compare_samples(capture_before, capture_after)
+    for result in comparison.values():
+        assert result == {
+            "ownership_verified": True,
+            "live_report_advanced": True,
+            "rest_report_stationary": True,
+            "cached_rest_discrepancy_observed": True,
+        }
+    evidence = json.dumps([capture_before, capture_after, comparison])
+    assert hass_access_token not in evidence
+    assert entry.entry_id not in evidence
+    assert all(entity_id not in evidence for entity_id in target_ids.values())
+    assert address not in evidence
+    assert capture_after["diagnostics"]["live_client_statistics"]["valid_packets"] == 4
 
     for frame in (status_frame, settings_frame):
         invalid = bytearray(frame)

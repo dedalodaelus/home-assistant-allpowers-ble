@@ -191,6 +191,51 @@ revision and routes, including whether reconnect reacquires settings.
 
 ## Issue #213: frozen telemetry retest
 
+### Check the observation path first
+
+The pinned Home Assistant 2026.10.4 runtime reproduces stationary REST
+`last_reported` with advancing state-machine reports. `StateMachine.async_set_internal`
+updates an existing `State.last_reported` in place for identical state/attributes,
+but the REST entity endpoint serves the cached `State.as_dict_json`. That JSON
+retains its earlier `last_reported`. A changed state creates a new `State` and
+REST catches up. This is reproduced both without BLE and through the captured
+R600 status/settings notification path for battery, connected, and telemetry
+availability. No integration workaround, forced reports, or Core patch is applied.
+
+The earlier tests inspected `hass.states.get(...).last_reported` without making
+HTTP requests. They therefore missed this difference between live reports and
+their REST representation. A stationary REST timestamp alone cannot establish
+that the integration stopped publishing. The physical report still needs the
+following comparison on its own host before assigning this cause to #213.
+
+On any machine with Python 3 and access to the dedicated HA instance, run:
+
+```bash
+python3 scripts/capture_telemetry_publication.py \
+  --interval 90 --output /tmp/telemetry-publication.json
+```
+
+The script prompts for the HA URL, the exact battery, connected, and enabled
+telemetry-availability entity IDs, and an existing admin token (hidden input).
+It reads each REST state before/after a live `/api/template` query and fetches
+integration diagnostics between them, twice 90 seconds apart. The template
+reads scalar timestamps directly and verifies that all three entities belong
+to one loaded ALLPOWERS config entry. Shared output uses logical aliases and a
+whitelist of timestamps, states, counters, and ownership booleans; it excludes
+tokens, URLs, IDs, attributes, device names, and raw diagnostics. New diagnostic
+fields are `null` on an older integration build. A diagnostics HTTP error is
+recorded by status only. The script issues no state or device writes, reloads,
+reconnects, or BLE commands. It can be used before installing this PR.
+
+If `cached_rest_discrepancy_observed` is true, live state-machine reports advanced
+for the verified entity despite its stationary REST representation. If live
+reports also stop, continue tracing the publication chain below. This does not
+infer telemetry freshness from publication: compare valid packet counters and
+status/settings freshness separately. Do not classify a missing/foreign entity
+or an unloaded config entry as a confirmed cache discrepancy.
+
+### Controlled BLE publication capture
+
 Use a dedicated Home Assistant instance with R600 V2 hardware 0.3 and the exact
 build under test. Record the loaded integration path and `manifest.json` version
 from inside the Home Assistant process/container; record the source commit or
@@ -230,8 +275,9 @@ evidence.
    These counters count completed coordinator callbacks by static entity key.
    They do not prove publication: Home Assistant can return from a state-write
    request without reaching the state machine when the entity is not ADDED.
-   REST `last_reported` from the verified active entity is the separate evidence
-   of actual state-machine reports. No entity IDs are added to diagnostics.
+   Read live `last_reported` via the scalar template query as well as REST;
+   cached REST alone is not evidence of missing state-machine reports. No
+   entity IDs are added to diagnostics.
    Record `publication.coordinator_listener_count` in both snapshots to detect
    a listener lifecycle change while the client remains active. This is an
    aggregate; a nonzero count does not prove any particular entity is subscribed.
@@ -256,8 +302,8 @@ with stationary `valid_packets` need decoder/error inspection. Rising valid
 packets with stationary coordinator updates need callback/exception inspection.
 Rising coordinator updates with stationary target callback counts narrow the
 investigation to target subscription, callback exceptions, or platform lifecycle.
-Rising target callback counts with stationary REST `last_reported` require
-checking entity lifecycle/platform registration and the private ID mapping;
+Rising target callback counts with stationary live template `last_reported`
+require checking entity lifecycle/platform registration and the private ID mapping;
 callback completion alone does not establish a state-machine write. Correlate
 all deltas over the same interval, including each target's actual state-machine
 reports. A passing simulation or CI run does not establish physical HIL success.
@@ -267,10 +313,11 @@ parser error counters change. Active entities may therefore advance
 `last_reported` even though no valid telemetry arrived. Such frames must not
 advance `valid_packets`, `last_packet_at`, `status_monotonic`, or
 `settings_monotonic`; compare these separately from HA publication timestamps.
-Repeated captured-frame, reload, and simulated elapsed-time tests are baseline
-coverage of the existing path, not a failing-before/fixed-after reproduction of
-the physical freeze. Keep #213 open and its HIL qualification pending until the
-failure boundary and recovery are demonstrated on hardware.
+Repeated captured-frame, reload, and simulated elapsed-time tests cover the
+existing publication path. HTTP tests additionally reproduce the reported
+observation discrepancy on the pinned runtime; they do not establish its cause
+on the physical installation. Keep #213 open and its HIL qualification pending
+until the live/REST boundary and any required recovery are demonstrated there.
 
 Before sharing evidence, remove Bluetooth addresses, device names, serial
 numbers, Home Assistant IDs, tokens, and unrelated traffic. Share only counts,
