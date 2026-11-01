@@ -20,6 +20,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.frame import ReportBehavior
 
 from custom_components.allpowers_ble import diagnostics
@@ -46,16 +47,35 @@ from tests.helpers import settings, snapshot, status
 pytestmark = pytest.mark.homeassistant
 
 
+@pytest.fixture
+def enable_telemetry_sensor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Include the optional freshness entity in publication/lifecycle checks."""
+    import custom_components.allpowers_ble.binary_sensor as binary_sensor_module
+
+    monkeypatch.setattr(
+        binary_sensor_module,
+        "BINARY_SENSOR_DESCRIPTIONS",
+        tuple(
+            replace(description, entity_registry_enabled_default=True)
+            if description.key == "telemetry_available"
+            else description
+            for description in binary_sensor_module.BINARY_SENSOR_DESCRIPTIONS
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_issue_213_identical_real_frames_report_battery_state(
     hass,
     enable_custom_integrations,
+    enable_telemetry_sensor,
     monkeypatch: pytest.MonkeyPatch,
     bluetooth_callbacks: list[tuple[Any, Any]],
 ) -> None:
     """Trace repeated captured frames through the real HA state machine."""
-    del enable_custom_integrations, bluetooth_callbacks
+    del enable_custom_integrations, enable_telemetry_sensor, bluetooth_callbacks
     import custom_components.allpowers_ble.client as client_module
+    import custom_components.allpowers_ble.coordinator as coordinator_module
 
     status_frame = bytes.fromhex("a565b100010801004e0000000012b590")
     settings_frame = bytes.fromhex("a565b1000106030101ffff030274")
@@ -102,6 +122,8 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert coordinator.listener_count > 0
     assert first_snapshot.status_monotonic is not None
     assert first_snapshot.settings_monotonic is not None
+    target_ids = _publication_entities(hass, entry, coordinator)
+    assert target_ids["battery"] == battery_id
 
     await asyncio.sleep(0.01)
     notify = client._make_notification_handler(1, transport)
@@ -114,21 +136,46 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     assert coordinator.data.statistics.notifications == 4
     assert coordinator.data.statistics.valid_packets == 4
     assert client.statistics.emitted_updates == coordinator.client_updates
-    assert coordinator.entity_state_reports["AllpowersSensor.battery"] >= 2
-    assert coordinator.entity_state_reports["AllpowersBinarySensor.connected"] >= 2
+    assert coordinator.entity_update_callbacks["AllpowersSensor.battery"] >= 2
+    assert coordinator.entity_update_callbacks["AllpowersBinarySensor.connected"] >= 2
     assert coordinator.data.last_packet_at > first_snapshot.last_packet_at
     assert coordinator.data.status_monotonic > first_snapshot.status_monotonic
     assert coordinator.data.settings_monotonic > first_snapshot.settings_monotonic
 
-    invalid = bytearray(status_frame)
-    invalid[-1] ^= 1
-    reported_before_bad_frame = second.last_reported
-    packet_time_before_bad_frame = coordinator.data.last_packet_at
-    notify(object(), invalid)
-    await hass.async_block_till_done()
-    assert coordinator.data.statistics.valid_packets == 4
-    assert coordinator.data.last_packet_at == packet_time_before_bad_frame
-    assert hass.states.get(battery_id).last_reported >= reported_before_bad_frame
+    for frame in (status_frame, settings_frame):
+        invalid = bytearray(frame)
+        invalid[-1] ^= 1
+        before = coordinator.data
+        reports_before = {
+            key: hass.states.get(entity_id).last_reported
+            for key, entity_id in target_ids.items()
+        }
+        callbacks_before = dict(coordinator.entity_update_callbacks)
+        notify(object(), invalid)
+        await hass.async_block_till_done()
+        after = coordinator.data
+        assert after.statistics.notifications == before.statistics.notifications + 1
+        assert after.statistics.valid_packets == before.statistics.valid_packets
+        assert after.status_monotonic == before.status_monotonic
+        assert after.settings_monotonic == before.settings_monotonic
+        assert after.last_packet_at == before.last_packet_at
+        assert after.status == before.status
+        assert after.settings == before.settings
+        assert after.statistics.parser_discards > before.statistics.parser_discards
+        assert after.statistics.protocol_errors == before.statistics.protocol_errors + 1
+        assert after.statistics.emitted_updates == before.statistics.emitted_updates + 1
+        # Parser-error diagnostics intentionally publish without refreshing telemetry.
+        for key, entity_id in target_ids.items():
+            assert hass.states.get(entity_id).last_reported > reports_before[key]
+            callback_key = (
+                "AllpowersSensor.battery"
+                if key == "battery"
+                else f"AllpowersBinarySensor.{key}"
+            )
+            assert (
+                coordinator.entity_update_callbacks[callback_key]
+                == callbacks_before[callback_key] + 1
+            )
 
     old_notify = notify
     new_transport = object()
@@ -162,6 +209,26 @@ async def test_issue_213_identical_real_frames_report_battery_state(
     await hass.async_block_till_done()
     assert hass.states.get(battery_id).state == "79"
     assert coordinator.data.statistics.valid_packets == 6
+
+    # Simulate six hours in one session with the real decoder and publication path.
+    # This checks elapsed-time behavior; it is not a six-hour physical BLE test.
+    clock = monotonic()
+    monkeypatch.setattr(client, "_loop_time", lambda: clock)
+    monkeypatch.setattr(coordinator_module, "monotonic", lambda: clock)
+    for _ in range(12):
+        reports_before = {
+            key: hass.states.get(entity_id).last_reported
+            for key, entity_id in target_ids.items()
+        }
+        clock += 1800
+        new_notify(object(), bytearray(status_frame))
+        new_notify(object(), bytearray(settings_frame))
+        await hass.async_block_till_done()
+        assert coordinator.status_is_fresh and coordinator.settings_are_fresh
+        assert _publication_entities(hass, entry, coordinator) == target_ids
+        for key, entity_id in target_ids.items():
+            assert hass.states.get(entity_id).last_reported > reports_before[key]
+    assert coordinator.data.statistics.valid_packets == 30
     assert await hass.config_entries.async_unload(entry.entry_id)
 
 
@@ -355,15 +422,45 @@ def _count_unique_id(hass, unique_id: str, *, domain: str) -> int:
     )
 
 
+def _publication_entities(hass, entry, coordinator) -> dict[str, str]:
+    """Verify target registry ownership and each active coordinator subscription."""
+    registry = er.async_get(hass)
+    entities = {
+        entity.entity_id: entity
+        for platform in async_get_platforms(hass, DOMAIN)
+        for entity in platform.entities.values()
+    }
+    result = {}
+    for key in ("battery", "connected", "telemetry_available"):
+        domain = "sensor" if key == "battery" else "binary_sensor"
+        entity_id = registry.async_get_entity_id(
+            domain, DOMAIN, f"{entry.data[CONF_ADDRESS]}_{key}"
+        )
+        assert entity_id is not None
+        registered = registry.async_get(entity_id)
+        assert registered.config_entry_id == entry.entry_id
+        assert registered.disabled_by is None
+        entity = entities[entity_id]
+        assert entity.coordinator is coordinator
+        assert any(
+            listener == entity._handle_coordinator_update
+            for listener, _ in coordinator._listeners.values()
+        )
+        assert hass.states.get(entity_id) is not None
+        result[key] = entity_id
+    return result
+
+
 @pytest.mark.asyncio
 async def test_setup_options_reload_unload_and_diagnostics(
     hass,
     enable_custom_integrations,
+    enable_telemetry_sensor,
     monkeypatch: pytest.MonkeyPatch,
     bluetooth_callbacks: list[tuple[Any, Any]],
 ) -> None:
     """Exercise setup lifecycle and verify no leaked client callbacks."""
-    del enable_custom_integrations
+    del enable_custom_integrations, enable_telemetry_sensor
     import custom_components.allpowers_ble.client as client_module
 
     monkeypatch.setattr(client_module, "AllpowersBLEClient", StatefulFakeClient)
@@ -375,6 +472,17 @@ async def test_setup_options_reload_unload_and_diagnostics(
     await hass.async_block_till_done()
 
     first_client = StatefulFakeClient.instances[-1]
+    first_coordinator = entry.runtime_data.coordinator
+    first_ids = _publication_entities(hass, entry, first_coordinator)
+    assert first_coordinator.listener_count >= len(first_ids)
+    for _ in range(3):
+        before = {
+            key: hass.states.get(entity_id).last_reported
+            for key, entity_id in first_ids.items()
+        }
+        first_client.set_snapshot(first_client.snapshot())
+        for key, entity_id in first_ids.items():
+            assert hass.states.get(entity_id).last_reported > before[key]
     assert first_client.started
     assert any(call[0] == "wait_ready" for call in first_client.calls)
 
@@ -416,6 +524,25 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client is not first_client
     assert first_client.stopped
     assert first_client.callback is None
+    assert first_coordinator.listener_count == 0
+    coordinator = entry.runtime_data.coordinator
+    assert coordinator is not first_coordinator
+    assert _publication_entities(hass, entry, coordinator) == first_ids
+    for _ in range(3):
+        before = {
+            key: hass.states.get(entity_id).last_reported
+            for key, entity_id in first_ids.items()
+        }
+        reloaded_client.set_snapshot(reloaded_client.snapshot())
+        for key, entity_id in first_ids.items():
+            assert hass.states.get(entity_id).last_reported > before[key]
+    # A removed entity can complete a callback while HA declines to write state.
+    battery_entity = next(
+        entity
+        for platform in async_get_platforms(hass, DOMAIN)
+        for entity in platform.entities.values()
+        if entity.entity_id == first_ids["battery"]
+    )
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -423,6 +550,16 @@ async def test_setup_options_reload_unload_and_diagnostics(
     assert reloaded_client.callback is None
     assert bluetooth_callbacks == []
     assert entry.update_listeners == []
+    assert coordinator.listener_count == 0
+    battery_id = first_ids["battery"]
+    removed_state = hass.states.get(battery_id)
+    callback_count = coordinator.entity_update_callbacks["AllpowersSensor.battery"]
+    battery_entity._handle_coordinator_update()
+    assert (
+        coordinator.entity_update_callbacks["AllpowersSensor.battery"]
+        == callback_count + 1
+    )
+    assert hass.states.get(battery_id) is removed_state
 
 
 @pytest.mark.asyncio

@@ -205,7 +205,12 @@ disabled-by-default `telemetry_available` entity distinct: enable the latter
 for this test. Do not modify the HIL matrix until both routes have measured
 evidence.
 
-1. Start a timestamped, 10-second REST poll of battery and connection states.
+1. Privately verify in the entity registry that the sampled battery, connected,
+   and `telemetry_available` IDs are enabled, use the `allpowers_ble` platform,
+   and belong to the active config entry. Retain the exact ID-to-alias mapping
+   locally; use consistent logical aliases in shared evidence. Repeat this
+   verification after reload/reconnect so retired entity IDs are not sampled.
+   Start a timestamped, 10-second REST poll of battery and connection states.
    Record `state`, `last_updated`, and `last_reported` for each. Record
    `telemetry_available` with the same fields. Use a monotonic test clock for
    elapsed time and UTC timestamps for correlation.
@@ -217,11 +222,20 @@ evidence.
    status/settings monotonic timestamps. Inspect `client_task_health` to spot
    a stopped connection or maintenance loop. The live counters may advance even
    when a rejected callback cannot publish a new coordinator snapshot.
-   Compare `publication.entity_state_reports` for battery and connected with
-   REST `last_reported`. These counters show actual entity state-write calls,
-   without exposing entity IDs.
+   For each snapshot, record UTC start/end times and sample REST immediately
+   before and after the diagnostics request. Compare
+   `publication.entity_update_callbacks` for `AllpowersSensor.battery`,
+   `AllpowersBinarySensor.connected`, and
+   `AllpowersBinarySensor.telemetry_available` with REST `last_reported`.
+   These counters count completed coordinator callbacks by static entity key.
+   They do not prove publication: Home Assistant can return from a state-write
+   request without reaching the state machine when the entity is not ADDED.
+   REST `last_reported` from the verified active entity is the separate evidence
+   of actual state-machine reports. No entity IDs are added to diagnostics.
    Record `publication.coordinator_listener_count` in both snapshots to detect
-   a listener lifecycle change while the client remains active.
+   a listener lifecycle change while the client remains active. This is an
+   aggregate; a nonzero count does not prove any particular entity is subscribed.
+   Use each target's callback deltas to check whether its callback runs.
 3. On `local_adapter`, capture HCI traffic with `btmon` on the selected
    adapter. Count ATT Handle Value Notifications for the R600 connection handle
    and attribute handle `0x0006` during exactly the REST/diagnostics interval;
@@ -240,11 +254,23 @@ HCI/proxy notifications with stationary live `notifications` need subscription,
 callback ownership, or competing-client investigation. Rising notifications
 with stationary `valid_packets` need decoder/error inspection. Rising valid
 packets with stationary coordinator updates need callback/exception inspection.
-Rising coordinator updates with stationary entity report counts indicate a
-listener/platform lifecycle problem. Rising entity report counts with stationary
-REST `last_reported` indicate an entity-ID mismatch or Home Assistant state
-machine problem. A passing simulation or CI run does
-not establish physical HIL success.
+Rising coordinator updates with stationary target callback counts narrow the
+investigation to target subscription, callback exceptions, or platform lifecycle.
+Rising target callback counts with stationary REST `last_reported` require
+checking entity lifecycle/platform registration and the private ID mapping;
+callback completion alone does not establish a state-machine write. Correlate
+all deltas over the same interval, including each target's actual state-machine
+reports. A passing simulation or CI run does not establish physical HIL success.
+
+Malformed frames intentionally emit client/coordinator diagnostic updates when
+parser error counters change. Active entities may therefore advance
+`last_reported` even though no valid telemetry arrived. Such frames must not
+advance `valid_packets`, `last_packet_at`, `status_monotonic`, or
+`settings_monotonic`; compare these separately from HA publication timestamps.
+Repeated captured-frame, reload, and simulated elapsed-time tests are baseline
+coverage of the existing path, not a failing-before/fixed-after reproduction of
+the physical freeze. Keep #213 open and its HIL qualification pending until the
+failure boundary and recovery are demonstrated on hardware.
 
 Before sharing evidence, remove Bluetooth addresses, device names, serial
 numbers, Home Assistant IDs, tokens, and unrelated traffic. Share only counts,

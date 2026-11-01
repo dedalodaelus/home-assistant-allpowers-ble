@@ -117,8 +117,8 @@ def _diagnostics_payload(
             "coordinator_listener_count": (
                 entry.runtime_data.coordinator.listener_count
             ),
-            "entity_state_reports": dict(
-                entry.runtime_data.coordinator.entity_state_reports
+            "entity_update_callbacks": dict(
+                entry.runtime_data.coordinator.entity_update_callbacks
             ),
         },
         "protocol": {

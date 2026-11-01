@@ -63,7 +63,7 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
         )
         self._repairs_manager: AllpowersRepairsManager | None = None
         self.client_updates = 0
-        self.entity_state_reports: dict[str, int] = {}
+        self.entity_update_callbacks: dict[str, int] = {}
         self.client.set_update_callback(self._handle_client_update)
         self.async_set_updated_data(client.snapshot())
 
@@ -108,10 +108,10 @@ class AllpowersCoordinator(DataUpdateCoordinator[AllpowersSnapshot]):
                 status_is_fresh=self.status_is_fresh,
             )
 
-    def record_entity_state_report(self, entity_key: str) -> None:
-        """Count state writes by static entity type and key for diagnostics."""
-        self.entity_state_reports[entity_key] = (
-            self.entity_state_reports.get(entity_key, 0) + 1
+    def record_entity_update_callback(self, entity_key: str) -> None:
+        """Count completed entity update callbacks; HA may skip state publication."""
+        self.entity_update_callbacks[entity_key] = (
+            self.entity_update_callbacks.get(entity_key, 0) + 1
         )
 
     @property

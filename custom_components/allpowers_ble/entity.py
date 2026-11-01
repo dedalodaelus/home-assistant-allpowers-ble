@@ -109,9 +109,9 @@ class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Report coordinator-driven state writes without exposing entity IDs."""
+        """Count completed coordinator callbacks, even if HA skips the state write."""
         super()._handle_coordinator_update()
-        self.coordinator.record_entity_state_report(
+        self.coordinator.record_entity_update_callback(
             f"{type(self).__name__}.{self._key}"
         )
 
