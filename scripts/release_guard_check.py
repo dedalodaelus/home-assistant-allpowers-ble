@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 CHECK_NAME = "Trusted release metadata"
 API_ROOT = "https://api.github.com"
 SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
-REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+REPOSITORY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\Z")
 
 
 class GuardError(RuntimeError):
@@ -159,9 +159,7 @@ def authorized_release_source(ctx: GuardContext, pull: Mapping[str, Any]) -> boo
     """Reject fork branch-name impersonation and unauthorized release writers."""
     is_promotion = ctx.base_ref == "main" and ctx.head_ref == "devel"
     is_sync = ctx.base_ref == "devel" and ctx.head_ref == "main"
-    is_release = (
-        ctx.base_ref == "main" and ctx.head_ref.startswith("release-please--")
-    )
+    is_release = ctx.base_ref == "main" and ctx.head_ref.startswith("release-please--")
     if not (is_promotion or is_sync or is_release):
         return True
     try:
@@ -171,12 +169,12 @@ def authorized_release_source(ctx: GuardContext, pull: Mapping[str, Any]) -> boo
             return False
         if is_release:
             author = pull["user"]
-            return (
-                author["type"] == "Bot"
-                and author["login"] in {"github-actions[bot]", "release-please[bot]"}
-            )
+            return author["type"] == "Bot" and author["login"] in {
+                "github-actions[bot]",
+                "release-please[bot]",
+            }
         return True
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return False
 
 

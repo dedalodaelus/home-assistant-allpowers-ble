@@ -433,7 +433,7 @@ def test_trusted_metadata_workflow_never_checks_out_or_runs_pr_head_code() -> No
 
     assert "pull_request_target:" in workflow
     assert "ref: main" in workflow
-    assert "refs/pull/${PR_NUMBER}/head" in workflow
+    assert "refs/pull/$PR_NUMBER/head" in workflow
     assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
     assert "python3 -m scripts.promotion_metadata" in workflow
     assert "REQUIRE_RELEASE_METADATA_GUARD" not in gate

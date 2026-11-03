@@ -83,7 +83,9 @@ def test_start_creates_pending_checks_for_head_and_test_merge() -> None:
     api = FakeGitHub()
     assert start_checks(context(), api) == (987, 988, MERGE_SHA)
     assert [call[0] for call in api.calls] == ["GET", "POST", "POST"]
-    for sha, (_, path, payload) in zip((HEAD_SHA, MERGE_SHA), api.calls[1:], strict=True):
+    for sha, (_, path, payload) in zip(
+        (HEAD_SHA, MERGE_SHA), api.calls[1:], strict=True
+    ):
         assert path == "/repos/owner/repo/check-runs"
         assert payload is not None
         assert payload["name"] == CHECK_NAME
