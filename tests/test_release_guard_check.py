@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from scripts.release_guard_check import (
     CHECK_NAME,
+    authorized_release_source,
     GuardContext,
     GuardError,
     current_revision_matches,
@@ -38,8 +40,17 @@ def live_pr() -> dict[str, Any]:
     return {
         "state": "open",
         "number": 211,
-        "base": {"ref": "main", "sha": BASE_SHA},
-        "head": {"ref": "devel", "sha": HEAD_SHA},
+        "base": {
+            "ref": "main",
+            "sha": BASE_SHA,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "head": {
+            "ref": "devel",
+            "sha": HEAD_SHA,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "user": {"type": "User", "login": "contributor"},
         "merge_commit_sha": MERGE_SHA,
     }
 
@@ -72,7 +83,9 @@ def test_start_creates_pending_checks_for_head_and_test_merge() -> None:
     api = FakeGitHub()
     assert start_checks(context(), api) == (987, 988, MERGE_SHA)
     assert [call[0] for call in api.calls] == ["GET", "POST", "POST"]
-    for sha, (_, path, payload) in zip((HEAD_SHA, MERGE_SHA), api.calls[1:], strict=True):
+    for sha, (_, path, payload) in zip(
+        (HEAD_SHA, MERGE_SHA), api.calls[1:], strict=True
+    ):
         assert path == "/repos/owner/repo/check-runs"
         assert payload is not None
         assert payload["name"] == CHECK_NAME
@@ -146,6 +159,65 @@ def test_merge_sha_appearing_later_fails_closed() -> None:
     with pytest.raises(GuardError, match="changed during validation"):
         finish_checks(context(), api, 987, None, None, "success")
     assert api.calls[-1][2]["conclusion"] == "failure"
+
+
+def test_fork_branch_named_devel_cannot_impersonate_promotion() -> None:
+    pull = live_pr()
+    pull["head"]["repo"]["full_name"] = "attacker/fork"
+    assert not authorized_release_source(context(), pull)
+    api = FakeGitHub(pull)
+    with pytest.raises(GuardError, match="changed before starting"):
+        start_checks(context(), api)
+    assert not any(call[0] == "POST" for call in api.calls)
+
+
+def test_fork_branch_named_main_cannot_impersonate_release_sync() -> None:
+    ctx = replace(context(), base_ref="devel", head_ref="main")
+    pull = live_pr()
+    pull["base"]["ref"] = "devel"
+    pull["head"]["ref"] = "main"
+    pull["head"]["repo"]["full_name"] = "attacker/fork"
+    assert not current_revision_matches(ctx, pull)
+
+
+@pytest.mark.parametrize(
+    ("login", "account_type", "allowed"),
+    [
+        ("contributor", "User", False),
+        ("github-actions[bot]", "Bot", True),
+        ("release-please[bot]", "Bot", True),
+        ("other-bot[bot]", "Bot", False),
+        ("github-actions[bot]", "User", False),
+    ],
+)
+def test_release_please_branch_requires_authorized_bot_and_repo(
+    login: str, account_type: str, allowed: bool
+) -> None:
+    ctx = replace(context(), head_ref="release-please--branches--main")
+    pull = live_pr()
+    pull["head"]["ref"] = ctx.head_ref
+    pull["user"] = {"login": login, "type": account_type}
+    assert authorized_release_source(ctx, pull) is allowed
+    assert current_revision_matches(ctx, pull) is allowed
+    pull["head"]["repo"]["full_name"] = "attacker/fork"
+    assert not current_revision_matches(ctx, pull)
+
+
+def test_privileged_source_changing_during_validation_fails_both_checks() -> None:
+    api = FakeGitHub()
+    api.pull["head"]["repo"]["full_name"] = "attacker/fork"
+    with pytest.raises(GuardError, match="changed during validation"):
+        finish_checks(context(), api, 987, 988, MERGE_SHA, "success")
+    assert all(call[2]["conclusion"] == "failure" for call in api.calls[1:])
+
+
+def test_nonprivileged_feature_pr_can_come_from_fork() -> None:
+    ctx = replace(context(), base_ref="devel", head_ref="feature/capability")
+    pull = live_pr()
+    pull["base"]["ref"] = "devel"
+    pull["head"]["ref"] = "feature/capability"
+    pull["head"]["repo"]["full_name"] = "contributor/fork"
+    assert current_revision_matches(ctx, pull)
 
 
 def test_malformed_live_pr_is_not_current() -> None:
