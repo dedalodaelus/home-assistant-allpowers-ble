@@ -170,6 +170,7 @@ def authorized_release_source(ctx: GuardContext, pull: Mapping[str, Any]) -> boo
         if is_release:
             author = pull["user"]
             return author["type"] == "Bot" and author["login"] in {
+                "allpowers-release-please[bot]",
                 "github-actions[bot]",
                 "release-please[bot]",
             }

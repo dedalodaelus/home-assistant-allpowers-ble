@@ -12,7 +12,6 @@ on:
       - edited
     branches:
       - main
-      - devel
 
 # Loaded only from protected default main, never from the PR's own workflow.
 permissions: {}

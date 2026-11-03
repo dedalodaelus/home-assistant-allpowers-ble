@@ -184,6 +184,7 @@ def test_fork_branch_named_main_cannot_impersonate_release_sync() -> None:
     ("login", "account_type", "allowed"),
     [
         ("contributor", "User", False),
+        ("allpowers-release-please[bot]", "Bot", True),
         ("github-actions[bot]", "Bot", True),
         ("release-please[bot]", "Bot", True),
         ("other-bot[bot]", "Bot", False),
@@ -252,6 +253,7 @@ def test_trusted_workflow_and_gate_contract() -> None:
         encoding="utf-8"
     )
     gate = (ROOT / ".github/workflows/merge-gate.yml").read_text(encoding="utf-8")
+    release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert "pull_request_target:" in guard
     assert "environment: release-metadata-guard" in guard
     assert "ref: main" in guard
@@ -262,13 +264,23 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "scripts.release_guard_check start" in guard
     assert "scripts.release_guard_check finish" in guard
     assert "scripts.promotion_metadata" in guard
+    assert "branches:\n      - main" in guard
+    assert "      - devel" not in guard
     assert "pull_request_target:" in gate
     assert "\n  pull_request:\n" not in gate
-    assert "actions/checkout@" not in gate
-    assert "refs/pull/" not in gate
+    assert "actions/checkout@" in gate
+    assert "persist-credentials: false" in gate
+    assert "refs/pull/$PR_NUMBER/head" in gate
+    assert "ref: main" in gate
+    assert "python3 -m scripts.promotion_metadata" in gate
     assert "- edited" in gate
     assert "context.payload.changes?.base" in gate
     assert "Validate title (current PR edit)" in gate
     assert "latestPull.data.title !== pr.title" in gate
+    assert '"allpowers-release-please[bot]"' in gate
     assert "REQUIRE_RELEASE_METADATA_GUARD" not in gate
     assert "actions.listWorkflowRuns" not in gate
+    assert "environment: release-please" in release
+    assert "RELEASE_PLEASE_APP_ID" in release
+    assert "RELEASE_PLEASE_APP_PRIVATE_KEY" in release
+    assert "token: ${{ steps.app-token.outputs.token }}" in release

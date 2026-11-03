@@ -6,14 +6,17 @@
 - Topics: `home-assistant`, `hacs`, `custom-component`, `bluetooth`, `ble`,
   `esphome-bluetooth-proxy`, and `allpowers`.
 - Vulnerability reporting enabled.
-- Branch protection/rulesets require both `Gate all required checks` and
-  `Trusted release metadata` (expected source: dedicated release guard App).
+- `Gate all required checks` is required for `main` and `devel`.
+- `Trusted release metadata` is required only for `main`, with the dedicated
+  release guard App as expected source; it is not required on `devel` because
+  Dependabot cannot access App secrets.
 - The `main-requires-up-to-date` ruleset requires PR heads targeting `main` to
   include the latest `main` revision; it is scoped to `main` and does not affect
   `main` to `devel` synchronization PRs.
 - `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
   and CodeQL checks.
-- Workflow permissions allow Release Please to create pull requests and releases.
+- Release Please uses its own repository-scoped GitHub App token to create PRs
+  and releases, so its PR events trigger trusted validation.
 - Dedicated release guard App credentials stay in a main-restricted environment.
 - All third-party GitHub Actions are pinned to full immutable commit SHAs with
   version comments and updated via Dependabot pull requests.
@@ -58,13 +61,23 @@ restricted to `main`, and environment-only secrets `RELEASE_GUARD_APP_ID`
 and `RELEASE_GUARD_APP_PRIVATE_KEY`. Do **not** put this App's credentials in
 repository-wide secrets or reuse the promotion App. Explicitly permit the
 trusted `pull_request_target` workflow in Actions event policies before GitHub's
-December 2, 2026 public-repository enforcement. After the validator lands on
-default `main`, verify a real successful and failed App-authored check, then
-configure it as a **second, independent required status** in both branch
-rulesets with the expected App source. Never mark the issue complete before
-that live integration is verified. Full rollout/negative tests:
+December 2, 2026 public-repository enforcement. The trusted Merge gate also
+validates PR metadata from its `main` version; this is the metadata policy for
+Dependabot PRs to `devel`, where App secrets are unavailable. After the
+validator lands on default `main`, verify a real successful and failed
+App-authored check, then require it only in the main-only ruleset with the
+expected App source. Never mark the issue complete before the live integrations
+are verified. Full rollout/negative tests:
 `docs/development.md#trusted-release-metadata-guard-and-staged-rollout`.
 The old `REQUIRE_RELEASE_METADATA_GUARD` switch is not used.
+
+Release Please requires a separate GitHub App installed only on this repository
+with Contents: read/write and Pull requests: read/write. Restrict its
+`release-please` environment to `main`, store
+`RELEASE_PLEASE_APP_ID` and `RELEASE_PLEASE_APP_PRIVATE_KEY` there, and use the
+App slug `allpowers-release-please` to match the trusted author allowlists. Do
+not reuse the release guard App. Verify both creation and update of a Release
+Please PR trigger ordinary CI and the independent metadata check.
 
 ## Code and metadata
 

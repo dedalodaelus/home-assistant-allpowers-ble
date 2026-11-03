@@ -203,10 +203,20 @@ A PR must not be able to disable its own release-metadata validation by editing
 `.github/workflows/merge-gate.yml`. Both the Merge gate and release-metadata
 guard use `pull_request_target`, so GitHub loads their definitions from
 protected default `main`, not from the PR revision. Neither workflow may execute
-PR code. The Merge gate uses read-only GitHub API access to enforce branch policy
-and aggregate ordinary CI checks. The release-metadata guard validates immutable
-base/head revisions and publishes `Trusted release metadata` using a dedicated
-GitHub App.
+PR code. The Merge gate checks out only its trusted validator from `main`,
+fetches the PR's immutable base/head revisions without executing them, validates
+release metadata, then enforces branch policy and aggregates ordinary CI checks.
+This lets Dependabot PRs to `devel` receive trusted metadata validation without
+exposing secrets or requiring an App check that Dependabot cannot produce.
+
+For PRs to `main`, `.github/workflows/release-metadata.yml` additionally
+publishes `Trusted release metadata` using a **dedicated GitHub App**, not the
+PR's workflow. It validates immutable base/head revisions, publishes checks on
+both the head and test-merge commit when available (GitHub can require the
+latter), and re-reads the live PR and merge SHA before publishing its conclusion.
+Missing, stale, unsuccessful, or unavailable validation must not be treated as a
+pass. Both the merge gate and App check are required for `main`; the trusted
+merge gate is the required metadata policy for `devel`.
 
 Security setup (repository administrator required):
 
@@ -214,9 +224,11 @@ Security setup (repository administrator required):
    ruleset covering both `main` and `devel`. `.github/CODEOWNERS` assigns the
    workflows and trusted release validators to the repository owner. A
    CODEOWNERS file without an enforcing ruleset does not require review.
-2. Keep `Gate all required checks` required. Require `Trusted release metadata`
-   independently, with the dedicated App as expected source; do not rely on a
-   PR-editable workflow as the source of trusted security enforcement.
+2. Keep `Gate all required checks` required for both `main` and `devel`. Require
+   `Trusted release metadata` only for `main`, in a main-only ruleset; do not
+   add it to the shared ruleset that also covers `devel`, because Dependabot
+   cannot access the App secrets. The trusted gate validates metadata for
+   `devel` PRs.
 3. Register a dedicated GitHub App installed **only** on this repository with
    **Checks: read/write** and **Pull requests: read** permissions. Do not reuse
    the promotion App or grant it permissions to publish the trusted check.
@@ -235,14 +247,25 @@ Security setup (repository administrator required):
 6. Merge the reviewed trusted workflow implementations to protected default `main`
    without weakening the existing checks. The workflow does not exist as a
    trusted trigger until its first deployment on `main`.
-7. Open a controlled test PR and verify both successful and failing
-   App-authored `Trusted release metadata` checks, including forbidden
-   release-version/history modifications.
-8. Add `Trusted release metadata` as a separate required status check to the
-   applicable protected branch rulesets. Select the dedicated App as its
-   expected source, keep `Gate all required checks` required, and keep `main`
-   strict/up-to-date.
-9. Re-trigger validation of already-open PRs with a fresh head revision as
+7. Use a separate Release Please GitHub App to create and update release PRs.
+   Install it only on this repository with **Contents: read/write** and
+   **Pull requests: read/write**, create the `release-please` environment
+   restricted to `main`, and store `RELEASE_PLEASE_APP_ID` and
+   `RELEASE_PLEASE_APP_PRIVATE_KEY` only as environment secrets. Use the App
+   slug `allpowers-release-please` so the expected author is
+   `allpowers-release-please[bot]`. Do not reuse the release guard App.
+8. Open a controlled Release Please PR and verify that both a new PR and a
+   subsequent update trigger ordinary CI and a fresh App-authored
+   `Trusted release metadata` check. Confirm the dedicated App source and test
+   both passing and forbidden metadata changes.
+9. Add `Trusted release metadata` as a required check with the dedicated App as
+   expected source to the **main-only** `main-requires-up-to-date` ruleset.
+   Keep `Gate all required checks` required in the shared `check-for-pr` ruleset
+   for both `main` and `devel`. Do not require the App check on `devel`.
+10. Open a Dependabot PR to `devel` and verify it remains mergeable with
+   `Gate all required checks` passing and metadata validation performed by the
+   trusted gate, without access to the release guard App secrets.
+11. Re-trigger validation of already-open PRs with a fresh head revision as
    necessary. Test missing checks, stale base/head, edited PR base and title,
    cancelled/failing runs, and successful runs. Only then consider this
    protection deployed. Delete the obsolete
