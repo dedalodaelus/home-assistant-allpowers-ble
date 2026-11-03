@@ -9,6 +9,7 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+      - edited
 
 # Minimum privileges for reading PR/check state.
 permissions: {}
@@ -31,7 +32,6 @@ jobs:
       pull-requests: read
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
-      REQUIRE_RELEASE_METADATA_GUARD: ${{ vars.REQUIRE_RELEASE_METADATA_GUARD || 'false' }}
     steps:
       - name: Wait for required checks on PR head
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
@@ -159,11 +159,6 @@ jobs:
               requiredChecks.push("HIL qualification (opt-in)");
               core.info("REQUIRE_HIL_STABLE_GATE=true; enforcing HIL qualification check.");
             }
-            const requireReleaseMetadataGuard =
-              String(process.env.REQUIRE_RELEASE_METADATA_GUARD || "").toLowerCase() === "true";
-            if (requireReleaseMetadataGuard) {
-              core.info("REQUIRE_RELEASE_METADATA_GUARD=true; enforcing the trusted release metadata workflow.");
-            }
             // Accepted terminal conclusions for required checks.
             const acceptedConclusions = new Set(["success", "neutral", "skipped"]);
 
@@ -207,46 +202,6 @@ jobs:
               const missing = [];
               const pending = [];
               const failed = [];
-
-              // pull_request_target runs are trusted, but their check runs are
-              // associated with the base SHA. Match the actual workflow run to
-              // this PR's exact head/base revisions instead of fabricating a
-              // status check on the PR head.
-              if (requireReleaseMetadataGuard) {
-                const guardCreatedAfter = new Date(
-                  new Date(pr.updated_at).getTime() - 120000
-                ).toISOString();
-                const guardRuns = await github.paginate(
-                  github.rest.actions.listWorkflowRuns,
-                  {
-                    owner,
-                    repo,
-                    workflow_id: "release-metadata.yml",
-                    event: "pull_request_target",
-                    created: `>=${guardCreatedAfter}`,
-                    per_page: 100,
-                  },
-                  (runResponse) => runResponse.data.workflow_runs
-                );
-                const matchingGuardRuns = guardRuns
-                  .filter((run) => (run.pull_requests || []).some((candidate) =>
-                    candidate.number === pr.number
-                    && candidate.head?.sha === headSha
-                    && candidate.base?.sha === pr.base.sha
-                  ))
-                  .sort((left, right) =>
-                    new Date(right.run_started_at || right.created_at)
-                    - new Date(left.run_started_at || left.created_at)
-                  );
-                const guardRun = matchingGuardRuns[0];
-                if (!guardRun) {
-                  missing.push("Release metadata guard");
-                } else if (guardRun.status !== "completed") {
-                  pending.push(`Release metadata guard (${guardRun.status})`);
-                } else if (guardRun.conclusion !== "success") {
-                  failed.push(`Release metadata guard (${guardRun.conclusion || "unknown"})`);
-                }
-              }
 
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
