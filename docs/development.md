@@ -205,8 +205,9 @@ must independently require **two** statuses: `Gate all required checks` (ordinar
 CI aggregation) and `Trusted release metadata` (a check published by a
 **dedicated GitHub App**, not by the PR's workflow). The latter is generated only
 by `.github/workflows/release-metadata.yml` using trusted code on default
-`main`; it validates the immutable base/head pair and re-reads the live PR
-before publishing its actual conclusion. Missing, stale, unsuccessful, or
+`main`; it validates immutable base/head revisions, publishes checks on both the head
+and the test-merge commit when available (GitHub can require the latter), and
+re-reads the live PR and merge SHA before publishing its actual conclusion. Missing, stale, unsuccessful, or
 unavailable validation must not be treated as a pass.
 
 Security setup (repository administrator required):

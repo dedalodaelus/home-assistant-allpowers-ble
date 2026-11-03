@@ -12,13 +12,14 @@ from scripts.release_guard_check import (
     GuardContext,
     GuardError,
     current_revision_matches,
-    finish_check,
-    start_check,
+    finish_checks,
+    start_checks,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
+MERGE_SHA = "c" * 40
 
 
 def context() -> GuardContext:
@@ -39,6 +40,7 @@ def live_pr() -> dict[str, Any]:
         "number": 211,
         "base": {"ref": "main", "sha": BASE_SHA},
         "head": {"ref": "devel", "sha": HEAD_SHA},
+        "merge_commit_sha": MERGE_SHA,
     }
 
 
@@ -47,13 +49,16 @@ class FakeGitHub:
         self.pull = live_pr() if pull is None else pull
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         self.fail_get = False
+        self.next_id = 987
 
     def request(
         self, method: str, path: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         self.calls.append((method, path, payload))
         if method == "POST":
-            return {"id": 987}
+            value = self.next_id
+            self.next_id += 1
+            return {"id": value}
         if method == "GET":
             if self.fail_get:
                 raise GuardError("unavailable")
@@ -63,36 +68,36 @@ class FakeGitHub:
         raise AssertionError(f"Unexpected API method: {method}")
 
 
-def test_start_creates_actual_in_progress_check_with_revision_identity() -> None:
+def test_start_creates_pending_checks_for_head_and_test_merge() -> None:
     api = FakeGitHub()
-    assert start_check(context(), api) == 987
-    method, path, payload = api.calls[0]
-    assert method == "POST"
-    assert path == "/repos/owner/repo/check-runs"
-    assert payload is not None
-    assert payload["name"] == CHECK_NAME
-    assert payload["status"] == "in_progress"
-    assert payload["head_sha"] == HEAD_SHA
-    assert payload["external_id"] == f"pr=211;base={BASE_SHA};head={HEAD_SHA}"
-    assert "conclusion" not in payload
+    assert start_checks(context(), api) == (987, 988, MERGE_SHA)
+    assert [call[0] for call in api.calls] == ["GET", "POST", "POST"]
+    for sha, (_, path, payload) in zip((HEAD_SHA, MERGE_SHA), api.calls[1:]):
+        assert path == "/repos/owner/repo/check-runs"
+        assert payload is not None
+        assert payload["name"] == CHECK_NAME
+        assert payload["head_sha"] == sha
+        assert payload["status"] == "in_progress"
+        assert "conclusion" not in payload
 
 
-def test_success_requires_real_validation_and_current_exact_revisions() -> None:
+def test_success_completes_both_checks_only_after_live_validation() -> None:
     api = FakeGitHub()
-    finish_check(context(), api, 987, "success")
-    assert [call[0] for call in api.calls] == ["GET", "PATCH"]
-    assert api.calls[-1][2]["conclusion"] == "success"
+    finish_checks(context(), api, 987, 988, MERGE_SHA, "success")
+    assert [call[0] for call in api.calls] == ["GET", "PATCH", "PATCH"]
+    assert all(call[2]["conclusion"] == "success" for call in api.calls[1:])
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("base_sha", "c" * 40),
-        ("head_sha", "c" * 40),
+        ("base_sha", "d" * 40),
+        ("head_sha", "d" * 40),
         ("base_ref", "devel"),
         ("head_ref", "feature"),
         ("state", "closed"),
         ("number", 999),
+        ("merge_commit_sha", "e" * 40),
     ],
 )
 def test_changed_or_closed_pr_fails_closed(field: str, value: Any) -> None:
@@ -105,24 +110,41 @@ def test_changed_or_closed_pr_fails_closed(field: str, value: Any) -> None:
         pull[field] = value
     api = FakeGitHub(pull)
     with pytest.raises(GuardError, match="changed during validation"):
-        finish_check(context(), api, 987, "success")
-    assert api.calls[-1][2]["conclusion"] == "failure"
+        finish_checks(context(), api, 987, 988, MERGE_SHA, "success")
+    assert all(call[2]["conclusion"] == "failure" for call in api.calls[1:])
 
 
 @pytest.mark.parametrize("outcome", ["failure", "skipped", "cancelled", ""])
-def test_failed_or_missing_validation_cannot_pass(outcome: str) -> None:
+def test_non_success_validator_cannot_pass(outcome: str) -> None:
     api = FakeGitHub()
     with pytest.raises(GuardError, match="did not succeed"):
-        finish_check(context(), api, 987, outcome)
-    assert api.calls[-1][2]["conclusion"] == "failure"
+        finish_checks(context(), api, 987, 988, MERGE_SHA, outcome)
+    assert all(call[2]["conclusion"] == "failure" for call in api.calls[1:])
 
 
-def test_pr_lookup_failure_reports_failure_check() -> None:
+def test_pr_lookup_failure_reports_failure_on_both_checks() -> None:
     api = FakeGitHub()
     api.fail_get = True
     with pytest.raises(GuardError, match="Could not re-read"):
-        finish_check(context(), api, 987, "success")
-    assert api.calls[-1][0] == "PATCH"
+        finish_checks(context(), api, 987, 988, MERGE_SHA, "success")
+    assert [call[0] for call in api.calls] == ["GET", "PATCH", "PATCH"]
+    assert all(call[2]["conclusion"] == "failure" for call in api.calls[1:])
+
+
+def test_no_test_merge_sha_still_creates_head_check_only() -> None:
+    pull = live_pr()
+    pull["merge_commit_sha"] = None
+    api = FakeGitHub(pull)
+    assert start_checks(context(), api) == (987, None, None)
+    finish_checks(context(), api, 987, None, None, "success")
+    assert [call[0] for call in api.calls] == ["GET", "POST", "GET", "PATCH"]
+
+
+def test_merge_sha_appearing_later_fails_closed() -> None:
+    pull = live_pr()
+    api = FakeGitHub(pull)
+    with pytest.raises(GuardError, match="changed during validation"):
+        finish_checks(context(), api, 987, None, None, "success")
     assert api.calls[-1][2]["conclusion"] == "failure"
 
 
@@ -164,6 +186,7 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "permission-checks: write" in guard
     assert "permission-pull-requests: read" in guard
     assert "refs/pull/" in guard
+    assert "refs/pull/$PR_NUMBER/merge" in guard
     assert "scripts.release_guard_check start" in guard
     assert "scripts.release_guard_check finish" in guard
     assert "scripts.promotion_metadata" in guard
