@@ -1882,8 +1882,8 @@ async def test_disconnect_client_updates_statistics() -> None:
 
 
 def test_required_characteristics() -> None:
-    notify = FakeCharacteristic()
-    write = FakeCharacteristic()
+    notify = FakeCharacteristic(("notify",))
+    write = FakeCharacteristic(("write-without-response",))
 
     class Services:
         def get_service(self, uuid: str) -> object | None:
@@ -1899,6 +1899,89 @@ def test_required_characteristics() -> None:
     fake.services = Services()
 
     assert client_module._required_characteristics(fake) == (notify, write)
+
+
+@pytest.mark.parametrize(
+    ("notify_properties", "write_properties", "expected_response"),
+    [
+        (("notify",), ("write-without-response",), False),
+        (("indicate",), ("write",), True),
+        (("notify", "indicate"), ("write", "write-without-response"), True),
+    ],
+)
+def test_required_characteristics_accept_supported_properties(
+    notify_properties: tuple[str, ...],
+    write_properties: tuple[str, ...],
+    expected_response: bool,
+) -> None:
+    notify = FakeCharacteristic(notify_properties)
+    write = FakeCharacteristic(write_properties)
+    fake = FakeClient()
+    fake.services = SimpleNamespace(
+        get_service=lambda uuid: object(),
+        get_characteristic=lambda uuid: {
+            client_module.NOTIFY_UUID: notify,
+            client_module.WRITE_UUID: write,
+        }.get(uuid),
+    )
+
+    assert client_module._required_characteristics(fake) == (notify, write)
+    assert client_module._write_with_response(write) is expected_response
+
+
+@pytest.mark.parametrize(
+    ("notify_properties", "write_properties", "error"),
+    [
+        ((), ("write",), "notify or indicate"),
+        (("read",), ("write",), "notify or indicate"),
+        (("notify",), (), "write-without-response"),
+        (("notify",), ("read",), "write-without-response"),
+    ],
+)
+def test_required_characteristics_reject_unusable_properties(
+    notify_properties: tuple[str, ...],
+    write_properties: tuple[str, ...],
+    error: str,
+) -> None:
+    notify = FakeCharacteristic(notify_properties)
+    write = FakeCharacteristic(write_properties)
+    fake = FakeClient()
+    fake.services = SimpleNamespace(
+        get_service=lambda uuid: object(),
+        get_characteristic=lambda uuid: {
+            client_module.NOTIFY_UUID: notify,
+            client_module.WRITE_UUID: write,
+        }.get(uuid),
+    )
+
+    with pytest.raises(UnsupportedDeviceError, match=error):
+        client_module._required_characteristics(fake)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("write_properties", "response"),
+    [
+        (("write",), True),
+        (("write-without-response",), False),
+        (("write", "write-without-response"), True),
+    ],
+)
+async def test_status_and_control_writes_use_supported_mode(
+    write_properties: tuple[str, ...],
+    response: bool,
+) -> None:
+    client, fake = _connected_client()
+    client._write_characteristic = FakeCharacteristic(write_properties)
+    client._status = _status()
+    now = asyncio.get_running_loop().time()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+
+    await client.async_request_status()
+    await client.async_set_ac(True)
+
+    assert fake.write_responses == [response, response]
 
 
 def test_required_service_is_enforced() -> None:

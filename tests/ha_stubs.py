@@ -19,7 +19,12 @@ class FakeBleakError(Exception):
 
 
 class FakeCharacteristic:
-    """Synthetic GATT characteristic."""
+    """Synthetic GATT characteristic with configurable properties."""
+
+    def __init__(
+        self, properties: tuple[str, ...] = ("write-without-response",)
+    ) -> None:
+        self.properties = list(properties)
 
 
 class FakeDevice:
@@ -32,6 +37,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.is_connected = True
         self.writes: list[bytes] = []
+        self.write_responses: list[bool] = []
         self.disconnect_calls = 0
         self.raise_on_write: Exception | None = None
         self.services: Any = None
@@ -44,10 +50,11 @@ class FakeClient:
         *,
         response: bool,
     ) -> None:
-        del characteristic, response
+        del characteristic
         if self.raise_on_write is not None:
             raise self.raise_on_write
         self.writes.append(bytes(data))
+        self.write_responses.append(response)
 
     async def disconnect(self) -> None:
         self.disconnect_calls += 1

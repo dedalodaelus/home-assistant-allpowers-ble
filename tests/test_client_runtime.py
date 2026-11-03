@@ -34,9 +34,16 @@ from tests.helpers import FakeHass, settings, status
 class Services:
     """GATT service collection with the required characteristics."""
 
-    def __init__(self, *, service: bool = True, characteristics: bool = True) -> None:
-        self.notify = FakeCharacteristic()
-        self.write = FakeCharacteristic()
+    def __init__(
+        self,
+        *,
+        service: bool = True,
+        characteristics: bool = True,
+        notify_properties: tuple[str, ...] = ("notify",),
+        write_properties: tuple[str, ...] = ("write-without-response",),
+    ) -> None:
+        self.notify = FakeCharacteristic(notify_properties)
+        self.write = FakeCharacteristic(write_properties)
         self.service = service
         self.characteristics = characteristics
 
@@ -404,6 +411,104 @@ async def test_connect_once_success_missing_route_and_unsupported_model(
     monkeypatch.setattr(unsupported, "_fresh_ble_device", lambda: FakeDevice())
     with pytest.raises(UnsupportedDeviceError):
         await unsupported._connect_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notify_properties", "write_properties", "response"),
+    [
+        (("notify",), ("write",), True),
+        (("indicate",), ("write-without-response",), False),
+        (("notify", "indicate"), ("write", "write-without-response"), True),
+    ],
+)
+async def test_connection_initial_status_uses_discovered_write_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    notify_properties: tuple[str, ...],
+    write_properties: tuple[str, ...],
+    response: bool,
+) -> None:
+    client = make_client()
+    fake = FakeClient()
+    fake.services = Services(
+        notify_properties=notify_properties,
+        write_properties=write_properties,
+    )
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client._connect_once()
+
+    assert fake.notification_callback is not None
+    assert fake.writes == [client_module.encode_status_request()]
+    assert fake.write_responses == [response]
+    await client._disconnect_client()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "properties"),
+    [
+        ("notify", ()),
+        ("notify", ("read",)),
+        ("write", ()),
+        ("write", ("read",)),
+    ],
+)
+async def test_connection_rejects_invalid_gatt_properties_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    properties: tuple[str, ...],
+) -> None:
+    client = make_client()
+    fake = FakeClient()
+    fake.services = Services()
+    getattr(fake.services, kind).properties = list(properties)
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    with pytest.raises(UnsupportedDeviceError, match=f"fff{1 if kind == 'notify' else 2}"):
+        await client._connect_once()
+
+    assert fake.notification_callback is None
+    assert fake.writes == []
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reconnect_reselects_gatt_write_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    first = FakeClient()
+    first.services = Services(write_properties=("write-without-response",))
+    second = FakeClient()
+    second.services = Services(write_properties=("write",))
+    clients = iter((first, second))
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return next(clients)
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    for fake, response in ((first, False), (second, True)):
+        await client._connect_once()
+        assert fake.write_responses == [response]
+        await client._disconnect_client()
+
+    assert first.disconnect_calls == second.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1899,6 +2004,65 @@ async def test_probe_success_and_cleanup(
         timeout=0.1,
     )
     assert result.status.battery_percent == 73
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notify_properties", "write_properties", "response"),
+    [
+        (("notify",), ("write",), True),
+        (("indicate",), ("write-without-response",), False),
+        (("notify", "indicate"), ("write", "write-without-response"), True),
+    ],
+)
+async def test_probe_status_uses_discovered_write_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+    notify_properties: tuple[str, ...],
+    write_properties: tuple[str, ...],
+    response: bool,
+) -> None:
+    fake = ProbeClient([status_frame])
+    fake.services = Services(
+        notify_properties=notify_properties,
+        write_properties=write_properties,
+    )
+
+    result = await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+
+    assert result.status.battery_percent == 73
+    assert fake.write_responses == [response]
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "properties"),
+    [
+        ("notify", ()),
+        ("notify", ("read",)),
+        ("write", ()),
+        ("write", ("read",)),
+    ],
+)
+async def test_probe_rejects_invalid_gatt_properties_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    properties: tuple[str, ...],
+) -> None:
+    fake = ProbeClientWithStopNotify([])
+    fake.services = Services()
+    getattr(fake.services, kind).properties = list(properties)
+
+    with pytest.raises(
+        ProbeGattValidationError, match=f"fff{1 if kind == 'notify' else 2}"
+    ):
+        await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+
+    assert fake.notification_callback is None
+    assert fake.writes == []
+    assert fake.stop_notify_calls == 0
+    assert fake.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
