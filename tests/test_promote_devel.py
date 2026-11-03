@@ -428,7 +428,21 @@ def test_version_increase_requires_release_please_or_main_to_devel_sync() -> Non
     promotion_metadata.validate_version_policy("1.2.3", "1.2.4", "devel", "main")
 
 
-@pytest.mark.parametrize("version", ["1.2.3-", "1.2.3-01", "1.2.3+build."])
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.2.3-",
+        "1.2.3-01",
+        "1.2.3+build.",
+        "1\u0662.2.3",
+        "1.2\u0662.3",
+        "1.2.3\u0662",
+        "1.2.3-1\u0662",
+        "1.2.3-\u0662rc",
+        "1.2.3-rc.1\u0662",
+        "1.2.3+build\u0662",
+    ],
+)
 def test_invalid_semver_is_rejected(version: str) -> None:
     with pytest.raises(
         promotion_metadata.MetadataError, match="Invalid semantic version"

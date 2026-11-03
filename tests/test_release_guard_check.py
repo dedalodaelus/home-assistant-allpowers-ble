@@ -204,6 +204,32 @@ def test_success_completes_both_checks_only_after_live_validation() -> None:
     assert all(call[2]["conclusion"] == "success" for call in api.calls[1:])
 
 
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_check_summary_uses_real_line_breaks(outcome: str) -> None:
+    api = FakeGitHub()
+    if outcome == "success":
+        finish_checks(context(), api, 987, 988, MERGE_SHA, outcome)
+    else:
+        with pytest.raises(GuardError, match="did not succeed"):
+            finish_checks(context(), api, 987, 988, MERGE_SHA, outcome)
+
+    for _, _, payload in api.calls[1:]:
+        assert payload is not None
+        summary = payload["output"]["summary"]
+        assert "\\n" not in summary
+        assert summary.splitlines() == [
+            (
+                "Trusted default-branch validator passed for current PR revisions."
+                if outcome == "success"
+                else "Trusted metadata validation did not succeed."
+            ),
+            "",
+            f"PR #211; base main@{BASE_SHA}; head devel@{HEAD_SHA}; "
+            f"test merge {MERGE_SHA}.",
+            f"Validator step outcome: {outcome}.",
+        ]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

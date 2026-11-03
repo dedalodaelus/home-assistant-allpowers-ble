@@ -287,10 +287,10 @@ def finish_checks(
         reason = "Trusted default-branch validator passed for current PR revisions."
 
     summary = (
-        f"{reason}\\n\\nPR #{ctx.number}; "
+        f"{reason}\n\nPR #{ctx.number}; "
         f"base {ctx.base_ref}@{ctx.base_sha}; "
         f"head {ctx.head_ref}@{ctx.head_sha}; "
-        f"test merge {merge_sha or 'unavailable'}.\\n"
+        f"test merge {merge_sha or 'unavailable'}.\n"
         f"Validator step outcome: {validation_outcome}."
     )
     for check_id in (head_check_id, merge_check_id):
