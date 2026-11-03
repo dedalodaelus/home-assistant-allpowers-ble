@@ -105,22 +105,25 @@ class GitHubAPI:
         return result
 
 
-def start_check(ctx: GuardContext, api: GitHubAPI) -> int:
-    """Post an in-progress check on the PR head; never pre-report success."""
+def create_check(ctx: GuardContext, api: GitHubAPI, sha: str) -> int:
+    """Post the real in-progress validation on one immutable commit."""
     result = api.request(
         "POST",
         f"/repos/{ctx.repository}/check-runs",
         {
             "name": CHECK_NAME,
-            "head_sha": ctx.head_sha,
+            "head_sha": sha,
             "status": "in_progress",
             "details_url": ctx.run_url,
-            "external_id": f"pr={ctx.number};base={ctx.base_sha};head={ctx.head_sha}",
+            "external_id": (
+                f"pr={ctx.number};base={ctx.base_sha};head={ctx.head_sha};"
+                f"checked={sha}"
+            ),
             "output": {
                 "title": "Validating release metadata",
                 "summary": (
                     f"PR #{ctx.number}; base {ctx.base_ref}@{ctx.base_sha}; "
-                    f"head {ctx.head_ref}@{ctx.head_sha}."
+                    f"head {ctx.head_ref}@{ctx.head_sha}; checked {sha}."
                 ),
             },
         },
@@ -129,6 +132,28 @@ def start_check(ctx: GuardContext, api: GitHubAPI) -> int:
     if not isinstance(check_id, int) or check_id < 1:
         raise GuardError("GitHub did not return a valid check run ID.")
     return check_id
+
+
+def start_checks(
+    ctx: GuardContext, api: GitHubAPI
+) -> tuple[int, int | None, str | None]:
+    """Cover both the PR head and the test-merge commit used by branch rulesets."""
+    pull = api.request("GET", f"/repos/{ctx.repository}/pulls/{ctx.number}")
+    if not current_revision_matches(ctx, pull):
+        raise GuardError("PR base/head changed before starting trusted validation.")
+    candidate = pull.get("merge_commit_sha")
+    merge_sha = (
+        candidate
+        if isinstance(candidate, str) and SHA_RE.fullmatch(candidate)
+        else None
+    )
+    head_check_id = create_check(ctx, api, ctx.head_sha)
+    merge_check_id = (
+        create_check(ctx, api, merge_sha)
+        if merge_sha is not None and merge_sha != ctx.head_sha
+        else None
+    )
+    return head_check_id, merge_check_id, merge_sha
 
 
 def current_revision_matches(ctx: GuardContext, pull: Mapping[str, Any]) -> bool:
@@ -146,42 +171,57 @@ def current_revision_matches(ctx: GuardContext, pull: Mapping[str, Any]) -> bool
         return False
 
 
-def finish_check(
-    ctx: GuardContext, api: GitHubAPI, check_id: int, validation_outcome: str
+def finish_checks(
+    ctx: GuardContext,
+    api: GitHubAPI,
+    head_check_id: int,
+    merge_check_id: int | None,
+    merge_sha: str | None,
+    validation_outcome: str,
 ) -> None:
-    """Complete with actual validation outcome; require current exact PR refs."""
-    if check_id < 1:
+    """Report success only for validated, current head/base/test-merge SHAs."""
+    if head_check_id < 1 or (merge_check_id is not None and merge_check_id < 1):
         raise GuardError("Invalid check run ID.")
     reason = "Trusted metadata validation did not succeed."
     current = False
     try:
         pull = api.request("GET", f"/repos/{ctx.repository}/pulls/{ctx.number}")
-        current = current_revision_matches(ctx, pull)
+        current = (
+            current_revision_matches(ctx, pull)
+            and pull.get("merge_commit_sha") == merge_sha
+        )
         if not current:
-            reason = "PR base/head revisions or refs changed during validation."
+            reason = "PR base/head or test-merge commit changed during validation."
     except GuardError:
         reason = "Could not re-read the current PR revisions from GitHub."
     success = validation_outcome == "success" and current
     if success:
-        reason = "Trusted default-branch validator passed for the current base/head."
-    api.request(
-        "PATCH",
-        f"/repos/{ctx.repository}/check-runs/{check_id}",
-        {
-            "status": "completed",
-            "conclusion": "success" if success else "failure",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "output": {
-                "title": "Release metadata passed" if success else "Release metadata failed",
-                "summary": (
-                    f"{reason}\n\nPR #{ctx.number}; "
-                    f"base {ctx.base_ref}@{ctx.base_sha}; "
-                    f"head {ctx.head_ref}@{ctx.head_sha}.\n"
-                    f"Validator step outcome: {validation_outcome}."
-                ),
-            },
+        reason = "Trusted default-branch validator passed for current PR revisions."
+
+    payload = {
+        "status": "completed",
+        "conclusion": "success" if success else "failure",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "output": {
+            "title": (
+                "Release metadata passed" if success else "Release metadata failed"
+            ),
+            "summary": (
+                f"{reason}\\n\\nPR #{ctx.number}; "
+                f"base {ctx.base_ref}@{ctx.base_sha}; "
+                f"head {ctx.head_ref}@{ctx.head_sha}; "
+                f"test merge {merge_sha or 'unavailable'}.\\n"
+                f"Validator step outcome: {validation_outcome}."
+            ),
         },
-    )
+    }
+    for check_id in (head_check_id, merge_check_id):
+        if check_id is not None:
+            api.request(
+                "PATCH",
+                f"/repos/{ctx.repository}/check-runs/{check_id}",
+                payload,
+            )
     if not success:
         raise GuardError(reason)
 
@@ -194,10 +234,19 @@ def main() -> int:
         ctx = GuardContext.from_env(os.environ)
         api = GitHubAPI(os.environ.get("RELEASE_GUARD_TOKEN", ""))
         if args.command == "start":
-            print(f"check_id={start_check(ctx, api)}")
+            head_id, merge_id, merge_sha = start_checks(ctx, api)
+            print(f"head_check_id={head_id}")
+            print(f"merge_check_id={merge_id or ''}")
+            print(f"merge_sha={merge_sha or ''}")
         else:
-            check_id = int(os.environ.get("RELEASE_GUARD_CHECK_ID", "0"))
-            finish_check(ctx, api, check_id, os.environ.get("VALIDATION_OUTCOME", ""))
+            head_id = int(os.environ.get("RELEASE_GUARD_HEAD_CHECK_ID", "0"))
+            merge_id_raw = os.environ.get("RELEASE_GUARD_MERGE_CHECK_ID", "")
+            merge_id = int(merge_id_raw) if merge_id_raw else None
+            merge_sha = os.environ.get("RELEASE_GUARD_MERGE_SHA") or None
+            finish_checks(
+                ctx, api, head_id, merge_id, merge_sha,
+                os.environ.get("VALIDATION_OUTCOME", ""),
+            )
     except (GuardError, ValueError) as error:
         print(f"Release guard failed: {error}", file=sys.stderr)
         return 1

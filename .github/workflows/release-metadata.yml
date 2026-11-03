@@ -65,6 +65,7 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_MERGE_SHA: ${{ steps.start.outputs.merge_sha }}
         run: |
           git fetch --no-tags origin \
             "refs/heads/$PR_BASE_REF:refs/remotes/origin/metadata-validation-base"
@@ -72,6 +73,11 @@ jobs:
             "refs/pull/$PR_NUMBER/head:refs/remotes/origin/metadata-validation-head"
           test "$(git rev-parse refs/remotes/origin/metadata-validation-base)" = "$PR_BASE_SHA"
           test "$(git rev-parse refs/remotes/origin/metadata-validation-head)" = "$PR_HEAD_SHA"
+          if [ -n "$PR_MERGE_SHA" ]; then
+            git fetch --no-tags origin \
+              "refs/pull/$PR_NUMBER/merge:refs/remotes/origin/metadata-validation-merge"
+            test "$(git rev-parse refs/remotes/origin/metadata-validation-merge)" = "$PR_MERGE_SHA"
+          fi
 
       - name: Validate release metadata without executing PR code
         id: metadata
@@ -97,6 +103,8 @@ jobs:
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RELEASE_GUARD_CHECK_ID: ${{ steps.start.outputs.check_id }}
+          RELEASE_GUARD_HEAD_CHECK_ID: ${{ steps.start.outputs.head_check_id }}
+          RELEASE_GUARD_MERGE_CHECK_ID: ${{ steps.start.outputs.merge_check_id }}
+          RELEASE_GUARD_MERGE_SHA: ${{ steps.start.outputs.merge_sha }}
           VALIDATION_OUTCOME: ${{ steps.metadata.outcome }}
         run: python3 -m scripts.release_guard_check finish
