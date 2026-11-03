@@ -18,7 +18,7 @@
 - All third-party GitHub Actions are pinned to full immutable commit SHAs with
   version comments and updated via Dependabot pull requests.
 - Workflows default to no token permissions; each job grants only the read or
-  write scopes it needs. Release publication is the only job with write access.
+  write scopes it needs. Write-capable GitHub App tokens are limited to dedicated, restricted jobs.
 
 ## Branch workflow and promotion
 
