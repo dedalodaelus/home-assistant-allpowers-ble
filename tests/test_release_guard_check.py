@@ -262,6 +262,10 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "scripts.release_guard_check start" in guard
     assert "scripts.release_guard_check finish" in guard
     assert "scripts.promotion_metadata" in guard
+    assert "pull_request_target:" in gate
+    assert "\n  pull_request:\n" not in gate
+    assert "actions/checkout@" not in gate
+    assert "refs/pull/" not in gate
     assert "- edited" in gate
     assert "context.payload.changes?.base" in gate
     assert "Validate title (current PR edit)" in gate

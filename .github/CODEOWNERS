@@ -1,3 +1,5 @@
 * @dedalodaelus
+/scripts/promotion_metadata.py @dedalodaelus
+/scripts/release_guard_check.py @dedalodaelus
 /custom_components/allpowers_ble/protocol/ @dedalodaelus
 /.github/ @dedalodaelus

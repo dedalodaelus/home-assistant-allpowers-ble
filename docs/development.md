@@ -200,46 +200,49 @@ updates, tags, GitHub release, and HACS assets.
 ### Trusted release metadata guard and staged rollout
 
 A PR must not be able to disable its own release-metadata validation by editing
-`.github/workflows/merge-gate.yml`. Consequently, the protected branch rulesets
-must independently require **two** statuses: `Gate all required checks` (ordinary
-CI aggregation) and `Trusted release metadata` (a check published by a
-**dedicated GitHub App**, not by the PR's workflow). The latter is generated only
-by `.github/workflows/release-metadata.yml` using trusted code on default
-`main`; it validates immutable base/head revisions, publishes checks on both the head
-and the test-merge commit when available (GitHub can require the latter), and
-re-reads the live PR and merge SHA before publishing its actual conclusion. Missing, stale, unsuccessful, or
-unavailable validation must not be treated as a pass.
+`.github/workflows/merge-gate.yml`. Both the Merge gate and release-metadata
+guard use `pull_request_target`, so GitHub loads their definitions from
+protected default `main`, not from the PR revision. Neither workflow may execute
+PR code. The Merge gate uses read-only GitHub API access to enforce branch policy
+and aggregate ordinary CI checks. The release-metadata guard validates immutable
+base/head revisions and publishes `Trusted release metadata` using a dedicated
+GitHub App.
 
 Security setup (repository administrator required):
 
-1. Register a dedicated GitHub App installed **only** on this repository with
+1. Require at least one approval and code-owner approval in the active PR review
+   ruleset covering both `main` and `devel`. `.github/CODEOWNERS` assigns the
+   workflows and trusted release validators to the repository owner. A
+   CODEOWNERS file without an enforcing ruleset does not require review.
+2. Keep `Gate all required checks` required. Require `Trusted release metadata`
+   independently, with the dedicated App as expected source; do not rely on a
+   PR-editable workflow as the source of trusted security enforcement.
+3. Register a dedicated GitHub App installed **only** on this repository with
    **Checks: read/write** and **Pull requests: read** permissions. Do not reuse
    the promotion App or grant it permissions to publish the trusted check.
-2. Create the GitHub Actions environment `release-metadata-guard`; restrict
+4. Create the GitHub Actions environment `release-metadata-guard`; restrict
    deployments to the protected `main` branch (no PR refs, no tags). Put
    `RELEASE_GUARD_APP_ID` and `RELEASE_GUARD_APP_PRIVATE_KEY` in this
    environment's **secrets**, *not* repository-wide secrets. Same-repository
    PR workflows may access repository secrets; an environment restricted to
    `main` prevents untrusted PR workflows from using this App's credentials.
-3. Explicitly allow `pull_request_target` **for only**
+5. Explicitly allow `pull_request_target` **only for**
+   `.github/workflows/merge-gate.yml` and
    `.github/workflows/release-metadata.yml` under the applicable Actions
    event policy. GitHub announced public-repository enforcement starting
    **December 2, 2026** (brownouts November 9 and 16). See
    https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/
-4. Merge the reviewed guard implementation to protected default `main`
+6. Merge the reviewed trusted workflow implementations to protected default `main`
    without weakening the existing checks. The workflow does not exist as a
    trusted trigger until its first deployment on `main`.
-5. Open a controlled test PR and observe an actual `Trusted release metadata`
-   check authored by the dedicated App on its head SHA. Test success and
-   forbidden release-version/history modifications; confirm a failure does not
-   become a successful check.
-6. Add **`Trusted release metadata`** as a separate required status check to
-   the active rulesets covering `main` and `devel` (currently
-   `main-requires-up-to-date` and `check-for-pr`). Select **the dedicated
-   App** as its expected source, not "any source" or GitHub Actions; keep
-   `Gate all required checks` required and `main` strict/up-to-date.
-   Both checks must be required before relying on release metadata safety.
-7. Re-trigger validation of already-open PRs with a fresh head revision as
+7. Open a controlled test PR and verify both successful and failing
+   App-authored `Trusted release metadata` checks, including forbidden
+   release-version/history modifications.
+8. Add `Trusted release metadata` as a separate required status check to the
+   applicable protected branch rulesets. Select the dedicated App as its
+   expected source, keep `Gate all required checks` required, and keep `main`
+   strict/up-to-date.
+9. Re-trigger validation of already-open PRs with a fresh head revision as
    necessary. Test missing checks, stale base/head, edited PR base and title,
    cancelled/failing runs, and successful runs. Only then consider this
    protection deployed. Delete the obsolete

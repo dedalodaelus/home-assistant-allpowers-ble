@@ -1,9 +1,9 @@
-# Centralized PR gate: enforces branch policy + required checks in one workflow.
+# Trusted default-branch PR gate: enforces branch policy + required checks.
 name: Merge gate
 
 on:
-  # Trigger on PR lifecycle events where policy/check status can change.
-  pull_request:
+  # GitHub loads this workflow from the default branch, not the PR's revision.
+  pull_request_target:
     types:
       - opened
       - reopened
@@ -11,7 +11,7 @@ on:
       - ready_for_review
       - edited
 
-# Minimum privileges for reading PR/check state.
+# This workflow only reads PR/check state and never checks out or runs PR code.
 permissions: {}
 
 concurrency:
@@ -26,7 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
-      actions: read
       contents: read
       checks: read
       pull-requests: read
@@ -43,9 +42,9 @@ jobs:
             const repo = context.repo.repo;
             const pr = context.payload.pull_request;
 
-            // Hard stop: this workflow is only meaningful for pull_request events.
+            // Hard stop: this workflow is only meaningful for PR target events.
             if (!pr) {
-              core.setFailed("This workflow only supports pull_request events.");
+              core.setFailed("This workflow only supports pull_request_target events.");
               return;
             }
 
