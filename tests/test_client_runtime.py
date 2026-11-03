@@ -477,7 +477,9 @@ async def test_connection_rejects_invalid_gatt_properties_before_io(
     monkeypatch.setattr(client_module, "establish_connection", establish)
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
 
-    with pytest.raises(UnsupportedDeviceError, match=f"fff{1 if kind == 'notify' else 2}"):
+    with pytest.raises(
+        UnsupportedDeviceError, match=f"fff{1 if kind == 'notify' else 2}"
+    ):
         await client._connect_once()
 
     assert fake.notification_callback is None
