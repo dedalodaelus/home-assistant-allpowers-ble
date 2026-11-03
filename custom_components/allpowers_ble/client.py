@@ -1190,7 +1190,11 @@ class AllpowersBLEClient:
 
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
-                await client.write_gatt_char(characteristic, frame, response=False)
+                await client.write_gatt_char(
+                    characteristic,
+                    frame,
+                    response=_write_with_response(characteristic),
+                )
             if (
                 self._active_session_generation != active_generation
                 or self._client is not client
@@ -1641,7 +1645,9 @@ async def async_probe_device(
         try:
             async with asyncio.timeout(remaining("status_request")):
                 await client.write_gatt_char(
-                    write_characteristic, encode_status_request(), response=False
+                    write_characteristic,
+                    encode_status_request(),
+                    response=_write_with_response(write_characteristic),
                 )
         except TimeoutError as ex:
             raise ProbeNotificationSetupError(
@@ -1711,7 +1717,25 @@ def _required_characteristics(
         raise UnsupportedDeviceError(
             f"Required characteristics {NOTIFY_UUID} and {WRITE_UUID} are missing"
         )
+    if not {"notify", "indicate"}.intersection(notify_characteristic.properties):
+        raise UnsupportedDeviceError(
+            f"Required characteristic {NOTIFY_UUID} must support notify or indicate"
+        )
+    _write_with_response(write_characteristic)
     return notify_characteristic, write_characteristic
+
+
+def _write_with_response(characteristic: BleakGATTCharacteristic) -> bool:
+    """Select a supported GATT write mode, preferring acknowledged writes."""
+    properties = characteristic.properties
+    if "write" in properties:
+        return True
+    if "write-without-response" in properties:
+        return False
+    raise UnsupportedDeviceError(
+        f"Required characteristic {WRITE_UUID} must support write or "
+        "write-without-response"
+    )
 
 
 def _utcnow() -> datetime:
