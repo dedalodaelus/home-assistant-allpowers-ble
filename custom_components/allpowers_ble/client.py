@@ -1719,8 +1719,7 @@ def _required_characteristics(
         )
     if not {"notify", "indicate"}.intersection(notify_characteristic.properties):
         raise UnsupportedDeviceError(
-            f"Required characteristic {NOTIFY_UUID} must support "
-            "notify or indicate"
+            f"Required characteristic {NOTIFY_UUID} must support notify or indicate"
         )
     _write_with_response(write_characteristic)
     return notify_characteristic, write_characteristic
