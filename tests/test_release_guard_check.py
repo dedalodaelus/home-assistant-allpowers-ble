@@ -168,5 +168,8 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "scripts.release_guard_check finish" in guard
     assert "scripts.promotion_metadata" in guard
     assert "- edited" in gate
+    assert 'context.payload.changes?.base' in gate
+    assert 'Validate title (current PR edit)' in gate
+    assert 'latestPull.data.title !== pr.title' in gate
     assert "REQUIRE_RELEASE_METADATA_GUARD" not in gate
     assert "actions.listWorkflowRuns" not in gate

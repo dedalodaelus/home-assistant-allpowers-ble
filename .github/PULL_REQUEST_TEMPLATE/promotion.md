@@ -39,6 +39,7 @@ Do not mark checks as passed before they finish.
 - [ ] CodeQL
 - [ ] Dependency review
 - [ ] CI, HACS validation, Hassfest, CodeQL, dependency review, and Merge gate
+- [ ] Trusted release metadata (separately required, dedicated App source)
 
 ### Manual pre-merge checklist
 
