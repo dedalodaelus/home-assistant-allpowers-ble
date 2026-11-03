@@ -2299,4 +2299,3 @@ async def test_probe_cleanup_skips_disconnected_temporary_client(
     assert result.status.battery_percent == 73
     assert fake.stop_notify_calls == 0
     assert fake.disconnect_calls == 0
-
