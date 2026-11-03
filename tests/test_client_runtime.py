@@ -2130,3 +2130,173 @@ async def test_probe_cleanup_stops_notifications_when_available(
     assert result.status.battery_percent == 73
     assert fake.stop_notify_calls == 1
     assert fake.disconnect_calls == 1
+
+
+async def _probe_for_cleanup_test(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: ProbeClient,
+    *,
+    timeout: float,
+) -> client_module.ProbeResult:
+    """Run a real probe against a controlled temporary BLE client."""
+
+    async def establish(*args: Any, **kwargs: Any) -> ProbeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    return await client_module.async_probe_device(
+        FakeHass(),  # type: ignore[arg-type]
+        address="aa:bb:cc:dd:ee:ff",
+        advertised_name="ALLPOWERS R600",
+        timeout=timeout,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_failure", ["ble_error", "unexpected", "timeout"])
+@pytest.mark.parametrize("probe_succeeds", [True, False])
+async def test_probe_stop_notify_failure_still_disconnects(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+    stop_failure: str,
+    probe_succeeds: bool,
+) -> None:
+    """Stop-notify failures cannot skip disconnect or mask the probe outcome."""
+
+    class FailingStopClient(ProbeClientWithStopNotify):
+        async def stop_notify(self, characteristic: object) -> None:
+            await super().stop_notify(characteristic)
+            if stop_failure == "ble_error":
+                raise FakeBleakError("stop notifications failed")
+            if stop_failure == "unexpected":
+                raise RuntimeError("unexpected stop failure")
+            await asyncio.Event().wait()
+
+    fake = FailingStopClient([status_frame] if probe_succeeds else [])
+    monkeypatch.setattr(client_module, "WRITE_TIMEOUT", 0.01)
+
+    if probe_succeeds:
+        result = await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+        assert result.status.battery_percent == 73
+    else:
+        with pytest.raises(client_module.ProbeStatusTimeoutError):
+            await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.01)
+
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect_failure", ["ble_error", "unexpected", "timeout"])
+@pytest.mark.parametrize("probe_succeeds", [True, False])
+async def test_probe_disconnect_failure_does_not_mask_original_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+    disconnect_failure: str,
+    probe_succeeds: bool,
+) -> None:
+    """Disconnect failures are bounded and do not replace probe outcomes."""
+
+    class FailingDisconnectClient(ProbeClientWithStopNotify):
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            if disconnect_failure == "ble_error":
+                raise FakeBleakError("disconnect failed")
+            if disconnect_failure == "unexpected":
+                raise RuntimeError("unexpected disconnect failure")
+            await asyncio.Event().wait()
+
+    fake = FailingDisconnectClient([status_frame] if probe_succeeds else [])
+    monkeypatch.setattr(client_module, "WRITE_TIMEOUT", 0.01)
+
+    if probe_succeeds:
+        result = await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+        assert result.status.battery_percent == 73
+    else:
+        with pytest.raises(client_module.ProbeStatusTimeoutError):
+            await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.01)
+
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_cancellation_during_stop_notify_attempts_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+) -> None:
+    """Task cancellation still enters disconnect cleanup and propagates."""
+
+    entered_stop = asyncio.Event()
+
+    class CancellingStopClient(ProbeClientWithStopNotify):
+        async def stop_notify(self, characteristic: object) -> None:
+            await super().stop_notify(characteristic)
+            entered_stop.set()
+            await asyncio.Event().wait()
+
+    fake = CancellingStopClient([status_frame])
+    probe = asyncio.create_task(_probe_for_cleanup_test(monkeypatch, fake, timeout=0.1))
+    try:
+        await asyncio.wait_for(entered_stop.wait(), timeout=1.0)
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+    finally:
+        if not probe.done():
+            probe.cancel()
+            await asyncio.gather(probe, return_exceptions=True)
+
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+
+
+@pytest.mark.asyncio
+async def test_probe_cleanup_omits_stop_when_notifications_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed subscription still disconnects without stopping notifications."""
+
+    class FailedStartClient(ProbeClientWithStopNotify):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            del characteristic, callback
+            raise FakeBleakError("notification setup failed")
+
+    fake = FailedStartClient([])
+    with pytest.raises(ProbeNotificationSetupError):
+        await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+
+    assert fake.stop_notify_calls == 0
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+
+
+@pytest.mark.asyncio
+async def test_probe_cleanup_skips_disconnected_temporary_client(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+) -> None:
+    """Do not call teardown methods if the transport is already disconnected."""
+
+    class AlreadyDisconnectedClient(ProbeClientWithStopNotify):
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            await super().write_gatt_char(characteristic, data, response=response)
+            self.is_connected = False
+
+    fake = AlreadyDisconnectedClient([status_frame])
+    result = await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+
+    assert result.status.battery_percent == 73
+    assert fake.stop_notify_calls == 0
+    assert fake.disconnect_calls == 0
+
