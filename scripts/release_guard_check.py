@@ -116,8 +116,7 @@ def create_check(ctx: GuardContext, api: GitHubAPI, sha: str) -> int:
             "status": "in_progress",
             "details_url": ctx.run_url,
             "external_id": (
-                f"pr={ctx.number};base={ctx.base_sha};head={ctx.head_sha};"
-                f"checked={sha}"
+                f"pr={ctx.number};base={ctx.base_sha};head={ctx.head_sha};checked={sha}"
             ),
             "output": {
                 "title": "Validating release metadata",
@@ -167,7 +166,7 @@ def current_revision_matches(ctx: GuardContext, pull: Mapping[str, Any]) -> bool
             and pull["head"]["ref"] == ctx.head_ref
             and pull["head"]["sha"] == ctx.head_sha
         )
-    except (KeyError, TypeError):
+    except KeyError, TypeError:
         return False
 
 
@@ -244,7 +243,11 @@ def main() -> int:
             merge_id = int(merge_id_raw) if merge_id_raw else None
             merge_sha = os.environ.get("RELEASE_GUARD_MERGE_SHA") or None
             finish_checks(
-                ctx, api, head_id, merge_id, merge_sha,
+                ctx,
+                api,
+                head_id,
+                merge_id,
+                merge_sha,
                 os.environ.get("VALIDATION_OUTCOME", ""),
             )
     except (GuardError, ValueError) as error:
