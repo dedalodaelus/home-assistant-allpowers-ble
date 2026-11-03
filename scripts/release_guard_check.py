@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -21,6 +22,8 @@ CHECK_NAME = "Trusted release metadata"
 API_ROOT = "https://api.github.com"
 SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\Z")
+MERGEABILITY_MAX_POLLS = 10
+MERGEABILITY_POLL_INTERVAL_SECONDS = 3
 
 
 class GuardError(RuntimeError):
@@ -133,25 +136,86 @@ def create_check(ctx: GuardContext, api: GitHubAPI, sha: str) -> int:
     return check_id
 
 
+def complete_check(
+    ctx: GuardContext, api: GitHubAPI, check_id: int, conclusion: str, summary: str
+) -> None:
+    api.request(
+        "PATCH",
+        f"/repos/{ctx.repository}/check-runs/{check_id}",
+        {
+            "status": "completed",
+            "conclusion": conclusion,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "output": {
+                "title": (
+                    "Release metadata passed"
+                    if conclusion == "success"
+                    else "Release metadata failed"
+                ),
+                "summary": summary,
+            },
+        },
+    )
+
+
 def start_checks(
     ctx: GuardContext, api: GitHubAPI
 ) -> tuple[int, int | None, str | None]:
     """Cover both the PR head and the test-merge commit used by branch rulesets."""
-    pull = api.request("GET", f"/repos/{ctx.repository}/pulls/{ctx.number}")
-    if not current_revision_matches(ctx, pull):
-        raise GuardError("PR base/head changed before starting trusted validation.")
-    candidate = pull.get("merge_commit_sha")
-    merge_sha = (
-        candidate
-        if isinstance(candidate, str) and SHA_RE.fullmatch(candidate)
-        else None
-    )
+    pull_path = f"/repos/{ctx.repository}/pulls/{ctx.number}"
     head_check_id = create_check(ctx, api, ctx.head_sha)
-    merge_check_id = (
-        create_check(ctx, api, merge_sha)
-        if merge_sha is not None and merge_sha != ctx.head_sha
-        else None
-    )
+    try:
+        merge_sha: str | None = None
+        for attempt in range(MERGEABILITY_MAX_POLLS):
+            pull = api.request("GET", pull_path)
+            if not current_revision_matches(ctx, pull):
+                raise GuardError(
+                    "PR base/head changed before starting trusted validation."
+                )
+            if pull.get("mergeable") is False:
+                raise GuardError(
+                    "PR has merge conflicts; trusted validation cannot proceed."
+                )
+            candidate = pull.get("merge_commit_sha")
+            if (
+                pull.get("mergeable") is True
+                and isinstance(candidate, str)
+                and SHA_RE.fullmatch(candidate)
+            ):
+                merge_sha = candidate
+                break
+            if attempt + 1 < MERGEABILITY_MAX_POLLS:
+                time.sleep(MERGEABILITY_POLL_INTERVAL_SECONDS)
+        else:
+            raise GuardError(
+                "GitHub did not produce a stable test-merge commit after "
+                f"{MERGEABILITY_MAX_POLLS} checks. Retry trusted validation."
+            )
+
+        merge_commit = api.request(
+            "GET", f"/repos/{ctx.repository}/commits/{merge_sha}"
+        )
+        parents = merge_commit.get("parents")
+        parent_shas = (
+            [parent.get("sha") for parent in parents if isinstance(parent, dict)]
+            if isinstance(parents, list)
+            else []
+        )
+        if merge_commit.get("sha") != merge_sha or parent_shas != [
+            ctx.base_sha,
+            ctx.head_sha,
+        ]:
+            raise GuardError(
+                "GitHub's test-merge commit does not have the expected current base/head parents."
+            )
+
+        merge_check_id = (
+            create_check(ctx, api, merge_sha) if merge_sha != ctx.head_sha else None
+        )
+    except GuardError as error:
+        complete_check(ctx, api, head_check_id, "failure", str(error))
+        raise
+
     return head_check_id, merge_check_id, merge_sha
 
 
@@ -222,29 +286,21 @@ def finish_checks(
     if success:
         reason = "Trusted default-branch validator passed for current PR revisions."
 
-    payload = {
-        "status": "completed",
-        "conclusion": "success" if success else "failure",
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "output": {
-            "title": (
-                "Release metadata passed" if success else "Release metadata failed"
-            ),
-            "summary": (
-                f"{reason}\\n\\nPR #{ctx.number}; "
-                f"base {ctx.base_ref}@{ctx.base_sha}; "
-                f"head {ctx.head_ref}@{ctx.head_sha}; "
-                f"test merge {merge_sha or 'unavailable'}.\\n"
-                f"Validator step outcome: {validation_outcome}."
-            ),
-        },
-    }
+    summary = (
+        f"{reason}\\n\\nPR #{ctx.number}; "
+        f"base {ctx.base_ref}@{ctx.base_sha}; "
+        f"head {ctx.head_ref}@{ctx.head_sha}; "
+        f"test merge {merge_sha or 'unavailable'}.\\n"
+        f"Validator step outcome: {validation_outcome}."
+    )
     for check_id in (head_check_id, merge_check_id):
         if check_id is not None:
-            api.request(
-                "PATCH",
-                f"/repos/{ctx.repository}/check-runs/{check_id}",
-                payload,
+            complete_check(
+                ctx,
+                api,
+                check_id,
+                "success" if success else "failure",
+                summary,
             )
     if not success:
         raise GuardError(reason)

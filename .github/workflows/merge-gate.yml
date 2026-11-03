@@ -11,7 +11,7 @@ on:
       - ready_for_review
       - edited
 
-# This workflow only reads PR/check state and never checks out or runs PR code.
+# This workflow checks out trusted default-branch code, never PR code.
 permissions: {}
 
 concurrency:
@@ -98,11 +98,11 @@ jobs:
             const isReleasePleaseBotAuthor =
               prAuthorType === "Bot" && releasePleaseAllowedBots.has(prAuthorLogin);
 
-            // Changing the base does not retrigger every PR validation workflow.
-            // Require a fresh synchronize event and check suite for the new base.
-            if (context.payload.action === "edited" && context.payload.changes?.base) {
+            // Edited events do not rerun every required pull_request workflow.
+            // Require a synchronize event so all checks validate the current PR state.
+            if (context.payload.action === "edited") {
               core.setFailed(
-                "PR base was changed. Update the head branch to run all required checks against the new base."
+                "PR metadata changed. Push a new commit to run all required checks against the current base and head before merging."
               );
               return;
             }
@@ -245,22 +245,6 @@ jobs:
               const missing = [];
               const pending = [];
               const failed = [];
-
-              // On edits the title check reruns, but older successful checks
-              // on the same SHA can otherwise satisfy the gate too early.
-              if (context.payload.action === "edited") {
-                const titleCheck = latestByName.get("Validate title");
-                const editTimestamp = Date.parse(pr.updated_at);
-                if (
-                  titleCheck
-                  && (
-                    !Number.isFinite(editTimestamp)
-                    || Date.parse(titleCheck.started_at) < editTimestamp
-                  )
-                ) {
-                  missing.push("Validate title (current PR edit)");
-                }
-              }
 
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {

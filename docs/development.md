@@ -267,8 +267,12 @@ Security setup (repository administrator required):
    trusted gate, without access to the release guard App secrets.
 11. Re-trigger validation of already-open PRs with a fresh head revision as
    necessary. Test missing checks, stale base/head, edited PR base and title,
-   cancelled/failing runs, and successful runs. Only then consider this
-   protection deployed. Delete the obsolete
+   and confirm every `edited` event stays blocked until a `synchronize` event
+   reruns required CI for the current base/head. Verify delayed, missing,
+   changed, conflicting, and concurrently moved test-merge revisions; the
+   guard must fail the head check if it cannot prove the exact current merge.
+   Also test cancelled/failing runs and successful runs. Only then consider
+   this protection deployed. Delete the obsolete
    `REQUIRE_RELEASE_METADATA_GUARD` variable if it exists; workflow-run
    correlation and this opt-in variable are no longer used.
 

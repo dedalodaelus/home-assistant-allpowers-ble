@@ -50,14 +50,28 @@ def live_pr() -> dict[str, Any]:
             "sha": HEAD_SHA,
             "repo": {"full_name": "owner/repo"},
         },
+        "mergeable": True,
         "user": {"type": "User", "login": "contributor"},
         "merge_commit_sha": MERGE_SHA,
     }
 
 
 class FakeGitHub:
-    def __init__(self, pull: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        pull: dict[str, Any] | None = None,
+        pull_responses: list[dict[str, Any]] | None = None,
+        commits: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.pull = live_pr() if pull is None else pull
+        self.pull_responses = pull_responses or [self.pull]
+        self.pull_index = 0
+        self.commits = commits or {
+            MERGE_SHA: {
+                "sha": MERGE_SHA,
+                "parents": [{"sha": BASE_SHA}, {"sha": HEAD_SHA}],
+            }
+        }
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         self.fail_get = False
         self.next_id = 987
@@ -73,7 +87,14 @@ class FakeGitHub:
         if method == "GET":
             if self.fail_get:
                 raise GuardError("unavailable")
-            return self.pull
+            if "/pulls/" in path:
+                pull = self.pull_responses[
+                    min(self.pull_index, len(self.pull_responses) - 1)
+                ]
+                self.pull_index += 1
+                return pull
+            if "/commits/" in path:
+                return self.commits[path.rsplit("/", 1)[-1]]
         if method == "PATCH":
             return {"id": 987}
         raise AssertionError(f"Unexpected API method: {method}")
@@ -82,9 +103,9 @@ class FakeGitHub:
 def test_start_creates_pending_checks_for_head_and_test_merge() -> None:
     api = FakeGitHub()
     assert start_checks(context(), api) == (987, 988, MERGE_SHA)
-    assert [call[0] for call in api.calls] == ["GET", "POST", "POST"]
+    assert [call[0] for call in api.calls] == ["POST", "GET", "GET", "POST"]
     for sha, (_, path, payload) in zip(
-        (HEAD_SHA, MERGE_SHA), api.calls[1:], strict=True
+        (HEAD_SHA, MERGE_SHA), (api.calls[0], api.calls[-1]), strict=True
     ):
         assert path == "/repos/owner/repo/check-runs"
         assert payload is not None
@@ -92,6 +113,88 @@ def test_start_creates_pending_checks_for_head_and_test_merge() -> None:
         assert payload["head_sha"] == sha
         assert payload["status"] == "in_progress"
         assert "conclusion" not in payload
+
+
+def test_start_polls_until_mergeability_and_test_merge_are_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = live_pr()
+    pending["mergeable"] = None
+    pending["merge_commit_sha"] = None
+    api = FakeGitHub(pull_responses=[pending, live_pr()])
+    sleeps: list[int] = []
+    monkeypatch.setattr("scripts.release_guard_check.time.sleep", sleeps.append)
+
+    assert start_checks(context(), api) == (987, 988, MERGE_SHA)
+    assert sleeps == [3]
+    assert sum("/pulls/" in call[1] for call in api.calls) == 2
+
+
+def test_start_fails_closed_when_merge_sha_never_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = live_pr()
+    pending["mergeable"] = None
+    pending["merge_commit_sha"] = None
+    api = FakeGitHub(pull_responses=[pending])
+    monkeypatch.setattr("scripts.release_guard_check.time.sleep", lambda _: None)
+
+    with pytest.raises(GuardError, match="stable test-merge commit"):
+        start_checks(context(), api)
+    assert sum("/pulls/" in call[1] for call in api.calls) == 10
+    assert [call[2]["head_sha"] for call in api.calls if call[0] == "POST"] == [
+        HEAD_SHA
+    ]
+    assert api.calls[-1][2]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize(
+    ("pull", "commit", "message"),
+    [
+        ({"mergeable": False}, None, "merge conflicts"),
+        (
+            {},
+            {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHA}, {"sha": "d" * 40}]},
+            "expected current base/head parents",
+        ),
+    ],
+)
+def test_start_rejects_conflict_or_wrong_test_merge(
+    pull: dict[str, Any],
+    commit: dict[str, Any] | None,
+    message: str,
+) -> None:
+    live = live_pr()
+    live.update(pull)
+    commits = {MERGE_SHA: commit} if commit is not None else None
+    api = FakeGitHub(pull=live, commits=commits)
+
+    with pytest.raises(GuardError, match=message):
+        start_checks(context(), api)
+    assert [call[2]["head_sha"] for call in api.calls if call[0] == "POST"] == [
+        HEAD_SHA
+    ]
+    assert api.calls[-1][2]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize("moved_ref", ["base", "head"])
+def test_start_fails_if_base_or_head_moves_while_mergeability_is_pending(
+    moved_ref: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = live_pr()
+    pending["mergeable"] = None
+    moved = live_pr()
+    moved[moved_ref]["sha"] = "d" * 40
+    api = FakeGitHub(pull_responses=[pending, moved])
+    monkeypatch.setattr("scripts.release_guard_check.time.sleep", lambda _: None)
+
+    with pytest.raises(GuardError, match="changed before starting"):
+        start_checks(context(), api)
+    assert [call[2]["head_sha"] for call in api.calls if call[0] == "POST"] == [
+        HEAD_SHA
+    ]
+    assert api.calls[-1][2]["conclusion"] == "failure"
 
 
 def test_success_completes_both_checks_only_after_live_validation() -> None:
@@ -144,20 +247,13 @@ def test_pr_lookup_failure_reports_failure_on_both_checks() -> None:
     assert all(call[2]["conclusion"] == "failure" for call in api.calls[1:])
 
 
-def test_no_test_merge_sha_still_creates_head_check_only() -> None:
-    pull = live_pr()
-    pull["merge_commit_sha"] = None
-    api = FakeGitHub(pull)
-    assert start_checks(context(), api) == (987, None, None)
-    finish_checks(context(), api, 987, None, None, "success")
-    assert [call[0] for call in api.calls] == ["GET", "POST", "GET", "PATCH"]
-
-
-def test_merge_sha_appearing_later_fails_closed() -> None:
+def test_merge_sha_changing_during_validation_fails_closed() -> None:
     pull = live_pr()
     api = FakeGitHub(pull)
+    api.pull_responses = [pull, {**pull, "merge_commit_sha": "d" * 40}]
+    start_checks(context(), api)
     with pytest.raises(GuardError, match="changed during validation"):
-        finish_checks(context(), api, 987, None, None, "success")
+        finish_checks(context(), api, 987, 988, MERGE_SHA, "success")
     assert api.calls[-1][2]["conclusion"] == "failure"
 
 
@@ -168,7 +264,7 @@ def test_fork_branch_named_devel_cannot_impersonate_promotion() -> None:
     api = FakeGitHub(pull)
     with pytest.raises(GuardError, match="changed before starting"):
         start_checks(context(), api)
-    assert not any(call[0] == "POST" for call in api.calls)
+    assert api.calls[-1][2]["conclusion"] == "failure"
 
 
 def test_fork_branch_named_main_cannot_impersonate_release_sync() -> None:
@@ -274,8 +370,8 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "ref: main" in gate
     assert "python3 -m scripts.promotion_metadata" in gate
     assert "- edited" in gate
-    assert "context.payload.changes?.base" in gate
-    assert "Validate title (current PR edit)" in gate
+    assert 'context.payload.action === "edited"' in gate
+    assert "PR metadata changed. Push a new commit" in gate
     assert "latestPull.data.title !== pr.title" in gate
     assert '"allpowers-release-please[bot]"' in gate
     assert "REQUIRE_RELEASE_METADATA_GUARD" not in gate
@@ -284,3 +380,18 @@ def test_trusted_workflow_and_gate_contract() -> None:
     assert "RELEASE_PLEASE_APP_ID" in release
     assert "RELEASE_PLEASE_APP_PRIVATE_KEY" in release
     assert "token: ${{ steps.app-token.outputs.token }}" in release
+
+
+def test_merge_gate_blocks_retarget_and_later_title_edit_until_synchronize() -> None:
+    gate = (ROOT / ".github/workflows/merge-gate.yml").read_text(encoding="utf-8")
+    edited_guard_start = gate.index('if (context.payload.action === "edited")')
+    edited_guard_end = gate.index("// Policy: PRs to main", edited_guard_start)
+    edited_guard = gate[edited_guard_start:edited_guard_end]
+
+    assert "context.payload.changes" not in edited_guard
+    assert "core.setFailed(" in edited_guard
+    assert "return;" in edited_guard
+    assert "PR metadata changed. Push a new commit" in edited_guard
+    assert gate.index("PR metadata changed. Push a new commit") < gate.index(
+        "const requiredChecks ="
+    )
