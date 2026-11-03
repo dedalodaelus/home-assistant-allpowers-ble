@@ -246,6 +246,11 @@ Security setup (repository administrator required):
    `REQUIRE_RELEASE_METADATA_GUARD` variable if it exists; workflow-run
    correlation and this opt-in variable are no longer used.
 
+The trusted guard also checks the actual head repository for privileged
+`devel`→`main`, `main`→`devel`, and Release Please PRs. Release Please
+PRs must be authored by one of the permitted bot accounts. A fork with a
+similarly named branch must not gain release metadata privileges.
+
 The dedicated check is a real check-run with an in-progress state, run URL and
 exact revision identity; it only reports success after trusted validation.
 A cancelled run can leave a pending check, which blocks merging. PR-authored

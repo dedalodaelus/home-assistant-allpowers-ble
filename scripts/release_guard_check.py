@@ -155,6 +155,31 @@ def start_checks(
     return head_check_id, merge_check_id, merge_sha
 
 
+def authorized_release_source(ctx: GuardContext, pull: Mapping[str, Any]) -> bool:
+    """Reject fork branch-name impersonation and unauthorized release writers."""
+    is_promotion = ctx.base_ref == "main" and ctx.head_ref == "devel"
+    is_sync = ctx.base_ref == "devel" and ctx.head_ref == "main"
+    is_release = (
+        ctx.base_ref == "main" and ctx.head_ref.startswith("release-please--")
+    )
+    if not (is_promotion or is_sync or is_release):
+        return True
+    try:
+        if pull["head"]["repo"]["full_name"] != ctx.repository:
+            return False
+        if pull["base"]["repo"]["full_name"] != ctx.repository:
+            return False
+        if is_release:
+            author = pull["user"]
+            return (
+                author["type"] == "Bot"
+                and author["login"] in {"github-actions[bot]", "release-please[bot]"}
+            )
+        return True
+    except (KeyError, TypeError):
+        return False
+
+
 def current_revision_matches(ctx: GuardContext, pull: Mapping[str, Any]) -> bool:
     """Reject stale base/head SHAs, retargeted PRs, or closed PRs."""
     try:
@@ -165,6 +190,7 @@ def current_revision_matches(ctx: GuardContext, pull: Mapping[str, Any]) -> bool
             and pull["base"]["sha"] == ctx.base_sha
             and pull["head"]["ref"] == ctx.head_ref
             and pull["head"]["sha"] == ctx.head_sha
+            and authorized_release_source(ctx, pull)
         )
     except KeyError, TypeError:
         return False
