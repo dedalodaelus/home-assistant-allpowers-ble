@@ -142,6 +142,8 @@ class FakeGitHub:
             "html_url": "https://example.test/pull/new",
             "body": body,
             "draft": True,
+            "base": {"sha": self.base_sha},
+            "head": {"sha": self.head_sha},
         }
         self.created.append(pull)
         self.open = [pull]
@@ -358,6 +360,42 @@ def test_branch_movement_during_preflight_prevents_creation() -> None:
     with pytest.raises(PromotionError, match="moved during preflight"):
         prepare_promotion(api, TEMPLATE)
     assert api.created == []
+
+
+@pytest.mark.parametrize("moving_ref", ["base", "head"])
+def test_branch_movement_during_creation_rejects_outdated_draft(
+    moving_ref: str,
+) -> None:
+    class MovingDuringCreation(FakeGitHub):
+        def create_draft(self, body: str) -> dict[str, Any]:
+            setattr(self, f"{moving_ref}_sha", "new-revision")
+            return super().create_draft(body)
+
+    api = MovingDuringCreation()
+
+    with pytest.raises(PromotionError, match="summary is outdated") as caught:
+        prepare_promotion(api, TEMPLATE)
+
+    assert len(api.created) == 1
+    assert api.created[0]["draft"] is True
+    assert api.created[0]["html_url"] in str(caught.value)
+    assert "close the draft and rerun" in str(caught.value)
+
+
+@pytest.mark.parametrize("missing_ref", ["base", "head"])
+def test_missing_created_pr_revision_is_not_accepted(missing_ref: str) -> None:
+    class IncompleteCreation(FakeGitHub):
+        def create_draft(self, body: str) -> dict[str, Any]:
+            pull = super().create_draft(body)
+            del pull[missing_ref]
+            return pull
+
+    api = IncompleteCreation()
+
+    with pytest.raises(PromotionError, match="unverified"):
+        prepare_promotion(api, TEMPLATE)
+    assert len(api.created) == 1
+    assert api.created[0]["draft"] is True
 
 
 @pytest.mark.parametrize(

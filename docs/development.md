@@ -182,7 +182,12 @@ event starts the normal validation workflows; the workflow does not use a broad
 personal access token or bypass required checks.
 
 Repeated runs return an existing open promotion PR unchanged. An identical branch
-comparison creates no PR. A diverged comparison fails with instructions to merge
+comparison creates no PR. After creating a draft, the workflow checks its actual
+base/head SHAs against the preflight revisions. If either differs or is missing,
+the run fails with the draft URL and warns that its summary is outdated or
+unverified. Leave it as a draft, close it, and rerun promotion to regenerate the
+summary; existing drafts and manual descriptions are never overwritten.
+A diverged comparison fails with instructions to merge
 `main` into `devel` through a reviewed synchronization PR using a merge commit,
 not a squash or rebase. This preserves the ancestry required by the promotion
 workflow; neither branch is rewritten automatically. The workflow blocks changes

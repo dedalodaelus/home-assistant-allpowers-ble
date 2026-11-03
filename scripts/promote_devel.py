@@ -405,6 +405,20 @@ def prepare_promotion(api: GitHubAPI, template: str) -> str | None:
         if existing:
             return existing[0]["html_url"]
         raise
+    actual_base = pull.get("base")
+    actual_head = pull.get("head")
+    if (
+        not isinstance(actual_base, dict)
+        or not isinstance(actual_head, dict)
+        or actual_base.get("sha") != base_sha
+        or actual_head.get("sha") != head_sha
+    ):
+        raise PromotionError(
+            f"Draft promotion {pull['html_url']} was created, but its base/head "
+            "does not match the preflight revisions. Its summary is outdated or "
+            "unverified. Do not mark it ready; close the draft and rerun promotion "
+            "to regenerate the summary. Existing drafts are not rewritten automatically."
+        )
     return pull["html_url"]
 
 
