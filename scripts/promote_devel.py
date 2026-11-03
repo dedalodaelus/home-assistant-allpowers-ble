@@ -364,9 +364,11 @@ def prepare_promotion(api: GitHubAPI, template: str) -> str | None:
         )
     )
     if not changed_paths:
-        raise PromotionError(
-            "Branches contain commits but no tree changes; refusing incomplete comparison."
-        )
+        if api.refs() != (base_sha, head_sha):
+            raise PromotionError(
+                "main or devel moved during preflight; rerun to regenerate the promotion summary."
+            )
+        return None
 
     protected_history = {CHANGELOG_PATH, RELEASE_MANIFEST_PATH}
     affected_history = sorted(protected_history.intersection(changed_paths))

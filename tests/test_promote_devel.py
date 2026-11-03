@@ -184,6 +184,15 @@ def test_identical_branches_do_not_create_empty_pr() -> None:
     assert api.created == []
 
 
+def test_ahead_branches_with_identical_trees_are_a_successful_noop() -> None:
+    api = FakeGitHub()
+    api.head_tree = dict(api.base_tree)
+
+    assert prepare_promotion(api, TEMPLATE) is None
+    assert api.comparison_calls == [1]
+    assert api.created == []
+
+
 def test_diverged_branches_fail_before_pr_creation() -> None:
     api = FakeGitHub()
     api.status = "diverged"
