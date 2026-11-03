@@ -1675,20 +1675,28 @@ async def async_probe_device(
     finally:
         if client.is_connected:
             try:
-                stop_notify = getattr(client, "stop_notify", None)
-                if (
-                    notify_started
-                    and notify_characteristic is not None
-                    and callable(stop_notify)
-                ):
+                if notify_started and notify_characteristic is not None:
+                    try:
+                        stop_notify = getattr(client, "stop_notify", None)
+                        if callable(stop_notify):
+                            async with asyncio.timeout(WRITE_TIMEOUT):
+                                await stop_notify(notify_characteristic)
+                    except Exception:
+                        _LOGGER.debug(
+                            "Probe notification cleanup failed for %s",
+                            normalized_address,
+                            exc_info=True,
+                        )
+            finally:
+                try:
                     async with asyncio.timeout(WRITE_TIMEOUT):
-                        await stop_notify(notify_characteristic)
-                async with asyncio.timeout(WRITE_TIMEOUT):
-                    await client.disconnect()
-            except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
-                _LOGGER.debug(
-                    "Probe disconnect failed for %s", normalized_address, exc_info=True
-                )
+                        await client.disconnect()
+                except Exception:
+                    _LOGGER.debug(
+                        "Probe disconnect failed for %s",
+                        normalized_address,
+                        exc_info=True,
+                    )
 
 
 def _required_characteristics(
