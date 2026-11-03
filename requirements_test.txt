@@ -1,7 +1,7 @@
 homeassistant==2026.10.4
 # Required by homeassistant.components.usb import path pulled by bluetooth.
 aiousbwatcher>=1.1.2
-serialx>=1.14.0
+serialx>=1.15.1
 aioesphomeapi>=46.23.0
 pytest-homeassistant-custom-component==0.13.375
 pytest>=9.0.3,<10
