@@ -6,13 +6,15 @@
 - Topics: `home-assistant`, `hacs`, `custom-component`, `bluetooth`, `ble`,
   `esphome-bluetooth-proxy`, and `allpowers`.
 - Vulnerability reporting enabled.
-- Branch protection/ruleset requires exactly one status check: `Merge gate`.
+- Branch protection/rulesets require both `Gate all required checks` and
+  `Trusted release metadata` (expected source: dedicated release guard App).
 - The `main-requires-up-to-date` ruleset requires PR heads targeting `main` to
   include the latest `main` revision; it is scoped to `main` and does not affect
   `main` to `devel` synchronization PRs.
 - `Merge gate` transitively enforces CI, HACS, Hassfest, title, dependency review,
   and CodeQL checks.
 - Workflow permissions allow Release Please to create pull requests and releases.
+- Dedicated release guard App credentials stay in a main-restricted environment.
 - All third-party GitHub Actions are pinned to full immutable commit SHAs with
   version comments and updated via Dependabot pull requests.
 - Workflows default to no token permissions; each job grants only the read or
@@ -50,12 +52,19 @@ write permissions. The short-lived installation token is limited to this
 repository and those permissions. `GITHUB_TOKEN` is not used to create the PR
 because its PR event would not start the downstream validation workflows.
 
-Release metadata enforcement is staged because its trusted
-`pull_request_target` workflow is read from default branch `main`. After that
-workflow reaches `main` and a successful guard run has been observed, set the
-repository variable `REQUIRE_RELEASE_METADATA_GUARD=true` to make the Merge gate
-require its result. Do not enable the variable before the workflow exists on
-`main`.
+Trusted release metadata requires a separately installed GitHub App with
+Checks: write and Pull requests: read, environment `release-metadata-guard`
+restricted to `main`, and environment-only secrets `RELEASE_GUARD_APP_ID`
+and `RELEASE_GUARD_APP_PRIVATE_KEY`. Do **not** put this App's credentials in
+repository-wide secrets or reuse the promotion App. Explicitly permit the
+trusted `pull_request_target` workflow in Actions event policies before GitHub's
+December 2, 2026 public-repository enforcement. After the validator lands on
+default `main`, verify a real successful and failed App-authored check, then
+configure it as a **second, independent required status** in both branch
+rulesets with the expected App source. Never mark the issue complete before
+that live integration is verified. Full rollout/negative tests:
+`docs/development.md#trusted-release-metadata-guard-and-staged-rollout`.
+The old `REQUIRE_RELEASE_METADATA_GUARD` switch is not used.
 
 ## Code and metadata
 

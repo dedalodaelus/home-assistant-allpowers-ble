@@ -1,6 +1,6 @@
 name: Release metadata guard
 
-run-name: Release metadata guard for PR #${{ github.event.pull_request.number }}
+run-name: "Release metadata guard for PR #${{ github.event.pull_request.number }}"
 
 on:
   pull_request_target:
@@ -49,7 +49,7 @@ jobs:
 
       - name: Start independently required check on PR head
         id: start
-        env: &guard-context
+        env:
           RELEASE_GUARD_TOKEN: ${{ steps.app-token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
