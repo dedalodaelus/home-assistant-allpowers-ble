@@ -1,5 +1,7 @@
 name: Release metadata guard
 
+run-name: "Release metadata guard for PR #${{ github.event.pull_request.number }}"
+
 on:
   pull_request_target:
     types:
@@ -12,6 +14,7 @@ on:
       - main
       - devel
 
+# Loaded only from protected default main, never from the PR's own workflow.
 permissions: {}
 
 concurrency:
@@ -20,8 +23,11 @@ concurrency:
 
 jobs:
   validate:
-    name: Release metadata guard
+    name: Publish trusted release check
     runs-on: ubuntu-latest
+    # The release guard App credentials live ONLY in this main-restricted
+    # environment. Repository-wide secrets can be read by same-repo PR code.
+    environment: release-metadata-guard
     permissions:
       contents: read
     steps:
@@ -32,21 +38,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Create dedicated release guard App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_GUARD_APP_ID }}
+          private-key: ${{ secrets.RELEASE_GUARD_APP_PRIVATE_KEY }}
+          permission-checks: write
+          permission-pull-requests: read
+
+      - name: Start independently required check on PR head
+        id: start
+        env:
+          RELEASE_GUARD_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -m scripts.release_guard_check start >> "$GITHUB_OUTPUT"
+
       - name: Fetch immutable PR revisions
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_MERGE_SHA: ${{ steps.start.outputs.merge_sha }}
         run: |
           git fetch --no-tags origin \
-            "refs/heads/${PR_BASE_REF}:refs/remotes/origin/metadata-validation-base"
+            "refs/heads/$PR_BASE_REF:refs/remotes/origin/metadata-validation-base"
           git fetch --no-tags origin \
-            "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/metadata-validation-head"
+            "refs/pull/$PR_NUMBER/head:refs/remotes/origin/metadata-validation-head"
           test "$(git rev-parse refs/remotes/origin/metadata-validation-base)" = "$PR_BASE_SHA"
           test "$(git rev-parse refs/remotes/origin/metadata-validation-head)" = "$PR_HEAD_SHA"
+          if [ -n "$PR_MERGE_SHA" ]; then
+            git fetch --no-tags origin \
+              "refs/pull/$PR_NUMBER/merge:refs/remotes/origin/metadata-validation-merge"
+            test "$(git rev-parse refs/remotes/origin/metadata-validation-merge)" = "$PR_MERGE_SHA"
+          fi
 
       - name: Validate release metadata without executing PR code
+        id: metadata
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -58,3 +92,19 @@ jobs:
           --head-sha "$PR_HEAD_SHA"
           --base-ref "$PR_BASE_REF"
           --head-ref "$PR_HEAD_REF"
+
+      - name: Complete actual validation check for live PR revisions
+        if: ${{ always() && steps.start.outcome == 'success' }}
+        env:
+          RELEASE_GUARD_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_GUARD_HEAD_CHECK_ID: ${{ steps.start.outputs.head_check_id }}
+          RELEASE_GUARD_MERGE_CHECK_ID: ${{ steps.start.outputs.merge_check_id }}
+          RELEASE_GUARD_MERGE_SHA: ${{ steps.start.outputs.merge_sha }}
+          VALIDATION_OUTCOME: ${{ steps.metadata.outcome }}
+        run: python3 -m scripts.release_guard_check finish

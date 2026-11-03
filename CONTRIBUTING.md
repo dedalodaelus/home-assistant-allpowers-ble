@@ -71,8 +71,9 @@ The repository uses an explicit promotion model:
 - Direct commits into `devel` and `main` are not permitted.
 - Urgent production fixes may target `main` only from a `hotfix/*` branch cut
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
-- Rulesets require a single status check: `Merge gate`. That workflow enforces
-  downstream validation checks transitively.
+- Rulesets must require both `Gate all required checks` (aggregate CI) and
+  `Trusted release metadata` (independent, trusted GitHub App check).
+  The release guard is not controlled by the PR being validated.
 - Pull requests into `main` must be current with the latest `main` commit; this
   freshness rule is scoped to `main` and does not constrain `main` to `devel`
   synchronization PRs.

@@ -197,17 +197,70 @@ only after required checks pass. Promotion does not publish a release. Release
 Please remains responsible for its separate release PR, version and changelog
 updates, tags, GitHub release, and HACS assets.
 
-### Trusted release metadata validation rollout
+### Trusted release metadata guard and staged rollout
 
-`.github/workflows/release-metadata.yml` uses `pull_request_target` only to read
-the PR's immutable base/head revisions. It checks out the trusted default-branch
-validator and never checks out or executes PR code. Because the workflow is read
-from the default `main` branch, its first deployment is staged: after it reaches
-`main`, observe a successful guard run, then set the repository Actions variable
-`REQUIRE_RELEASE_METADATA_GUARD=true`. The Merge gate will then require the
-`Release metadata guard` workflow result for the exact PR revisions. Keep the
-variable unset until that workflow is present on `main`; doing so earlier makes
-the required gate correctly fail closed for a missing check.
+A PR must not be able to disable its own release-metadata validation by editing
+`.github/workflows/merge-gate.yml`. Consequently, the protected branch rulesets
+must independently require **two** statuses: `Gate all required checks` (ordinary
+CI aggregation) and `Trusted release metadata` (a check published by a
+**dedicated GitHub App**, not by the PR's workflow). The latter is generated only
+by `.github/workflows/release-metadata.yml` using trusted code on default
+`main`; it validates immutable base/head revisions, publishes checks on both the head
+and the test-merge commit when available (GitHub can require the latter), and
+re-reads the live PR and merge SHA before publishing its actual conclusion. Missing, stale, unsuccessful, or
+unavailable validation must not be treated as a pass.
+
+Security setup (repository administrator required):
+
+1. Register a dedicated GitHub App installed **only** on this repository with
+   **Checks: read/write** and **Pull requests: read** permissions. Do not reuse
+   the promotion App or grant it permissions to publish the trusted check.
+2. Create the GitHub Actions environment `release-metadata-guard`; restrict
+   deployments to the protected `main` branch (no PR refs, no tags). Put
+   `RELEASE_GUARD_APP_ID` and `RELEASE_GUARD_APP_PRIVATE_KEY` in this
+   environment's **secrets**, *not* repository-wide secrets. Same-repository
+   PR workflows may access repository secrets; an environment restricted to
+   `main` prevents untrusted PR workflows from using this App's credentials.
+3. Explicitly allow `pull_request_target` **for only**
+   `.github/workflows/release-metadata.yml` under the applicable Actions
+   event policy. GitHub announced public-repository enforcement starting
+   **December 2, 2026** (brownouts November 9 and 16). See
+   https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/
+4. Merge the reviewed guard implementation to protected default `main`
+   without weakening the existing checks. The workflow does not exist as a
+   trusted trigger until its first deployment on `main`.
+5. Open a controlled test PR and observe an actual `Trusted release metadata`
+   check authored by the dedicated App on its head SHA. Test success and
+   forbidden release-version/history modifications; confirm a failure does not
+   become a successful check.
+6. Add **`Trusted release metadata`** as a separate required status check to
+   the active rulesets covering `main` and `devel` (currently
+   `main-requires-up-to-date` and `check-for-pr`). Select **the dedicated
+   App** as its expected source, not "any source" or GitHub Actions; keep
+   `Gate all required checks` required and `main` strict/up-to-date.
+   Both checks must be required before relying on release metadata safety.
+7. Re-trigger validation of already-open PRs with a fresh head revision as
+   necessary. Test missing checks, stale base/head, edited PR base and title,
+   cancelled/failing runs, and successful runs. Only then consider this
+   protection deployed. Delete the obsolete
+   `REQUIRE_RELEASE_METADATA_GUARD` variable if it exists; workflow-run
+   correlation and this opt-in variable are no longer used.
+
+The trusted guard also checks the actual head repository for privileged
+`devel`→`main`, `main`→`devel`, and Release Please PRs. Release Please
+PRs must be authored by one of the permitted bot accounts. A fork with a
+similarly named branch must not gain release metadata privileges.
+
+The dedicated check is a real check-run with an in-progress state, run URL and
+exact revision identity; it only reports success after trusted validation.
+A cancelled run can leave a pending check, which blocks merging. PR-authored
+workflow code is never executed with the dedicated App credentials. Do not
+disable the required App check during incident recovery or release promotion.
+
+GitHub's reference for trusted events and workflow-ref isolation:
+https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
+GitHub's check-runs API:
+https://docs.github.com/en/rest/checks/runs
 
 ## Manual Home Assistant development
 
