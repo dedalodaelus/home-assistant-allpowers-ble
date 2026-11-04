@@ -91,9 +91,7 @@ class HAClient:
         # Do not inherit http_proxy/https_proxy/ALL_PROXY from the runner's
         # environment. Those variables can route a loopback HTTP request
         # (including its Authorization header) to an unexpected proxy.
-        opener = request.build_opener(
-            request.ProxyHandler({}), _NoRedirectHandler()
-        )
+        opener = request.build_opener(request.ProxyHandler({}), _NoRedirectHandler())
         try:
             with opener.open(req, timeout=API_TIMEOUT) as response:
                 if response.status != 200:
@@ -253,9 +251,7 @@ class HAClient:
         return {
             "total_scanners": len(records),
             "connectable_scanners": sum(bool(row["connectable"]) for row in records),
-            "remote_scanners": sum(
-                row["scanner_type"] == "remote" for row in records
-            ),
+            "remote_scanners": sum(row["scanner_type"] == "remote" for row in records),
             "connectable_remote_scanners": sum(
                 row["scanner_type"] == "remote" and row["connectable"]
                 for row in records

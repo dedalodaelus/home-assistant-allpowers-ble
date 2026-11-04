@@ -656,9 +656,7 @@ def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
     def make_handler(which):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                traffic[which].append(
-                    (self.path, self.headers.get("Authorization"))
-                )
+                traffic[which].append((self.path, self.headers.get("Authorization")))
                 data = json.dumps({"version": "2026.10.4"}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
@@ -719,7 +717,9 @@ def test_rest_disables_proxy_handler_even_under_https(monkeypatch):
         isinstance(handler, api.request.ProxyHandler) and handler.proxies == {}
         for handler in observed_handlers
     )
-    assert any(isinstance(handler, api._NoRedirectHandler) for handler in observed_handlers)
+    assert any(
+        isinstance(handler, api._NoRedirectHandler) for handler in observed_handlers
+    )
 
 
 @pytest.mark.parametrize(
@@ -743,7 +743,9 @@ def test_doctor_checks_connection_and_telemetry_independently(
     }
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
-    result = cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+    result = cli.main(
+        ["doctor", "--ha-url", "https://example.test", "--non-interactive"]
+    )
     assert result == (0 if expected == "ready" else 2)
     output = capsys.readouterr().out
     assert f"overall={expected}" in output
@@ -761,7 +763,10 @@ def test_disabled_telemetry_sensor_is_unknown_not_hardware_failure(
     fake = FakeHA((entities, devices, entries))
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
-    assert cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"]) == 2
+    assert (
+        cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+        == 2
+    )
     output = capsys.readouterr().out
     assert "BLE=ready" in output
     assert "telemetry=unknown" in output
@@ -777,8 +782,12 @@ def test_degraded_run_is_still_recorded_with_preflight_result(
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
     args = make_args(
-        "run", "--ha-url", "https://example.test", "--non-interactive",
-        "--output-root", str(tmp_path),
+        "run",
+        "--ha-url",
+        "https://example.test",
+        "--non-interactive",
+        "--output-root",
+        str(tmp_path),
     )
     assert cli.execute(args) == 0
     path = next(tmp_path.iterdir()) / "session.json"
@@ -797,20 +806,26 @@ def test_bluetooth_scanner_subscription_collects_only_aggregate_counts(monkeypat
         {"type": "auth_ok"},
         {"id": 1, "type": "result", "success": True, "result": None},
         {
-            "id": 1, "type": "event", "event": {
+            "id": 1,
+            "type": "event",
+            "event": {
                 "add": [
                     {
-                        "source": "AA:BB:CC:DD:EE:FF", "name": "Home secret adapter",
-                        "adapter": "hci0", "connectable": False,
+                        "source": "AA:BB:CC:DD:EE:FF",
+                        "name": "Home secret adapter",
+                        "adapter": "hci0",
+                        "connectable": False,
                         "scanner_type": "uart",
                     },
                     {
-                        "source": "AB:12:23:34:45:56", "name": "Private ESPHome name",
-                        "adapter": "secret-proxy", "connectable": True,
+                        "source": "AB:12:23:34:45:56",
+                        "name": "Private ESPHome name",
+                        "adapter": "secret-proxy",
+                        "connectable": True,
                         "scanner_type": "remote",
                     },
                 ]
-            }
+            },
         },
     ]
 
@@ -846,7 +861,9 @@ def test_bluetooth_scanner_subscription_collects_only_aggregate_counts(monkeypat
         ("websockets.sync.client", sync_client),
     ):
         monkeypatch.setitem(sys.modules, name, module)
-    result = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN").scanner_candidates()
+    result = api.HAClient(
+        "https://example.test", "DUMMY_TEST_TOKEN"
+    ).scanner_candidates()
     assert result == {
         "total_scanners": 2,
         "connectable_scanners": 1,
@@ -876,7 +893,9 @@ def test_bluetooth_scanner_denied_or_no_data_remains_unknown(monkeypatch):
     assert client.scanner_candidates() is None
 
 
-def test_scanner_inventory_environment_is_privacy_safe(monkeypatch, allpowers_registry, tmp_path):
+def test_scanner_inventory_environment_is_privacy_safe(
+    monkeypatch, allpowers_registry, tmp_path
+):
     fake = FakeHA(allpowers_registry)
     fake.scanners = {
         "total_scanners": 2,
@@ -886,10 +905,19 @@ def test_scanner_inventory_environment_is_privacy_safe(monkeypatch, allpowers_re
     }
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
-    assert cli.execute(make_args(
-        "run", "--ha-url", "https://example.test", "--non-interactive",
-        "--output-root", str(tmp_path),
-    )) == 0
+    assert (
+        cli.execute(
+            make_args(
+                "run",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--output-root",
+                str(tmp_path),
+            )
+        )
+        == 0
+    )
     env = json.loads((next(tmp_path.iterdir()) / "environment.json").read_text())
     scanners = env["home_assistant"]["bluetooth_scanner_candidates"]
     assert scanners["value"] == fake.scanners
@@ -900,11 +928,13 @@ def test_scanner_inventory_environment_is_privacy_safe(monkeypatch, allpowers_re
 
 def test_scanner_subscription_no_event_is_bounded_and_unknown(monkeypatch):
     """No scanners can produce a subscription ack without an initial event."""
-    replies = iter([
-        {"type": "auth_required"},
-        {"type": "auth_ok"},
-        {"id": 1, "type": "result", "success": True, "result": None},
-    ])
+    replies = iter(
+        [
+            {"type": "auth_required"},
+            {"type": "auth_ok"},
+            {"id": 1, "type": "result", "success": True, "result": None},
+        ]
+    )
 
     class FakeWS:
         def __enter__(self):
