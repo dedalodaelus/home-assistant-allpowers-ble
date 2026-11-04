@@ -2848,3 +2848,63 @@ async def test_stop_during_unregistered_connect_then_start_and_stop_again(
     assert client._client is None
     assert client._active_session_generation is None
     assert client._connection_task is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stops_wait_for_registered_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second stop cannot orphan a client during normal connected teardown."""
+    client = make_client()
+    connection_ready = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+    second_stop_entered = asyncio.Event()
+
+    class PausedClient(FakeClient):
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            await super().write_gatt_char(characteristic, data, response=response)
+            connection_ready.set()
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            disconnect_entered.set()
+            await allow_disconnect.wait()
+            self.is_connected = False
+
+    fake = PausedClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    async def stop_again() -> None:
+        second_stop_entered.set()
+        await client.async_stop()
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client.async_start()
+    await connection_ready.wait()
+    first_stop = asyncio.create_task(client.async_stop())
+    await disconnect_entered.wait()
+    second_stop = asyncio.create_task(stop_again())
+    await second_stop_entered.wait()
+    try:
+        assert client._connection_task is not None
+        assert client._connection_task.cancelling() >= 2
+        assert fake.disconnect_calls == 1
+    finally:
+        allow_disconnect.set()
+
+    await asyncio.gather(first_stop, second_stop)
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert not client.snapshot().connected
+    assert client._connection_task is None
