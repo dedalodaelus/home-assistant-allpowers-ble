@@ -51,7 +51,7 @@ def local_commit() -> dict[str, Any]:
             timeout=2,
             check=True,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return unknown("checkout Git commit unavailable")
     sha = result.stdout.strip()
     if not re.fullmatch(r"[a-f0-9]{40}", sha):
@@ -66,7 +66,7 @@ def local_manifest_version() -> str | None:
                 encoding="utf-8"
             )
         ).get("version")
-    except (OSError, ValueError, AttributeError):
+    except OSError, ValueError, AttributeError:
         return None
     return _safe_label(value)
 
@@ -105,7 +105,7 @@ def _linux_memory_bytes() -> int | None:
         pages = os.sysconf("SC_PHYS_PAGES")
         if isinstance(page_size, int) and isinstance(pages, int):
             return page_size * pages
-    except (ValueError, OSError, AttributeError):
+    except ValueError, OSError, AttributeError:
         pass
     return None
 

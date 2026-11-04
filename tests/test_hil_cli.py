@@ -105,8 +105,7 @@ def make_args(*argv):
 
 def test_url_validation_rejects_plaintext_remote_and_embedded_secrets():
     assert (
-        api.normalize_url("https://example.test:8123/")
-        == "https://example.test:8123"
+        api.normalize_url("https://example.test:8123/") == "https://example.test:8123"
     )
     assert api.normalize_url("http://127.0.0.1:8123") == "http://127.0.0.1:8123"
     for value in (
@@ -120,9 +119,10 @@ def test_url_validation_rejects_plaintext_remote_and_embedded_secrets():
     ):
         with pytest.raises(api.HAAPIError):
             api.normalize_url(value)
-    assert api.normalize_url(
-        "http://10.0.0.4:8123", allow_insecure_http=True
-    ) == "http://10.0.0.4:8123"
+    assert (
+        api.normalize_url("http://10.0.0.4:8123", allow_insecure_http=True)
+        == "http://10.0.0.4:8123"
+    )
     assert api.normalize_url("HTTPS://example.test:8123/") == (
         "https://example.test:8123"
     )
@@ -286,8 +286,12 @@ def test_doctor_performs_read_only_checks_and_writes_nothing(
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "SECRET_BEARER_TOKEN")
     args = make_args(
-        "doctor", "--ha-url", "https://example.test", "--non-interactive",
-        "--output-root", str(tmp_path / "no-results"),
+        "doctor",
+        "--ha-url",
+        "https://example.test",
+        "--non-interactive",
+        "--output-root",
+        str(tmp_path / "no-results"),
     )
     assert cli.execute(args) == 0
     captured = capsys.readouterr().out
@@ -305,9 +309,16 @@ def test_run_writes_private_allowlisted_json_without_identifiers(
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "MY_PRIVATE_TOKEN")
     args = make_args(
-        "run", "--ha-url", "https://my-secret-host.local:8123",
-        "--device", "1", "--route", "active_proxy", "--non-interactive",
-        "--output-root", str(tmp_path / "results"),
+        "run",
+        "--ha-url",
+        "https://my-secret-host.local:8123",
+        "--device",
+        "1",
+        "--route",
+        "active_proxy",
+        "--non-interactive",
+        "--output-root",
+        str(tmp_path / "results"),
     )
     assert cli.execute(args) == 0
     dirs = list((tmp_path / "results").iterdir())
@@ -317,9 +328,15 @@ def test_run_writes_private_allowlisted_json_without_identifiers(
     data = json.loads((dirs[0] / "session.json").read_text())
     content = " ".join(p.read_text() for p in dirs[0].iterdir())
     for secret in (
-        "MY_PRIVATE_TOKEN", "my-secret-host", "AA:BB:CC:DD:EE:FF",
-        "secret-entry-1", "secret-device-id", "sensor.my_name",
-        "39.4699", "10.0.0.100", "My very private",
+        "MY_PRIVATE_TOKEN",
+        "my-secret-host",
+        "AA:BB:CC:DD:EE:FF",
+        "secret-entry-1",
+        "secret-device-id",
+        "sensor.my_name",
+        "39.4699",
+        "10.0.0.100",
+        "My very private",
     ):
         assert secret not in content
     assert data["route"]["requested"] == "active_proxy"
@@ -346,8 +363,7 @@ def test_run_no_device_and_noninteractive_missing_token_fail_safely(
         == 2
     )
     assert (
-        cli.main(["run", "--ha-url", "https://example.test", "--non-interactive"])
-        == 2
+        cli.main(["run", "--ha-url", "https://example.test", "--non-interactive"]) == 2
     )
     assert "SECRET_VALUE" not in capsys.readouterr().err
     monkeypatch.delenv("HA_HIL_TOKEN")
@@ -405,7 +421,8 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
             sent.append(json.loads(message))
 
     replies = [
-        {"type": "auth_required"}, {"type": "auth_ok"},
+        {"type": "auth_required"},
+        {"type": "auth_ok"},
         {"id": 1, "type": "result", "success": True, "result": [1, 2]},
     ]
     # Tests must not depend on optional HIL requirements being installed in CI.
@@ -430,7 +447,8 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
     assert sent[1]["type"] == "config/device_registry/list"
 
     denied = [
-        {"type": "auth_required"}, {"type": "auth_invalid", "message": "PRIVATE_TOKEN"}
+        {"type": "auth_required"},
+        {"type": "auth_invalid", "message": "PRIVATE_TOKEN"},
     ]
     client_module.connect = lambda url, **kwargs: FakeWS(denied)
     with pytest.raises(api.HAAPIError, match="authentication failed") as exc:
@@ -590,8 +608,11 @@ def test_json_storage_excludes_internal_ids_when_public_types_are_used(
     device = discovery.find_devices(*allpowers_registry)[0]
     env = environment.build_environment({"version": "2026.10.4"}, {"version": "0.3.0"})
     session = environment.build_session(
-        run_id="0123456789abcdef", requested_route="auto", device=device,
-        environment=env, sample={},
+        run_id="0123456789abcdef",
+        requested_route="auto",
+        device=device,
+        environment=env,
+        sample={},
     )
     folder = storage.write_run(tmp_path, "safe", env, session)
     saved = (folder / "session.json").read_text()

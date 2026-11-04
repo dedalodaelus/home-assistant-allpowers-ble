@@ -24,7 +24,8 @@ def write_run(
         run_dir = root / run_name
         run_dir.mkdir(mode=0o700, exist_ok=False)
         for name, value in (
-            ("environment.json", environment), ("session.json", session)
+            ("environment.json", environment),
+            ("session.json", session),
         ):
             file_path = run_dir / name
             data = (
