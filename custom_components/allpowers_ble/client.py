@@ -926,12 +926,19 @@ class AllpowersBLEClient:
                 await self._write_frame_unlocked(encode_status_request())
                 self._last_status_request_monotonic = self._loop_time()
                 self._wake_maintenance_loop()
-        except Exception:
+        except BaseException:
+            # The connected client is not published until the operation lock is
+            # acquired. Cancellation while waiting for it must still release the
+            # connection slot; _disconnect_client() cannot see this local client.
             try:
                 async with asyncio.timeout(WRITE_TIMEOUT):
                     await client.disconnect()
-            except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS):
-                pass
+            except Exception as ex:  # pragma: no cover - cleanup must not mask failure
+                _LOGGER.debug(
+                    "Failed to disconnect client after connection setup error for %s: %s",
+                    self.address,
+                    ex,
+                )
             raise
         self._emit_update()
 
