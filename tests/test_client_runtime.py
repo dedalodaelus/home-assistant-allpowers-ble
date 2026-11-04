@@ -2465,3 +2465,552 @@ async def test_probe_cleanup_skips_disconnected_temporary_client(
     assert result.status.battery_percent == 73
     assert fake.stop_notify_calls == 0
     assert fake.disconnect_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_connect_cancellation_before_client_registration_disconnects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connected, unpublished client must be released on lock cancellation."""
+    client = make_client()
+    fake = FakeClient()
+    fake.services = Services()
+    established = asyncio.Event()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        established.set()
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    async with client._operation_lock:
+        task = asyncio.create_task(client._connect_once())
+        await established.wait()
+        assert client._client is None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    assert client._client is None
+    await client._disconnect_client()
+    assert client._active_session_generation is None
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["notify", "write"])
+async def test_connect_cancellation_during_setup_disconnects(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Cancellation during GATT startup releases the registered client."""
+    client = make_client()
+    entered = asyncio.Event()
+
+    class BlockingClient(FakeClient):
+        async def start_notify(self, characteristic: object, callback: Any) -> None:
+            await super().start_notify(characteristic, callback)
+            if phase == "notify":
+                entered.set()
+                await asyncio.Event().wait()
+
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            if phase == "write":
+                entered.set()
+                await asyncio.Event().wait()
+            await super().write_gatt_char(characteristic, data, response=response)
+
+    fake = BlockingClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    task = asyncio.create_task(client._connect_once())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    await client._disconnect_client()
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "timeout"])
+async def test_connect_cancellation_cleanup_failure_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """A failing disconnect must not replace the original cancellation."""
+    client = make_client()
+    established = asyncio.Event()
+
+    class FailingDisconnectClient(FakeClient):
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            if failure == "exception":
+                raise RuntimeError("cleanup failure")
+            await asyncio.Event().wait()
+
+    fake = FailingDisconnectClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        established.set()
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    if failure == "timeout":
+        monkeypatch.setattr(client_module, "WRITE_TIMEOUT", 0.001)
+
+    async with client._operation_lock:
+        task = asyncio.create_task(client._connect_once())
+        await established.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert fake.disconnect_calls == 1
+    assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_second_cancellation_does_not_abandon_unregistered_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local connection remains owned while disconnect is in progress."""
+    client = make_client()
+    established = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+
+    class PausedDisconnectClient(FakeClient):
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            disconnect_entered.set()
+            await allow_disconnect.wait()
+            self.is_connected = False
+
+    fake = PausedDisconnectClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        established.set()
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    async with client._operation_lock:
+        setup = asyncio.create_task(client._connect_once())
+        await established.wait()
+        setup.cancel()
+        await disconnect_entered.wait()
+        assert client._client is None
+        setup.cancel()
+        try:
+            assert not setup.done()
+        finally:
+            allow_disconnect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup
+
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    assert client._active_session_generation is None
+    await client._disconnect_client()
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_queued_first", [True, False])
+async def test_cancelled_registered_setup_serializes_status_writes_and_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    request_queued_first: bool,
+) -> None:
+    """No status request may write while a registered client is tearing down."""
+    client = make_client()
+    initial_write_entered = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+    request_entered = asyncio.Event()
+
+    class PausedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.write_calls = 0
+
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            self.write_calls += 1
+            if self.write_calls == 1:
+                initial_write_entered.set()
+                await asyncio.Event().wait()
+            await super().write_gatt_char(characteristic, data, response=response)
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            disconnect_entered.set()
+            await allow_disconnect.wait()
+            self.is_connected = False
+
+    fake = PausedClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    async def request_status() -> None:
+        request_entered.set()
+        await client.async_request_status()
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    setup = asyncio.create_task(client._connect_once())
+    await initial_write_entered.wait()
+    if request_queued_first:
+        request = asyncio.create_task(request_status())
+        await request_entered.wait()
+
+    setup.cancel()
+    await disconnect_entered.wait()
+    if not request_queued_first:
+        request = asyncio.create_task(request_status())
+        await request_entered.wait()
+
+    # This second cancellation must not interrupt the serialized teardown.
+    setup.cancel()
+    try:
+        assert fake.write_calls == 1
+        if not request_queued_first:
+            # A request queued before cancellation may already have failed,
+            # whereas one queued during teardown must wait for its lock.
+            assert not request.done()
+        assert client._active_session_generation is None
+    finally:
+        allow_disconnect.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await setup
+    with pytest.raises(NotConnectedError):
+        await request
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    assert client._client is None
+    assert not client.snapshot().connected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "timeout"])
+async def test_registered_cleanup_failure_preserves_startup_error(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Cleanup errors must not mask the triggering registered-client failure."""
+    client = make_client()
+
+    class FailingClient(FakeClient):
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            del characteristic, data, response
+            raise ValueError("initial status failed")
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            if failure == "exception":
+                raise RuntimeError("disconnect failed")
+            await asyncio.Event().wait()
+
+    fake = FailingClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    if failure == "timeout":
+        monkeypatch.setattr(client_module, "WRITE_TIMEOUT", 0.01)
+
+    with pytest.raises(ValueError, match="initial status failed"):
+        await client._connect_once()
+
+    assert fake.disconnect_calls == 1
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert not client.snapshot().connected
+
+
+@pytest.mark.asyncio
+async def test_connect_validation_skips_disconnected_unregistered_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed connection should not disconnect a slot already released."""
+    client = make_client()
+    fake = FakeClient()
+    fake.is_connected = False
+    fake.services = Services(service=False)
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    with pytest.raises(UnsupportedDeviceError):
+        await client._connect_once()
+    assert fake.disconnect_calls == 0
+    assert client._active_session_generation is None
+
+
+@pytest.mark.asyncio
+async def test_stop_during_unregistered_connect_then_start_and_stop_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real connection-loop stop and restart do not retain BLE connections."""
+    client = make_client()
+    first_established = asyncio.Event()
+    first_disconnected = asyncio.Event()
+    restarted_write = asyncio.Event()
+    attempts = 0
+
+    class FirstClient(FakeClient):
+        async def disconnect(self) -> None:
+            await super().disconnect()
+            first_disconnected.set()
+
+    class RestartedClient(FakeClient):
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            await super().write_gatt_char(characteristic, data, response=response)
+            restarted_write.set()
+
+    first = FirstClient()
+    second = RestartedClient()
+    for fake in (first, second):
+        fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        nonlocal attempts
+        del args, kwargs
+        attempts += 1
+        if attempts == 1:
+            first_established.set()
+            return first
+        return second
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    async with client._operation_lock:
+        await client.async_start()
+        await first_established.wait()
+        stopping = asyncio.create_task(client.async_stop())
+        await first_disconnected.wait()
+        assert client._client is None
+
+    await stopping
+    assert first.disconnect_calls == 1
+    assert not first.is_connected
+    assert client._active_session_generation is None
+    assert client._connection_task is None
+
+    await client.async_start()
+    await restarted_write.wait()
+    assert client.snapshot().connected
+    await client.async_stop()
+
+    assert attempts == 2
+    assert second.disconnect_calls == 1
+    assert not second.is_connected
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert client._connection_task is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stops_wait_for_registered_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second stop cannot orphan a client during normal connected teardown."""
+    client = make_client()
+    connection_ready = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+    second_stop_entered = asyncio.Event()
+
+    class PausedClient(FakeClient):
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            await super().write_gatt_char(characteristic, data, response=response)
+            connection_ready.set()
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            disconnect_entered.set()
+            await allow_disconnect.wait()
+            self.is_connected = False
+
+    fake = PausedClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    async def stop_again() -> None:
+        second_stop_entered.set()
+        await client.async_stop()
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client.async_start()
+    await connection_ready.wait()
+    first_stop = asyncio.create_task(client.async_stop())
+    await disconnect_entered.wait()
+    second_stop = asyncio.create_task(stop_again())
+    await second_stop_entered.wait()
+    try:
+        assert client._connection_task is not None
+        assert client._connection_task.cancelling() >= 2
+        assert fake.disconnect_calls == 1
+    finally:
+        allow_disconnect.set()
+
+    await asyncio.gather(first_stop, second_stop)
+    assert fake.disconnect_calls == 1
+    assert not fake.is_connected
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert not client.snapshot().connected
+    assert client._connection_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teardown", ["reconnect", "disconnect"])
+async def test_cancelled_registered_setup_joins_competing_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    teardown: str,
+) -> None:
+    """A published client must never be disconnected twice across ownership races."""
+    client = make_client()
+    first_write_entered = asyncio.Event()
+    teardown_queued = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    finish_disconnect = asyncio.Event()
+
+    class PausedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.disconnects_in_flight = 0
+            self.max_disconnects_in_flight = 0
+
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            del characteristic, data, response
+            first_write_entered.set()
+            await asyncio.Event().wait()
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            self.disconnects_in_flight += 1
+            self.max_disconnects_in_flight = max(
+                self.max_disconnects_in_flight, self.disconnects_in_flight
+            )
+            disconnect_entered.set()
+            try:
+                await finish_disconnect.wait()
+                self.is_connected = False
+            finally:
+                self.disconnects_in_flight -= 1
+
+    fake = PausedClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    async def competing_teardown() -> None:
+        teardown_queued.set()
+        if teardown == "reconnect":
+            await client.async_reconnect("competing reconnect")
+        else:
+            await client._disconnect_client()
+
+    original_cleanup = client._cleanup_failed_connection
+
+    async def observed_cleanup(*args: Any, **kwargs: Any) -> None:
+        cleanup_entered.set()
+        await original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    monkeypatch.setattr(client, "_cleanup_failed_connection", observed_cleanup)
+
+    setup = asyncio.create_task(client._connect_once())
+    await first_write_entered.wait()
+    assert client._client is fake
+
+    # Queue a different teardown while the setup task holds the operation lock.
+    # Once setup is cancelled, that teardown acquires the lock first.
+    other = asyncio.create_task(competing_teardown())
+    await teardown_queued.wait()
+    setup.cancel()
+
+    try:
+        await disconnect_entered.wait()
+        assert client._client is None
+        assert fake.is_connected
+
+        # This event signals that failed-setup cleanup has also been scheduled.
+        # Its continuation attempts the contested ownership branch before we
+        # inspect disconnect_calls, with the first disconnect held by an event.
+        await cleanup_entered.wait()
+        assert fake.disconnect_calls == 1
+        assert fake.disconnects_in_flight == 1
+        assert not setup.done()
+        assert not other.done()
+    finally:
+        finish_disconnect.set()
+        await asyncio.gather(setup, other, return_exceptions=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await setup
+    await other
+    assert fake.disconnect_calls == 1
+    assert fake.max_disconnects_in_flight == 1
+    assert fake.disconnects_in_flight == 0
+    assert not fake.is_connected
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert not client.snapshot().connected
