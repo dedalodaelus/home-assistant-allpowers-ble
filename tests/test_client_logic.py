@@ -1896,7 +1896,9 @@ def _gatt_services(
         }.get(uuid)
     )
     return SimpleNamespace(
-        get_service=lambda uuid: service if present and uuid == client_module.SERVICE_UUID else None,
+        get_service=lambda uuid: (
+            service if present and uuid == client_module.SERVICE_UUID else None
+        ),
         get_characteristic=lambda uuid: {
             client_module.NOTIFY_UUID: notify,
             client_module.WRITE_UUID: write,

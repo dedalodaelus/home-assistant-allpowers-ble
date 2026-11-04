@@ -46,7 +46,9 @@ class Services:
         self.write = FakeCharacteristic(write_properties)
         self.service = service
         self.characteristics = characteristics
-        self.required_service = SimpleNamespace(get_characteristic=self._get_characteristic)
+        self.required_service = SimpleNamespace(
+            get_characteristic=self._get_characteristic
+        )
 
     def _get_characteristic(self, uuid: str) -> object | None:
         if not self.characteristics:
@@ -57,7 +59,9 @@ class Services:
         }.get(uuid)
 
     def get_service(self, uuid: str) -> object | None:
-        return self.required_service if self.service and uuid == client_module.SERVICE_UUID else None
+        if self.service and uuid == client_module.SERVICE_UUID:
+            return self.required_service
+        return None
 
     def get_characteristic(self, uuid: str) -> object | None:
         return self._get_characteristic(uuid)
