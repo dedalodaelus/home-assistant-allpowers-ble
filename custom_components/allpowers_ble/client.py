@@ -927,13 +927,29 @@ class AllpowersBLEClient:
                 self._last_status_request_monotonic = self._loop_time()
                 self._wake_maintenance_loop()
         except BaseException:
-            # The connected client is not published until the operation lock is
-            # acquired. Cancellation while waiting for it must still release the
-            # connection slot; _disconnect_client() cannot see this local client.
+            # Invalidate before yielding: a writer already waiting for the lock
+            # must not use a session whose initial setup has failed.
+            self._active_session_generation = None
+            self._ready_event.clear()
+
+            # Own the cleanup independently of this connection task. A second
+            # cancellation (e.g. concurrent async_stop calls) must not abandon
+            # a connected client which was never registered in self._client.
+            cleanup_task = asyncio.create_task(
+                self._cleanup_failed_connection(client),
+                name=f"allpowers-connect-cleanup-{self.address}",
+            )
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    # Preserve the *original* exception after cleanup completes.
+                    continue
+                except Exception:
+                    break
             try:
-                async with asyncio.timeout(WRITE_TIMEOUT):
-                    await client.disconnect()
-            except Exception as ex:  # pragma: no cover - cleanup must not mask failure
+                cleanup_task.result()
+            except (Exception, asyncio.CancelledError) as ex:
                 _LOGGER.debug(
                     "Failed to disconnect client after connection setup error for %s: %s",
                     self.address,
@@ -941,6 +957,17 @@ class AllpowersBLEClient:
                 )
             raise
         self._emit_update()
+
+    async def _cleanup_failed_connection(self, client: BleakClient) -> None:
+        """Release the setup client, whether published or still held locally."""
+        async with asyncio.timeout(WRITE_TIMEOUT):
+            if self._client is client:
+                # Registered clients must be invalidated and disconnected under
+                # the operation lock, never concurrently with a GATT write.
+                await self._disconnect_client()
+            elif client.is_connected:
+                # No lock: cancellation might have happened while awaiting it.
+                await client.disconnect()
 
     async def _disconnect_client(self) -> None:
         async with self._operation_lock:
@@ -976,7 +1003,9 @@ class AllpowersBLEClient:
                 try:
                     async with asyncio.timeout(WRITE_TIMEOUT):
                         await client.disconnect()
-                except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
+                except Exception as ex:
+                    # Cleanup errors must not replace the connection-loop failure
+                    # or cancellation which initiated teardown.
                     _LOGGER.debug("Disconnect failed for %s: %s", self.address, ex)
             if was_connected:
                 self._emit_update()
