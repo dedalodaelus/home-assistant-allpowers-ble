@@ -32,7 +32,7 @@ from tests.helpers import FakeHass, settings, status
 
 
 class Services:
-    """GATT service collection with the required characteristics."""
+    """GATT collection with service-owned characteristics."""
 
     def __init__(
         self,
@@ -46,18 +46,25 @@ class Services:
         self.write = FakeCharacteristic(write_properties)
         self.service = service
         self.characteristics = characteristics
+        self.required_service = SimpleNamespace(
+            get_characteristic=self._get_characteristic
+        )
 
-    def get_service(self, uuid: str) -> object | None:
-        del uuid
-        return object() if self.service else None
-
-    def get_characteristic(self, uuid: str) -> object | None:
+    def _get_characteristic(self, uuid: str) -> object | None:
         if not self.characteristics:
             return None
         return {
             client_module.NOTIFY_UUID: self.notify,
             client_module.WRITE_UUID: self.write,
         }.get(uuid)
+
+    def get_service(self, uuid: str) -> object | None:
+        if self.service and uuid == client_module.SERVICE_UUID:
+            return self.required_service
+        return None
+
+    def get_characteristic(self, uuid: str) -> object | None:
+        return self._get_characteristic(uuid)
 
 
 class IterationStop:

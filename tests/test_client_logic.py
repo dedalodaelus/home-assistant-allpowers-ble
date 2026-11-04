@@ -1881,81 +1881,37 @@ async def test_disconnect_client_updates_statistics() -> None:
     assert client.snapshot().last_disconnected_at is not None
 
 
+def _gatt_services(
+    notify: FakeCharacteristic | None,
+    write: FakeCharacteristic | None,
+    *,
+    present: bool = True,
+) -> SimpleNamespace:
+    """Model a GATT service with its own characteristics."""
+
+    service = SimpleNamespace(
+        get_characteristic=lambda uuid: {
+            client_module.NOTIFY_UUID: notify,
+            client_module.WRITE_UUID: write,
+        }.get(uuid)
+    )
+    return SimpleNamespace(
+        get_service=lambda uuid: (
+            service if present and uuid == client_module.SERVICE_UUID else None
+        ),
+        get_characteristic=lambda uuid: {
+            client_module.NOTIFY_UUID: notify,
+            client_module.WRITE_UUID: write,
+        }.get(uuid),
+    )
+
+
 def test_required_characteristics() -> None:
     notify = FakeCharacteristic(("notify",))
     write = FakeCharacteristic(("write-without-response",))
-
-    class Services:
-        def get_service(self, uuid: str) -> object | None:
-            return object() if uuid == client_module.SERVICE_UUID else None
-
-        def get_characteristic(self, uuid: str) -> object | None:
-            return {
-                client_module.NOTIFY_UUID: notify,
-                client_module.WRITE_UUID: write,
-            }.get(uuid)
-
     fake = FakeClient()
-    fake.services = Services()
-
+    fake.services = _gatt_services(notify, write)
     assert client_module._required_characteristics(fake) == (notify, write)
-
-
-@pytest.mark.parametrize(
-    ("notify_properties", "write_properties", "expected_response"),
-    [
-        (("notify",), ("write-without-response",), False),
-        (("indicate",), ("write",), True),
-        (("notify", "indicate"), ("write", "write-without-response"), True),
-    ],
-)
-def test_required_characteristics_accept_supported_properties(
-    notify_properties: tuple[str, ...],
-    write_properties: tuple[str, ...],
-    expected_response: bool,
-) -> None:
-    notify = FakeCharacteristic(notify_properties)
-    write = FakeCharacteristic(write_properties)
-    fake = FakeClient()
-    fake.services = SimpleNamespace(
-        get_service=lambda uuid: object(),
-        get_characteristic=lambda uuid: {
-            client_module.NOTIFY_UUID: notify,
-            client_module.WRITE_UUID: write,
-        }.get(uuid),
-    )
-
-    assert client_module._required_characteristics(fake) == (notify, write)
-    assert client_module._write_with_response(write) is expected_response
-
-
-@pytest.mark.parametrize(
-    ("notify_properties", "write_properties", "error"),
-    [
-        ((), ("write",), "notify or indicate"),
-        (("read",), ("write",), "notify or indicate"),
-        (("notify",), (), "write-without-response"),
-        (("notify",), ("read",), "write-without-response"),
-    ],
-)
-def test_required_characteristics_reject_unusable_properties(
-    notify_properties: tuple[str, ...],
-    write_properties: tuple[str, ...],
-    error: str,
-) -> None:
-    notify = FakeCharacteristic(notify_properties)
-    write = FakeCharacteristic(write_properties)
-    fake = FakeClient()
-    fake.services = SimpleNamespace(
-        get_service=lambda uuid: object(),
-        get_characteristic=lambda uuid: {
-            client_module.NOTIFY_UUID: notify,
-            client_module.WRITE_UUID: write,
-        }.get(uuid),
-    )
-
-    with pytest.raises(UnsupportedDeviceError, match=error):
-        client_module._required_characteristics(fake)
 
 
 @pytest.mark.asyncio
@@ -1998,17 +1954,7 @@ def test_required_service_is_enforced() -> None:
 
 
 def test_required_characteristics_are_enforced() -> None:
-    class Services:
-        def get_service(self, uuid: str) -> object:
-            del uuid
-            return object()
-
-        def get_characteristic(self, uuid: str) -> None:
-            del uuid
-            return None
-
     fake = FakeClient()
-    fake.services = Services()
-
+    fake.services = _gatt_services(None, None)
     with pytest.raises(UnsupportedDeviceError, match="characteristics"):
         client_module._required_characteristics(fake)

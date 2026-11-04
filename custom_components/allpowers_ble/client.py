@@ -1769,10 +1769,13 @@ def _required_characteristics(
     client: BleakClient,
 ) -> tuple[BleakGATTCharacteristic, BleakGATTCharacteristic]:
     services = client.services
-    if services.get_service(SERVICE_UUID) is None:
+    service = services.get_service(SERVICE_UUID)
+    if service is None:
         raise UnsupportedDeviceError(f"Required service {SERVICE_UUID} is missing")
-    notify_characteristic = services.get_characteristic(NOTIFY_UUID)
-    write_characteristic = services.get_characteristic(WRITE_UUID)
+    # Resolve within FFF0, not from the collection (which may contain duplicate
+    # UUIDs in unrelated services).
+    notify_characteristic = service.get_characteristic(NOTIFY_UUID)
+    write_characteristic = service.get_characteristic(WRITE_UUID)
     if notify_characteristic is None or write_characteristic is None:
         raise UnsupportedDeviceError(
             f"Required characteristics {NOTIFY_UUID} and {WRITE_UUID} are missing"
