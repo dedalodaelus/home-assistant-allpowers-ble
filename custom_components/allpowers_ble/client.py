@@ -970,6 +970,7 @@ class AllpowersBLEClient:
                 await client.disconnect()
 
     async def _disconnect_client(self) -> None:
+        cancelled = False
         async with self._operation_lock:
             client = self._client
             was_connected = self._connected
@@ -1000,16 +1001,31 @@ class AllpowersBLEClient:
                     disconnects=self._statistics.disconnects + 1,
                 )
             if client is not None and client.is_connected:
-                try:
+
+                async def disconnect_bounded() -> None:
                     async with asyncio.timeout(WRITE_TIMEOUT):
                         await client.disconnect()
-                except Exception as ex:
-                    # Cleanup errors must not replace the connection-loop failure
-                    # or cancellation which initiated teardown.
+
+                # Keep the lock through the physical disconnect even if another
+                # stop cancels the connection task during teardown.
+                disconnect_task = asyncio.create_task(disconnect_bounded())
+                while not disconnect_task.done():
+                    try:
+                        await asyncio.shield(disconnect_task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                    except Exception:
+                        break
+                try:
+                    disconnect_task.result()
+                except (Exception, asyncio.CancelledError) as ex:
+                    # A failed cleanup must never mask the original failure.
                     _LOGGER.debug("Disconnect failed for %s: %s", self.address, ex)
             if was_connected:
                 self._emit_update()
         self._wake_maintenance_loop()
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _disconnected_callback(self, client: BleakClient) -> None:
         del client
