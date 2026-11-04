@@ -124,12 +124,10 @@ def test_real_bleak_rejects_misplaced_and_partial_layouts(
     # The old global lookups would have found a valid FFF1 and FFF2 here.
     global_notify = collection.get_characteristic(NOTIFY_UUID)
     global_write = collection.get_characteristic(WRITE_UUID)
-    assert global_notify is chars[
-        "other_notify" if notify_misplaced else "fff0_notify"
-    ]
-    assert global_write is chars[
-        "other_write" if write_misplaced else "fff0_write"
-    ]
+    expected_notify_key = "other_notify" if notify_misplaced else "fff0_notify"
+    expected_write_key = "other_write" if write_misplaced else "fff0_write"
+    assert global_notify is chars[expected_notify_key]
+    assert global_write is chars[expected_write_key]
     with pytest.raises(client_module.UnsupportedDeviceError, match="characteristics"):
         _resolve(collection)
 
