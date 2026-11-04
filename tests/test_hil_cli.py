@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
 import sys
-from threading import Thread
 from types import ModuleType
 from urllib.error import HTTPError
 
@@ -650,50 +648,50 @@ def test_json_storage_excludes_internal_ids_when_public_types_are_used(
 
 
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
-    """A plain HTTP loopback token must not be forwarded to http_proxy."""
-    traffic = {"direct": [], "proxy": []}
+    """Use urllib's actual proxy dispatch with an in-memory HTTP transport.
 
-    def make_handler(which):
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                traffic[which].append((self.path, self.headers.get("Authorization")))
-                data = json.dumps({"version": "2026.10.4"}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(data)
+    HA's unit-test harness forbids real sockets. If the client regresses to
+    the default ProxyHandler, urllib will deliver this dummy bearer token to
+    the fake proxy host instead of the intended loopback host.
+    """
+    seen = []
 
-            def log_message(self, _format, *args):
-                del args
+    class FakeResponse:
+        code = 200
+        status = 200
+        msg = "OK"
 
-        return Handler
+        def __enter__(self):
+            return self
 
-    servers = [
-        ThreadingHTTPServer(("127.0.0.1", 0), make_handler("direct")),
-        ThreadingHTTPServer(("127.0.0.1", 0), make_handler("proxy")),
-    ]
-    threads = [Thread(target=server.serve_forever, daemon=True) for server in servers]
-    for thread in threads:
-        thread.start()
-    try:
-        port = servers[0].server_address[1]
-        proxy_port = servers[1].server_address[1]
-        for name in ("http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"):
-            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy_port}")
-        for name in ("no_proxy", "NO_PROXY"):
-            monkeypatch.setenv(name, "")
+        def __exit__(self, *args):
+            return False
 
-        ha = api.HAClient(f"http://127.0.0.1:{port}", "DUMMY_TEST_TOKEN")
-        assert ha.config()["version"] == "2026.10.4"
-        assert traffic["direct"] == [("/api/config", "Bearer DUMMY_TEST_TOKEN")]
-        assert traffic["proxy"] == []
-    finally:
-        for server in servers:
-            server.shutdown()
-            server.server_close()
-        for thread in threads:
-            thread.join(timeout=5)
+        def read(self, _limit):
+            return b'{"version":"2026.10.4"}'
+
+        def info(self):
+            return {}
+
+    class MemoryHTTPHandler(api.request.HTTPHandler):
+        def http_open(self, req):
+            seen.append((req.host, req.get_header("Authorization")))
+            return FakeResponse()
+
+    original_build_opener = api.request.build_opener
+
+    def build_with_memory_transport(*handlers):
+        return original_build_opener(*handlers, MemoryHTTPHandler())
+
+    monkeypatch.setattr(api.request, "build_opener", build_with_memory_transport)
+    for name in ("http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://untrusted.proxy.invalid:8080")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "")
+
+    client = api.HAClient("http://127.0.0.1:8123", "DUMMY_TEST_TOKEN")
+    assert client.config()["version"] == "2026.10.4"
+    assert seen == [("127.0.0.1:8123", "Bearer DUMMY_TEST_TOKEN")]
 
 
 def test_rest_disables_proxy_handler_even_under_https(monkeypatch):
