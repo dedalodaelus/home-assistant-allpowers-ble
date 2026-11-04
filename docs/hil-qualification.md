@@ -18,6 +18,10 @@ Use this process when you need to:
 - refresh stale HIL evidence before a stable release;
 - qualify a new hardware revision for write-capable support.
 
+For a non-destructive first step, use the [guided HIL CLI](hil-cli.md) to collect
+read-only environment and entity snapshots. It does not produce qualifying BLE
+or physical evidence until later guided-capture stages are implemented.
+
 ## Prerequisites
 
 - One physical ALLPOWERS device for the target revision.

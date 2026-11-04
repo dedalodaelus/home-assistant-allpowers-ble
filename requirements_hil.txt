@@ -1,0 +1,2 @@
+# Standalone CLI transport dependency; never installed by HACS.
+websockets>=15.0.1,<17

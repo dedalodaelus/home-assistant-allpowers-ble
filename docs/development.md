@@ -86,6 +86,11 @@ available Core APIs; it is not certification against an unreleased 2026.12 build
 Run the same gating lane against a Core release containing enforcement when
 available before claiming that version is tested.
 
+The optional [read-only HIL preflight CLI](hil-cli.md) uses a separate
+`requirements_hil.txt` and never changes Home Assistant or sends BLE commands.
+It supports HA Container and remote API deployments but cannot prove the exact
+runtime commit or BLE connection route on its own.
+
 For step-by-step real hardware execution and evidence capture, follow
 `docs/hil-qualification.md`.
 
