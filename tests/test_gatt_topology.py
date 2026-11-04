@@ -72,6 +72,8 @@ class GattServices:
             raise FakeBleakError("Multiple Characteristics with this UUID")
         return matches[0] if matches else None
 
+
+
 @pytest.mark.parametrize("members", [(), ("notify",), ("write",)])
 def test_misplaced_characteristics_are_rejected(members: tuple[str, ...]) -> None:
     fake = FakeClient()
@@ -101,6 +103,107 @@ def test_duplicate_uuids_bind_only_to_fff0() -> None:
         fake.services.write,
     )
     assert client_module._write_with_response(fake.services.write)
+
+
+
+def test_old_global_lookup_would_accept_misplaced_characteristics() -> None:
+    """Show the old code's false positive without replacing the production code."""
+    fake = FakeClient()
+    fake.services = GattServices(())
+
+    # This mirrors the original pre-fix global-UUID resolution path.
+    assert fake.services.get_service(client_module.SERVICE_UUID) is not None
+    notify = fake.services.get_characteristic(client_module.NOTIFY_UUID)
+    write = fake.services.get_characteristic(client_module.WRITE_UUID)
+    assert notify is fake.services.other_notify
+    assert write is fake.services.other_write
+    assert set(notify.properties).intersection({"notify", "indicate"})
+    assert client_module._write_with_response(write)
+
+    # The corrected implementation must reject this same GATT hierarchy.
+    with pytest.raises(UnsupportedDeviceError, match="characteristics"):
+        client_module._required_characteristics(fake)
+
+
+class RecordingRuntimeClient(FakeClient):
+    """Record actual characteristic instances used for BLE operations."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.notify_target: object | None = None
+        self.write_target: object | None = None
+
+    async def start_notify(self, characteristic: object, callback: Any) -> None:
+        self.notify_target = characteristic
+        await super().start_notify(characteristic, callback)
+
+    async def write_gatt_char(
+        self, characteristic: object, data: bytes, *, response: bool
+    ) -> None:
+        self.write_target = characteristic
+        await super().write_gatt_char(characteristic, data, response=response)
+
+
+class RecordingProbeClient(ProbeClientWithStopNotify):
+    """Record probe characteristic instances without bypassing notifications."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        super().__init__(frames)
+        self.notify_target: object | None = None
+        self.write_target: object | None = None
+
+    async def start_notify(self, characteristic: object, callback: Any) -> None:
+        self.notify_target = characteristic
+        await super().start_notify(characteristic, callback)
+
+    async def write_gatt_char(
+        self, characteristic: object, data: bytes, *, response: bool
+    ) -> None:
+        self.write_target = characteristic
+        await super().write_gatt_char(characteristic, data, response=response)
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_fff0_characteristic_instances_with_duplicate_uuids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = RecordingRuntimeClient()
+    fake.services = GattServices(("notify", "write"), duplicate_uuids=True)
+    client = make_client()
+
+    async def establish(*args: Any, **kwargs: Any) -> RecordingRuntimeClient:
+        del args, kwargs
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+
+    await client._connect_once()
+
+    assert fake.notify_target is fake.services.notify
+    assert fake.write_target is fake.services.write
+    assert fake.write_responses == [True]
+    assert fake.notification_callback is not None
+    await client._disconnect_client()
+    assert fake.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_fff0_characteristic_instances_with_duplicate_uuids(
+    monkeypatch: pytest.MonkeyPatch,
+    status_frame: bytes,
+) -> None:
+    fake = RecordingProbeClient([status_frame])
+    fake.services = GattServices(("notify", "write"), duplicate_uuids=True)
+
+    result = await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+
+    assert result.status.battery_percent == 73
+    assert fake.notify_target is fake.services.notify
+    assert fake.write_target is fake.services.write
+    assert fake.write_responses == [True]
+    assert fake.stop_notify_calls == 1
+    assert fake.disconnect_calls == 1
 
 
 @pytest.mark.asyncio
