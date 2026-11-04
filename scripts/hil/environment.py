@@ -259,6 +259,11 @@ def build_session(
                 if device.firmware
                 else unknown("no validated firmware in registry")
             ),
+            "integration_entry_state": (
+                observed(device.entry_state, "ha_ws_config_entries_get")
+                if device.entry_state
+                else unknown("config-entry state unavailable or ambiguous")
+            ),
         },
         "route": {
             "requested": requested_route,

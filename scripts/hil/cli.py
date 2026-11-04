@@ -92,7 +92,8 @@ def _device_list(devices: list[Device]) -> None:
         print(
             f"  [{index}] {device.model} "
             f"(hardware {device.hardware or 'unknown'}, "
-            f"firmware {device.firmware or 'unknown'})"
+            f"firmware {device.firmware or 'unknown'}, "
+            f"integration {device.entry_state or 'unverified'})"
         )
 
 
@@ -114,10 +115,26 @@ def execute(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         if not devices:
             print(
-                "No integration-owned devices found; verify setup and registry permissions"
+                "No integration-owned devices found; verify setup and "
+                "registry permissions"
             )
             return 2
-        print("Preflight complete: read-only checks only; no HIL qualification granted")
+        inspected = (
+            [choose_device(devices, args.device, non_interactive=args.non_interactive)]
+            if args.device
+            else devices
+        )
+        if any(device.entry_state != "loaded" for device in inspected):
+            print(
+                "Preflight incomplete: integration entry not loaded or state "
+                "unverified; check Settings > Devices & services. "
+                "Registry discovery remains available."
+            )
+            return 2
+        print(
+            "Preflight complete: integration loaded; read-only checks only; "
+            "no HIL qualification granted"
+        )
         return 0
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)

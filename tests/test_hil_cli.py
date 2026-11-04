@@ -63,7 +63,9 @@ def allpowers_registry():
             "unique_id": "abc_battery",
         },
     ]
-    entries = [{"entry_id": "secret-entry-1", "domain": "allpowers_ble"}]
+    entries = [
+        {"entry_id": "secret-entry-1", "domain": "allpowers_ble", "state": "loaded"}
+    ]
     return entities, devices, entries
 
 
@@ -102,7 +104,10 @@ def make_args(*argv):
 
 
 def test_url_validation_rejects_plaintext_remote_and_embedded_secrets():
-    assert api.normalize_url("https://example.test:8123/") == "https://example.test:8123"
+    assert (
+        api.normalize_url("https://example.test:8123/")
+        == "https://example.test:8123"
+    )
     assert api.normalize_url("http://127.0.0.1:8123") == "http://127.0.0.1:8123"
     for value in (
         "http://10.0.0.4:8123",
@@ -118,6 +123,12 @@ def test_url_validation_rejects_plaintext_remote_and_embedded_secrets():
     assert api.normalize_url(
         "http://10.0.0.4:8123", allow_insecure_http=True
     ) == "http://10.0.0.4:8123"
+    assert api.normalize_url("HTTPS://example.test:8123/") == (
+        "https://example.test:8123"
+    )
+    assert api.normalize_url("HtTpS://example.test:8123") == (
+        "https://example.test:8123"
+    )
 
 
 def test_https_remains_enforced_no_disable_tls_switch():
@@ -143,7 +154,9 @@ def test_discovery_without_optional_config_entries(allpowers_registry):
     assert [device.model for device in choices] == ["R600"]
 
 
-def test_discovery_ignores_registry_entries_with_contradictory_ownership(allpowers_registry):
+def test_discovery_ignores_registry_entries_with_contradictory_ownership(
+    allpowers_registry,
+):
     entities, devices, _ = allpowers_registry
     wrong_entry = [{"entry_id": "foreign-entry", "domain": "allpowers_ble"}]
     assert discovery.find_devices(entities, devices, wrong_entry) == []
@@ -180,6 +193,13 @@ def test_unknown_models_and_firmware_never_reveal_device_supplied_strings():
     assert discovery.safe_version("0.2 secret-name") is None
     assert discovery.safe_model("S300") == "S300"
     assert discovery.safe_version("0.2") == "0.2"
+    assert discovery.safe_version("0xF1") == "0xF1"
+    assert discovery.safe_version("0x03") == "0x03"
+    assert discovery.safe_version("0Xf1") == "0xF1"
+    assert discovery.safe_version("0xF1 secret") is None
+    assert discovery.safe_version("0xAABBCCDD") is None
+    assert discovery.safe_version("0x") is None
+    assert discovery.safe_version("0xGG") is None
 
 
 def test_multiple_device_selection_requires_index_in_noninteractive_mode():
@@ -222,7 +242,10 @@ def test_public_environment_allowlists_ha_config_and_labels():
     assert "private" not in public
     assert "39.4699" not in public
     assert "AA:BB" not in public
-    assert payload["home_assistant"]["installation_type"]["value"] == "Home Assistant Container"
+    assert (
+        payload["home_assistant"]["installation_type"]["value"]
+        == "Home Assistant Container"
+    )
     assert payload["integration"]["qualification_allowed"] is False
     assert payload["home_assistant"]["host"]["bluez_version"]["value"] is None
     assert "runner_host" in payload
@@ -230,7 +253,9 @@ def test_public_environment_allowlists_ha_config_and_labels():
 
 def test_manifest_version_mismatch_blocks_build_proof(monkeypatch):
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "0.3.0")
-    monkeypatch.setattr(environment, "local_commit", lambda: environment.unknown("test"))
+    monkeypatch.setattr(
+        environment, "local_commit", lambda: environment.unknown("test")
+    )
     mismatch = environment.integration_build({"version": "1.2.0"})
     assert mismatch["build_match"] == "mismatch"
     assert mismatch["qualification_allowed"] is False
@@ -240,7 +265,9 @@ def test_manifest_version_mismatch_blocks_build_proof(monkeypatch):
     assert environment.integration_build(None)["installed_commit"]["value"] is None
 
 
-def test_read_only_snapshot_excludes_rest_attributes_and_arbitrary_states(allpowers_registry):
+def test_read_only_snapshot_excludes_rest_attributes_and_arbitrary_states(
+    allpowers_registry,
+):
     fake = FakeHA(allpowers_registry)
     chosen = discovery.find_devices(*allpowers_registry)[0]
     sample = environment.read_only_sample(fake, chosen)
@@ -299,6 +326,8 @@ def test_run_writes_private_allowlisted_json_without_identifiers(
     assert data["route"]["observed"]["value"] is None
     assert data["qualification_status"] == "inconclusive"
     assert data["integration_build"]["qualification_allowed"] is False
+    assert data["device"]["integration_entry_state"]["value"] == "loaded"
+    assert "secret-entry-1" not in content
     assert re.fullmatch(r"[a-f0-9]{16}", data["run_id"])
     assert "MY_PRIVATE_TOKEN" not in capsys.readouterr().out
     assert (dirs[0].stat().st_mode & 0o077) == 0
@@ -312,11 +341,20 @@ def test_run_no_device_and_noninteractive_missing_token_fail_safely(
     fake = FakeHA(([], [], []))
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "SECRET_VALUE")
-    assert cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"]) == 2
-    assert cli.main(["run", "--ha-url", "https://example.test", "--non-interactive"]) == 2
+    assert (
+        cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+        == 2
+    )
+    assert (
+        cli.main(["run", "--ha-url", "https://example.test", "--non-interactive"])
+        == 2
+    )
     assert "SECRET_VALUE" not in capsys.readouterr().err
     monkeypatch.delenv("HA_HIL_TOKEN")
-    assert cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"]) == 2
+    assert (
+        cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+        == 2
+    )
 
 
 def test_output_symlink_rejected(tmp_path):
@@ -398,6 +436,140 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
     with pytest.raises(api.HAAPIError, match="authentication failed") as exc:
         ha.websocket([{"type": "manifest/get"}])
     assert "PRIVATE_TOKEN" not in str(exc.value)
+
+
+def test_mixed_case_https_never_downgrades_websocket(monkeypatch):
+    """Regression: validated HTTPS origins must never send a token over ws://."""
+    attempted_urls = []
+
+    class FakeWS:
+        def __init__(self):
+            self.replies = iter([{"type": "auth_required"}, {"type": "auth_ok"}])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def recv(self, timeout):
+            return json.dumps(next(self.replies))
+
+        def send(self, message):
+            assert json.loads(message)["access_token"] == "SECRET_TOKEN"
+
+    websocket_package = ModuleType("websockets")
+    websocket_package.__path__ = []
+    exceptions_module = ModuleType("websockets.exceptions")
+    exceptions_module.WebSocketException = type("WebSocketException", (Exception,), {})
+    sync_package = ModuleType("websockets.sync")
+    sync_package.__path__ = []
+    client_module = ModuleType("websockets.sync.client")
+
+    def fake_connect(url, **kwargs):
+        attempted_urls.append(url)
+        return FakeWS()
+
+    client_module.connect = fake_connect
+    for name, module in (
+        ("websockets", websocket_package),
+        ("websockets.exceptions", exceptions_module),
+        ("websockets.sync", sync_package),
+        ("websockets.sync.client", client_module),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    for origin in (
+        "HTTPS://example.test:8123",
+        "HtTpS://example.test:8123",
+        "https://example.test:8123",
+    ):
+        ha = api.HAClient(origin, "SECRET_TOKEN")
+        assert ha.websocket([]) == []
+        assert attempted_urls[-1] == "wss://example.test:8123/api/websocket"
+    ha = api.HAClient("http://127.0.0.1:8123", "SECRET_TOKEN")
+    assert ha.websocket([]) == []
+    assert attempted_urls[-1] == "ws://127.0.0.1:8123/api/websocket"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_exit"),
+    [
+        ("loaded", 0),
+        ("not_loaded", 2),
+        ("setup_error", 2),
+        ("setup_retry", 2),
+        ("migration_error", 2),
+        ("setup_in_progress", 2),
+        ("unload_in_progress", 2),
+        ("future_unknown_state", 2),
+        (None, 2),
+    ],
+)
+def test_doctor_reports_actual_config_entry_readiness(
+    monkeypatch, capsys, allpowers_registry, state, expected_exit
+):
+    """A stale device-registry row cannot qualify as a running integration."""
+    fake = FakeHA(allpowers_registry)
+    fake.entries[0]["state"] = state
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "SECRET_VALUE")
+    assert (
+        cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+        == expected_exit
+    )
+    output = capsys.readouterr().out
+    if state in discovery.CONFIG_ENTRY_STATES:
+        assert state in output
+    else:
+        assert "unverified" in output
+    assert "SECRET_VALUE" not in output
+    assert "secret-entry-1" not in output
+    if expected_exit:
+        assert "Preflight incomplete" in output
+    else:
+        assert "integration loaded" in output
+
+
+def test_doctor_missing_entry_permissions_remains_unknown_but_run_is_available(
+    monkeypatch, tmp_path, capsys, allpowers_registry
+):
+    """Missing optional entry data must not block a read-only snapshot."""
+    entities, devices, _ = allpowers_registry
+    fake = FakeHA((entities, devices, None))
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "SECRET_VALUE")
+    args = ["--ha-url", "https://example.test", "--non-interactive"]
+    assert cli.main(["doctor", *args]) == 2
+    assert cli.main(["run", *args, "--output-root", str(tmp_path)]) == 0
+    sessions = list(tmp_path.glob("*/session.json"))
+    assert len(sessions) == 1
+    state = json.loads(sessions[0].read_text())["device"]["integration_entry_state"]
+    assert state["value"] is None
+    assert state["verified"] is False
+    assert "SECRET_VALUE" not in capsys.readouterr().out
+
+
+def test_doctor_detects_disabled_entries(monkeypatch, capsys, allpowers_registry):
+    fake = FakeHA(allpowers_registry)
+    fake.entries[0]["disabled_by"] = "user"
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "SECRET_VALUE")
+    assert cli.main(["doctor", "--ha-url", "https://example.test"]) == 2
+    output = capsys.readouterr().out
+    assert "integration disabled" in output
+    assert "SECRET_VALUE" not in output
+
+
+def test_hex_firmware_in_registry_and_telemetry_is_preserved(allpowers_registry):
+    entities, devices, entries = allpowers_registry
+    devices[0]["sw_version"] = "0xF1"
+    devices[0]["hw_version"] = "0x03"
+    selected = discovery.find_devices(entities, devices, entries)[0]
+    assert selected.firmware == "0xF1"
+    assert selected.hardware == "0x03"
+    assert environment.safe_state_value("firmware_version", "0xF1") == "0xF1"
+    assert environment.safe_state_value("hardware_version", "0x03") == "0x03"
 
 
 def test_ws_unauthorized_manifest_keeps_device_registry(monkeypatch):

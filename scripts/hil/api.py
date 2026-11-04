@@ -49,7 +49,9 @@ def normalize_url(url: str, *, allow_insecure_http: bool = False) -> str:
             "HTTP to a remote host exposes your token; use HTTPS or "
             "explicitly pass --allow-insecure-http on a trusted network"
         )
-    return url.strip().rstrip("/")
+    # urlsplit() normalizes the scheme but not the original input string. A
+    # mixed-case HTTPS:// origin must never become an unencrypted WS URL.
+    return parse.urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
 def _json_object(payload: Any, context: str) -> dict[str, Any]:
@@ -134,8 +136,9 @@ class HAClient:
                 "Missing HIL dependency; install requirements_hil.txt"
             ) from ex
 
-        scheme = "wss" if self.origin.startswith("https:") else "ws"
-        ws_url = f"{scheme}://{parse.urlsplit(self.origin).netloc}/api/websocket"
+        origin = parse.urlsplit(self.origin)
+        scheme = "wss" if origin.scheme == "https" else "ws"
+        ws_url = f"{scheme}://{origin.netloc}/api/websocket"
         try:
             with connect(
                 ws_url,

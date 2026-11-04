@@ -31,7 +31,7 @@ A remote host and HA OS are also supported using the REST/WebSocket APIs. `netwo
 
 ## Commands
 
-- `doctor`: authenticate, verify HA Core version, read integration manifest and registries, list ALLPOWERS devices and report missing prerequisites; no filesystem output.
+- `doctor`: authenticate, verify HA Core version, read integration manifest and registries, list ALLPOWERS devices and check the associated integration config-entry state; no filesystem output. Returns a nonzero status if an entry is not loaded or its state cannot be verified. Registry discovery still works even when optional entry-state access is denied.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.
 - `--device 1`: select an indexed device (or a model name if unambiguous). If there is one device, selection is automatic. In non-interactive mode, multiple devices require an explicit selection.
 - `--route auto|local_adapter|active_proxy`: record the **requested** route. The **observed** route is always `unverified` at this stage, even if a proxy is connected.
@@ -45,13 +45,13 @@ hil-results/<UTC-time>_<random-run-id>/
   session.json
 ```
 
-Both files use schema version 1, UTC timestamps, structured `value/source/verified` metadata and explicit `unavailable` reasons. Registry device IDs, entity IDs, BLE addresses, tokens, IP addresses, SSIDs, hostnames, full HA configuration and device-provided arbitrary attributes are **never written**. Environment and session schemas will be extended in #229-#232; these files are not yet a publishable evidence ZIP.
+Both files use schema version 1, UTC timestamps, structured `value/source/verified` metadata and explicit `unavailable` reasons. The session records the sanitized associated config-entry readiness (`loaded`, `not_loaded`, `setup_error`, etc.), if the HA API exposes it; absent or ambiguous states remain unknown. Registry device IDs, entity IDs, BLE addresses, tokens, IP addresses, SSIDs, hostnames, full HA configuration and device-provided arbitrary attributes are **never written**. Environment and session schemas will be extended in #229-#232; these files are not yet a publishable evidence ZIP.
 
 ## What can and cannot be verified
 
 The CLI reads `/api/config`, `config/entity_registry/list`, `config/device_registry/list`, `manifest/get` and optionally `config_entries/get`, plus selected `/api/states/<entity_id>` GETs. Registry `model`, hardware and firmware are **last recorded metadata**, not proof of live BLE freshness. Unavailable states are not replaced with guessed values, and translated entity names are never used to infer functionality.
 
-`manifest/get` can establish the **reported installed integration version**, but does **not** expose the installed files' exact Git SHA. The CLI records the runner checkout commit when available while marking the *installed* commit and build match as unverified (or mismatched if manifest versions differ). The run is always **inconclusive for HIL qualification** until later instrumentation provides route-specific trace/build evidence and physical checks.
+`manifest/get` can establish the **reported installed integration version**, but does **not** expose the installed files' exact Git SHA. The CLI records the runner checkout commit when available while marking the *installed* commit and build match as unverified (or mismatched if manifest versions differ). Firmware/hardware versions from HA may use a constrained decimal representation or hexadecimal notation such as `0xF1`; arbitrary strings are rejected. The run is always **inconclusive for HIL qualification** until later instrumentation provides route-specific trace/build evidence and physical checks.
 
 The CLI currently requires Home Assistant Core **2026.8 or later** for the registry contract. It was designed around 2026.10.4 but a live connection to a physical HA host has not been made as part of the automated tests; volunteer verification is still required.
 

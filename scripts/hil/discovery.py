@@ -10,6 +10,18 @@ from .api import HAAPIError
 
 DOMAIN = "allpowers_ble"
 KNOWN_MODELS = {"R600", "VOLIX P1800", "BLE power station", "S500", "S700"}
+CONFIG_ENTRY_STATES = frozenset(
+    {
+        "loaded",
+        "not_loaded",
+        "setup_error",
+        "setup_retry",
+        "migration_error",
+        "failed_unload",
+        "setup_in_progress",
+        "unload_in_progress",
+    }
+)
 SENSOR_KEYS = (
     "battery",
     "input_power",
@@ -30,6 +42,7 @@ class Device:
     hardware: str | None
     firmware: str | None
     state_entities: dict[str, str]
+    entry_state: str | None = None
 
 
 def safe_model(value: Any) -> str:
@@ -43,10 +56,11 @@ def safe_model(value: Any) -> str:
 
 def safe_version(value: Any) -> str | None:
     """Reject arbitrary device-provided strings (could contain identifiers)."""
-    if isinstance(value, str) and re.fullmatch(
-        r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,3}", value
-    ):
-        return value
+    if isinstance(value, str):
+        if re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,3}", value):
+            return value
+        if re.fullmatch(r"0[xX][0-9a-fA-F]{1,4}", value):
+            return "0x" + value[2:].upper()
     return None
 
 
@@ -64,6 +78,38 @@ def _owned_identifiers(device: dict[str, Any]) -> bool:
         isinstance(item, (list, tuple)) and len(item) == 2 and item[0] == DOMAIN
         for item in identifiers
     )
+
+
+def _entry_state(device: dict[str, Any], entries: list[Any] | None) -> str | None:
+    """Inspect only linked config entries, without retaining their IDs.
+
+    A missing, inaccessible or ambiguous entry state is *not* proof of a loaded
+    integration. The list comes from Home Assistant, not arbitrary device names.
+    """
+    if entries is None:
+        return None
+    ids: set[str] = set()
+    main_id = device.get("config_entry_id")
+    if isinstance(main_id, str):
+        ids.add(main_id)
+    old_ids = device.get("config_entries")
+    if isinstance(old_ids, list):
+        ids.update(value for value in old_ids if isinstance(value, str))
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("domain") == DOMAIN
+        and isinstance(entry.get("entry_id"), str)
+        and entry["entry_id"] in ids
+    ]
+    if len(matches) != 1:
+        return None
+    entry = matches[0]
+    if entry.get("disabled_by") is not None:
+        return "disabled"
+    state = entry.get("state")
+    return state if isinstance(state, str) and state in CONFIG_ENTRY_STATES else None
 
 
 def _entity_key(entry: dict[str, Any]) -> str | None:
@@ -136,6 +182,7 @@ def find_devices(
                 hardware=safe_version(raw_device.get("hw_version")),
                 firmware=safe_version(raw_device.get("sw_version")),
                 state_entities=mapping,
+                entry_state=_entry_state(raw_device, entries),
             )
         )
     return sorted(
