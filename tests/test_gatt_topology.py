@@ -30,7 +30,9 @@ class GattServices:
         self.other_write = FakeCharacteristic(("write",))
         self.required = SimpleNamespace(
             get_characteristic=lambda uuid: {
-                client_module.NOTIFY_UUID: self.notify if "notify" in required else None,
+                client_module.NOTIFY_UUID: (
+                    self.notify if "notify" in required else None
+                ),
                 client_module.WRITE_UUID: self.write if "write" in required else None,
             }.get(uuid)
         )
