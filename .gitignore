@@ -25,3 +25,7 @@ build/
 
 # Home Assistant local development
 config/
+
+# Local HIL captures and the optional HIL environment
+hil-results/
+.venv-hil/
