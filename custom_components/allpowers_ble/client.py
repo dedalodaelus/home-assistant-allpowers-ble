@@ -941,9 +941,7 @@ class AllpowersBLEClient:
             # cancellation (e.g. concurrent async_stop calls) must not abandon
             # a connected client which was never registered in self._client.
             cleanup_task = asyncio.create_task(
-                self._cleanup_failed_connection(
-                    client, published=client_published
-                ),
+                self._cleanup_failed_connection(client, published=client_published),
                 name=f"allpowers-connect-cleanup-{self.address}",
             )
             while not cleanup_task.done():
