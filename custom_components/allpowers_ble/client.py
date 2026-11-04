@@ -878,6 +878,10 @@ class AllpowersBLEClient:
             ble_device_callback=fresh_device_for_retry,
             use_services_cache=True,
         )
+        # Ownership transfers as soon as this client is published under the
+        # operation lock. Never infer past ownership from self._client later:
+        # another teardown can clear it while disconnect() is still running.
+        client_published = False
         try:
             (
                 notify_characteristic,
@@ -885,6 +889,7 @@ class AllpowersBLEClient:
             ) = _required_characteristics(client)
             async with self._operation_lock:
                 self._client = client
+                client_published = True
                 self._write_characteristic = write_characteristic
 
                 # A new GATT session must never inherit parser fragments or freshness
@@ -936,7 +941,9 @@ class AllpowersBLEClient:
             # cancellation (e.g. concurrent async_stop calls) must not abandon
             # a connected client which was never registered in self._client.
             cleanup_task = asyncio.create_task(
-                self._cleanup_failed_connection(client),
+                self._cleanup_failed_connection(
+                    client, published=client_published
+                ),
                 name=f"allpowers-connect-cleanup-{self.address}",
             )
             while not cleanup_task.done():
@@ -958,15 +965,18 @@ class AllpowersBLEClient:
             raise
         self._emit_update()
 
-    async def _cleanup_failed_connection(self, client: BleakClient) -> None:
-        """Release the setup client, whether published or still held locally."""
+    async def _cleanup_failed_connection(
+        self, client: BleakClient, *, published: bool
+    ) -> None:
+        """Release a failed setup using its ownership at publication time."""
         async with asyncio.timeout(WRITE_TIMEOUT):
-            if self._client is client:
-                # Registered clients must be invalidated and disconnected under
-                # the operation lock, never concurrently with a GATT write.
+            if published:
+                # Wait for a competing teardown holding the lock, even if it
+                # already cleared self._client but is still disconnecting.
                 await self._disconnect_client()
             elif client.is_connected:
-                # No lock: cancellation might have happened while awaiting it.
+                # Never published: do not wait for _operation_lock, since the
+                # setup task might have been cancelled while acquiring it.
                 await client.disconnect()
 
     async def _disconnect_client(self) -> None:
