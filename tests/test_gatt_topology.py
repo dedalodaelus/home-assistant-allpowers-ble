@@ -73,7 +73,6 @@ class GattServices:
         return matches[0] if matches else None
 
 
-
 @pytest.mark.parametrize("members", [(), ("notify",), ("write",)])
 def test_misplaced_characteristics_are_rejected(members: tuple[str, ...]) -> None:
     fake = FakeClient()
@@ -103,7 +102,6 @@ def test_duplicate_uuids_bind_only_to_fff0() -> None:
         fake.services.write,
     )
     assert client_module._write_with_response(fake.services.write)
-
 
 
 def test_old_global_lookup_would_accept_misplaced_characteristics() -> None:
