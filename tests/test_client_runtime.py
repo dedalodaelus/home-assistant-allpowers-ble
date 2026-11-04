@@ -2911,3 +2911,106 @@ async def test_concurrent_stops_wait_for_registered_disconnect(
     assert client._active_session_generation is None
     assert not client.snapshot().connected
     assert client._connection_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teardown", ["reconnect", "disconnect"])
+async def test_cancelled_registered_setup_joins_competing_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    teardown: str,
+) -> None:
+    """A published client must never be disconnected twice across ownership races."""
+    client = make_client()
+    first_write_entered = asyncio.Event()
+    teardown_queued = asyncio.Event()
+    disconnect_entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    finish_disconnect = asyncio.Event()
+
+    class PausedClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.disconnects_in_flight = 0
+            self.max_disconnects_in_flight = 0
+
+        async def write_gatt_char(
+            self, characteristic: object, data: bytes, *, response: bool
+        ) -> None:
+            del characteristic, data, response
+            first_write_entered.set()
+            await asyncio.Event().wait()
+
+        async def disconnect(self) -> None:
+            self.disconnect_calls += 1
+            self.disconnects_in_flight += 1
+            self.max_disconnects_in_flight = max(
+                self.max_disconnects_in_flight, self.disconnects_in_flight
+            )
+            disconnect_entered.set()
+            try:
+                await finish_disconnect.wait()
+                self.is_connected = False
+            finally:
+                self.disconnects_in_flight -= 1
+
+    fake = PausedClient()
+    fake.services = Services()
+
+    async def establish(*args: Any, **kwargs: Any) -> FakeClient:
+        del args, kwargs
+        return fake
+
+    async def competing_teardown() -> None:
+        teardown_queued.set()
+        if teardown == "reconnect":
+            await client.async_reconnect("competing reconnect")
+        else:
+            await client._disconnect_client()
+
+    original_cleanup = client._cleanup_failed_connection
+
+    async def observed_cleanup(*args: Any, **kwargs: Any) -> None:
+        cleanup_entered.set()
+        await original_cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    monkeypatch.setattr(client, "_cleanup_failed_connection", observed_cleanup)
+
+    setup = asyncio.create_task(client._connect_once())
+    await first_write_entered.wait()
+    assert client._client is fake
+
+    # Queue a different teardown while the setup task holds the operation lock.
+    # Once setup is cancelled, that teardown acquires the lock first.
+    other = asyncio.create_task(competing_teardown())
+    await teardown_queued.wait()
+    setup.cancel()
+
+    try:
+        await disconnect_entered.wait()
+        assert client._client is None
+        assert fake.is_connected
+
+        # This event signals that failed-setup cleanup has also been scheduled.
+        # Its continuation attempts the contested ownership branch before we
+        # inspect disconnect_calls, with the first disconnect held by an event.
+        await cleanup_entered.wait()
+        assert fake.disconnect_calls == 1
+        assert fake.disconnects_in_flight == 1
+        assert not setup.done()
+        assert not other.done()
+    finally:
+        finish_disconnect.set()
+        await asyncio.gather(setup, other, return_exceptions=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await setup
+    await other
+    assert fake.disconnect_calls == 1
+    assert fake.max_disconnects_in_flight == 1
+    assert fake.disconnects_in_flight == 0
+    assert not fake.is_connected
+    assert client._client is None
+    assert client._active_session_generation is None
+    assert not client.snapshot().connected
