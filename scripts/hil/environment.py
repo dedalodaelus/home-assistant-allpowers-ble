@@ -139,7 +139,9 @@ def runner_host() -> dict[str, Any]:
 
 
 def build_environment(
-    ha_config: dict[str, Any], manifest: dict[str, Any] | None
+    ha_config: dict[str, Any],
+    manifest: dict[str, Any] | None,
+    scanner_candidates: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Allowlist fields: never serialize the raw HA configuration/registry."""
     version = _safe_label(ha_config.get("version"))
@@ -170,10 +172,22 @@ def build_environment(
                 "python_version": unknown("not exposed by standard HA API"),
             },
             "bluetooth_adapters": unknown(
-                "adapter and route metadata not available here"
+                "adapter model, firmware and physical location not exposed here"
+            ),
+            "bluetooth_scanner_candidates": (
+                {
+                    "value": scanner_candidates,
+                    "source": "ha_ws_bluetooth_subscribe_scanner_details_admin",
+                    "verified": True,
+                }
+                if scanner_candidates is not None
+                else unknown(
+                    "admin-only Bluetooth scanner inventory unavailable, "
+                    "denied or no initial event received"
+                )
             ),
             "esphome_active_proxy": unknown(
-                "proxy GATT capability not verified via public API"
+                "remote scanners do not prove ESPHome identity or GATT capability"
             ),
         },
         "runner_host": runner_host(),
@@ -271,9 +285,48 @@ def build_session(
             "qualification_allowed": False,
         },
         "telemetry": sample,
+        "preflight": evaluate_preflight(device, sample),
         "integration_build": environment["integration"],
         "qualification_status": "inconclusive",
         "reason": (
             "read-only API observations are not route-specific GATT/physical evidence"
         ),
     }
+
+
+def evaluate_preflight(device: Device, sample: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate HA integration, BLE connection and status freshness separately.
+
+    These are observations through HA's public entity API, not hardware HIL
+    qualification. A disabled telemetry_available entity yields *unknown*,
+    never a false positive or a fabricated failure.
+    """
+    if device.entry_state == "loaded":
+        entry = "ready"
+    elif device.entry_state is None:
+        entry = "unknown"
+    else:
+        entry = "incomplete"
+
+    def binary_state(key: str) -> str:
+        record = sample.get(key)
+        if not isinstance(record, dict) or record.get("verified") is not True:
+            return "unknown"
+        if record.get("value") == "on":
+            return "ready"
+        if record.get("value") == "off":
+            return "incomplete"
+        return "unknown"
+
+    checks = {
+        "entry_loaded": entry,
+        "connected": binary_state("connected"),
+        "telemetry_fresh": binary_state("telemetry_available"),
+    }
+    if "incomplete" in checks.values():
+        overall = "incomplete"
+    elif "unknown" in checks.values():
+        overall = "inconclusive"
+    else:
+        overall = "ready"
+    return {"overall": overall, "checks": checks}

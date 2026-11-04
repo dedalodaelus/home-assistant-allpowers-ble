@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
 import sys
+from threading import Thread
 from types import ModuleType
 from urllib.error import HTTPError
 
@@ -57,6 +59,20 @@ def allpowers_registry():
             "disabled_by": None,
         },
         {
+            "device_id": "secret-device-id-012345",
+            "platform": "allpowers_ble",
+            "entity_id": "binary_sensor.my_name_connected",
+            "unique_id": "AA:BB:CC:DD:EE:FF_connected",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "secret-device-id-012345",
+            "platform": "allpowers_ble",
+            "entity_id": "binary_sensor.my_name_telemetry_available",
+            "unique_id": "AA:BB:CC:DD:EE:FF_telemetry_available",
+            "disabled_by": None,
+        },
+        {
             "device_id": "foreign-device-id",
             "platform": "esphome",
             "entity_id": "sensor.foreign_battery",
@@ -73,6 +89,12 @@ class FakeHA:
     def __init__(self, data):
         self.entities, self.devices, self.entries = data
         self.calls = []
+        self.state_overrides = {}
+        self.scanners = None
+
+    def scanner_candidates(self):
+        self.calls.append(("ws", "bluetooth_scanner_candidates"))
+        return self.scanners
 
     def config(self):
         self.calls.append(("get", "/api/config"))
@@ -90,6 +112,12 @@ class FakeHA:
 
     def entity_state(self, entity_id):
         self.calls.append(("get", entity_id))
+        if entity_id in self.state_overrides:
+            return {"state": self.state_overrides[entity_id]}
+        if entity_id.endswith("_connected"):
+            return {"state": "on"}
+        if entity_id.endswith("_telemetry_available"):
+            return {"state": "on"}
         if entity_id.endswith("_battery"):
             return {"state": "76", "attributes": {"secret": "10.0.0.100"}}
         if entity_id.endswith("_hardware_version"):
@@ -544,9 +572,9 @@ def test_doctor_reports_actual_config_entry_readiness(
     assert "SECRET_VALUE" not in output
     assert "secret-entry-1" not in output
     if expected_exit:
-        assert "Preflight incomplete" in output
+        assert "Preflight inconclusive or incomplete" in output
     else:
-        assert "integration loaded" in output
+        assert "Preflight ready" in output
 
 
 def test_doctor_missing_entry_permissions_remains_unknown_but_run_is_available(
@@ -619,3 +647,302 @@ def test_json_storage_excludes_internal_ids_when_public_types_are_used(
     assert "secret-device-id" not in saved
     assert "AA:BB" not in saved
     assert session["route"]["qualification_allowed"] is False
+
+
+def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
+    """A plain HTTP loopback token must not be forwarded to http_proxy."""
+    traffic = {"direct": [], "proxy": []}
+
+    def make_handler(which):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                traffic[which].append(
+                    (self.path, self.headers.get("Authorization"))
+                )
+                data = json.dumps({"version": "2026.10.4"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, _format, *args):
+                del args
+
+        return Handler
+
+    servers = [
+        ThreadingHTTPServer(("127.0.0.1", 0), make_handler("direct")),
+        ThreadingHTTPServer(("127.0.0.1", 0), make_handler("proxy")),
+    ]
+    threads = [Thread(target=server.serve_forever, daemon=True) for server in servers]
+    for thread in threads:
+        thread.start()
+    try:
+        port = servers[0].server_address[1]
+        proxy_port = servers[1].server_address[1]
+        for name in ("http_proxy", "HTTP_PROXY", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy_port}")
+        for name in ("no_proxy", "NO_PROXY"):
+            monkeypatch.setenv(name, "")
+
+        ha = api.HAClient(f"http://127.0.0.1:{port}", "DUMMY_TEST_TOKEN")
+        assert ha.config()["version"] == "2026.10.4"
+        assert traffic["direct"] == [("/api/config", "Bearer DUMMY_TEST_TOKEN")]
+        assert traffic["proxy"] == []
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=5)
+
+
+def test_rest_disables_proxy_handler_even_under_https(monkeypatch):
+    """Verify the default urllib proxy handler is replaced, not just bypassed."""
+    observed_handlers = []
+
+    class FakeOpener:
+        def open(self, req, timeout):
+            del timeout
+            raise HTTPError(req.full_url, 503, "fake", {}, None)
+
+    def spy(*handlers):
+        observed_handlers.extend(handlers)
+        return FakeOpener()
+
+    monkeypatch.setattr(api.request, "build_opener", spy)
+    client = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN")
+    with pytest.raises(api.HAAPIError, match="HTTP 503"):
+        client.config()
+    assert any(
+        isinstance(handler, api.request.ProxyHandler) and handler.proxies == {}
+        for handler in observed_handlers
+    )
+    assert any(isinstance(handler, api._NoRedirectHandler) for handler in observed_handlers)
+
+
+@pytest.mark.parametrize(
+    ("connected", "telemetry", "expected"),
+    [
+        ("on", "on", "ready"),
+        ("off", "on", "incomplete"),
+        ("on", "off", "incomplete"),
+        ("unknown", "on", "inconclusive"),
+        ("on", "unknown", "inconclusive"),
+        ("unavailable", "unavailable", "inconclusive"),
+    ],
+)
+def test_doctor_checks_connection_and_telemetry_independently(
+    monkeypatch, capsys, allpowers_registry, connected, telemetry, expected
+):
+    fake = FakeHA(allpowers_registry)
+    fake.state_overrides = {
+        "binary_sensor.my_name_connected": connected,
+        "binary_sensor.my_name_telemetry_available": telemetry,
+    }
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
+    result = cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+    assert result == (0 if expected == "ready" else 2)
+    output = capsys.readouterr().out
+    assert f"overall={expected}" in output
+    assert "DUMMY_TEST_TOKEN" not in output
+    assert "HIL qualification" in output or "no HIL qualification" in output
+
+
+def test_disabled_telemetry_sensor_is_unknown_not_hardware_failure(
+    monkeypatch, capsys, allpowers_registry
+):
+    entities, devices, entries = allpowers_registry
+    for entity in entities:
+        if entity.get("entity_id") == "binary_sensor.my_name_telemetry_available":
+            entity["disabled_by"] = "integration"
+    fake = FakeHA((entities, devices, entries))
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
+    assert cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"]) == 2
+    output = capsys.readouterr().out
+    assert "BLE=ready" in output
+    assert "telemetry=unknown" in output
+    assert "overall=inconclusive" in output
+    assert "disabled by default" in output
+
+
+def test_degraded_run_is_still_recorded_with_preflight_result(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = FakeHA(allpowers_registry)
+    fake.state_overrides["binary_sensor.my_name_connected"] = "off"
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
+    args = make_args(
+        "run", "--ha-url", "https://example.test", "--non-interactive",
+        "--output-root", str(tmp_path),
+    )
+    assert cli.execute(args) == 0
+    path = next(tmp_path.iterdir()) / "session.json"
+    session = json.loads(path.read_text())
+    assert session["preflight"]["overall"] == "incomplete"
+    assert session["preflight"]["checks"]["connected"] == "incomplete"
+    assert session["qualification_status"] == "inconclusive"
+    assert session["route"]["observed"]["value"] is None
+
+
+def test_bluetooth_scanner_subscription_collects_only_aggregate_counts(monkeypatch):
+    """HA 2026.10.4 sends a WS result followed by a scanner add event."""
+    sent = []
+    replies = [
+        {"type": "auth_required"},
+        {"type": "auth_ok"},
+        {"id": 1, "type": "result", "success": True, "result": None},
+        {
+            "id": 1, "type": "event", "event": {
+                "add": [
+                    {
+                        "source": "AA:BB:CC:DD:EE:FF", "name": "Home secret adapter",
+                        "adapter": "hci0", "connectable": False,
+                        "scanner_type": "uart",
+                    },
+                    {
+                        "source": "AB:12:23:34:45:56", "name": "Private ESPHome name",
+                        "adapter": "secret-proxy", "connectable": True,
+                        "scanner_type": "remote",
+                    },
+                ]
+            }
+        },
+    ]
+
+    class FakeWS:
+        def __init__(self):
+            self.answers = iter(replies)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def recv(self, timeout):
+            del timeout
+            return json.dumps(next(self.answers))
+
+        def send(self, value):
+            sent.append(json.loads(value))
+
+    websocket_module = ModuleType("websockets")
+    websocket_module.__path__ = []
+    exception_module = ModuleType("websockets.exceptions")
+    exception_module.WebSocketException = type("WebSocketException", (Exception,), {})
+    sync_module = ModuleType("websockets.sync")
+    sync_module.__path__ = []
+    sync_client = ModuleType("websockets.sync.client")
+    sync_client.connect = lambda *args, **kwargs: FakeWS()
+    for name, module in (
+        ("websockets", websocket_module),
+        ("websockets.exceptions", exception_module),
+        ("websockets.sync", sync_module),
+        ("websockets.sync.client", sync_client),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    result = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN").scanner_candidates()
+    assert result == {
+        "total_scanners": 2,
+        "connectable_scanners": 1,
+        "remote_scanners": 1,
+        "connectable_remote_scanners": 1,
+    }
+    assert sent[-1] == {"id": 1, "type": "bluetooth/subscribe_scanner_details"}
+    text = json.dumps(result)
+    assert "AA:BB" not in text
+    assert "secret-proxy" not in text
+    assert "Private ESPHome" not in text
+
+
+def test_bluetooth_scanner_denied_or_no_data_remains_unknown(monkeypatch):
+    client = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN")
+
+    def denied(*args, **kwargs):
+        raise api.HAAPIError("Home Assistant WebSocket command rejected (unauthorized)")
+
+    monkeypatch.setattr(client, "websocket", denied)
+    assert client.scanner_candidates() is None
+    monkeypatch.setattr(client, "websocket", lambda *args, **kwargs: [None])
+    assert client.scanner_candidates() is None
+    monkeypatch.setattr(
+        client, "websocket", lambda *args, **kwargs: [{"add": [{"name": "private"}]}]
+    )
+    assert client.scanner_candidates() is None
+
+
+def test_scanner_inventory_environment_is_privacy_safe(monkeypatch, allpowers_registry, tmp_path):
+    fake = FakeHA(allpowers_registry)
+    fake.scanners = {
+        "total_scanners": 2,
+        "connectable_scanners": 1,
+        "remote_scanners": 1,
+        "connectable_remote_scanners": 1,
+    }
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "DUMMY_TEST_TOKEN")
+    assert cli.execute(make_args(
+        "run", "--ha-url", "https://example.test", "--non-interactive",
+        "--output-root", str(tmp_path),
+    )) == 0
+    env = json.loads((next(tmp_path.iterdir()) / "environment.json").read_text())
+    scanners = env["home_assistant"]["bluetooth_scanner_candidates"]
+    assert scanners["value"] == fake.scanners
+    assert scanners["source"] == "ha_ws_bluetooth_subscribe_scanner_details_admin"
+    assert env["home_assistant"]["esphome_active_proxy"]["value"] is None
+    assert env["integration"]["qualification_allowed"] is False
+
+
+def test_scanner_subscription_no_event_is_bounded_and_unknown(monkeypatch):
+    """No scanners can produce a subscription ack without an initial event."""
+    replies = iter([
+        {"type": "auth_required"},
+        {"type": "auth_ok"},
+        {"id": 1, "type": "result", "success": True, "result": None},
+    ])
+
+    class FakeWS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def recv(self, timeout):
+            try:
+                return json.dumps(next(replies))
+            except StopIteration as ex:
+                assert timeout <= 1.5
+                raise TimeoutError("no scanner event") from ex
+
+        def send(self, message):
+            pass
+
+    websocket_package = ModuleType("websockets")
+    websocket_package.__path__ = []
+    exception_module = ModuleType("websockets.exceptions")
+    exception_module.WebSocketException = type("WebSocketException", (Exception,), {})
+    sync_module = ModuleType("websockets.sync")
+    sync_module.__path__ = []
+    sync_client = ModuleType("websockets.sync.client")
+    sync_client.connect = lambda url, **kwargs: FakeWS()
+    for name, module in (
+        ("websockets", websocket_package),
+        ("websockets.exceptions", exception_module),
+        ("websockets.sync", sync_module),
+        ("websockets.sync.client", sync_client),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    ha = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN")
+    assert ha.scanner_candidates() is None
+
+
+def test_scanner_snapshot_rejects_non_scanner_subscriptions():
+    ha = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN")
+    with pytest.raises(api.HAAPIError, match="Unsupported scanner"):
+        ha.websocket([{"type": "call_service"}], scanner_snapshot=True)

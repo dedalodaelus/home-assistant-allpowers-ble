@@ -88,7 +88,12 @@ class HAClient:
             },
             method="GET",
         )
-        opener = request.build_opener(_NoRedirectHandler())
+        # Do not inherit http_proxy/https_proxy/ALL_PROXY from the runner's
+        # environment. Those variables can route a loopback HTTP request
+        # (including its Authorization header) to an unexpected proxy.
+        opener = request.build_opener(
+            request.ProxyHandler({}), _NoRedirectHandler()
+        )
         try:
             with opener.open(req, timeout=API_TIMEOUT) as response:
                 if response.status != 200:
@@ -126,8 +131,18 @@ class HAClient:
             raise
         return _json_object(data, "entity state")
 
-    def websocket(self, commands: list[dict[str, Any]]) -> list[Any]:
-        """Send fixed read-only commands over one authenticated WS connection."""
+    def websocket(
+        self, commands: list[dict[str, Any]], *, scanner_snapshot: bool = False
+    ) -> list[Any]:
+        """Send read-only WS commands, optionally capturing one scanner event.
+
+        The scanner subscription is short-lived and admin-restricted by HA.
+        Closing the socket unregisters it. Never retain its raw identifiers.
+        """
+        if scanner_snapshot and commands != [
+            {"type": "bluetooth/subscribe_scanner_details"}
+        ]:
+            raise HAAPIError("Unsupported scanner subscription request")
         try:
             from websockets.exceptions import WebSocketException
             from websockets.sync.client import connect
@@ -185,6 +200,20 @@ class HAClient:
                             f"Home Assistant WebSocket command rejected ({safe_code})"
                         )
                     results.append(reply.get("result"))
+                if scanner_snapshot:
+                    # HA sends the subscription acknowledgement followed by an
+                    # initial scanner-details event, but sends no event when
+                    # no scanners exist. Never wait indefinitely for it.
+                    try:
+                        event = _json_object(
+                            _load_json(ws.recv(timeout=1.5), "scanner event"),
+                            "scanner event",
+                        )
+                    except TimeoutError:
+                        return [None]
+                    if event.get("type") != "event" or event.get("id") != 1:
+                        raise HAAPIError("Unexpected Bluetooth scanner event")
+                    return [event.get("event")]
                 return results
         except HAAPIError:
             raise
@@ -192,6 +221,46 @@ class HAClient:
             raise HAAPIError(
                 "Home Assistant WebSocket connection failed or timed out"
             ) from ex
+
+    def scanner_candidates(self) -> dict[str, int] | None:
+        """Read an optional, privacy-safe scanner inventory (not route proof).
+
+        Home Assistant 2026.10.4 exposes an admin-only scanner subscription.
+        Its raw records include BLE addresses and device names; return counts
+        only. A remote, connectable scanner is *not* proof of an ESPHome proxy,
+        nor evidence of which connection route was used for our device.
+        """
+        try:
+            events = self.websocket(
+                [{"type": "bluetooth/subscribe_scanner_details"}],
+                scanner_snapshot=True,
+            )
+        except HAAPIError:
+            # Missing integration / permission / unsupported command is not a
+            # failure of the ordinary, unprivileged HA preflight.
+            return None
+        event = events[0] if events else None
+        if not isinstance(event, dict) or not isinstance(event.get("add"), list):
+            return None
+        records = event["add"]
+        if len(records) > 128 or any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("connectable"), bool)
+            or not isinstance(row.get("scanner_type"), str)
+            for row in records
+        ):
+            return None
+        return {
+            "total_scanners": len(records),
+            "connectable_scanners": sum(bool(row["connectable"]) for row in records),
+            "remote_scanners": sum(
+                row["scanner_type"] == "remote" for row in records
+            ),
+            "connectable_remote_scanners": sum(
+                row["scanner_type"] == "remote" and row["connectable"]
+                for row in records
+            ),
+        }
 
     def discovery(
         self,

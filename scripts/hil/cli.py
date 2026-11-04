@@ -16,6 +16,7 @@ from .environment import (
     build_environment,
     build_session,
     check_ha_version,
+    evaluate_preflight,
     new_run_id,
     read_only_sample,
 )
@@ -102,7 +103,11 @@ def execute(args: argparse.Namespace) -> int:
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)
-    environment = build_environment(config, manifest)
+    # Optional admin-only HA Bluetooth scanner inventory. Its raw scanner
+    # identifiers and BLE addresses never leave HAClient; only counts do.
+    get_scanners = getattr(api, "scanner_candidates", None)
+    candidates = get_scanners() if callable(get_scanners) else None
+    environment = build_environment(config, manifest, candidates)
     print("Home Assistant:", environment["home_assistant"]["version"]["value"])
     installed = environment["integration"]["installed_manifest_version"]["value"]
     print("ALLPOWERS manifest version:", installed or "unknown")
@@ -124,18 +129,32 @@ def execute(args: argparse.Namespace) -> int:
             if args.device
             else devices
         )
-        if any(device.entry_state != "loaded" for device in inspected):
+        assessments = []
+        for device in inspected:
+            # Read actual binary sensor states; a loaded config entry alone
+            # cannot prove a station is connected or telemetry is fresh.
+            assessment = evaluate_preflight(device, read_only_sample(api, device))
+            assessments.append(assessment)
+            checks = assessment["checks"]
             print(
-                "Preflight incomplete: integration entry not loaded or state "
-                "unverified; check Settings > Devices & services. "
-                "Registry discovery remains available."
+                "Readiness: integration={entry_loaded}; BLE={connected}; "
+                "telemetry={telemetry_fresh}; overall={overall}".format(
+                    **checks, overall=assessment["overall"]
+                )
             )
-            return 2
+        if all(item["overall"] == "ready" for item in assessments):
+            print(
+                "Preflight ready at the observed HA snapshot; "
+                "no HIL qualification granted"
+            )
+            return 0
         print(
-            "Preflight complete: integration loaded; read-only checks only; "
-            "no HIL qualification granted"
+            "Preflight inconclusive or incomplete: check integration setup, "
+            "BLE connectivity, and diagnostic telemetry_available (disabled "
+            "by default). Read-only run remains available; "
+            "no HIL qualification granted."
         )
-        return 0
+        return 2
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
     run_id = new_run_id()
@@ -152,6 +171,7 @@ def execute(args: argparse.Namespace) -> int:
         args.output_root, f"{timestamp}_{run_id}", environment, session
     )
     print("Read-only preflight saved to:", output_dir)
+    print("Read-only readiness:", session["preflight"]["overall"])
     print(
         "Qualification: inconclusive (no GATT trace, physical proof or verified route)"
     )
