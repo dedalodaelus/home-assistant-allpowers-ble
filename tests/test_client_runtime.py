@@ -2703,7 +2703,10 @@ async def test_cancelled_registered_setup_serializes_status_writes_and_disconnec
     setup.cancel()
     try:
         assert fake.write_calls == 1
-        assert not request.done()
+        if not request_queued_first:
+            # A request queued before cancellation may already have failed,
+            # whereas one queued during teardown must wait for its lock.
+            assert not request.done()
         assert client._active_session_generation is None
     finally:
         allow_disconnect.set()
