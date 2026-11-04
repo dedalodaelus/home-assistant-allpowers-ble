@@ -209,7 +209,7 @@ async def test_probe_uses_fff0_characteristic_instances_with_duplicate_uuids(
 async def test_runtime_rejects_misplaced_characteristics_before_io(
     monkeypatch: pytest.MonkeyPatch, members: tuple[str, ...]
 ) -> None:
-    fake = FakeClient()
+    fake = RecordingRuntimeClient()
     fake.services = GattServices(members)
     client = make_client()
 
@@ -221,6 +221,8 @@ async def test_runtime_rejects_misplaced_characteristics_before_io(
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
     with pytest.raises(UnsupportedDeviceError, match="characteristics"):
         await client._connect_once()
+    assert fake.notify_target is None
+    assert fake.write_target is None
     assert fake.notification_callback is None
     assert fake.writes == []
     assert fake.disconnect_calls == 1
@@ -231,10 +233,12 @@ async def test_runtime_rejects_misplaced_characteristics_before_io(
 async def test_probe_rejects_misplaced_characteristics_before_io(
     monkeypatch: pytest.MonkeyPatch, members: tuple[str, ...]
 ) -> None:
-    fake = ProbeClientWithStopNotify([])
+    fake = RecordingProbeClient([])
     fake.services = GattServices(members)
     with pytest.raises(ProbeGattValidationError, match="characteristics"):
         await _probe_for_cleanup_test(monkeypatch, fake, timeout=0.1)
+    assert fake.notify_target is None
+    assert fake.write_target is None
     assert fake.notification_callback is None
     assert fake.writes == []
     assert fake.stop_notify_calls == 0
