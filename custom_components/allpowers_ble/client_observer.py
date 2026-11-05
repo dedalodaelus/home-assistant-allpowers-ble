@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 from typing import Any, Protocol
 
@@ -115,12 +116,12 @@ class ObserverSlot:
         """An observer failure must never alter a BLE decision."""
         try:
             getattr(self.target, method)(*args, **kwargs)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             return
 
     def transaction_id(self) -> str | None:
         """Missing observer correlation cannot interrupt an actual write."""
         try:
             return self.target.new_transaction_id()
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             return None
