@@ -3,24 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 
-class PendingTransactionView(Protocol):
-    """Value-only read access to existing production transaction metadata."""
+@dataclass(frozen=True, slots=True)
+class TransactionObservation:
+    """Immutable, minimal transport outcome: no mutable production targets."""
 
-    @property
-    def session_generation(self) -> int: ...
-
-    @property
-    def observation_id(self) -> str | None: ...
-
-    @property
-    def phase(self) -> Enum: ...
-
-    @property
-    def confirm_deadline_monotonic(self) -> float: ...
+    generation: int
+    transaction_id: str | None
+    kind: Literal["output", "settings"]
+    phase: str
+    deadline: float
 
 
 class ClientObserver(Protocol):
@@ -28,14 +23,14 @@ class ClientObserver(Protocol):
 
     def attach_runtime(
         self,
-        output: PendingTransactionView | None,
-        settings: PendingTransactionView | None,
+        output: TransactionObservation | None,
+        settings: TransactionObservation | None,
     ) -> None: ...
 
     def finalize_runtime(
         self,
-        output: PendingTransactionView | None,
-        settings: PendingTransactionView | None,
+        output: TransactionObservation | None,
+        settings: TransactionObservation | None,
         *,
         now: float,
         disconnected: bool,
@@ -44,6 +39,10 @@ class ClientObserver(Protocol):
     def stop_runtime(self, generation: int | None) -> None: ...
 
     def new_transaction_id(self) -> str: ...
+
+    def observation_failed(self, method: str) -> None:
+        """Mark observer evidence incomplete without exposing exception details."""
+        ...
 
     def connection(
         self,
@@ -63,13 +62,13 @@ class ClientObserver(Protocol):
     def transaction_runtime(
         self,
         event: str,
-        transaction: PendingTransactionView,
+        transaction: TransactionObservation,
         *,
         reason: str | None = None,
     ) -> None: ...
 
     def notification_received(
-        self, generation: int | None, data: bytearray
+        self, generation: int | None, data: bytes
     ) -> None: ...
 
     def notification_decoded(
@@ -112,16 +111,28 @@ class ObserverSlot:
     def __init__(self, target: ClientObserver) -> None:
         self.target = target
 
+    def _observation_failed(self, method: str) -> None:
+        """Best-effort failure accounting; never call via emit or recurse."""
+        try:
+            self.target.observation_failed(method)
+        except Exception, asyncio.CancelledError:
+            pass
+
     def emit(self, method: str, /, *args: Any, **kwargs: Any) -> None:
         """An observer failure must never alter a BLE decision."""
         try:
             getattr(self.target, method)(*args, **kwargs)
         except Exception, asyncio.CancelledError:
-            return
+            self._observation_failed(method)
 
     def transaction_id(self) -> str | None:
-        """Missing observer correlation cannot interrupt an actual write."""
+        """Invalid or unavailable observer correlation cannot interrupt a write."""
         try:
-            return self.target.new_transaction_id()
+            value = self.target.new_transaction_id()
         except Exception, asyncio.CancelledError:
+            self._observation_failed("new_transaction_id")
             return None
+        if not isinstance(value, str) or not value.strip():
+            self._observation_failed("new_transaction_id")
+            return None
+        return value
