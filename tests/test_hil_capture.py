@@ -2582,3 +2582,5 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
     plain._disconnect_reason_category = "manual"
     await plain._disconnect_client()
     assert plain.snapshot().statistics.disconnects == 1
+    clear_entry_capture(hass, "entry")
+    assert "allpowers_ble_hil_capture" not in hass.data
