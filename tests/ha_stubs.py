@@ -684,6 +684,12 @@ def install() -> None:
     bluetooth.async_request_active_scan = _async_request_active_scan
     components.bluetooth = bluetooth
 
+    websocket_api = ModuleType("homeassistant.components.websocket_api")
+    websocket_api.websocket_command = lambda schema: lambda fn: fn
+    websocket_api.async_response = lambda fn: fn
+    websocket_api.async_register_command = lambda hass, fn: None
+    components.websocket_api = websocket_api
+
     bluetooth_match = ModuleType("homeassistant.components.bluetooth.match")
     bluetooth_match.ADDRESS = "address"
     bluetooth_match.BluetoothCallbackMatcher = BluetoothCallbackMatcher
@@ -855,6 +861,7 @@ def install() -> None:
             "homeassistant": homeassistant,
             "homeassistant.components": components,
             "homeassistant.components.bluetooth": bluetooth,
+            "homeassistant.components.websocket_api": websocket_api,
             "homeassistant.components.bluetooth.match": bluetooth_match,
             "homeassistant.components.diagnostics": diagnostics,
             "homeassistant.components.sensor": sensor,

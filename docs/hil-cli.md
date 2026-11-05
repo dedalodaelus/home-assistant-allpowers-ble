@@ -1,6 +1,6 @@
-# Guided HIL CLI: environment and read-only preflight
+# Guided HIL CLI: read-only preflight and opt-in private GATT trace
 
-This is the **first, non-destructive step** of the guided HIL work in [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227). It collects environment provenance and a snapshot of existing ALLPOWERS entities. It does **not** implement BLE packet capture, route proof, write scenarios or hardware qualification; these belong to #229-#232.
+The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. None of these commands provide independent RF capture, connected-backend route proof, active config-flow probe evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
 
 ## Installation
 
@@ -91,3 +91,137 @@ ruff check scripts tests
 ```
 
 See [the full qualification runbook](hil-qualification.md). Do not update `qualification_matrix.json` or mark any control/route passed based on the read-only preflight alone.
+
+
+## Experimental private GATT trace (#229)
+
+An administrator can record bounded runtime GATT activity without creating a second
+Bluetooth connection. Enable explicitly with:
+
+```bash
+HA_HIL_URL=https://homeassistant.example HA_HIL_TOKEN="$TOKEN" \\
+  python -m scripts.hil trace --non-interactive --duration 20
+```
+
+Use `--device 1` for multi-device installations and `--route auto` (or a
+requested route). Do not put the token in shell command arguments. The command
+creates `trace.json`, `events.jsonl` and `frames.jsonl` inside the private
+run directory (`0600`). Only a HA administrator can start, stop or fetch
+captures; capture access remains bound to that HA account and selected config
+entry. Only one capture is active at a time; active TTL is 120 seconds. Up to
+**four independently addressable sealed captures** remain privately retrievable
+for 30 seconds each, so starting the next scenario does not erase the previous
+one. A fifth sealed result evicts the oldest immediately (FIFO), after which
+the previous owner cannot fetch it. Entry unload/reload erases all captures
+for that entry. Each capture stores at most 256 events and 128 frames of at
+most 256 bytes. Dropped counters and expiry make evidence incomplete. Raw packet contents may contain private information: **never
+publish `frames.jsonl` without a separate protocol-aware privacy review.**
+
+The trace records *GATT API observations*, not independent RF data or
+physical output measurements. The observed route remains `unverified`, even
+when a proxy is available. Config-flow active probes and connection-time
+local/proxy attribution are not captured yet: do not treat these artifacts
+as physical HIL qualification.
+
+Trace acquisition defaults to 15 seconds and is limited to 30 seconds per
+scenario (`--scenario-id safe-label`). Run separate scenarios instead of
+silently extending a trace beyond the bounded buffer capacity. A stopped trace
+may be fetched again for up to 30 seconds if the stop response is lost.
+`complete` only certifies *capture integrity* (no dropped records), not
+hardware qualification or successful commands. Zero GATT frames, drops or
+missing final acknowledgement produce nonzero CLI exit status; the baseline
+`session.json` always remains inconclusive.
+
+Safe, non-identifying `model_profile_selected` and
+`notification_decoded.inferred_model_profile` events provide the selected
+compatibility profile and current session hardware revision when available;
+these are inferences from application telemetry, **not proof of physical BLE
+route or device authenticity**. Known characteristic UUIDs accompany GATT
+write/notify metadata; raw RX chunks remain unclassified until decoding.
+
+
+### Private trace v1 schema and interpretation
+
+`trace.json` describes the authenticated, entry-scoped capture. Required fields:
+`schema_version=1`, `capture_id`, `run_id`, `scenario_id`,
+`requested_route`, `observed_route="unverified"`,
+`capture_layer="gatt_api_not_rf"`, `private_raw_bytes=true`,
+`qualification_allowed=false`, `closed`, `expired`,
+`termination_reason`, `complete`, `has_gatt_frames`,
+`event_count`, `frame_count`, `dropped_events`, `dropped_frames`.
+The `events` and `frames` arrays are stored only in the private JSONL files,
+not copied into `trace.json`. Counters describe **stored**, not total observed,
+records. Missing or overwritten records contribute to drop counters.
+
+Each line in `events.jsonl` has `schema_version=1`, increasing positive
+`seq` (shared with any associated frame), UTC ISO-8601 `utc`,
+nonnegative monotonic `elapsed_ms`, `run_id`, `scenario_id`, a machine-readable
+`event`, `session_generation` (positive integer or null),
+`layer="gatt_api"`, `observed_route="unverified"`, and optional
+event-specific *safe* fields. The sequence may have gaps when events are
+dropped; when `dropped_events=0`, every frame `seq` must match one stored
+event with the same `event` name.
+
+Each line in `frames.jsonl` has those same common keys plus
+`direction=tx|rx`, lowercase even-length `hex` (maximum 256 bytes),
+`command_type=status_request|output_control|settings_control|unknown`, and
+`frame_validation=validated_tx|unvalidated_chunk`. `validated_tx` means
+known write framing/XOR, **not** successful GATT submission or a physical
+effect. RX chunks are always marked `unknown/unvalidated_chunk`; separate
+`notification_decoded` events expose valid decoded packet types. For TX
+`write_attempt/write_ok/write_error`, optional `transaction_id` joins to
+`transaction_accepted/submitted/confirmed/unresolved/timed_out/abandoned`
+events; standalone status requests carry null. Transaction submission means
+the GATT operation returned, not that the station applied a setting.
+
+`termination_reason` is `requested_stop` (normal WebSocket stop),
+`runtime_stopped` (integration shutdown/unload), or `expired` (active
+capture timed out). The original reason is immutable across retries.
+`complete=true` requires `requested_stop`, no expiry and zero drops,
+but **does not imply device confirmation or HIL qualification**. A silent,
+pending write at stop becomes `transaction_unresolved` before its deadline
+or `transaction_timed_out` after it, without modifying production state or
+sending another BLE command. On a genuine disconnect, the trace instead
+records `transaction_abandoned` or `transaction_timed_out` before
+`disconnected`. The `disconnected.reason_category` is a finite safe label
+(`manual`, `telemetry_watchdog`, `transport_watchdog`,
+`settings_recovery`, `unsolicited_disconnect`, `write_failure`), never a
+raw exception, address or caller-provided reason.
+
+The CLI rejects missing/malformed schemas, sequences, timestamps, lengths,
+private field mismatches and unjoined frames **before saving raw data**. A
+runtime-stopped or empty capture exits 2 even with no drops. A sealed capture
+remains accessible to its original admin account for up to 30 seconds, then
+in-memory private bytes are erased; entry unload erases immediately.
+
+
+### Cross-scenario causality and fail-closed collection
+
+Transaction IDs use an independent random namespace and a sequence counter,
+not the private capture-ID retrieval capability. They are distinct across
+overlapping or subsequent HIL runs. When a new run is
+attached to an already-connected entry with an outstanding output/settings
+transaction, `transaction_inherited` records the **original** correlation
+ID, transaction kind, generation, phase and `origin=preexisting`. It does
+not fabricate a corresponding TX frame or rerun the BLE write. If the write
+occurred while capture was disabled, the inherited ID stays null with
+`attribution=unattributed`: the new run must not claim to have initiated it.
+
+The trace emits `control_rejected` for pre-GATT safety guards with only a
+control kind (`output`, `settings`, `keepalive`) and a finite safe reason
+(`unsupported_capability`, `disconnected`, `stale_telemetry`,
+`semantic_validation`, `ambiguous_state`, `confirmation_pending` or
+`confirmation_timed_out`). Existing transaction-specific rejection events
+may additionally identify the pending transaction, but no false GATT TX row
+is created. Hardware status and addresses never appear in the guard reason.
+
+For every frame with a matching event, the CLI requires exact agreement
+on schema version, sequence, UTC timestamp, elapsed time, run/scenario,
+session generation, layer, observed route, event name and transaction ID
+(if present). Elapsed time must not go backwards; ties are valid. Orphan
+frames are accepted only when `dropped_events>0`, and such an incomplete
+trace exits with status 2. A malformed trace is rejected before writing
+private JSONL. If a private file write fails, the CLI attempts to delete
+**all** partial trace-only files and reports a sanitized failure; it leaves
+the already-created inconclusive `environment.json` and `session.json`
+untouched. Disk I/O errors cannot establish physical HIL qualification.

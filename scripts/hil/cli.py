@@ -5,7 +5,11 @@ from __future__ import annotations
 import argparse
 from datetime import UTC, datetime
 import getpass
+import json
+import math
 import os
+import re
+from time import sleep
 from pathlib import Path
 import sys
 from typing import Any
@@ -63,6 +67,13 @@ def make_parser() -> argparse.ArgumentParser:
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
     commands.add_parser("run", parents=[common], help="Capture a read-only snapshot")
+    trace_parser = commands.add_parser(
+        "trace",
+        parents=[common],
+        help="Private admin-only bounded runtime GATT capture",
+    )
+    trace_parser.add_argument("--duration", type=int, default=15)
+    trace_parser.add_argument("--scenario-id", default="manual-runtime")
     return parser
 
 
@@ -98,8 +109,181 @@ def _device_list(devices: list[Device]) -> None:
         )
 
 
+def _natural_int(value: Any) -> bool:
+    """Exclude booleans from integer fields and forbid negative counters."""
+    return type(value) is int and value >= 0
+
+
+def _check_trace_rows(
+    rows: list[dict[str, Any]],
+    *,
+    run_id: str,
+    scenario_id: str,
+    frame: bool,
+) -> dict[int, dict[str, Any]]:
+    """Validate ordered v1 event/frame rows without decoding private payloads."""
+    by_seq: dict[int, dict[str, Any]] = {}
+    previous = 0
+    previous_elapsed = 0.0
+    for row in rows:
+        seq = row.get("seq")
+        if (
+            not _natural_int(seq)
+            or seq <= previous
+            or row.get("schema_version") != 1
+            or row.get("run_id") != run_id
+            or row.get("scenario_id") != scenario_id
+            or row.get("layer") != "gatt_api"
+            or row.get("observed_route") != "unverified"
+            or not isinstance(row.get("event"), str)
+            or re.fullmatch(r"[a-z][a-z0-9_]*", row["event"]) is None
+        ):
+            raise HAAPIError("Malformed HIL trace event/frame identity or order")
+        utc_value = row.get("utc")
+        try:
+            when = datetime.fromisoformat(utc_value)
+        except (TypeError, ValueError) as ex:
+            raise HAAPIError("Malformed HIL trace timestamp") from ex
+        if when.utcoffset() is None or when.utcoffset().total_seconds() != 0:
+            raise HAAPIError("HIL trace timestamp must be UTC")
+        elapsed = row.get("elapsed_ms")
+        generation = row.get("session_generation")
+        if (
+            type(elapsed) not in (float, int)
+            or not math.isfinite(elapsed)
+            or elapsed < previous_elapsed
+            or (
+                generation is not None
+                and (not _natural_int(generation) or generation < 1)
+            )
+        ):
+            raise HAAPIError("Malformed HIL trace timing or session generation")
+        if frame:
+            direction = row.get("direction")
+            opcode = row.get("command_type")
+            validation = row.get("frame_validation")
+            encoded = row.get("hex")
+            if (
+                direction not in ("rx", "tx")
+                or opcode
+                not in (
+                    "status_request",
+                    "output_control",
+                    "settings_control",
+                    "unknown",
+                )
+                or validation not in ("validated_tx", "unvalidated_chunk")
+                or not isinstance(encoded, str)
+                or len(encoded) > 512
+                or len(encoded) % 2
+                or re.fullmatch(r"[0-9a-f]*", encoded) is None
+                or (
+                    direction == "rx"
+                    and (opcode != "unknown" or validation != "unvalidated_chunk")
+                )
+                or (
+                    validation == "validated_tx"
+                    and (direction != "tx" or opcode == "unknown")
+                )
+                or (
+                    direction == "tx"
+                    and opcode != "unknown"
+                    and validation != "validated_tx"
+                )
+            ):
+                raise HAAPIError("Malformed HIL GATT frame or validation")
+        previous = seq
+        previous_elapsed = elapsed
+        by_seq[seq] = row
+    return by_seq
+
+
+def _validate_trace_result(
+    result: Any,
+    *,
+    run_id: str,
+    scenario_id: str,
+    capture_id: str,
+    requested_route: str,
+) -> None:
+    """Fail closed on malformed private v1 evidence, before writing any raw files."""
+    if (
+        not isinstance(result, dict)
+        or result.get("schema_version") != 1
+        or result.get("run_id") != run_id
+        or result.get("scenario_id") != scenario_id
+        or result.get("capture_id") != capture_id
+        or result.get("requested_route") != requested_route
+        or result.get("qualification_allowed") is not False
+        or result.get("observed_route") != "unverified"
+        or result.get("capture_layer") != "gatt_api_not_rf"
+        or result.get("private_raw_bytes") is not True
+        or result.get("closed") is not True
+        or type(result.get("expired")) is not bool
+        or type(result.get("complete")) is not bool
+        or result.get("termination_reason")
+        not in ("requested_stop", "runtime_stopped", "expired")
+    ):
+        raise HAAPIError("Capture metadata mismatch or final stop not acknowledged")
+    for key in ("events", "frames"):
+        if not isinstance(result.get(key), list) or not all(
+            isinstance(row, dict) for row in result[key]
+        ):
+            raise HAAPIError("Invalid private HIL trace records")
+    for name in ("event_count", "frame_count", "dropped_events", "dropped_frames"):
+        if not _natural_int(result.get(name)):
+            raise HAAPIError("Invalid HIL trace count")
+    events = result["events"]
+    frames = result["frames"]
+    if (
+        result["event_count"] != len(events)
+        or result["frame_count"] != len(frames)
+        or result.get("has_gatt_frames") is not bool(frames)
+    ):
+        raise HAAPIError("Incomplete private HIL trace record count")
+    expected_complete = (
+        result["termination_reason"] == "requested_stop"
+        and not result["expired"]
+        and result["dropped_events"] == 0
+        and result["dropped_frames"] == 0
+    )
+    if result["complete"] is not expected_complete:
+        raise HAAPIError("Contradictory HIL capture integrity fields")
+    events_by_seq = _check_trace_rows(
+        events, run_id=run_id, scenario_id=scenario_id, frame=False
+    )
+    _check_trace_rows(frames, run_id=run_id, scenario_id=scenario_id, frame=True)
+    common_fields = (
+        "schema_version",
+        "seq",
+        "utc",
+        "elapsed_ms",
+        "run_id",
+        "scenario_id",
+        "event",
+        "session_generation",
+        "layer",
+        "observed_route",
+    )
+    for record in frames:
+        event = events_by_seq.get(record["seq"])
+        if event is None:
+            if result["dropped_events"] == 0:
+                raise HAAPIError("HIL frame is missing its corresponding event")
+            continue
+        if any(record[key] != event[key] for key in common_fields) or (
+            ("transaction_id" in record or "transaction_id" in event)
+            and (
+                "transaction_id" not in record
+                or "transaction_id" not in event
+                or record["transaction_id"] != event["transaction_id"]
+            )
+        ):
+            raise HAAPIError("HIL frame metadata differs from its matching event")
+
+
 def execute(args: argparse.Namespace) -> int:
-    """Execute only GET and read-only WebSocket commands."""
+    """Execute read-only preflight and explicitly requested private HIL capture."""
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)
@@ -157,6 +341,42 @@ def execute(args: argparse.Namespace) -> int:
         return 2
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
+    entry_id: str | None = None
+    if args.command == "trace":
+        if not 1 <= args.duration <= 30:
+            raise HAAPIError(
+                "Trace duration must be 1-30 seconds; split long scenarios"
+            )
+        if re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", args.scenario_id) is None:
+            raise HAAPIError("Scenario ID must be 1-80 safe characters")
+        _, registry_devices, _, entries = api.discovery()
+        if entries is None:
+            raise HAAPIError("Admin config entry registry is required for HIL trace")
+        matched = [
+            row
+            for row in registry_devices
+            if isinstance(row, dict) and row.get("id") == selected.device_id
+        ]
+        if len(matched) != 1:
+            raise HAAPIError("Selected HA device registry record is ambiguous")
+        allowed = {
+            row["entry_id"]
+            for row in entries
+            if isinstance(row, dict)
+            and row.get("domain") == "allpowers_ble"
+            and isinstance(row.get("entry_id"), str)
+            and row.get("state") == "loaded"
+        }
+        candidates = set()
+        value = matched[0].get("config_entry_id")
+        if isinstance(value, str) and value in allowed:
+            candidates.add(value)
+        other = matched[0].get("config_entries")
+        if isinstance(other, list):
+            candidates.update(v for v in other if isinstance(v, str) and v in allowed)
+        if len(candidates) != 1:
+            raise HAAPIError("Cannot determine one loaded ALLPOWERS config entry")
+        entry_id = next(iter(candidates))
     run_id = new_run_id()
     sample = read_only_sample(api, selected)
     session = build_session(
@@ -170,6 +390,96 @@ def execute(args: argparse.Namespace) -> int:
     output_dir = write_run(
         args.output_root, f"{timestamp}_{run_id}", environment, session
     )
+    if args.command == "trace":
+        if entry_id is None:
+            raise HAAPIError("Missing HIL config entry")
+        start = api.websocket(
+            [
+                {
+                    "type": "allpowers_ble/hil/start",
+                    "entry_id": entry_id,
+                    "run_id": run_id,
+                    "scenario_id": args.scenario_id,
+                    "requested_route": args.route,
+                }
+            ]
+        )[0]
+        if (
+            not isinstance(start, dict)
+            or start.get("schema_version") != 1
+            or not isinstance(start.get("capture_id"), str)
+        ):
+            raise HAAPIError("Unexpected HIL capture start response")
+        capture_id = start["capture_id"]
+        print("Private GATT capture active; no new BLE connection is opened")
+        try:
+            sleep(args.duration)
+        finally:
+            stop_command = {
+                "type": "allpowers_ble/hil/stop",
+                "entry_id": entry_id,
+                "capture_id": capture_id,
+            }
+            try:
+                result = api.websocket([stop_command])[0]
+            except HAAPIError:
+                # A lost stop response must not strand sealed evidence in HA.
+                result = api.websocket(
+                    [
+                        {
+                            "type": "allpowers_ble/hil/fetch",
+                            "entry_id": entry_id,
+                            "capture_id": capture_id,
+                        }
+                    ]
+                )[0]
+        _validate_trace_result(
+            result,
+            run_id=run_id,
+            scenario_id=args.scenario_id,
+            capture_id=capture_id,
+            requested_route=args.route,
+        )
+        private_paths = (
+            output_dir / "events.jsonl",
+            output_dir / "frames.jsonl",
+            output_dir / "trace.json",
+        )
+        try:
+            for path, key in zip(private_paths[:2], ("events", "frames"), strict=True):
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    for record in result[key]:
+                        stream.write(json.dumps(record, sort_keys=True) + "\n")
+            metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in ("events", "frames")
+            }
+            fd = os.open(private_paths[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(metadata, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+        except (OSError, TypeError, ValueError) as ex:
+            for path in private_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise HAAPIError("Private HIL trace could not be saved") from ex
+        print("Private HIL trace saved to:", output_dir)
+        print(
+            "Capture completeness:",
+            "complete" if result.get("complete") else "incomplete",
+        )
+        print(f"GATT frames recorded: {result['frame_count']}")
+        print(
+            f"Dropped events / frames: {result.get('dropped_events')} / "
+            f"{result.get('dropped_frames')}"
+        )
+        print("Capture termination:", result["termination_reason"])
+        print("Observed connection route: unverified; HIL PASS not permitted")
+        return 0 if result["complete"] and result["frame_count"] else 2
     print("Read-only preflight saved to:", output_dir)
     print("Read-only readiness:", session["preflight"]["overall"])
     print(
