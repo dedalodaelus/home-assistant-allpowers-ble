@@ -26,7 +26,9 @@ class ClientObserver(Protocol):
     """A non-owning observer: callbacks cannot perform BLE decisions."""
 
     def attach_runtime(
-        self, output: PendingTransactionView | None, settings: PendingTransactionView | None
+        self,
+        output: PendingTransactionView | None,
+        settings: PendingTransactionView | None,
     ) -> None: ...
 
     def finalize_runtime(
@@ -58,7 +60,11 @@ class ClientObserver(Protocol):
     ) -> None: ...
 
     def transaction_runtime(
-        self, event: str, transaction: PendingTransactionView, *, reason: str | None = None
+        self,
+        event: str,
+        transaction: PendingTransactionView,
+        *,
+        reason: str | None = None,
     ) -> None: ...
 
     def notification_received(

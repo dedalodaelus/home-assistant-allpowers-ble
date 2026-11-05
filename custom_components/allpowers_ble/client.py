@@ -1012,7 +1012,8 @@ class AllpowersBLEClient:
             stage = "model_support"
             support = identify_model(self._device_identity)
             if self._observer is not None:
-                self._observer.emit("connection", 
+                self._observer.emit(
+                    "connection",
                     "model_profile_selected",
                     session_generation,
                     profile=support.profile,
@@ -1035,7 +1036,8 @@ class AllpowersBLEClient:
             )
         except BaseException as ex:
             if self._observer is not None:
-                self._observer.emit("connection", 
+                self._observer.emit(
+                    "connection",
                     "connect_failed",
                     session_generation,
                     stage=stage,
@@ -1102,7 +1104,8 @@ class AllpowersBLEClient:
                 self._wake_maintenance_loop()
         except BaseException as ex:
             if self._observer is not None:
-                self._observer.emit("connection", 
+                self._observer.emit(
+                    "connection",
                     "connect_failed",
                     session_generation,
                     stage="gatt_setup",
@@ -1201,7 +1204,12 @@ class AllpowersBLEClient:
 
             if was_connected:
                 if self._observer is not None:
-                    self._observer.emit("connection", "disconnected", old_generation, stage=cause)
+                    self._observer.emit(
+                        "connection",
+                        "disconnected",
+                        old_generation,
+                        stage=cause,
+                    )
                 self._last_disconnected_at = _utcnow()
                 self._statistics = replace(
                     self._statistics,
@@ -1313,7 +1321,9 @@ class AllpowersBLEClient:
         data: bytearray,
     ) -> None:
         if self._observer is not None:
-            self._observer.emit("notification_received", self._active_session_generation, data)
+            self._observer.emit(
+                "notification_received", self._active_session_generation, data
+            )
         del characteristic
         self._statistics = replace(
             self._statistics,
@@ -1507,7 +1517,8 @@ class AllpowersBLEClient:
                 self._observe_model_identity(packet.name.strip())
 
         if self._observer is not None:
-            self._observer.emit("notification_decoded", 
+            self._observer.emit(
+                "notification_decoded",
                 self._active_session_generation,
                 packet_types=tuple(type(packet).__name__ for packet in packets),
                 profile=self._runtime_model_support().profile,
@@ -1538,7 +1549,8 @@ class AllpowersBLEClient:
             or active_generation is None
         ):
             if self._observer is not None:
-                self._observer.emit("write", 
+                self._observer.emit(
+                    "write",
                     "write_rejected",
                     active_generation,
                     transaction_id=observation_id,
@@ -1547,7 +1559,8 @@ class AllpowersBLEClient:
             raise NotConnectedError("The ALLPOWERS device is not connected")
 
         if self._observer is not None:
-            self._observer.emit("write", 
+            self._observer.emit(
+                "write",
                 "write_attempt",
                 active_generation,
                 transaction_id=observation_id,
@@ -1568,12 +1581,14 @@ class AllpowersBLEClient:
             ):
                 raise NotConnectedError("The ALLPOWERS device session changed")
             if self._observer is not None:
-                self._observer.emit("write", 
+                self._observer.emit(
+                    "write",
                     "write_ok", active_generation, transaction_id=observation_id
                 )
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
             if self._observer is not None:
-                self._observer.emit("write", 
+                self._observer.emit(
+                    "write",
                     "write_error",
                     active_generation,
                     transaction_id=observation_id,
@@ -1592,7 +1607,8 @@ class AllpowersBLEClient:
             raise
         except (Exception, asyncio.CancelledError) as ex:
             if self._observer is not None:
-                self._observer.emit("write_unexpected_error", 
+                self._observer.emit(
+                    "write_unexpected_error",
                     active_generation,
                     transaction_id=observation_id,
                     error_type=type(ex).__name__,
