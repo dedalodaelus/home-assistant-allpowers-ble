@@ -213,6 +213,8 @@ def _check_v2_routes(
     observations = result.get("route_observations")
     if not isinstance(observations, list):
         raise HAAPIError("Missing HIL v2 route observations")
+    if len(observations) > 256:
+        raise HAAPIError("Too many HIL v2 route observations")
     routes: dict[int, dict[str, Any]] = {}
     previous_seq = 0
     previous_elapsed = 0.0

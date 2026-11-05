@@ -129,12 +129,28 @@ class Capture:
         """Retain one immutable connected-route proof per successful generation."""
         if not self.active():
             return
-        if generation in self.route_observations:
-            if (
-                self.route_observations[generation]["observed_route"]
-                != route.observed_route
-            ):
+        previous = self.route_observations.get(generation)
+        if previous is not None:
+            # A generation cannot change its scanner, backend or private source.
+            old_identity = (
+                previous["observed_route"],
+                previous["backend_kind"],
+                previous["evidence"],
+                previous.get("adapter_id"),
+                previous.get("proxy_id"),
+            )
+            new_identity = (
+                route.observed_route,
+                route.backend_kind,
+                route.evidence,
+                route.adapter_id,
+                route.proxy_id,
+            )
+            if old_identity != new_identity:
                 self.dropped_events += 1
+            return
+        if len(self.route_observations) >= MAX_EVENTS:
+            self.dropped_events += 1
             return
         item: dict[str, Any] = {
             "session_generation": generation,
@@ -154,7 +170,7 @@ class Capture:
             evidence=route.evidence,
         )
         row = self.events[-1] if self.events else None
-        if row is not None and row["seq"] == self.seq:
+        if isinstance(row, dict) and row["seq"] == self.seq:
             item.update({key: row[key] for key in ("seq", "utc", "elapsed_ms")})
         else:
             item["seq"] = self.seq

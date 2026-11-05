@@ -65,6 +65,9 @@ class ProxyClient(ESPHomeClient):
     def __init__(self, scanner, source):
         self._scanner = scanner
         self._source = source
+        # The upstream destructor accesses these after our synthetic setup.
+        self._cancel_connection_state = None
+        self._loop = SimpleNamespace(is_closed=lambda: True)
 
     @property
     def is_connected(self):

@@ -45,7 +45,7 @@ def _backend_types() -> tuple[
 ]:
     """Import optional backend types only when a connection is established."""
     from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
-    from habluetooth.scanner_bleak import HaScanner
+    from habluetooth.scanner_bleak import HaScanner  # pylint: disable=no-name-in-module
     from habluetooth.wrappers import HaBleakClientWrapper
 
     try:

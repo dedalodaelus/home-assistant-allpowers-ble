@@ -233,3 +233,24 @@ def test_route_observation_full_buffer_cannot_fabricate_complete_capture():
     assert capture.snapshot()["complete"] is False
     capture.erase()
     assert not capture.route_observations
+
+def test_connected_route_history_is_bounded_and_detects_private_source_changes():
+    """Do not grow metadata unbounded or silently replace a connected source."""
+    from custom_components.allpowers_ble.hil_trace import MAX_EVENTS
+
+    capture, tracer = _trace()
+    tracer.route_connected(1, LOCAL)
+    changed = ConnectedRoute(
+        "local_adapter", "bluez", "bluez_device_path", adapter_id="hci3"
+    )
+    tracer.route_connected(1, changed)
+    assert capture.dropped_events == 1
+    for generation in range(2, MAX_EVENTS + 1):
+        tracer.route_connected(generation, UNKNOWN)
+    assert len(capture.route_observations) == MAX_EVENTS
+    tracer.route_connected(MAX_EVENTS + 1, UNKNOWN)
+    assert len(capture.route_observations) == MAX_EVENTS
+    assert capture.dropped_events == 2
+    capture.stop()
+    assert capture.snapshot()["complete"] is False
+    capture.erase()

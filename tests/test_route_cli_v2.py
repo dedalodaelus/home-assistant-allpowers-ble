@@ -108,7 +108,7 @@ def test_v2_rejects_malformed_route_and_frame_evidence(change):
     elif change == "evidence":
         observation["evidence"] = "esphome_scanner_binding"
     elif change == "adapter":
-        observation["adapter_id"] = "hci9"
+        observation["adapter_id"] = "hciX"
     elif change == "proxy":
         observation["proxy_id"] = "private-proxy"
     elif change == "summary":
@@ -256,3 +256,18 @@ def test_v2_cli_roundtrip_private_files_never_public_ids(
             "frames.jsonl",
         ):
             assert "PRIVATE-PROXY-ID" not in (directory / name).read_text()
+
+def test_structurally_valid_other_hci_is_not_claimed_as_independent_proof():
+    """Only the connected backend, not the CLI, can verify hci1 vs hci9."""
+    result = route_capture()
+    result["route_observations"][0]["adapter_id"] = "hci9"
+    validate(result)
+    assert result["qualification_allowed"] is False
+
+
+def test_v2_rejects_excessively_many_route_observations():
+    """A malicious private response cannot force unbounded route metadata."""
+    result = route_capture()
+    result["route_observations"] *= 257
+    with pytest.raises(HAAPIError):
+        validate(result)
