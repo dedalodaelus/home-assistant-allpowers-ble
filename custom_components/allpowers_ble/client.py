@@ -530,10 +530,7 @@ class AllpowersBLEClient:
 
     def detach_observer(self, expected_observer: ClientObserver | None) -> None:
         """Late cleanup cannot remove a more recently attached observer."""
-        if (
-            self._observer is not None
-            and self._observer.target is expected_observer
-        ):
+        if self._observer is not None and self._observer.target is expected_observer:
             self._observer = None
 
     def finalize_observer(self, expected_observer: ClientObserver | None) -> None:

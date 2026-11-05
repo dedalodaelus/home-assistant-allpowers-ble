@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import FrozenInstanceError
 from unittest.mock import MagicMock
 
@@ -279,6 +280,11 @@ def test_generic_observer_slot_isolated_from_transport_failures() -> None:
     broken.new_transaction_id.side_effect = RuntimeError("allocation error")
     slot = ObserverSlot(broken)
     slot.emit("connection", "connected", 4)
+    broken.connection.side_effect = asyncio.CancelledError()
+    slot.emit("connection", "connected", 4)
+    broken.new_transaction_id.side_effect = asyncio.CancelledError()
+    assert slot.transaction_id() is None
+    broken.new_transaction_id.side_effect = RuntimeError("allocation error")
     assert slot.transaction_id() is None
     broken.new_transaction_id.side_effect = None
     broken.new_transaction_id.return_value = "tx-success"
