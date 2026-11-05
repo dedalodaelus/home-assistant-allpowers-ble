@@ -234,6 +234,7 @@ def test_route_observation_full_buffer_cannot_fabricate_complete_capture():
     capture.erase()
     assert not capture.route_observations
 
+
 def test_connected_route_history_is_bounded_and_detects_private_source_changes():
     """Do not grow metadata unbounded or silently replace a connected source."""
     from custom_components.allpowers_ble.hil_trace import MAX_EVENTS

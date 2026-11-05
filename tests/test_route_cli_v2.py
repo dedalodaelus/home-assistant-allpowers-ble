@@ -257,6 +257,7 @@ def test_v2_cli_roundtrip_private_files_never_public_ids(
         ):
             assert "PRIVATE-PROXY-ID" not in (directory / name).read_text()
 
+
 def test_structurally_valid_other_hci_is_not_claimed_as_independent_proof():
     """Only the connected backend, not the CLI, can verify hci1 vs hci9."""
     result = route_capture()
