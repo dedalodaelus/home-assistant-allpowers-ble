@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import builtins
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,6 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from custom_components.allpowers_ble import route_attribution as routes
+
+_ORIGINAL_BACKEND_TYPES = routes._backend_types
 
 
 class Wrapper:
@@ -92,12 +96,16 @@ def test_valid_active_proxy_requires_bound_scanner_and_backend():
     scanner = ESPHomeScanner()
     observed = routes.connected_route(Wrapper(ESPHomeClient(scanner), scanner))
     assert observed == routes.ConnectedRoute(
-        "active_proxy", "esphome", "esphome_scanner_binding",
+        "active_proxy",
+        "esphome",
+        "esphome_scanner_binding",
         proxy_id="proxy-private-id",
     )
 
 
-@pytest.mark.parametrize("reason", ["wrong-scanner", "wrong-source", "empty-source", "secret-source"])
+@pytest.mark.parametrize(
+    "reason", ["wrong-scanner", "wrong-source", "empty-source", "secret-source"]
+)
 def test_proxy_identity_spoofing_not_proven(reason):
     scanner = ESPHomeScanner()
     backend = ESPHomeClient(scanner)
@@ -159,5 +167,56 @@ def test_extractor_handles_faulty_attributes_and_optional_import_failure():
         def is_connected(self):
             raise RuntimeError("PRIVATE:DEVICE:MAC")
 
-    assert routes.connected_route(Wrapper(Bad(), scanner)).evidence == "inspection_failed"
+    assert (
+        routes.connected_route(Wrapper(Bad(), scanner)).evidence == "inspection_failed"
+    )
     assert "PRIVATE" not in repr(routes.connected_route(Wrapper(Bad(), scanner)))
+
+@pytest.mark.parametrize("missing_proxy", [True, False])
+def test_real_import_contract_has_optional_proxy_support(monkeypatch, missing_proxy):
+    """Cover late backend type imports and a missing optional ESPHome package."""
+    from types import SimpleNamespace
+
+    original = routes._backend_types.__wrapped__ if hasattr(
+        routes._backend_types, "__wrapped__"
+    ) else _ORIGINAL_BACKEND_TYPES
+
+    imports = {
+        "habluetooth.wrappers": SimpleNamespace(HaBleakClientWrapper=Wrapper),
+        "habluetooth.scanner_bleak": SimpleNamespace(HaScanner=Local),
+        "bleak.backends.bluezdbus.client": SimpleNamespace(
+            BleakClientBlueZDBus=BlueZ
+        ),
+        "bleak_esphome.backend.client": SimpleNamespace(
+            ESPHomeClient=ESPHomeClient
+        ),
+        "bleak_esphome.backend.scanner": SimpleNamespace(
+            ESPHomeScanner=ESPHomeScanner
+        ),
+    }
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name in imports:
+            if missing_proxy and name == "bleak_esphome.backend.client":
+                raise ImportError("optional proxy missing")
+            return imports[name]
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    classes = original()
+    assert classes[:3] == (Wrapper, Local, BlueZ)
+    assert classes[3:] == (
+        (None, None) if missing_proxy else (ESPHomeScanner, ESPHomeClient)
+    )
+
+
+def test_cancelled_backend_property_isolated_without_raw_data():
+    class CancelledBackend:
+        @property
+        def is_connected(self):
+            raise asyncio.CancelledError()
+
+    snapshot = routes.connected_route(Wrapper(CancelledBackend(), Local()))
+    assert snapshot.observed_route == "unverified"
+    assert snapshot.evidence == "inspection_failed"

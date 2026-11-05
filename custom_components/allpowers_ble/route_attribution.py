@@ -53,7 +53,13 @@ def _backend_types() -> tuple[
         from bleak_esphome.backend.scanner import ESPHomeScanner
     except ImportError:
         return HaBleakClientWrapper, HaScanner, BleakClientBlueZDBus, None, None
-    return HaBleakClientWrapper, HaScanner, BleakClientBlueZDBus, ESPHomeScanner, ESPHomeClient
+    return (
+        HaBleakClientWrapper,
+        HaScanner,
+        BleakClientBlueZDBus,
+        ESPHomeScanner,
+        ESPHomeClient,
+    )
 
 
 def connected_route(client: object) -> ConnectedRoute:
@@ -77,7 +83,10 @@ def connected_route(client: object) -> ConnectedRoute:
             if not isinstance(backend, bluez_type):
                 return ConnectedRoute(evidence="local_backend_mismatch")
             adapter = scanner.adapter
-            if not isinstance(adapter, str) or re.fullmatch(r"hci[0-9]+", adapter) is None:
+            if (
+                not isinstance(adapter, str)
+                or re.fullmatch(r"hci[0-9]+", adapter) is None
+            ):
                 return ConnectedRoute(evidence="bluez_path_mismatch")
             index = scanner.adapter_idx
             path = backend._device_path
@@ -108,12 +117,14 @@ def connected_route(client: object) -> ConnectedRoute:
             ):
                 return ConnectedRoute(evidence="esphome_scanner_mismatch")
             return ConnectedRoute(
-                "active_proxy", "esphome", "esphome_scanner_binding",
+                "active_proxy",
+                "esphome",
+                "esphome_scanner_binding",
                 proxy_id=source,
             )
 
         return ConnectedRoute(evidence="unsupported_backend")
-    except (Exception, asyncio.CancelledError):
+    except Exception, asyncio.CancelledError:
         # Property errors and cancellation cannot change the BLE lifecycle
         # or leak device paths, exceptions, or scanner identifiers.
         return ConnectedRoute(evidence="inspection_failed")

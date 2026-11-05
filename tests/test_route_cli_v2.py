@@ -12,12 +12,21 @@ from custom_components.allpowers_ble.protocol import encode_status_request
 from custom_components.allpowers_ble.route_attribution import ConnectedRoute
 from scripts.hil import cli
 from scripts.hil.api import HAAPIError
-from tests.test_hil_cli import TraceHA
+from tests.test_hil_cli import TraceHA, allpowers_registry as _registry_fixture
+
+
+@pytest.fixture
+def allpowers_registry():
+    """Reuse the existing CLI fixture for v2 route-proof roundtrips."""
+    return _registry_fixture.__wrapped__()
+
 
 
 LOCAL = ConnectedRoute("local_adapter", "bluez", "bluez_device_path", adapter_id="hci1")
 PROXY = ConnectedRoute(
-    "active_proxy", "esphome", "esphome_scanner_binding",
+    "active_proxy",
+    "esphome",
+    "esphome_scanner_binding",
     proxy_id="PRIVATE-PROXY-ID",
 )
 UNKNOWN = ConnectedRoute(evidence="no_ha_wrapper")
@@ -65,10 +74,24 @@ def test_v2_accepts_real_capture_with_correct_connected_proof(route):
 @pytest.mark.parametrize(
     "change",
     [
-        "generation", "duplicate", "route", "backend", "evidence",
-        "adapter", "proxy", "summary", "event_route", "frame_route",
-        "cross_gen", "missing_event", "future_seq", "old_seq",
-        "invalid_time", "timestamp", "private_key", "version_mismatch",
+        "generation",
+        "duplicate",
+        "route",
+        "backend",
+        "evidence",
+        "adapter",
+        "proxy",
+        "summary",
+        "event_route",
+        "frame_route",
+        "cross_gen",
+        "missing_event",
+        "future_seq",
+        "old_seq",
+        "invalid_time",
+        "timestamp",
+        "private_key",
+        "version_mismatch",
         "missing_observation",
     ],
 )
@@ -125,14 +148,18 @@ def test_v2_mixed_then_unknown_route_summary_and_original_frame_identity():
     capture.record("connect_attempt", session_generation=1)
     capture.observe_route(1, LOCAL)
     capture.record(
-        "write_attempt", frame=encode_status_request(),
-        direction="tx", session_generation=1,
+        "write_attempt",
+        frame=encode_status_request(),
+        direction="tx",
+        session_generation=1,
     )
     first = deepcopy(capture.frames[0])
     capture.observe_route(2, PROXY)
     capture.record(
-        "write_attempt", frame=encode_status_request(),
-        direction="tx", session_generation=2,
+        "write_attempt",
+        frame=encode_status_request(),
+        direction="tx",
+        session_generation=2,
     )
     capture.stop()
     result = capture.snapshot()
@@ -199,9 +226,16 @@ def test_v2_cli_roundtrip_private_files_never_public_ids(
     root = tmp_path / "results"
     code = cli.main(
         [
-            "trace", "--ha-url", "https://example.test", "--non-interactive",
-            "--duration", "1", "--route", "local_adapter",
-            "--output-root", str(root),
+            "trace",
+            "--ha-url",
+            "https://example.test",
+            "--non-interactive",
+            "--duration",
+            "1",
+            "--route",
+            "local_adapter",
+            "--output-root",
+            str(root),
         ]
     )
     assert code == (2 if invalid else 0)
@@ -216,5 +250,10 @@ def test_v2_cli_roundtrip_private_files_never_public_ids(
         assert private["requested_route"] == "local_adapter"
         assert private["route_observations"][0]["proxy_id"] == "PRIVATE-PROXY-ID"
         assert private["qualification_allowed"] is False
-        for name in ("environment.json", "session.json", "events.jsonl", "frames.jsonl"):
+        for name in (
+            "environment.json",
+            "session.json",
+            "events.jsonl",
+            "frames.jsonl",
+        ):
             assert "PRIVATE-PROXY-ID" not in (directory / name).read_text()
