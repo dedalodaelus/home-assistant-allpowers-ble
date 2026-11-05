@@ -7,6 +7,8 @@ connection, decides transaction outcomes, or changes runtime pending state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
 
 from .const import NOTIFY_UUID, WRITE_UUID
 from .hil_trace import Capture
@@ -23,6 +25,22 @@ class PendingTraceState:
     deadline: float
 
 
+class PendingTraceSource(Protocol):
+    """Read-only fields shared by the two production pending TX dataclasses."""
+
+    @property
+    def session_generation(self) -> int: ...
+
+    @property
+    def hil_transaction_id(self) -> str | None: ...
+
+    @property
+    def phase(self) -> Enum: ...
+
+    @property
+    def confirm_deadline_monotonic(self) -> float: ...
+
+
 class HilClientTracer:
     """Format and dispatch optional HIL records without performing BLE I/O."""
 
@@ -32,6 +50,59 @@ class HilClientTracer:
     def matches(self, expected: Capture) -> bool:
         """Protect a newer attachment from an earlier capture's cleanup."""
         return self.capture is expected
+
+    @staticmethod
+    def _snapshot(transaction: PendingTraceSource, kind: str) -> PendingTraceState:
+        """Convert production state into private immutable trace fields."""
+        return PendingTraceState(
+            generation=transaction.session_generation,
+            transaction_id=transaction.hil_transaction_id,
+            kind=kind,
+            phase=transaction.phase.name.lower(),
+            deadline=transaction.confirm_deadline_monotonic,
+        )
+
+    @classmethod
+    def _pending_snapshots(
+        cls,
+        output: PendingTraceSource | None,
+        settings: PendingTraceSource | None,
+    ) -> tuple[PendingTraceState, ...]:
+        """Bind output/settings meaning without client-side trace formatting."""
+        snapshots: list[PendingTraceState] = []
+        if output is not None:
+            snapshots.append(cls._snapshot(output, "output"))
+        if settings is not None:
+            snapshots.append(cls._snapshot(settings, "settings"))
+        return tuple(snapshots)
+
+    def attach_runtime(
+        self, output: PendingTraceSource | None, settings: PendingTraceSource | None
+    ) -> None:
+        """Attach to existing pending TX without changing its ID or phase."""
+        self.attach(self._pending_snapshots(output, settings))
+
+    def transaction_runtime(
+        self, event: str, transaction: PendingTraceSource, *, reason: str | None = None
+    ) -> None:
+        """Format a TX transition already determined by the BLE state machine."""
+        kind = "output" if hasattr(transaction, "target_dc") else "settings"
+        self.transaction(event, self._snapshot(transaction, kind), reason=reason)
+
+    def finalize_runtime(
+        self,
+        output: PendingTraceSource | None,
+        settings: PendingTraceSource | None,
+        *,
+        now: float,
+        disconnected: bool,
+    ) -> None:
+        """Read-only finalization shared by stop and BLE disconnect."""
+        self.finalize_pending(
+            self._pending_snapshots(output, settings),
+            now=now,
+            disconnected=disconnected,
+        )
 
     def attach(self, pending: tuple[PendingTraceState, ...]) -> None:
         """Record pre-existing TX identifiers without replaying their GATT writes."""
@@ -218,6 +289,31 @@ class HilClientTracer:
                 session_generation=generation,
                 transaction_id=transaction_id,
             )
+
+    def write_unexpected_error(
+        self,
+        generation: int | None,
+        *,
+        transaction_id: str | None,
+        error_type: str,
+        session_changed: bool,
+        cancelled: bool,
+    ) -> None:
+        """Assign finite error categories, without retaining the exception."""
+        reason = (
+            "session_changed"
+            if session_changed
+            else "cancelled"
+            if cancelled
+            else "unexpected_failure"
+        )
+        self.write(
+            "write_error",
+            generation,
+            transaction_id=transaction_id,
+            error_type=error_type,
+            reason_category=reason,
+        )
 
     def stop_runtime(self, generation: int | None) -> None:
         """Seal an interrupted runtime capture; never report a successful stop."""

@@ -32,7 +32,7 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
-from .hil_client import HilClientTracer, PendingTraceState
+from .hil_client import HilClientTracer
 from .model_support import (
     ModelSupport,
     canonical_model_identity,
@@ -522,59 +522,32 @@ class AllpowersBLEClient:
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
-    @property
-    def hil_capture(self) -> Capture | None:
-        """Read-only identity for scoped HIL capture management."""
-        return self._hil.capture if self._hil is not None else None
-
-    def _hil_pending_states(self) -> tuple[PendingTraceState, ...]:
-        """Flatten immutable transaction metadata only while a trace is active."""
-        states: list[PendingTraceState] = []
-        for transaction in (
-            self._pending_output_transaction,
-            self._pending_settings_transaction,
-        ):
-            if transaction is not None:
-                states.append(
-                    PendingTraceState(
-                        generation=transaction.session_generation,
-                        transaction_id=transaction.hil_transaction_id,
-                        kind=(
-                            "output"
-                            if isinstance(transaction, PendingOutputTransaction)
-                            else "settings"
-                        ),
-                        phase=transaction.phase.name.lower(),
-                        deadline=transaction.confirm_deadline_monotonic,
-                    )
-                )
-        return tuple(states)
-
     def attach_hil_capture(self, capture: Capture) -> None:
-        """Attach at the authenticated HIL boundary, preserving inherited IDs."""
-        self._hil = HilClientTracer(capture)
-        self._hil.attach(self._hil_pending_states())
+        """Attach the capture without replaying outstanding transactions."""
+        tracer = HilClientTracer(capture)
+        self._hil = tracer
+        tracer.attach_runtime(
+            self._pending_output_transaction, self._pending_settings_transaction
+        )
 
     def detach_hil_capture(self, expected_capture: Capture) -> None:
-        """Late cleanup must not detach a more recent capture."""
+        """An earlier capture cannot detach an unrelated, newer observer."""
         if self._hil is not None and self._hil.matches(expected_capture):
             self._hil = None
 
-    def finalize_hil_capture(self, expected_capture: Capture | None) -> None:
-        """Finalize only the capture still attached to this client."""
-        if (
-            expected_capture is not None
-            and self._hil is not None
-            and self._hil.matches(expected_capture)
-        ):
-            self._hil.finalize_pending(
-                self._hil_pending_states(),
+    def finalize_hil_capture(self, expected_capture: Capture) -> None:
+        """Finalize only the still-attached capture, without changing BLE state."""
+        tracer = self._hil
+        if tracer is not None and tracer.matches(expected_capture):
+            tracer.finalize_runtime(
+                self._pending_output_transaction,
+                self._pending_settings_transaction,
                 now=self._loop_time(),
                 disconnected=False,
             )
 
     def _hil_rejection(self, kind: str, reason: str) -> None:
-        """Thin control-guard boundary; the observer formats the record."""
+        """Emit one pre-write guard observation only when capture is armed."""
         if self._hil is not None:
             self._hil.control_rejection(self._active_session_generation, kind, reason)
 
@@ -585,27 +558,16 @@ class AllpowersBLEClient:
         *,
         reason: str | None = None,
     ) -> None:
-        """Pass a value-only view of a transaction decision to the observer."""
-        if self._hil is None:
-            return
-        state = PendingTraceState(
-            generation=transaction.session_generation,
-            transaction_id=transaction.hil_transaction_id,
-            kind=(
-                "output"
-                if isinstance(transaction, PendingOutputTransaction)
-                else "settings"
-            ),
-            phase=transaction.phase.name.lower(),
-            deadline=transaction.confirm_deadline_monotonic,
-        )
-        self._hil.transaction(event, state, reason=reason)
+        """Delegate trace-only transaction mapping to the observer."""
+        if self._hil is not None:
+            self._hil.transaction_runtime(event, transaction, reason=reason)
 
     def _hil_pending_report(self, *, disconnected: bool) -> None:
-        """Snapshot already-decided outcomes before production clears pending TX."""
+        """Report pending outcomes before normal BLE teardown clears them."""
         if self._hil is not None:
-            self._hil.finalize_pending(
-                self._hil_pending_states(),
+            self._hil.finalize_runtime(
+                self._pending_output_transaction,
+                self._pending_settings_transaction,
                 now=self._loop_time(),
                 disconnected=disconnected,
             )
@@ -1623,19 +1585,12 @@ class AllpowersBLEClient:
             raise
         except (Exception, asyncio.CancelledError) as ex:
             if self._hil is not None:
-                reason = (
-                    "session_changed"
-                    if isinstance(ex, NotConnectedError)
-                    else "cancelled"
-                    if isinstance(ex, asyncio.CancelledError)
-                    else "unexpected_failure"
-                )
-                self._hil.write(
-                    "write_error",
+                self._hil.write_unexpected_error(
                     active_generation,
                     transaction_id=hil_transaction_id,
                     error_type=type(ex).__name__,
-                    reason_category=reason,
+                    session_changed=isinstance(ex, NotConnectedError),
+                    cancelled=isinstance(ex, asyncio.CancelledError),
                 )
             raise
 
