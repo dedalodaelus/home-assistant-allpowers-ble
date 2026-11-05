@@ -302,12 +302,16 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         hil_transaction_id=None,
     )
     tracer.attach_runtime(output, setting)
-    assert [(row["transaction_kind"], row["transaction_id"]) for row in capture.events] == [
+    assert [
+        (row["transaction_kind"], row["transaction_id"]) for row in capture.events
+    ] == [
         ("output", "tx-old-1"),
         ("settings", None),
     ]
     tracer.transaction_runtime("transaction_submitted", output)
-    tracer.transaction_runtime("transaction_failed", setting, reason="gatt_write_failed")
+    tracer.transaction_runtime(
+        "transaction_failed", setting, reason="gatt_write_failed"
+    )
     assert [row["transaction_phase"] for row in capture.events[2:]] == [
         "sending",
         "awaiting_confirmation",
