@@ -1306,6 +1306,7 @@ class AllpowersBLEClient:
                 self._pending_model_identity_generation = None
         self._session_generation_counter += 1
         self._active_session_generation = self._session_generation_counter
+        self._connected_route = None
         self._disconnect_reason_category = None
         self._session_hardware_revision = None
         self._decoder = NotificationStreamDecoder()
