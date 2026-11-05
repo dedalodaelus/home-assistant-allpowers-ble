@@ -1540,3 +1540,48 @@ def test_trace_cli_with_observer_loss_fails_with_valid_gatt_frame(
     assert trace["dropped_events"] == 1
     assert trace["complete"] is False
     assert trace["qualification_allowed"] is False
+
+@pytest.mark.parametrize("command", ("doctor", "run", "trace"))
+def test_cli_route_text_distinguishes_preflight_and_connected_trace(
+    monkeypatch, tmp_path, capsys, allpowers_registry, command
+):
+    """Requested route is never proof; trace prints the actual v2 route."""
+    from tests.test_route_cli_v2 import V2TraceHA
+
+    fake = V2TraceHA(allpowers_registry) if command == "trace" else FakeHA(
+        allpowers_registry
+    )
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / command
+    args = [
+        command,
+        "--ha-url",
+        "https://example.test",
+        "--non-interactive",
+        "--route",
+        "local_adapter",
+        "--output-root",
+        str(output_root),
+    ]
+    if command == "trace":
+        args.extend(["--duration", "1"])
+    assert cli.main(args) == 0
+    output = capsys.readouterr().out
+    assert (
+        "Bluetooth route: not verified by preflight; "
+        "use 'trace' for connected-backend attribution"
+    ) in output
+    assert "no route instrumentation yet" not in output
+    if command == "trace":
+        assert "Observed connection route: active_proxy" in output
+        (directory,) = list(output_root.iterdir())
+        trace = json.loads((directory / "trace.json").read_text())
+        session = json.loads((directory / "session.json").read_text())
+        assert trace["schema_version"] == 2
+        assert trace["requested_route"] == session["route"]["requested"] == "local_adapter"
+        assert trace["observed_route"] == "active_proxy"
+        assert trace["qualification_allowed"] is False
+    else:
+        assert "Observed connection route:" not in output
