@@ -170,12 +170,8 @@ class Capture:
             evidence=route.evidence,
         )
         if self.events and self.events[-1]["seq"] == self.seq:
-            item.update(
-                {
-                    key: self.events[-1][key]
-                    for key in ("seq", "utc", "elapsed_ms")
-                }
-            )
+            last_row = self.events[-1]
+            item.update({key: last_row[key] for key in ("seq", "utc", "elapsed_ms")})
         else:
             item["seq"] = self.seq
             item["utc"] = datetime.now(UTC).isoformat()
