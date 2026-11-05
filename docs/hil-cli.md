@@ -1,6 +1,6 @@
 # Guided HIL CLI: read-only preflight and opt-in private GATT trace
 
-The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. None of these commands provide independent RF capture, connected-backend route proof, active config-flow probe evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
+The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. The private trace v2 identifies the established local BlueZ adapter or ESPHome active proxy only when the connected backend exposes sufficient evidence; otherwise its route is unverified. None of these commands provide independent RF capture, active config-flow probe evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
 
 ## Installation
 
@@ -34,7 +34,7 @@ A remote host and HA OS are also supported using the REST/WebSocket APIs. `netwo
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.
 - `--device 1`: select an indexed device (or a model name if unambiguous). If there is one device, selection is automatic. In non-interactive mode, multiple devices require an explicit selection.
-- `--route auto|local_adapter|active_proxy`: record the **requested** route. The **observed** route is always `unverified` at this stage, even if a proxy is connected.
+- `--route auto|local_adapter|active_proxy`: record the **requested** route. Runtime trace v2 determines the **observed** route from the connected backend, not from the requested route or available scanner advertisements.
 - `--output-root`: choose the output directory. The default is `./hil-results/`, ignored by Git.
 
 Each `run` creates a permission-restricted folder:
@@ -118,10 +118,7 @@ most 256 bytes. Dropped counters and expiry make evidence incomplete. Raw packet
 publish `frames.jsonl` without a separate protocol-aware privacy review.**
 
 The trace records *GATT API observations*, not independent RF data or
-physical output measurements. The observed route remains `unverified`, even
-when a proxy is available. Config-flow active probes and connection-time
-local/proxy attribution are not captured yet: do not treat these artifacts
-as physical HIL qualification.
+physical output measurements. A trace v2 route can be `local_adapter`, `active_proxy`, `mixed` or `unverified`, based exclusively on the actually connected backend. Config-flow active probes and independent RF/physical evidence are not available yet; these artifacts are not physical HIL qualification.
 
 Trace acquisition defaults to 15 seconds and is limited to 30 seconds per
 scenario (`--scenario-id safe-label`). Run separate scenarios instead of
@@ -140,7 +137,7 @@ route or device authenticity**. Known characteristic UUIDs accompany GATT
 write/notify metadata; raw RX chunks remain unclassified until decoding.
 
 
-### Private trace v1 schema and interpretation
+### Legacy private trace v1 schema and interpretation
 
 `trace.json` describes the authenticated, entry-scoped capture. Required fields:
 `schema_version=1`, `capture_id`, `run_id`, `scenario_id`,
@@ -225,3 +222,57 @@ private JSONL. If a private file write fails, the CLI attempts to delete
 **all** partial trace-only files and reports a sanitized failure; it leaves
 the already-created inconclusive `environment.json` and `session.json`
 untouched. Disk I/O errors cannot establish physical HIL qualification.
+
+
+### Connection-route private trace v2 (new runtime captures)
+
+New admin-armed runtime captures use **`schema_version=2`**. The CLI continues
+to validate legacy **v1** private evidence with `observed_route=unverified`;
+it does not reinterpret old v1 records as route proof. Event, frame and
+`trace.json` schema versions must match; a mismatched server response is
+rejected before private bytes are saved. The independent
+`environment.json`/`session.json` formats are unchanged.
+
+The private `trace.json` now contains `route_observations`, one record per
+successfully established connected generation. Each observation records a
+positive `session_generation`, the associated `route_observed` event `seq`,
+UTC `utc`, monotonic `elapsed_ms`, finite `observed_route`, `backend_kind`
+and `evidence`. The optional `adapter_id=hciN` or `proxy_id` is restricted
+to private `trace.json`. Proxy identifiers can identify the operator's
+network devices: do **not** publish raw trace files or full snapshots.
+
+A `local_adapter` proof requires a connected
+`HaBleakClientWrapper`, its actual `HaScanner`, a connected BlueZ backend,
+and exact agreement among the scanner's `hciN` adapter name, numeric index
+and backend's BlueZ device path. The path itself is **never stored**.
+An `active_proxy` proof requires that same connected HA wrapper, an actual
+`ESPHomeScanner` and connected `ESPHomeClient`, the **same scanner object**
+and an identical, nonempty proxy source. Advertisement provenance, RSSI,
+the requested `--route`, an unpatched Bleak client, or the mere existence
+of a remote scanner never establishes the route. Missing/version-changed
+backend internals are recorded as `unverified`, not guessed.
+
+The route in each event/frame is the route **known when that row was emitted**.
+Earlier rows remain `unverified`; reconnect/failover adds a new generation
+and never overwrites old frames. A homogeneous set of verified connected
+generations produces `local_adapter` or `active_proxy`. Distinct verified
+local and proxy generations yield `mixed`. **Any unverified connected
+generation forces the summary to `unverified`**; failed pre-connect attempts
+do not influence it. Attaching a capture to an already connected client
+records a read-only route snapshot with **zero additional BLE operations**.
+
+The CLI validates per-generation uniqueness, route/backend/evidence
+consistency, safe private-ID placement, UTC timing, ordering, association
+with the first `route_observed` sequence, every event/frame route at its
+original sequence, frame/event joins and the recomputed summary. Invalid
+or contradictory backend claims are rejected before writing `frames.jsonl`,
+`events.jsonl` or `trace.json`. The CLI never copies adapter/proxy IDs into
+`environment.json`, `session.json` or event/frame JSONL, and never prints
+them. A requested-local/observed-proxy mismatch remains visible in private
+metadata but does not authorize qualification.
+
+**`qualification_allowed=false` for every v1/v2 trace and every route**,
+even with `complete=true` or `mixed`. A connected backend is not independent
+RF evidence or proof that the station changed a physical output. The
+config-flow active-probe task and authorized hardware measurements on both
+routes remain separate work under #229.
