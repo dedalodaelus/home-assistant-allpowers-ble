@@ -19,6 +19,24 @@ from custom_components.allpowers_ble.hil_trace import (
 pytestmark = pytest.mark.homeassistant
 
 
+class _CaptureClient:
+    """Minimal identity-safe client protocol for WebSocket lifecycle tests."""
+
+    def __init__(self, generation):
+        self._active_session_generation = generation
+        self.hil_capture = None
+
+    def attach_hil_capture(self, capture):
+        self.hil_capture = capture
+
+    def detach_hil_capture(self, capture):
+        if self.hil_capture is capture:
+            self.hil_capture = None
+
+    def finalize_hil_capture(self, capture):
+        assert self.hil_capture is capture
+
+
 @pytest.mark.asyncio
 async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     hass: HomeAssistant,
@@ -27,7 +45,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
 ) -> None:
     """A real authenticated WS connection validates commands and serializes bytes."""
     await async_register(hass)
-    client = SimpleNamespace(_hil_trace=None, _active_session_generation=8)
+    client = _CaptureClient(8)
     entry = MockConfigEntry(domain="allpowers_ble", data={})
     entry.add_to_hass(hass)
     entry.runtime_data = SimpleNamespace(client=client)
@@ -50,15 +68,15 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     await ws.send_json_auto_id(request)
     denied = await ws.receive_json()
     assert denied["success"] is False
-    assert client._hil_trace is None
+    assert client.hil_capture is None
     hass_admin_user.groups = saved_groups
 
     await ws.send_json_auto_id(request)
     success = await ws.receive_json()
     assert success["success"] is True
     capture_id = success["result"]["capture_id"]
-    assert client._hil_trace is not None
-    client._hil_trace.record("write_attempt", direction="tx", frame=b"private")
+    assert client.hil_capture is not None
+    client.hil_capture.record("write_attempt", direction="tx", frame=b"private")
 
     await ws.send_json_auto_id(request)
     busy = await ws.receive_json()
@@ -96,7 +114,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     assert sealed["frames"][0]["hex"] == b"private".hex()
     assert sealed["observed_route"] == "unverified"
     assert sealed["qualification_allowed"] is False
-    assert client._hil_trace is None
+    assert client.hil_capture is None
 
     await ws.send_json_auto_id(lookup)
     retry = await ws.receive_json()
@@ -111,7 +129,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     await ws.send_json_auto_id({**request, "scenario_id": "real-ws-B"})
     second = await ws.receive_json()
     assert second["success"] is True
-    second_capture = client._hil_trace
+    second_capture = client.hil_capture
     assert second_capture is not None
     assert second_capture.capture_id != capture_id
     second_capture.record("notification_received", direction="rx", frame=b"B-secret")
@@ -119,7 +137,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     first_again = await ws.receive_json()
     assert first_again["success"] is True
     assert first_again["result"] == sealed
-    assert client._hil_trace is second_capture
+    assert client.hil_capture is second_capture
     await other_ws.send_json_auto_id(lookup)
     still_private = await other_ws.receive_json()
     assert still_private["success"] is False
@@ -129,7 +147,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     assert store.active is second_capture
     assert capture_id in store.sealed
     store.sealed[capture_id]._expiry_handle._callback()
-    assert client._hil_trace is second_capture
+    assert client.hil_capture is second_capture
     assert store.active is second_capture
     assert capture_id not in store.sealed
     assert KEY in hass.data
@@ -144,8 +162,8 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
 ) -> None:
     """An A timer must never remain attached or erase a newer B runtime."""
     await async_register(hass)
-    first_client = SimpleNamespace(_hil_trace=None, _active_session_generation=10)
-    second_client = SimpleNamespace(_hil_trace=None, _active_session_generation=11)
+    first_client = _CaptureClient(10)
+    second_client = _CaptureClient(11)
     first_entry = MockConfigEntry(domain="allpowers_ble", data={})
     second_entry = MockConfigEntry(domain="allpowers_ble", data={})
     first_entry.add_to_hass(hass)
@@ -164,7 +182,7 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
     await ws.send_json_auto_id(start)
     first_response = await ws.receive_json()
     assert first_response["success"]
-    first = first_client._hil_trace
+    first = first_client.hil_capture
     first.record("notification_received", direction="rx", frame=b"A-secret")
     first_timer = first._expiry_handle
     expiry_callback = first_timer._callback
@@ -175,7 +193,7 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
     )
     busy = await ws.receive_json()
     assert not busy["success"] and busy["error"]["code"] == "busy"
-    assert first_client._hil_trace is first and second_client._hil_trace is None
+    assert first_client.hil_capture is first and second_client.hil_capture is None
 
     first.started -= 121
     await ws.send_json_auto_id(
@@ -183,8 +201,8 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
     )
     second_response = await ws.receive_json()
     assert second_response["success"]
-    second = second_client._hil_trace
-    assert first_client._hil_trace is None
+    second = second_client.hil_capture
+    assert first_client.hil_capture is None
     assert second is not None and second is not first
     assert first_timer.cancelled() and first._expiry_handle is None
     assert first.events == [] and first.frames == []
@@ -193,7 +211,7 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
 
     # Even a forced late callback for A must not touch B.
     expiry_callback()
-    assert store.active is second and second_client._hil_trace is second
+    assert store.active is second and second_client.hil_capture is second
     await ws.send_json_auto_id(
         {
             "type": "allpowers_ble/hil/fetch",
@@ -204,5 +222,5 @@ async def test_hil_real_websocket_expired_other_entry_detaches_its_client(
     removed = await ws.receive_json()
     assert removed["success"] is False
     clear_entry_capture(hass, second_entry.entry_id)
-    assert second_client._hil_trace is None
+    assert second_client.hil_capture is None
     assert KEY not in hass.data
