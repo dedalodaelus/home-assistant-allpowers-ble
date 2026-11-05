@@ -6,25 +6,17 @@ connection, decides transaction outcomes, or changes runtime pending state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .client_observer import PendingTransactionView
+from .client_observer import TransactionObservation
 from .const import NOTIFY_UUID, WRITE_UUID
 
 if TYPE_CHECKING:
     from .hil_trace import Capture
 
 
-@dataclass(frozen=True, slots=True)
-class PendingTraceState:
-    """Immutable trace-only view of an outstanding production transaction."""
-
-    generation: int
-    transaction_id: str | None
-    kind: str
-    phase: str
-    deadline: float
+# Preserve the trace-only name for existing unit contracts.
+PendingTraceState = TransactionObservation
 
 
 class HilClientTracer:
@@ -37,66 +29,46 @@ class HilClientTracer:
         """Protect a newer attachment from an earlier capture's cleanup."""
         return self.capture is expected
 
-    @staticmethod
-    def _snapshot(transaction: PendingTransactionView, kind: str) -> PendingTraceState:
-        """Convert production state into private immutable trace fields."""
-        return PendingTraceState(
-            generation=transaction.session_generation,
-            transaction_id=transaction.observation_id,
-            kind=kind,
-            phase=transaction.phase.name.lower(),
-            deadline=transaction.confirm_deadline_monotonic,
-        )
-
-    @classmethod
-    def _pending_snapshots(
-        cls,
-        output: PendingTransactionView | None,
-        settings: PendingTransactionView | None,
-    ) -> tuple[PendingTraceState, ...]:
-        """Bind output/settings meaning without client-side trace formatting."""
-        snapshots: list[PendingTraceState] = []
-        if output is not None:
-            snapshots.append(cls._snapshot(output, "output"))
-        if settings is not None:
-            snapshots.append(cls._snapshot(settings, "settings"))
-        return tuple(snapshots)
-
     def attach_runtime(
         self,
-        output: PendingTransactionView | None,
-        settings: PendingTransactionView | None,
+        output: TransactionObservation | None,
+        settings: TransactionObservation | None,
     ) -> None:
-        """Attach to existing pending TX without changing its ID or phase."""
-        self.attach(self._pending_snapshots(output, settings))
+        """Register outstanding immutable snapshots without changing BLE state."""
+        self.attach(tuple(tx for tx in (output, settings) if tx is not None))
 
     def transaction_runtime(
         self,
         event: str,
-        transaction: PendingTransactionView,
+        transaction: TransactionObservation,
         *,
         reason: str | None = None,
     ) -> None:
-        """Format a TX transition already determined by the BLE state machine."""
-        kind = "output" if hasattr(transaction, "target_dc") else "settings"
-        self.transaction(event, self._snapshot(transaction, kind), reason=reason)
+        """Record an already-decided transition from value-only fields."""
+        self.transaction(event, transaction, reason=reason)
 
     def finalize_runtime(
         self,
-        output: PendingTransactionView | None,
-        settings: PendingTransactionView | None,
+        output: TransactionObservation | None,
+        settings: TransactionObservation | None,
         *,
         now: float,
         disconnected: bool,
     ) -> None:
-        """Read-only finalization shared by stop and BLE disconnect."""
+        """Report already-decided pending outcomes without touching BLE state."""
         self.finalize_pending(
-            self._pending_snapshots(output, settings),
+            tuple(tx for tx in (output, settings) if tx is not None),
             now=now,
             disconnected=disconnected,
         )
 
-    def attach(self, pending: tuple[PendingTraceState, ...]) -> None:
+    def observation_failed(self, method: str) -> None:
+        """Record loss of evidence without raw data, error text or recursion."""
+        del method
+        if not self.capture.closed:
+            self.capture.dropped_events += 1
+
+    def attach(self, pending: tuple[TransactionObservation, ...]) -> None:
         """Record pre-existing TX identifiers without replaying their GATT writes."""
         for transaction in pending:
             if transaction.phase == "confirmed":
@@ -163,7 +135,7 @@ class HilClientTracer:
         )
 
     def transaction(
-        self, event: str, state: PendingTraceState, *, reason: str | None = None
+        self, event: str, state: TransactionObservation, *, reason: str | None = None
     ) -> None:
         """Report an already-decided transaction transition."""
         self.capture.record(
@@ -177,7 +149,7 @@ class HilClientTracer:
 
     def finalize_pending(
         self,
-        pending: tuple[PendingTraceState, ...],
+        pending: tuple[TransactionObservation, ...],
         *,
         now: float,
         disconnected: bool,
@@ -203,7 +175,7 @@ class HilClientTracer:
             )
             self.transaction(event, transaction, reason=reason)
 
-    def notification_received(self, generation: int | None, data: bytearray) -> None:
+    def notification_received(self, generation: int | None, data: bytes) -> None:
         """Retain raw RX solely in the bounded private capture."""
         self.capture.record(
             "notification_received",
