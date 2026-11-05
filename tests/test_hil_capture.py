@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from custom_components.allpowers_ble.hil_client import HilClientTracer
 from custom_components.allpowers_ble.hil_trace import (
     Capture,
     CaptureStore,
@@ -25,29 +26,58 @@ from custom_components.allpowers_ble.hil_trace import (
 
 
 class _CaptureClient:
-    """Minimal identity-safe client protocol for WebSocket lifecycle tests."""
+    """Synchronous observer mock for WebSocket lifecycle tests."""
 
     def __init__(self, generation):
         self._active_session_generation = generation
-        self.hil_capture = None
+        self.observer = None
 
-    def attach_hil_capture(self, capture):
-        self.hil_capture = capture
+    def attach_observer(self, observer):
+        self.observer = observer
 
-    def detach_hil_capture(self, capture):
-        if self.hil_capture is capture:
-            self.hil_capture = None
+    def detach_observer(self, observer):
+        if self.observer is observer:
+            self.observer = None
 
-    def finalize_hil_capture(self, capture):
-        assert self.hil_capture is capture
+    def finalize_observer(self, observer):
+        assert self.observer is observer
+
+
+def _current_observer(client):
+    """Inspect a test double or the private production observer slot."""
+    if isinstance(client, _CaptureClient):
+        return client.observer
+    slot = client._observer
+    return slot.target if slot is not None else None
 
 
 def _capture_of(client):
-    """Read current capture in tests, not through a production public getter."""
-    if isinstance(client, _CaptureClient):
-        return client.hil_capture
-    tracer = client._hil
-    return tracer.capture if tracer is not None else None
+    """Test-only capture accessor; no production getter is required."""
+    observer = _current_observer(client)
+    return observer.capture if observer is not None else None
+
+
+def _attach_capture(client, capture):
+    observer = HilClientTracer(capture)
+    client.attach_observer(observer)
+    return observer
+
+
+def _for_capture(client, capture):
+    observer = _current_observer(client)
+    return (
+        observer
+        if observer is not None and observer.capture is capture
+        else HilClientTracer(capture)
+    )
+
+
+def _detach_capture(client, capture):
+    client.detach_observer(_for_capture(client, capture))
+
+
+def _finalize_capture(client, capture):
+    client.finalize_observer(_for_capture(client, capture))
 
 
 def new_capture():
@@ -281,7 +311,7 @@ async def test_expired_lookup_without_runtime_erases_private_data() -> None:
     assert capture.events == []
     assert "allpowers_ble_hil_capture" not in hass.data
     connection.send_error.assert_called_with(2, "expired", "HIL request rejected")
-    client.detach_hil_capture(capture)
+    _detach_capture(client, capture)
     assert _capture_of(client) is None
 
 
@@ -390,7 +420,7 @@ async def test_timer_does_not_clear_replacement_capture():
     replacement = new_capture()
     store = hass.data["allpowers_ble_hil_capture"]
     store.active = replacement
-    client.attach_hil_capture(replacement)
+    store.active_observer = _attach_capture(client, replacement)
     callback()
     assert _capture_of(client) is replacement
     assert store.active is replacement
@@ -457,7 +487,7 @@ async def test_client_runtime_records_success_and_private_bytes(
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     client._status = status()
     client._status_monotonic = monotonic()
     client._settings_monotonic = monotonic()
@@ -491,7 +521,7 @@ async def test_client_trace_disconnected_guard_and_write_error(monkeypatch):
 
     client = make_client()
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     with pytest.raises(NotConnectedError):
         await client._write_frame_unlocked(b"request")
     fake = connect_fake(client)
@@ -519,7 +549,7 @@ async def test_connect_and_failed_setup_trace(monkeypatch):
     from tests.test_client_runtime import Services, make_client
 
     client = make_client()
-    client.attach_hil_capture(new_capture())
+    _attach_capture(client, new_capture())
     fake = FakeClient()
     fake.services = Services()
 
@@ -540,7 +570,7 @@ async def test_connect_and_failed_setup_trace(monkeypatch):
     await client.async_stop()
 
     failing = make_client()
-    failing.attach_hil_capture(new_capture())
+    _attach_capture(failing, new_capture())
     invalid = FakeClient()
     invalid.services = Services(service=False)
 
@@ -564,7 +594,7 @@ async def test_expired_capture_preserves_unrelated_runtime_attachment():
     store.active = capture
     hass.data["allpowers_ble_hil_capture"] = store
     unrelated = new_capture()
-    client.attach_hil_capture(unrelated)
+    _attach_capture(client, unrelated)
     await ws_fetch(
         hass,
         connection,
@@ -659,7 +689,7 @@ async def test_failed_connect_has_terminal_typed_event(
 
     client = make_client(name="AP S700" if fault == "unsupported" else "ALLPOWERS R600")
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     monkeypatch.setattr(
         client,
         "_fresh_ble_device",
@@ -715,7 +745,7 @@ async def test_connection_recovers_with_new_generation_after_missing_route(monke
 
     client = make_client()
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: None)
     with pytest.raises(DeviceNotFoundError):
         await client._connect_once()
@@ -758,7 +788,7 @@ async def test_transaction_evidence_distinguishes_submit_and_confirm(
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     now = client._loop_time()
     client._status = status()
     client._status_monotonic = now
@@ -812,7 +842,7 @@ async def test_late_matching_status_cannot_resurrect_timed_out_transaction(
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     now = 1000.0
     monkeypatch.setattr(client, "_loop_time", lambda: now)
     client._status = status()
@@ -820,7 +850,7 @@ async def test_late_matching_status_cannot_resurrect_timed_out_transaction(
     client._settings_monotonic = now
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
     await client.async_set_ac(True)
-    tx_id = client._pending_output_transaction.hil_transaction_id
+    tx_id = client._pending_output_transaction.observation_id
     now = client._pending_output_transaction.confirm_deadline_monotonic + 1
     client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
     assert any(
@@ -934,9 +964,9 @@ async def test_opt_in_capture_does_not_add_ble_writes_or_change_status_request()
         fake = connect_fake(client)
         capture = new_capture() if enabled else None
         if capture is not None:
-            client.attach_hil_capture(capture)
+            _attach_capture(client, capture)
         else:
-            assert client._hil is None
+            assert client._observer is None
         await client.async_request_status()
         writes.append(list(fake.writes))
         if capture is not None:
@@ -1071,7 +1101,7 @@ async def test_real_disconnect_records_one_terminal_pending_transaction(
     client._status_monotonic = clock[0]
     client._settings_monotonic = clock[0]
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     if kind == "output":
         await client.async_set_ac(True)
         transaction = client._pending_output_transaction
@@ -1079,7 +1109,7 @@ async def test_real_disconnect_records_one_terminal_pending_transaction(
         await client.async_set_eco(False)
         transaction = client._pending_settings_transaction
     assert transaction is not None
-    identifier = transaction.hil_transaction_id
+    identifier = transaction.observation_id
     generation = transaction.session_generation
     assert identifier is not None
     assert len(fake.writes) == 1
@@ -1172,7 +1202,7 @@ async def test_user_stop_records_silent_pending_state_without_mutating_it(
     tx_events = [
         row
         for row in first["events"]
-        if row.get("transaction_id") == original.hil_transaction_id
+        if row.get("transaction_id") == original.observation_id
         and row["event"].startswith("transaction_")
     ]
     assert [row["event"] for row in tx_events] == [
@@ -1202,12 +1232,12 @@ def test_pending_trace_finalizer_is_read_only_and_skips_confirmed():
     from tests.test_client_runtime import make_client
 
     client = make_client()
-    client.finalize_hil_capture(_capture_of(client))
+    _finalize_capture(client, _capture_of(client))
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     client._pending_output_transaction = None
     client._pending_settings_transaction = None
-    client.finalize_hil_capture(_capture_of(client))
+    _finalize_capture(client, _capture_of(client))
     from custom_components.allpowers_ble.client import PendingOutputTransaction
 
     client._pending_output_transaction = PendingOutputTransaction(
@@ -1219,9 +1249,9 @@ def test_pending_trace_finalizer_is_read_only_and_skips_confirmed():
         sent_monotonic=1,
         confirm_deadline_monotonic=client._loop_time() + 60,
         phase=TransactionPhase.CONFIRMED,
-        hil_transaction_id="tx-confirmed",
+        observation_id="tx-confirmed",
     )
-    client.finalize_hil_capture(_capture_of(client))
+    _finalize_capture(client, _capture_of(client))
     assert not capture.events
     assert client._pending_output_transaction.phase is TransactionPhase.CONFIRMED
 
@@ -1239,7 +1269,7 @@ async def test_interleaved_status_and_controls_join_exact_frame_id(monkeypatch):
     client._settings_monotonic = client._loop_time()
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     await client.async_request_status()
     await client.async_set_ac(True)
     await client.async_request_status()
@@ -1292,7 +1322,7 @@ async def test_watchdog_and_unsolicited_disconnects_are_distinct_causes(
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     clock = 1000.0
     monkeypatch.setattr(client, "_loop_time", lambda: clock)
     watchdog = client._options.watchdog_timeout
@@ -1321,7 +1351,7 @@ async def test_external_disconnect_has_safe_cause_even_with_private_data():
     fake = connect_fake(client)
     client._loop = asyncio.get_running_loop()
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     callback = client._make_disconnected_callback(1)
     fake.is_connected = False
     callback(fake)
@@ -1348,7 +1378,7 @@ async def test_reconnect_unknown_reason_and_settings_recovery_use_safe_categorie
         client = make_client()
         connect_fake(client)
         capture = new_capture()
-        client.attach_hil_capture(capture)
+        _attach_capture(client, capture)
         await client.async_reconnect(reason)
         rows = [row for row in capture.events if row["event"] == "disconnected"]
         assert len(rows) == 1
@@ -1364,7 +1394,7 @@ async def test_existing_disconnect_cause_is_not_overwritten(operation):
     client = make_client()
     connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     client._disconnect_reason_category = "unsolicited_disconnect"
     if operation == "stop":
         await client.async_stop()
@@ -1384,7 +1414,7 @@ async def test_write_error_cannot_replace_an_existing_disconnect_cause(monkeypat
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     client._disconnect_reason_category = "manual"
 
     async def reject(*args, **kwargs):
@@ -1595,8 +1625,8 @@ async def test_new_run_inherits_pending_transaction_without_replaying_tx(
     else:
         await client.async_set_eco(False)
         pending = client._pending_settings_transaction
-    assert pending is not None and pending.hil_transaction_id is not None
-    previous_id = pending.hil_transaction_id
+    assert pending is not None and pending.observation_id is not None
+    previous_id = pending.observation_id
     assert previous_id.startswith("tx-")
     assert first.capture_id not in previous_id
     assert len(fake.writes) == 1
@@ -1678,7 +1708,7 @@ async def test_new_capture_marks_untraced_pending_write_as_unattributed(
     client._settings_monotonic = client._loop_time()
     await client.async_set_ac(True)
     original = client._pending_output_transaction
-    assert original is not None and original.hil_transaction_id is None
+    assert original is not None and original.observation_id is None
     await ws_start(
         hass,
         connection,
@@ -1731,10 +1761,10 @@ async def test_attaching_trace_skips_already_confirmed_transaction():
         sent_monotonic=1.0,
         confirm_deadline_monotonic=99999.0,
         phase=TransactionPhase.CONFIRMED,
-        hil_transaction_id="tx-prior-1",
+        observation_id="tx-prior-1",
     )
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     assert _capture_of(client) is capture
     assert not capture.events
 
@@ -1749,7 +1779,7 @@ async def test_gatt_setup_first_write_failure_preserves_original_generation(
 
     client = make_client()
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     fake = FakeClient()
     fake.services = Services()
     write_count = []
@@ -1830,7 +1860,7 @@ async def test_pre_gatt_guards_record_safe_rejection_without_writes(
     client._settings_monotonic = now
     client._session_hardware_revision = ("0.3", 3)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     if case == "unsupported":
         client._identity_conflicted = True
     elif case == "stale":
@@ -1908,7 +1938,7 @@ async def test_optional_control_and_invalid_timeout_reject_before_gatt():
     client = make_client()
     fake = connect_fake(client)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     with pytest.raises(StateUnavailableError):
         await client.async_set_car_charger(True)
     assert not fake.writes
@@ -1966,7 +1996,7 @@ async def test_new_start_forgets_expired_active_capture_without_erasing_replacem
     old.record("notification_received", frame=b"secret", direction="rx")
     old.started -= 121
     if not still_attached:
-        client.detach_hil_capture(_capture_of(client))
+        _detach_capture(client, _capture_of(client))
     await ws_start(hass, connection, {**start, "id": 2, "scenario_id": "new-b"})
     new = _capture_of(client)
     assert new is not None and new is not old
@@ -1995,7 +2025,7 @@ async def test_trace_inflight_matching_rx_cannot_confirm_failed_gatt_write(
     client._settings_monotonic = client._loop_time()
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     is_output = kind == "output"
     matching = notification_builder(
         0x01 if is_output else 0x03,
@@ -2112,7 +2142,7 @@ async def test_all_attempted_gatt_failures_have_one_safe_terminal_error(
     client._settings_monotonic = client._loop_time()
     monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
     capture = new_capture()
-    client.attach_hil_capture(capture)
+    _attach_capture(client, capture)
     old_generation = client._active_session_generation
     original_write = fake.write_gatt_char
 
