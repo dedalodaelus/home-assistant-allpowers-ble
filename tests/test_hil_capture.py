@@ -244,6 +244,40 @@ async def test_expired_owner_lookup_erases_data():
 
 
 @pytest.mark.asyncio
+async def test_expired_lookup_without_runtime_erases_private_data() -> None:
+    """Expired evidence must scrub even after its config entry disappeared."""
+    hass, connection, client = _api_case()
+    await ws_start(
+        hass,
+        connection,
+        {
+            "id": 1,
+            "entry_id": "entry",
+            "run_id": "abc12345",
+            "scenario_id": "status",
+            "requested_route": "auto",
+        },
+    )
+    capture = client.hil_capture
+    assert capture is not None
+    capture.record("notification_received", frame=b"private", direction="rx")
+    capture.started -= 121
+    hass.config_entries.async_get_entry.return_value = None
+
+    await ws_fetch(
+        hass,
+        connection,
+        {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id},
+    )
+    assert capture.frames == []
+    assert capture.events == []
+    assert "allpowers_ble_hil_capture" not in hass.data
+    connection.send_error.assert_called_with(2, "expired", "HIL request rejected")
+    client.detach_hil_capture(capture)
+    assert client.hil_capture is None
+
+
+@pytest.mark.asyncio
 async def test_new_session_retains_prior_sealed_retry():
     hass, connection, client = _api_case()
     start = {
@@ -891,7 +925,10 @@ async def test_opt_in_capture_does_not_add_ble_writes_or_change_status_request()
         client = make_client()
         fake = connect_fake(client)
         capture = new_capture() if enabled else None
-        client.attach_hil_capture(capture)
+        if capture is not None:
+            client.attach_hil_capture(capture)
+        else:
+            assert client._hil is None
         await client.async_request_status()
         writes.append(list(fake.writes))
         if capture is not None:
