@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
+from .route_attribution import ConnectedRoute
+
 
 @dataclass(frozen=True, slots=True)
 class TransactionObservation:
@@ -54,6 +56,8 @@ class ClientObserver(Protocol):
         profile: str | None = None,
         classification: str | None = None,
     ) -> None: ...
+
+    def route_connected(self, generation: int, route: ConnectedRoute) -> None: ...
 
     def control_rejection(
         self, generation: int | None, kind: str, reason: str

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from .client_observer import TransactionObservation
 from .const import NOTIFY_UUID, WRITE_UUID
+from .route_attribution import ConnectedRoute
 
 if TYPE_CHECKING:
     from .hil_trace import Capture
@@ -124,6 +125,10 @@ class HilClientTracer:
             )
         else:
             self.capture.record(event, session_generation=generation)
+
+    def route_connected(self, generation: int, route: ConnectedRoute) -> None:
+        """Store connection-time backend proof without leaking backend objects."""
+        self.capture.observe_route(generation, route)
 
     def control_rejection(self, generation: int | None, kind: str, reason: str) -> None:
         """Keep rejection categories separate from production safety decisions."""
