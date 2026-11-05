@@ -2502,9 +2502,7 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
     tx_id = rows[7]["transaction_id"]
     assert isinstance(tx_id, str) and tx_id.startswith("tx-")
     assert tx_id.endswith("-1")
-    assert [rows[i]["transaction_id"] for i in (7, 8, 9, 10, 12, 15)] == [
-        tx_id
-    ] * 6
+    assert [rows[i]["transaction_id"] for i in (7, 8, 9, 10, 12, 15)] == [tx_id] * 6
     assert [
         (rows[i]["event"], rows[i]["transaction_phase"], rows[i]["reason"])
         for i in (7, 10, 12, 15)

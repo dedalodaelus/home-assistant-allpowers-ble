@@ -328,6 +328,8 @@ def _check_v2_routes(
             if (
                 route_item is None
                 or row["seq"] != route_item["seq"]
+                or row.get("utc") != route_item["utc"]
+                or row.get("elapsed_ms") != route_item["elapsed_ms"]
                 or row.get("backend_kind") != route_item["backend_kind"]
                 or row.get("evidence") != route_item["evidence"]
             ):

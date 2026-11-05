@@ -1,4 +1,6 @@
 homeassistant==2026.10.4
+# Test the installed HA 2026.10 Bluetooth proxy backend with real types.
+bleak-esphome==4.0.0
 # Required by homeassistant.components.usb import path pulled by bluetooth.
 aiousbwatcher>=1.1.2
 serialx>=1.15.1

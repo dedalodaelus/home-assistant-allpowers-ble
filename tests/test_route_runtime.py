@@ -13,11 +13,11 @@ from tests.helpers import FakeHass
 from tests.test_client_runtime import ProbeClient, Services, make_client
 
 
-LOCAL = ConnectedRoute(
-    "local_adapter", "bluez", "bluez_device_path", adapter_id="hci1"
-)
+LOCAL = ConnectedRoute("local_adapter", "bluez", "bluez_device_path", adapter_id="hci1")
 PROXY = ConnectedRoute(
-    "active_proxy", "esphome", "esphome_scanner_binding",
+    "active_proxy",
+    "esphome",
+    "esphome_scanner_binding",
     proxy_id="PRIVATE-PROXY",
 )
 UNKNOWN = ConnectedRoute(evidence="no_ha_wrapper")
@@ -61,7 +61,8 @@ async def test_runtime_and_probe_use_late_patched_client_class(
 
     monkeypatch.setattr(client_module, "establish_connection", probe_connect)
     monkeypatch.setattr(
-        client_module.bluetooth, "async_ble_device_from_address",
+        client_module.bluetooth,
+        "async_ble_device_from_address",
         lambda *args, **kwargs: FakeDevice(),
     )
     result = await client_module.async_probe_device(
@@ -111,7 +112,8 @@ async def test_route_on_success_reconnect_updates_generation_not_prior_rows(
     assert capture.frames[0] == first_frames[0]
     assert capture.frames[-1]["observed_route"] == "active_proxy"
     assert [r["session_generation"] for r in capture.route_observations.values()] == [
-        first_generation, second_generation
+        first_generation,
+        second_generation,
     ]
     assert capture.snapshot()["qualification_allowed"] is False
     assert "PRIVATE-PROXY" not in str(capture.events)

@@ -10,7 +10,10 @@ from bleak.backends.bluezdbus.client import BleakClientBlueZDBus
 from bleak_esphome.backend.client import ESPHomeClient
 from bleak_esphome.backend.scanner import ESPHomeScanner
 from habluetooth.scanner_bleak import HaScanner
-from habluetooth.usage import HaBleakClientWithServiceCache, install_multiple_bleak_catcher
+from habluetooth.usage import (
+    HaBleakClientWithServiceCache,
+    install_multiple_bleak_catcher,
+)
 from habluetooth.wrappers import HaBleakClientWrapper
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -18,8 +21,14 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from homeassistant.core import HomeAssistant
 
 from custom_components.allpowers_ble import client as client_module
-from custom_components.allpowers_ble.hil_trace import async_register, clear_entry_capture
-from custom_components.allpowers_ble.route_attribution import ConnectedRoute, connected_route
+from custom_components.allpowers_ble.hil_trace import (
+    async_register,
+    clear_entry_capture,
+)
+from custom_components.allpowers_ble.route_attribution import (
+    ConnectedRoute,
+    connected_route,
+)
 from tests.ha_stubs import FakeClient, FakeDevice
 from tests.helpers import FakeHass
 from tests.test_client_runtime import ProbeClient, Services, make_client
@@ -76,15 +85,28 @@ def test_actual_upstream_types_verify_bluez_and_esphome_connected_paths():
         Wrapper(proxy_scanner, ProxyClient(proxy_scanner, "private-remote-source"))
     )
     assert proxy == ConnectedRoute(
-        "active_proxy", "esphome", "esphome_scanner_binding",
+        "active_proxy",
+        "esphome",
+        "esphome_scanner_binding",
         proxy_id="private-remote-source",
     )
-    assert connected_route(
-        Wrapper(proxy_scanner, ProxyClient(ProxyScanner("private-remote-source"), "private-remote-source"))
-    ).observed_route == "unverified"
-    assert connected_route(
-        Wrapper(local_scanner, BlueZ("/org/bluez/hci2/dev_AA_BB"))
-    ).observed_route == "unverified"
+    assert (
+        connected_route(
+            Wrapper(
+                proxy_scanner,
+                ProxyClient(
+                    ProxyScanner("private-remote-source"), "private-remote-source"
+                ),
+            )
+        ).observed_route
+        == "unverified"
+    )
+    assert (
+        connected_route(
+            Wrapper(local_scanner, BlueZ("/org/bluez/hci2/dev_AA_BB"))
+        ).observed_route
+        == "unverified"
+    )
 
 
 @pytest.mark.asyncio
@@ -158,32 +180,39 @@ async def test_real_ha_authenticated_ws_route_snapshot_on_existing_connection(
     client._connected = True
     client._active_session_generation = 4
     client._connected_route = (
-        4, ConnectedRoute(
-            "active_proxy", "esphome", "esphome_scanner_binding",
+        4,
+        ConnectedRoute(
+            "active_proxy",
+            "esphome",
+            "esphome_scanner_binding",
             proxy_id="PRIVATE-PROXY",
-        )
+        ),
     )
     entry = MockConfigEntry(domain="allpowers_ble", data={})
     entry.add_to_hass(hass)
     entry.runtime_data = SimpleNamespace(client=client)
 
     ws = await hass_ws_client()
-    await ws.send_json_auto_id({
-        "type": "allpowers_ble/hil/start",
-        "entry_id": entry.entry_id,
-        "run_id": "test12345",
-        "scenario_id": "route-real-ws",
-        "requested_route": "local_adapter",
-    })
+    await ws.send_json_auto_id(
+        {
+            "type": "allpowers_ble/hil/start",
+            "entry_id": entry.entry_id,
+            "run_id": "test12345",
+            "scenario_id": "route-real-ws",
+            "requested_route": "local_adapter",
+        }
+    )
     begun = await ws.receive_json()
     assert begun["success"] is True
     assert begun["result"]["schema_version"] == 2
     capture_id = begun["result"]["capture_id"]
-    await ws.send_json_auto_id({
-        "type": "allpowers_ble/hil/stop",
-        "entry_id": entry.entry_id,
-        "capture_id": capture_id,
-    })
+    await ws.send_json_auto_id(
+        {
+            "type": "allpowers_ble/hil/stop",
+            "entry_id": entry.entry_id,
+            "capture_id": capture_id,
+        }
+    )
     ended = await ws.receive_json()
     assert ended["success"] is True
     result = ended["result"]

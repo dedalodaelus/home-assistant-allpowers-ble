@@ -130,7 +130,10 @@ class Capture:
         if not self.active():
             return
         if generation in self.route_observations:
-            if self.route_observations[generation]["observed_route"] != route.observed_route:
+            if (
+                self.route_observations[generation]["observed_route"]
+                != route.observed_route
+            ):
                 self.dropped_events += 1
             return
         item: dict[str, Any] = {
