@@ -23,7 +23,11 @@ def _normalized_rows(capture: Capture) -> tuple[list[dict], list[dict]]:
     """Only timestamps differ between the original and extracted producer."""
     def clean(rows: list[dict]) -> list[dict]:
         return [
-            {key: value for key, value in row.items() if key not in ("utc", "elapsed_ms")}
+            {
+                key: value
+                for key, value in row.items()
+                if key not in ("utc", "elapsed_ms")
+            }
             for row in rows
         ]
 
@@ -79,7 +83,10 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
         characteristic_uuid="0000fff2-0000-1000-8000-00805f9b34fb",
     )
     observer.write(
-        "write_attempt", 4, transaction_id="tx-fixed-42", frame=payload,
+        "write_attempt",
+        4,
+        transaction_id="tx-fixed-42",
+        frame=payload,
         write_with_response=True,
     )
     rx = bytearray(b"\x01\x02")
@@ -103,12 +110,14 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
         discarded_bytes=1,
     )
     observer.notification_decoded(
-        4, packet_types=("StatusData",), profile="r600",
-        hardware_revision="2", discarded_frames=0, discarded_bytes=1,
+        4,
+        packet_types=("StatusData",),
+        profile="r600",
+        hardware_revision="2",
+        discarded_frames=0,
+        discarded_bytes=1,
     )
-    original.record(
-        "write_ok", session_generation=4, transaction_id="tx-fixed-42"
-    )
+    original.record("write_ok", session_generation=4, transaction_id="tx-fixed-42")
     observer.write("write_ok", 4, transaction_id="tx-fixed-42")
     for event, reason in (
         ("transaction_submitted", None),
@@ -133,13 +142,20 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
 
     assert _normalized_rows(original) == _normalized_rows(refactored)
     for key in (
-        "closed", "termination_reason", "complete", "event_count", "frame_count",
-        "dropped_events", "dropped_frames", "schema_version", "observed_route",
+        "closed",
+        "termination_reason",
+        "complete",
+        "event_count",
+        "frame_count",
+        "dropped_events",
+        "dropped_frames",
+        "schema_version",
+        "observed_route",
         "qualification_allowed",
     ):
         assert original.snapshot()[key] == refactored.snapshot()[key]
     assert original.frames[0]["hex"] == payload.hex()
-    assert original.frames[0]["seq"] == original.events[4]["seq"]
+    assert original.frames[0]["seq"] == original.events[5]["seq"]
 
 
 def test_observer_negative_and_inherited_outcomes() -> None:
@@ -155,10 +171,12 @@ def test_observer_negative_and_inherited_outcomes() -> None:
 
     tracer.attach((previous, unknown, confirmed))
     assert [row["event"] for row in capture.events] == [
-        "transaction_inherited", "transaction_inherited"
+        "transaction_inherited",
+        "transaction_inherited",
     ]
     assert [row["attribution"] for row in capture.events] == [
-        "prior_capture", "unattributed"
+        "prior_capture",
+        "unattributed",
     ]
     trace_id = tracer.new_transaction_id()
     assert trace_id.startswith("tx-") and trace_id != capture.capture_id
@@ -172,10 +190,12 @@ def test_observer_negative_and_inherited_outcomes() -> None:
         disconnected=True,
     )
     assert [row["event"] for row in capture.events[-2:]] == [
-        "transaction_timed_out", "transaction_abandoned"
+        "transaction_timed_out",
+        "transaction_abandoned",
     ]
     assert [row["reason"] for row in capture.events[-2:]] == [
-        "deadline_passed", "session_disconnected"
+        "deadline_passed",
+        "session_disconnected",
     ]
     tracer.finalize_pending((unknown,), now=15, disconnected=False)
     assert capture.events[-1]["event"] == "transaction_unresolved"
@@ -200,8 +220,11 @@ def test_error_write_paths_stay_private_and_causally_distinct() -> None:
     )
     tracer.write("write_ok", 7, transaction_id="tx-56")
     assert [row["event"] for row in capture.events] == [
-        "connect_failed", "write_rejected", "write_attempt",
-        "write_error", "write_ok",
+        "connect_failed",
+        "write_rejected",
+        "write_attempt",
+        "write_error",
+        "write_ok",
     ]
     assert capture.events[0]["exception_type"] == "TimeoutError"
     assert capture.events[1]["reason"] == "not_connected"
