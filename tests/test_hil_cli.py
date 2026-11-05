@@ -1546,11 +1546,12 @@ def test_cli_route_text_distinguishes_preflight_and_connected_trace(
     monkeypatch, tmp_path, capsys, allpowers_registry, command
 ):
     """Requested route is never proof; trace prints the actual v2 route."""
-    from tests.test_route_cli_v2 import V2TraceHA
+    if command == "trace":
+        from tests.test_route_cli_v2 import V2TraceHA
 
-    fake = V2TraceHA(allpowers_registry) if command == "trace" else FakeHA(
-        allpowers_registry
-    )
+        fake = V2TraceHA(allpowers_registry)
+    else:
+        fake = FakeHA(allpowers_registry)
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setattr(cli, "sleep", lambda _: None)
     monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
@@ -1580,7 +1581,8 @@ def test_cli_route_text_distinguishes_preflight_and_connected_trace(
         trace = json.loads((directory / "trace.json").read_text())
         session = json.loads((directory / "session.json").read_text())
         assert trace["schema_version"] == 2
-        assert trace["requested_route"] == session["route"]["requested"] == "local_adapter"
+        assert trace["requested_route"] == "local_adapter"
+        assert session["route"]["requested"] == "local_adapter"
         assert trace["observed_route"] == "active_proxy"
         assert trace["qualification_allowed"] is False
     else:
