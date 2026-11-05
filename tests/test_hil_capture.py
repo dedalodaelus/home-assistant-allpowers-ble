@@ -2479,6 +2479,7 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
         ("capture_started", None),
         ("connect_attempt", 1),
         ("model_profile_selected", 1),
+        ("route_observed", 1),
         ("connected", 1),
         ("write_attempt", 1),
         ("write_ok", 1),
@@ -2496,15 +2497,17 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
         ("capture_stopped", None),
     ]
     assert [(r["event"], r["session_generation"]) for r in rows] == expected_events
-    assert [r["seq"] for r in rows] == list(range(1, 19))
+    assert [r["seq"] for r in rows] == list(range(1, 20))
 
-    tx_id = rows[6]["transaction_id"]
+    tx_id = rows[7]["transaction_id"]
     assert isinstance(tx_id, str) and tx_id.startswith("tx-")
     assert tx_id.endswith("-1")
-    assert [rows[i]["transaction_id"] for i in (6, 7, 8, 9, 11, 14)] == [tx_id] * 6
+    assert [rows[i]["transaction_id"] for i in (7, 8, 9, 10, 12, 15)] == [
+        tx_id
+    ] * 6
     assert [
         (rows[i]["event"], rows[i]["transaction_phase"], rows[i]["reason"])
-        for i in (6, 9, 11, 14)
+        for i in (7, 10, 12, 15)
     ] == [
         ("transaction_accepted", "sending", None),
         ("transaction_submitted", "sending", None),
@@ -2520,17 +2523,17 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
         ),
     ]
     assert rows[2]["inferred_model_profile"] == "r600-unverified-revision"
-    assert rows[16]["reason_category"] == "manual"
+    assert rows[17]["reason_category"] == "manual"
 
     # Externally fixed v1 byte vectors, including XOR checksum and sequence joins.
     assert [
         (frame["seq"], frame["event"], frame["hex"], frame.get("transaction_id"))
         for frame in capture.frames
     ] == [
-        (5, "write_attempt", "a565b1000106010000000000", None),
-        (8, "write_attempt", "a56500b10101002352", tx_id),
-        (11, "notification_received", "a56500000008011149012c0096007852", None),
-        (14, "notification_received", "a56500000008011349012c0096007850", None),
+        (6, "write_attempt", "a565b1000106010000000000", None),
+        (9, "write_attempt", "a56500b10101002352", tx_id),
+        (12, "notification_received", "a56500000008011149012c0096007852", None),
+        (15, "notification_received", "a56500000008011349012c0096007850", None),
     ]
     for frame in capture.frames:
         matching_event = rows[frame["seq"] - 1]
@@ -2543,8 +2546,8 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
         "unknown",
     ]
     result = connection.send_result.call_args.args[1]
-    assert result["schema_version"] == 1
-    assert result["event_count"] == 18
+    assert result["schema_version"] == 2
+    assert result["event_count"] == 19
     assert result["frame_count"] == 4
     assert result["complete"] is True
     assert result["termination_reason"] == "requested_stop"
