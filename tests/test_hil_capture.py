@@ -45,7 +45,7 @@ class _CaptureClient:
 def _capture_of(client):
     """Read current capture in tests, not through a production public getter."""
     if isinstance(client, _CaptureClient):
-        return _capture_of(client)
+        return client.hil_capture
     tracer = client._hil
     return tracer.capture if tracer is not None else None
 
