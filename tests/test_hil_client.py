@@ -21,17 +21,12 @@ def _capture() -> Capture:
 
 def _normalized_rows(capture: Capture) -> tuple[list[dict], list[dict]]:
     """Only timestamps differ between the original and extracted producer."""
-    def clean(rows: list[dict]) -> list[dict]:
-        return [
-            {
-                key: value
-                for key, value in row.items()
-                if key not in ("utc", "elapsed_ms")
-            }
-            for row in rows
-        ]
-
-    return clean(capture.events), clean(capture.frames)
+    events = [row.copy() for row in capture.events]
+    frames = [row.copy() for row in capture.frames]
+    for row in events + frames:
+        row.pop("utc", None)
+        row.pop("elapsed_ms", None)
+    return events, frames
 
 
 def test_scripted_v1_event_and_frame_equivalence() -> None:
