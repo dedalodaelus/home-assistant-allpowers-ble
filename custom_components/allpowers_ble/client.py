@@ -1580,7 +1580,9 @@ class AllpowersBLEClient:
             if self._observer is not None:
                 self._observer.emit(
                     "write",
-                    "write_ok", active_generation, transaction_id=observation_id
+                    "write_ok",
+                    active_generation,
+                    transaction_id=observation_id,
                 )
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
             if self._observer is not None:
