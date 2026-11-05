@@ -32,7 +32,7 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
-from .client_observer import ClientObserver, ObserverSlot
+from .client_observer import ClientObserver, ObserverSlot, TransactionObservation
 from .model_support import (
     ModelSupport,
     canonical_model_identity,
@@ -518,15 +518,39 @@ class AllpowersBLEClient:
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
+    @staticmethod
+    def _transaction_observation(
+        transaction: PendingOutputTransaction | PendingSettingsTransaction,
+    ) -> TransactionObservation:
+        """Expose only frozen decision metadata, never mutable command targets."""
+        return TransactionObservation(
+            generation=transaction.session_generation,
+            transaction_id=transaction.observation_id,
+            kind=(
+                "output"
+                if isinstance(transaction, PendingOutputTransaction)
+                else "settings"
+            ),
+            phase=transaction.phase.name.lower(),
+            deadline=transaction.confirm_deadline_monotonic,
+        )
+
+    def _pending_observations(
+        self,
+    ) -> tuple[TransactionObservation | None, TransactionObservation | None]:
+        """Build snapshots only while an observer is actually attached."""
+        output = self._pending_output_transaction
+        settings = self._pending_settings_transaction
+        return (
+            self._transaction_observation(output) if output is not None else None,
+            self._transaction_observation(settings) if settings is not None else None,
+        )
+
     def attach_observer(self, observer: ClientObserver) -> None:
         """Install an optional, non-owning observer without any BLE replay."""
         slot = ObserverSlot(observer)
         self._observer = slot
-        slot.emit(
-            "attach_runtime",
-            self._pending_output_transaction,
-            self._pending_settings_transaction,
-        )
+        slot.emit("attach_runtime", *self._pending_observations())
 
     def detach_observer(self, expected_observer: ClientObserver | None) -> None:
         """Late cleanup cannot remove a more recently attached observer."""
@@ -539,8 +563,7 @@ class AllpowersBLEClient:
         if slot is not None and slot.target is expected_observer:
             slot.emit(
                 "finalize_runtime",
-                self._pending_output_transaction,
-                self._pending_settings_transaction,
+                *self._pending_observations(),
                 now=self._loop_time(),
                 disconnected=False,
             )
@@ -562,7 +585,10 @@ class AllpowersBLEClient:
         """Report an already-decided transport transaction transition."""
         if self._observer is not None:
             self._observer.emit(
-                "transaction_runtime", event, transaction, reason=reason
+                "transaction_runtime",
+                event,
+                self._transaction_observation(transaction),
+                reason=reason,
             )
 
     def _report_pending_observations(self, *, disconnected: bool) -> None:
@@ -570,8 +596,7 @@ class AllpowersBLEClient:
         if self._observer is not None:
             self._observer.emit(
                 "finalize_runtime",
-                self._pending_output_transaction,
-                self._pending_settings_transaction,
+                *self._pending_observations(),
                 now=self._loop_time(),
                 disconnected=disconnected,
             )
@@ -1319,7 +1344,7 @@ class AllpowersBLEClient:
     ) -> None:
         if self._observer is not None:
             self._observer.emit(
-                "notification_received", self._active_session_generation, data
+                "notification_received", self._active_session_generation, bytes(data)
             )
         del characteristic
         self._statistics = replace(
