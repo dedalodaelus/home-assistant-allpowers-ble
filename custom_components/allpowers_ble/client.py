@@ -10,7 +10,7 @@ from enum import Enum, auto
 import logging
 from random import Random
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -24,7 +24,10 @@ from bleak_retry_connector import (
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 
-from .hil_trace import Capture
+from .hil_client import HilClientTracer, PendingTraceState
+
+if TYPE_CHECKING:
+    from .hil_trace import Capture
 from .const import (
     COMMAND_REFRESH_DELAY,
     CONNECTION_ATTEMPTS,
@@ -175,7 +178,7 @@ class AllpowersBLEClient:
         self._identity_conflict_callback = identity_conflict_callback
         self._options = options
 
-        self._hil_trace: Capture | None = None
+        self._hil: HilClientTracer | None = None
         self._disconnect_reason_category: str | None = None
         self._client: BleakClient | None = None
         self._write_characteristic: BleakGATTCharacteristic | None = None
@@ -304,13 +307,9 @@ class AllpowersBLEClient:
         self._maintenance_task = None
         self._connection_task = None
         await self._disconnect_client()
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                "client_stopped",
-                session_generation=self._active_session_generation,
-            )
-            self._hil_trace.stop("runtime_stopped")
-            self._hil_trace = None
+        if self._hil is not None:
+            self._hil.stop_runtime(self._active_session_generation)
+            self._hil = None
         self._loop = None
         self._update_callback = None
 
@@ -411,7 +410,7 @@ class AllpowersBLEClient:
             target_light = current_light if light is None else light
             active_generation = self._active_session_generation
             if active_generation is None:
-                self._hil_control_rejected("output", "disconnected")
+                self._hil_rejection("output", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             if (target_dc, target_ac, target_light) == (
                 current_dc,
@@ -451,7 +450,7 @@ class AllpowersBLEClient:
     async def async_set_car_charger(self, enabled: bool) -> None:
         """Set the optional car-charger bit when explicitly enabled by the user."""
         if not self._options.enable_car_charger:
-            self._hil_control_rejected("settings", "unsupported_capability")
+            self._hil_rejection("settings", "unsupported_capability")
             raise StateUnavailableError(
                 "Car charger control is disabled in integration options"
             )
@@ -477,11 +476,11 @@ class AllpowersBLEClient:
                     eco_timeout_hours=eco_timeout_hours,
                 )
             except ValueError, TypeError:
-                self._hil_control_rejected("settings", "semantic_validation")
+                self._hil_rejection("settings", "semantic_validation")
                 raise
             active_generation = self._active_session_generation
             if active_generation is None:
-                self._hil_control_rejected("settings", "disconnected")
+                self._hil_rejection("settings", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             if target == current:
                 return
@@ -508,7 +507,7 @@ class AllpowersBLEClient:
             now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
-                self._hil_control_rejected("keepalive", "disconnected")
+                self._hil_rejection("keepalive", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             transaction = PendingSettingsTransaction(
                 session_generation=active_generation,
@@ -522,96 +521,93 @@ class AllpowersBLEClient:
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
-    def _hil_attach_trace(self, capture: Capture) -> None:
-        """Attach one run; identify, never replay, prior unfinished writes."""
-        self._hil_trace = capture
+    @property
+    def hil_capture(self) -> Capture | None:
+        """Read-only identity for scoped HIL capture management."""
+        return self._hil.capture if self._hil is not None else None
+
+    def _hil_pending_states(self) -> tuple[PendingTraceState, ...]:
+        """Flatten immutable transaction metadata only while a trace is active."""
+        states: list[PendingTraceState] = []
         for transaction in (
             self._pending_output_transaction,
             self._pending_settings_transaction,
         ):
-            if transaction is None or transaction.phase is TransactionPhase.CONFIRMED:
-                continue
-            capture.record(
-                "transaction_inherited",
-                session_generation=transaction.session_generation,
-                transaction_id=transaction.hil_transaction_id,
-                transaction_kind=(
-                    "output"
-                    if isinstance(transaction, PendingOutputTransaction)
-                    else "settings"
-                ),
-                transaction_phase=transaction.phase.name.lower(),
-                origin="preexisting",
-                attribution=(
-                    "prior_capture"
-                    if transaction.hil_transaction_id is not None
-                    else "unattributed"
-                ),
+            if transaction is not None:
+                states.append(
+                    PendingTraceState(
+                        generation=transaction.session_generation,
+                        transaction_id=transaction.hil_transaction_id,
+                        kind=(
+                            "output"
+                            if isinstance(transaction, PendingOutputTransaction)
+                            else "settings"
+                        ),
+                        phase=transaction.phase.name.lower(),
+                        deadline=transaction.confirm_deadline_monotonic,
+                    )
+                )
+        return tuple(states)
+
+    def attach_hil_capture(self, capture: Capture) -> None:
+        """Attach at the authenticated HIL boundary, preserving inherited IDs."""
+        self._hil = HilClientTracer(capture)
+        self._hil.attach(self._hil_pending_states())
+
+    def detach_hil_capture(self, expected_capture: Capture) -> None:
+        """Late cleanup must not detach a more recent capture."""
+        if self._hil is not None and self._hil.matches(expected_capture):
+            self._hil = None
+
+    def finalize_hil_capture(self, expected_capture: Capture | None) -> None:
+        """Finalize only the capture still attached to this client."""
+        if (
+            expected_capture is not None
+            and self._hil is not None
+            and self._hil.matches(expected_capture)
+        ):
+            self._hil.finalize_pending(
+                self._hil_pending_states(),
+                now=self._loop_time(),
+                disconnected=False,
             )
 
-    def _hil_control_rejected(self, control_kind: str, reason: str) -> None:
-        """Expose only a finite pre-GATT guard cause, never target data."""
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                "control_rejected",
-                session_generation=self._active_session_generation,
-                control_kind=control_kind,
-                reason=reason,
-            )
+    def _hil_rejection(self, kind: str, reason: str) -> None:
+        """Thin control-guard boundary; the observer formats the record."""
+        if self._hil is not None:
+            self._hil.control_rejection(self._active_session_generation, kind, reason)
 
-    def _trace_transaction(
+    def _hil_transaction(
         self,
         event: str,
         transaction: PendingOutputTransaction | PendingSettingsTransaction,
         *,
         reason: str | None = None,
     ) -> None:
-        """Report safe state transitions without altering command authorization."""
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                event,
-                session_generation=transaction.session_generation,
-                transaction_id=transaction.hil_transaction_id,
-                transaction_kind=(
-                    "output"
-                    if isinstance(transaction, PendingOutputTransaction)
-                    else "settings"
-                ),
-                transaction_phase=transaction.phase.name.lower(),
-                reason=reason,
-            )
-
-    def _trace_pending_snapshot(self, *, disconnected: bool) -> None:
-        """Report pending outcomes without changing production transaction state."""
-        if self._hil_trace is None:
+        """Pass a value-only view of a transaction decision to the observer."""
+        if self._hil is None:
             return
-        now = self._loop_time()
-        for transaction in (
-            self._pending_output_transaction,
-            self._pending_settings_transaction,
-        ):
-            if transaction is None or transaction.phase is TransactionPhase.CONFIRMED:
-                continue
-            timed_out = now > transaction.confirm_deadline_monotonic
-            event = (
-                "transaction_timed_out"
-                if timed_out
-                else "transaction_abandoned"
-                if disconnected
-                else "transaction_unresolved"
-            )
-            reason = (
-                "deadline_passed"
-                if timed_out
-                else "session_disconnected"
-                if disconnected
-                else "deadline_open"
-            )
-            self._trace_transaction(event, transaction, reason=reason)
+        state = PendingTraceState(
+            generation=transaction.session_generation,
+            transaction_id=transaction.hil_transaction_id,
+            kind=(
+                "output"
+                if isinstance(transaction, PendingOutputTransaction)
+                else "settings"
+            ),
+            phase=transaction.phase.name.lower(),
+            deadline=transaction.confirm_deadline_monotonic,
+        )
+        self._hil.transaction(event, state, reason=reason)
 
-    def _hil_finalize_pending_trace(self) -> None:
-        """Record silent unresolved/timed-out writes when a user seals the trace."""
-        self._trace_pending_snapshot(disconnected=False)
+    def _hil_pending_report(self, *, disconnected: bool) -> None:
+        """Snapshot already-decided outcomes before production clears pending TX."""
+        if self._hil is not None:
+            self._hil.finalize_pending(
+                self._hil_pending_states(),
+                now=self._loop_time(),
+                disconnected=disconnected,
+            )
 
     async def _write_transaction_unlocked(
         self,
@@ -619,16 +615,16 @@ class AllpowersBLEClient:
         transaction: PendingOutputTransaction | PendingSettingsTransaction,
     ) -> None:
         """Publish before yielding; failed submissions require a new snapshot."""
-        if self._hil_trace is not None:
+        if self._hil is not None:
             transaction = replace(
                 transaction,
-                hil_transaction_id=self._hil_trace.new_transaction_id(),
+                hil_transaction_id=self._hil.new_transaction_id(),
             )
         if isinstance(transaction, PendingOutputTransaction):
             self._pending_output_transaction = transaction
         else:
             self._pending_settings_transaction = transaction
-        self._trace_transaction("transaction_accepted", transaction)
+        self._hil_transaction("transaction_accepted", transaction)
         try:
             await self._write_frame_unlocked(
                 frame, hil_transaction_id=transaction.hil_transaction_id
@@ -640,7 +636,7 @@ class AllpowersBLEClient:
                     "The ALLPOWERS device disconnected during write"
                 )
         except Exception, asyncio.CancelledError:
-            self._trace_transaction(
+            self._hil_transaction(
                 "transaction_failed", transaction, reason="gatt_write_failed"
             )
             same_session = (
@@ -668,12 +664,12 @@ class AllpowersBLEClient:
                     self._settings_blocked_until_version = self._settings_version + 1
             raise
 
-        self._trace_transaction("transaction_submitted", transaction)
+        self._hil_transaction("transaction_submitted", transaction)
         if isinstance(transaction, PendingOutputTransaction):
             pending_output = self._pending_output_transaction
             if pending_output is not None:
                 if pending_output.phase is TransactionPhase.CONFIRMED:
-                    self._trace_transaction(
+                    self._hil_transaction(
                         "transaction_confirmed",
                         pending_output,
                         reason="matching_validated_telemetry",
@@ -689,7 +685,7 @@ class AllpowersBLEClient:
             pending_settings = self._pending_settings_transaction
             if pending_settings is not None:
                 if pending_settings.phase is TransactionPhase.CONFIRMED:
-                    self._trace_transaction(
+                    self._hil_transaction(
                         "transaction_confirmed",
                         pending_settings,
                         reason="matching_validated_telemetry",
@@ -704,7 +700,7 @@ class AllpowersBLEClient:
 
     def _safe_output_snapshot(self) -> tuple[bool, bool, bool]:
         if not self._connected or self._disconnect_event.is_set():
-            self._hil_control_rejected("output", "disconnected")
+            self._hil_rejection("output", "disconnected")
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
@@ -712,26 +708,26 @@ class AllpowersBLEClient:
         pending = self._pending_output_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
-                self._trace_transaction(
+                self._hil_transaction(
                     "transaction_rejected", pending, reason="confirmation_pending"
                 )
-                self._hil_control_rejected("output", "confirmation_pending")
+                self._hil_rejection("output", "confirmation_pending")
                 raise StateUnavailableError(
                     "Output command confirmation is pending; wait for a status update"
                 )
-            self._trace_transaction(
+            self._hil_transaction(
                 "transaction_timed_out", pending, reason="no_confirming_telemetry"
             )
             self._pending_output_transaction = None
             self._output_blocked_until_version = self._status_version + 1
-            self._hil_control_rejected("output", "confirmation_timed_out")
+            self._hil_rejection("output", "confirmation_timed_out")
             raise StateUnavailableError(
                 "Output command confirmation timed out; wait for a fresh status update"
             )
 
         blocked_until = self._output_blocked_until_version
         if blocked_until is not None and self._status_version < blocked_until:
-            self._hil_control_rejected("output", "ambiguous_state")
+            self._hil_rejection("output", "ambiguous_state")
             raise StateUnavailableError(
                 "Output command state is ambiguous; wait for a fresh status update"
             )
@@ -741,7 +737,7 @@ class AllpowersBLEClient:
             or self._status_monotonic is None
             or now - self._status_monotonic > self._options.stale_timeout
         ):
-            self._hil_control_rejected("output", "stale_telemetry")
+            self._hil_rejection("output", "stale_telemetry")
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
@@ -749,7 +745,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         errors = status_write_validation_errors(support.profile, self._status)
         if errors:
-            self._hil_control_rejected("output", "semantic_validation")
+            self._hil_rejection("output", "semantic_validation")
             raise StateUnavailableError(
                 "Output writes are blocked by semantic validation: " + "; ".join(errors)
             )
@@ -763,7 +759,7 @@ class AllpowersBLEClient:
         self, *, control_kind: str = "settings"
     ) -> SettingsData:
         if not self._connected or self._disconnect_event.is_set():
-            self._hil_control_rejected(control_kind, "disconnected")
+            self._hil_rejection(control_kind, "disconnected")
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
@@ -771,26 +767,26 @@ class AllpowersBLEClient:
         pending = self._pending_settings_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
-                self._trace_transaction(
+                self._hil_transaction(
                     "transaction_rejected", pending, reason="confirmation_pending"
                 )
-                self._hil_control_rejected(control_kind, "confirmation_pending")
+                self._hil_rejection(control_kind, "confirmation_pending")
                 raise StateUnavailableError(
                     "Settings command confirmation is pending; wait for a settings update"
                 )
-            self._trace_transaction(
+            self._hil_transaction(
                 "transaction_timed_out", pending, reason="no_confirming_telemetry"
             )
             self._pending_settings_transaction = None
             self._settings_blocked_until_version = self._settings_version + 1
-            self._hil_control_rejected(control_kind, "confirmation_timed_out")
+            self._hil_rejection(control_kind, "confirmation_timed_out")
             raise StateUnavailableError(
                 "Settings command confirmation timed out; wait for a fresh settings update"
             )
 
         blocked_until = self._settings_blocked_until_version
         if blocked_until is not None and self._settings_version < blocked_until:
-            self._hil_control_rejected(control_kind, "ambiguous_state")
+            self._hil_rejection(control_kind, "ambiguous_state")
             raise StateUnavailableError(
                 "Settings command state is ambiguous; wait for a fresh settings update"
             )
@@ -800,7 +796,7 @@ class AllpowersBLEClient:
             or self._settings_monotonic is None
             or now - self._settings_monotonic > self._options.settings_stale_timeout
         ):
-            self._hil_control_rejected(control_kind, "stale_telemetry")
+            self._hil_rejection(control_kind, "stale_telemetry")
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
@@ -808,7 +804,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         errors = settings_write_validation_errors(support.profile, self._settings)
         if errors:
-            self._hil_control_rejected(control_kind, "semantic_validation")
+            self._hil_rejection(control_kind, "semantic_validation")
             raise StateUnavailableError(
                 "Settings writes are blocked by semantic validation: "
                 + "; ".join(errors)
@@ -938,7 +934,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_output_controls:
             return
-        self._hil_control_rejected("output", "unsupported_capability")
+        self._hil_rejection("output", "unsupported_capability")
         raise StateUnavailableError(
             f"Unsupported output command for active model profile: {support.profile}"
         )
@@ -948,7 +944,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_settings_controls:
             return
-        self._hil_control_rejected("settings", "unsupported_capability")
+        self._hil_rejection("settings", "unsupported_capability")
         raise StateUnavailableError(
             f"Unsupported settings command for active model profile: {support.profile}"
         )
@@ -958,7 +954,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_settings_keepalive:
             return
-        self._hil_control_rejected("keepalive", "unsupported_capability")
+        self._hil_rejection("keepalive", "unsupported_capability")
         raise StateUnavailableError(
             "Unsupported settings keepalive command for active model profile: "
             f"{support.profile}"
@@ -1023,11 +1019,8 @@ class AllpowersBLEClient:
 
     async def _connect_once(self) -> None:
         session_generation = self._activate_session_generation()
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                "connect_attempt",
-                session_generation=session_generation,
-            )
+        if self._hil is not None:
+            self._hil.connection("connect_attempt", session_generation)
         self._statistics = replace(
             self._statistics,
             connection_attempts=self._statistics.connection_attempts + 1,
@@ -1048,12 +1041,12 @@ class AllpowersBLEClient:
 
             stage = "model_support"
             support = identify_model(self._device_identity)
-            if self._hil_trace is not None:
-                self._hil_trace.record(
+            if self._hil is not None:
+                self._hil.connection(
                     "model_profile_selected",
-                    session_generation=session_generation,
-                    inferred_model_profile=support.profile,
-                    model_classification=support.classification,
+                    session_generation,
+                    profile=support.profile,
+                    classification=support.classification,
                 )
             if not support.supported and not self._identity_conflicted:
                 raise UnsupportedDeviceError(support.reason or "Unsupported model")
@@ -1071,12 +1064,12 @@ class AllpowersBLEClient:
                 use_services_cache=True,
             )
         except BaseException as ex:
-            if self._hil_trace is not None:
-                self._hil_trace.record(
+            if self._hil is not None:
+                self._hil.connection(
                     "connect_failed",
-                    session_generation=session_generation,
-                    reason_category=stage,
-                    exception_type=type(ex).__name__,
+                    session_generation,
+                    stage=stage,
+                    error_type=type(ex).__name__,
                 )
             self._active_session_generation = None
             self._ready_event.clear()
@@ -1125,11 +1118,8 @@ class AllpowersBLEClient:
                 self._connected = True
                 self._connected_monotonic = now
                 self._last_connected_at = _utcnow()
-                if self._hil_trace is not None:
-                    self._hil_trace.record(
-                        "connected",
-                        session_generation=session_generation,
-                    )
+                if self._hil is not None:
+                    self._hil.connection("connected", session_generation)
                 self._last_error = None
                 self._persist_model_identity_if_validated()
                 self._statistics = replace(
@@ -1141,12 +1131,12 @@ class AllpowersBLEClient:
                 self._last_status_request_monotonic = self._loop_time()
                 self._wake_maintenance_loop()
         except BaseException as ex:
-            if self._hil_trace is not None:
-                self._hil_trace.record(
+            if self._hil is not None:
+                self._hil.connection(
                     "connect_failed",
-                    session_generation=session_generation,
-                    reason_category="gatt_setup",
-                    exception_type=type(ex).__name__,
+                    session_generation,
+                    stage="gatt_setup",
+                    error_type=type(ex).__name__,
                 )
             # Invalidate before yielding: a writer already waiting for the lock
             # must not use a session whose initial setup has failed.
@@ -1217,7 +1207,7 @@ class AllpowersBLEClient:
             if old_generation is None and was_connected and client is failed_client:
                 old_generation = failed_generation
             cause = self._disconnect_reason_category or "unsolicited_disconnect"
-            self._trace_pending_snapshot(disconnected=True)
+            self._hil_pending_report(disconnected=True)
             self._disconnect_reason_category = None
             self._active_session_generation = None
             self._ready_event.clear()
@@ -1240,12 +1230,8 @@ class AllpowersBLEClient:
                 refresh_task.cancel()
 
             if was_connected:
-                if self._hil_trace is not None:
-                    self._hil_trace.record(
-                        "disconnected",
-                        session_generation=old_generation,
-                        reason_category=cause,
-                    )
+                if self._hil is not None:
+                    self._hil.connection("disconnected", old_generation, stage=cause)
                 self._last_disconnected_at = _utcnow()
                 self._statistics = replace(
                     self._statistics,
@@ -1356,14 +1342,8 @@ class AllpowersBLEClient:
         characteristic: BleakGATTCharacteristic,
         data: bytearray,
     ) -> None:
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                "notification_received",
-                direction="rx",
-                frame=data,
-                characteristic_uuid=NOTIFY_UUID,
-                session_generation=self._active_session_generation,
-            )
+        if self._hil is not None:
+            self._hil.notification_received(self._active_session_generation, data)
         del characteristic
         self._statistics = replace(
             self._statistics,
@@ -1404,14 +1384,14 @@ class AllpowersBLEClient:
                         pending_output.session_generation
                         != self._active_session_generation
                     ):
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "transaction_abandoned",
                             pending_output,
                             reason="session_changed",
                         )
                         self._pending_output_transaction = None
                     elif now > pending_output.confirm_deadline_monotonic:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "transaction_timed_out",
                             pending_output,
                             reason="telemetry_after_deadline",
@@ -1428,7 +1408,7 @@ class AllpowersBLEClient:
                         and packet.light_enabled == pending_output.target_light
                     ):
                         if pending_output.phase is TransactionPhase.SENDING:
-                            self._trace_transaction(
+                            self._hil_transaction(
                                 "telemetry_match_pending_submission",
                                 pending_output,
                                 reason="matching_validated_telemetry",
@@ -1437,7 +1417,7 @@ class AllpowersBLEClient:
                             pending_output.phase
                             is TransactionPhase.AWAITING_CONFIRMATION
                         ):
-                            self._trace_transaction(
+                            self._hil_transaction(
                                 "transaction_confirmed",
                                 pending_output,
                                 reason="matching_validated_telemetry",
@@ -1451,7 +1431,7 @@ class AllpowersBLEClient:
                             )
                         )
                     elif pending_output.phase is TransactionPhase.CONFIRMED:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "telemetry_mismatch",
                             pending_output,
                             reason="unconfirmed_or_contradictory",
@@ -1460,7 +1440,7 @@ class AllpowersBLEClient:
                             pending_output, phase=TransactionPhase.SENDING
                         )
                     else:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "telemetry_mismatch",
                             pending_output,
                             reason="unconfirmed_or_contradictory",
@@ -1486,14 +1466,14 @@ class AllpowersBLEClient:
                         pending_settings.session_generation
                         != self._active_session_generation
                     ):
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "transaction_abandoned",
                             pending_settings,
                             reason="session_changed",
                         )
                         self._pending_settings_transaction = None
                     elif now > pending_settings.confirm_deadline_monotonic:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "transaction_timed_out",
                             pending_settings,
                             reason="telemetry_after_deadline",
@@ -1510,7 +1490,7 @@ class AllpowersBLEClient:
                         and packet == pending_settings.target
                     ):
                         if pending_settings.phase is TransactionPhase.SENDING:
-                            self._trace_transaction(
+                            self._hil_transaction(
                                 "telemetry_match_pending_submission",
                                 pending_settings,
                                 reason="matching_validated_telemetry",
@@ -1519,7 +1499,7 @@ class AllpowersBLEClient:
                             pending_settings.phase
                             is TransactionPhase.AWAITING_CONFIRMATION
                         ):
-                            self._trace_transaction(
+                            self._hil_transaction(
                                 "transaction_confirmed",
                                 pending_settings,
                                 reason="matching_validated_telemetry",
@@ -1533,7 +1513,7 @@ class AllpowersBLEClient:
                             )
                         )
                     elif pending_settings.phase is TransactionPhase.CONFIRMED:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "telemetry_mismatch",
                             pending_settings,
                             reason="unconfirmed_or_contradictory",
@@ -1542,7 +1522,7 @@ class AllpowersBLEClient:
                             pending_settings, phase=TransactionPhase.SENDING
                         )
                     else:
-                        self._trace_transaction(
+                        self._hil_transaction(
                             "telemetry_mismatch",
                             pending_settings,
                             reason="unconfirmed_or_contradictory",
@@ -1556,15 +1536,12 @@ class AllpowersBLEClient:
                 self._advertised_name = packet.name
                 self._observe_model_identity(packet.name.strip())
 
-        if self._hil_trace is not None:
-            self._hil_trace.record(
-                "notification_decoded",
-                session_generation=self._active_session_generation,
-                decoded_packets=len(packets),
-                decoded_packet_types=[type(packet).__name__ for packet in packets],
-                characteristic_uuid=NOTIFY_UUID,
-                inferred_model_profile=self._runtime_model_support().profile,
-                session_hardware_revision=(
+        if self._hil is not None:
+            self._hil.notification_decoded(
+                self._active_session_generation,
+                packet_types=tuple(type(packet).__name__ for packet in packets),
+                profile=self._runtime_model_support().profile,
+                hardware_revision=(
                     self._session_hardware_revision[0]
                     if self._session_hardware_revision is not None
                     else None
@@ -1590,26 +1567,22 @@ class AllpowersBLEClient:
             or characteristic is None
             or active_generation is None
         ):
-            if self._hil_trace is not None:
-                self._hil_trace.record(
+            if self._hil is not None:
+                self._hil.write(
                     "write_rejected",
-                    direction="tx",
-                    frame=frame,
-                    session_generation=active_generation,
+                    active_generation,
                     transaction_id=hil_transaction_id,
-                    reason="not_connected",
+                    frame=frame,
                 )
             raise NotConnectedError("The ALLPOWERS device is not connected")
 
-        if self._hil_trace is not None:
-            self._hil_trace.record(
+        if self._hil is not None:
+            self._hil.write(
                 "write_attempt",
-                direction="tx",
-                frame=frame,
-                session_generation=active_generation,
+                active_generation,
                 transaction_id=hil_transaction_id,
+                frame=frame,
                 write_with_response=_write_with_response(characteristic),
-                characteristic_uuid=WRITE_UUID,
             )
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
@@ -1624,17 +1597,15 @@ class AllpowersBLEClient:
                 or not self._connected
             ):
                 raise NotConnectedError("The ALLPOWERS device session changed")
-            if self._hil_trace is not None:
-                self._hil_trace.record(
-                    "write_ok",
-                    session_generation=active_generation,
-                    transaction_id=hil_transaction_id,
+            if self._hil is not None:
+                self._hil.write(
+                    "write_ok", active_generation, transaction_id=hil_transaction_id
                 )
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
-            if self._hil_trace is not None:
-                self._hil_trace.record(
+            if self._hil is not None:
+                self._hil.write(
                     "write_error",
-                    session_generation=active_generation,
+                    active_generation,
                     transaction_id=hil_transaction_id,
                     error_type=type(ex).__name__,
                     reason_category="transport_failure",
@@ -1650,7 +1621,7 @@ class AllpowersBLEClient:
             self._emit_update()
             raise
         except (Exception, asyncio.CancelledError) as ex:
-            if self._hil_trace is not None:
+            if self._hil is not None:
                 reason = (
                     "session_changed"
                     if isinstance(ex, NotConnectedError)
@@ -1658,9 +1629,9 @@ class AllpowersBLEClient:
                     if isinstance(ex, asyncio.CancelledError)
                     else "unexpected_failure"
                 )
-                self._hil_trace.record(
+                self._hil.write(
                     "write_error",
-                    session_generation=active_generation,
+                    active_generation,
                     transaction_id=hil_transaction_id,
                     error_type=type(ex).__name__,
                     reason_category=reason,

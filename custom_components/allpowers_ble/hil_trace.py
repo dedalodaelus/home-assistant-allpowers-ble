@@ -310,8 +310,8 @@ def _lookup(
     if not capture.retrievable():
         entry = hass.config_entries.async_get_entry(capture.entry_id)
         runtime = getattr(entry, "runtime_data", None)
-        if runtime is not None and runtime.client._hil_trace is capture:
-            runtime.client._hil_trace = None
+        if runtime is not None:
+            runtime.client.detach_hil_capture(capture)
         _forget(hass, store, capture)
         _deny(connection, msg, "expired")
         return None
@@ -346,8 +346,8 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
     if old is not None:
         old_entry = hass.config_entries.async_get_entry(old.entry_id)
         old_runtime = getattr(old_entry, "runtime_data", None)
-        if old_runtime is not None and old_runtime.client._hil_trace is old:
-            old_runtime.client._hil_trace = None
+        if old_runtime is not None:
+            old_runtime.client.detach_hil_capture(old)
         _forget(hass, store, old)
         # Expired A may have removed the empty store; B must re-register it.
         hass.data[KEY] = store
@@ -361,8 +361,7 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
     store.active = capture
 
     def expire() -> None:
-        if runtime.client._hil_trace is capture:
-            runtime.client._hil_trace = None
+        runtime.client.detach_hil_capture(capture)
         _forget(hass, store, capture)
 
     capture._on_expire = expire
@@ -372,11 +371,7 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
         "capture_started",
         session_generation=runtime.client._active_session_generation,
     )
-    attach = getattr(runtime.client, "_hil_attach_trace", None)
-    if callable(attach):
-        attach(capture)
-    else:
-        runtime.client._hil_trace = capture
+    runtime.client.attach_hil_capture(capture)
     connection.send_result(
         msg["id"],
         {
@@ -398,14 +393,12 @@ async def ws_stop(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     entry = hass.config_entries.async_get_entry(capture.entry_id)
     runtime = getattr(entry, "runtime_data", None)
     if not capture.closed:
-        if runtime is not None and runtime.client._hil_trace is capture:
-            finalize = getattr(runtime.client, "_hil_finalize_pending_trace", None)
-            if callable(finalize):
-                finalize()
+        if runtime is not None:
+            runtime.client.finalize_hil_capture(capture)
         capture.record("capture_stopped")
         capture.stop("requested_stop")
-    if runtime is not None and runtime.client._hil_trace is capture:
-        runtime.client._hil_trace = None
+    if runtime is not None:
+        runtime.client.detach_hil_capture(capture)
     connection.send_result(msg["id"], capture.snapshot())
 
 
@@ -440,6 +433,6 @@ def clear_entry_capture(hass: HomeAssistant, entry_id: str) -> None:
     for capture in candidates:
         if capture.entry_id != entry_id:
             continue
-        if runtime is not None and runtime.client._hil_trace is capture:
-            runtime.client._hil_trace = None
+        if runtime is not None:
+            runtime.client.detach_hil_capture(capture)
         _forget(hass, store, capture)
