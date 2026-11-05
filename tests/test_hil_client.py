@@ -435,6 +435,7 @@ def test_write_error_reason_is_private_value_only() -> None:
         assert capture.events[-1]["error_type"] == "RuntimeError"
     assert capture.frames == []
 
+
 @pytest.mark.parametrize("invalid_id", [None, "", "   ", 0])
 def test_invalid_observer_transaction_id_fails_closed(invalid_id) -> None:
     """No malformed identifier may silently produce a purportedly complete HIL."""
