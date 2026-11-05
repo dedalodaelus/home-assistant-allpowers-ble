@@ -43,6 +43,16 @@ from .repairs import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Register authenticated, opt-in HIL capture commands."""
+    del config
+    from .hil_trace import async_register
+
+    await async_register(hass)
+    return True
+
+
 PLATFORMS: tuple[Platform, ...] = (
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
@@ -398,6 +408,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -
     except Exception:
         async_create_unload_failed_issue(hass, entry)
         raise
+    finally:
+        from .hil_trace import clear_entry_capture
+
+        clear_entry_capture(hass, entry.entry_id)
     if not unloaded:
         _LOGGER.error(
             "Platform unload failed for config entry %s; restart Home Assistant "

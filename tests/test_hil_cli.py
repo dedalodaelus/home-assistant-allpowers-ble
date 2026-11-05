@@ -974,3 +974,533 @@ def test_scanner_snapshot_rejects_non_scanner_subscriptions():
     ha = api.HAClient("https://example.test", "DUMMY_TEST_TOKEN")
     with pytest.raises(api.HAAPIError, match="Unsupported scanner"):
         ha.websocket([{"type": "call_service"}], scanner_snapshot=True)
+
+
+class TraceHA(FakeHA):
+    """Simulated authenticated WS response, including lost-stop retry."""
+
+    def __init__(self, registry):
+        super().__init__(registry)
+        self.run_id = None
+        self.scenario_id = None
+        self.closed = False
+        self.lose_stop_reply = False
+        self.tamper = False
+        self.no_frames = False
+        self.runtime_stopped = False
+        self.bad_result = None
+        self.requested_route = None
+
+    def websocket(self, commands):
+        command = commands[0]
+        typ = command["type"]
+        self.calls.append(("ws", typ))
+        if typ == "allpowers_ble/hil/start":
+            self.run_id = command["run_id"]
+            self.scenario_id = command["scenario_id"]
+            self.requested_route = command["requested_route"]
+            return [
+                {
+                    "schema_version": 1,
+                    "capture_id": "private-capture",
+                    "ttl_seconds": 120,
+                }
+            ]
+        if typ == "allpowers_ble/hil/stop":
+            self.closed = True
+            if self.lose_stop_reply:
+                self.lose_stop_reply = False
+                raise api.HAAPIError("Lost stop acknowledgement")
+        if typ not in ("allpowers_ble/hil/stop", "allpowers_ble/hil/fetch"):
+            raise AssertionError("Unexpected command")
+        common = {
+            "schema_version": 1,
+            "seq": 1,
+            "utc": "2026-11-05T00:00:00+00:00",
+            "elapsed_ms": 1.0,
+            "run_id": self.run_id,
+            "scenario_id": self.scenario_id,
+            "layer": "gatt_api",
+            "session_generation": 1,
+            "observed_route": "unverified",
+            "event": "write_attempt",
+            "transaction_id": None,
+        }
+        events = [common.copy()]
+        frames = (
+            []
+            if self.no_frames
+            else [
+                {
+                    **common,
+                    "direction": "tx",
+                    "command_type": "status_request",
+                    "frame_validation": "validated_tx",
+                    "hex": "a565b1000106010000000000",
+                }
+            ]
+        )
+        result = {
+            "schema_version": 1,
+            "capture_id": "private-capture",
+            "run_id": "incorrect" if self.tamper else self.run_id,
+            "scenario_id": self.scenario_id,
+            "requested_route": self.requested_route,
+            "capture_layer": "gatt_api_not_rf",
+            "private_raw_bytes": True,
+            "has_gatt_frames": bool(frames),
+            "closed": self.closed,
+            "expired": False,
+            "termination_reason": (
+                "runtime_stopped" if self.runtime_stopped else "requested_stop"
+            ),
+            "qualification_allowed": False,
+            "observed_route": "unverified",
+            "complete": self.closed and not self.runtime_stopped,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "event_count": len(events),
+            "frame_count": len(frames),
+            "events": events,
+            "frames": frames,
+        }
+        if self.bad_result == "missing_schema":
+            result.pop("schema_version")
+        elif self.bad_result == "negative_drop":
+            result["dropped_events"] = -1
+        elif self.bad_result == "bad_hex":
+            frames[0]["hex"] = "oops"
+        elif self.bad_result == "odd_hex":
+            frames[0]["hex"] = "abc"
+        elif self.bad_result == "orphan_frame":
+            frames[0]["seq"] = 2
+        elif self.bad_result == "duplicate_seq":
+            events.append(events[0].copy())
+            result["event_count"] = len(events)
+        elif self.bad_result == "out_of_order":
+            events[0]["seq"] = 2
+            events.append({**common, "seq": 1})
+            result["event_count"] = len(events)
+        elif self.bad_result == "row_scenario":
+            frames[0]["scenario_id"] = "wrong"
+        elif self.bad_result == "bad_timestamp":
+            events[0]["utc"] = "invalid"
+        elif self.bad_result == "nonutc_timestamp":
+            events[0]["utc"] = "2026-11-05T01:00:00+01:00"
+        elif self.bad_result == "missing_timing":
+            events[0].pop("elapsed_ms")
+        elif self.bad_result == "bad_generation":
+            events[0]["session_generation"] = "ble-secret"
+        elif self.bad_result == "bad_direction":
+            frames[0]["direction"] = "rx"
+        elif self.bad_result == "bad_opcode":
+            frames[0]["command_type"] = "invalid_command"
+        elif self.bad_result == "bad_validation":
+            frames[0]["frame_validation"] = "unvalidated_chunk"
+        elif self.bad_result == "bad_event":
+            events[0]["event"] = "invalid event"
+        elif self.bad_result == "bad_count":
+            result["frame_count"] = 7
+        elif self.bad_result == "contradictory_complete":
+            result["complete"] = False
+        elif self.bad_result == "not_private":
+            result["private_raw_bytes"] = False
+        elif self.bad_result == "wrong_route":
+            result["requested_route"] = "other"
+        elif self.bad_result == "invalid_frames":
+            result["frames"] = [{"seq": 1}, None]
+        elif self.bad_result == "frame_generation_mismatch":
+            frames[0]["session_generation"] = 2
+        elif self.bad_result == "frame_time_mismatch":
+            frames[0]["elapsed_ms"] = 2.0
+        elif self.bad_result == "frame_utc_mismatch":
+            frames[0]["utc"] = "2026-11-05T00:00:01+00:00"
+        elif self.bad_result == "frame_transaction_mismatch":
+            frames[0]["transaction_id"] = "tx-different-1"
+        elif self.bad_result == "frame_transaction_missing":
+            frames[0].pop("transaction_id")
+        elif self.bad_result == "elapsed_backwards":
+            events.append({**common, "seq": 2, "elapsed_ms": 0.5})
+            result["event_count"] = len(events)
+        elif self.bad_result == "equal_elapsed":
+            events.append({**common, "seq": 2})
+            result["event_count"] = len(events)
+        elif self.bad_result == "orphan_with_drops":
+            frames[0]["seq"] = 2
+            result["dropped_events"] = 1
+            result["complete"] = False
+        elif self.bad_result == "matching_with_drops_but_mismatched":
+            frames[0]["transaction_id"] = "tx-different-1"
+            result["dropped_events"] = 1
+            result["complete"] = False
+        return [result]
+
+
+@pytest.mark.parametrize("lose_reply", [False, True])
+def test_trace_cli_private_jsonl_agrees_with_manifest_and_recovers_lost_stop(
+    monkeypatch, tmp_path, allpowers_registry, lose_reply
+):
+    fake = TraceHA(allpowers_registry)
+    fake.lose_stop_reply = lose_reply
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output = tmp_path / "results"
+    rc = cli.main(
+        [
+            "trace",
+            "--ha-url",
+            "https://example.test",
+            "--non-interactive",
+            "--scenario-id",
+            "outputs-rejected",
+            "--duration",
+            "1",
+            "--route",
+            "active_proxy",
+            "--output-root",
+            str(output),
+        ]
+    )
+    assert rc == 0
+    (directory,) = list(output.iterdir())
+    assert (directory.stat().st_mode & 0o777) == 0o700
+    assert {p.name for p in directory.iterdir()} == {
+        "environment.json",
+        "session.json",
+        "events.jsonl",
+        "frames.jsonl",
+        "trace.json",
+    }
+    assert all((p.stat().st_mode & 0o777) == 0o600 for p in directory.iterdir())
+    meta = json.loads((directory / "trace.json").read_text())
+    events = [
+        json.loads(s) for s in (directory / "events.jsonl").read_text().splitlines()
+    ]
+    frames = [
+        json.loads(s) for s in (directory / "frames.jsonl").read_text().splitlines()
+    ]
+    session = json.loads((directory / "session.json").read_text())
+    assert meta["run_id"] == session["run_id"] == events[0]["run_id"]
+    assert meta["scenario_id"] == events[0]["scenario_id"] == "outputs-rejected"
+    assert meta["event_count"] == len(events) == 1
+    assert meta["frame_count"] == len(frames) == 1
+    assert meta["closed"] and meta["complete"]
+    assert not meta["qualification_allowed"]
+    assert session["qualification_status"] == "inconclusive"
+    assert frames[0]["command_type"] == "status_request"
+    assert any(call == ("ws", "allpowers_ble/hil/stop") for call in fake.calls)
+    assert lose_reply == any(
+        call == ("ws", "allpowers_ble/hil/fetch") for call in fake.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "exit_code"),
+    [
+        ("tamper", 2),
+        ("no_frames", 2),
+        ("interrupt", 2),
+    ],
+)
+def test_trace_cli_never_qualifies_missing_or_interrupted_evidence(
+    monkeypatch, tmp_path, allpowers_registry, mode, exit_code
+):
+    fake = TraceHA(allpowers_registry)
+    fake.tamper = mode == "tamper"
+    fake.no_frames = mode == "no_frames"
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+
+    def sleep_once(_):
+        if mode == "interrupt":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "sleep", sleep_once)
+    output = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--duration",
+                "1",
+                "--output-root",
+                str(output),
+            ]
+        )
+        == exit_code
+    )
+    (directory,) = list(output.iterdir())
+    session = json.loads((directory / "session.json").read_text())
+    assert session["qualification_status"] == "inconclusive"
+    assert fake.closed
+    if mode in ("tamper", "interrupt"):
+        assert not (directory / "trace.json").exists()
+
+
+@pytest.mark.parametrize("scenario,duration", [("not safe!", "1"), ("ok", "31")])
+def test_trace_cli_rejects_bad_scenario_and_oversized_run_before_capture(
+    monkeypatch, tmp_path, allpowers_registry, scenario, duration
+):
+    fake = TraceHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    root = tmp_path / "no-results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--duration",
+                duration,
+                "--scenario-id",
+                scenario,
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    assert not root.exists()
+    assert all("allpowers_ble/hil/start" not in c for c in fake.calls)
+
+
+def test_runtime_stopped_trace_returns_two_even_when_it_has_valid_frames(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = TraceHA(allpowers_registry)
+    fake.runtime_stopped = True
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--duration",
+                "1",
+                "--non-interactive",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    (directory,) = list(root.iterdir())
+    trace = json.loads((directory / "trace.json").read_text())
+    assert trace["frame_count"] == 1
+    assert trace["termination_reason"] == "runtime_stopped"
+    assert trace["complete"] is False
+    assert trace["qualification_allowed"] is False
+    assert (
+        json.loads((directory / "session.json").read_text())["qualification_status"]
+        == "inconclusive"
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "missing_schema",
+        "negative_drop",
+        "bad_hex",
+        "odd_hex",
+        "orphan_frame",
+        "duplicate_seq",
+        "out_of_order",
+        "row_scenario",
+        "bad_timestamp",
+        "nonutc_timestamp",
+        "missing_timing",
+        "bad_generation",
+        "bad_direction",
+        "bad_opcode",
+        "bad_validation",
+        "bad_event",
+        "bad_count",
+        "contradictory_complete",
+        "not_private",
+        "wrong_route",
+        "invalid_frames",
+        "frame_generation_mismatch",
+        "frame_time_mismatch",
+        "frame_utc_mismatch",
+        "frame_transaction_mismatch",
+        "frame_transaction_missing",
+        "elapsed_backwards",
+        "matching_with_drops_but_mismatched",
+    ],
+)
+def test_trace_cli_fails_closed_on_malformed_v1_evidence(
+    monkeypatch, tmp_path, allpowers_registry, mode
+):
+    fake = TraceHA(allpowers_registry)
+    fake.bad_result = mode
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--duration",
+                "1",
+                "--non-interactive",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    (directory,) = list(root.iterdir())
+    assert (directory / "environment.json").exists()
+    assert (directory / "session.json").exists()
+    assert not (directory / "events.jsonl").exists()
+    assert not (directory / "frames.jsonl").exists()
+    assert not (directory / "trace.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_return"),
+    [("equal_elapsed", 0), ("orphan_with_drops", 2)],
+)
+def test_trace_cli_accepts_equal_timestamps_and_explains_dropped_orphan(
+    monkeypatch, tmp_path, allpowers_registry, mode, expected_return
+):
+    fake = TraceHA(allpowers_registry)
+    fake.bad_result = mode
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--duration",
+                "1",
+                "--non-interactive",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == expected_return
+    )
+    (directory,) = list(root.iterdir())
+    metadata = json.loads((directory / "trace.json").read_text())
+    events = [
+        json.loads(value)
+        for value in (directory / "events.jsonl").read_text().splitlines()
+    ]
+    frames = [
+        json.loads(value)
+        for value in (directory / "frames.jsonl").read_text().splitlines()
+    ]
+    assert metadata["qualification_allowed"] is False
+    assert events[0]["elapsed_ms"] == 1.0
+    if mode == "equal_elapsed":
+        assert events[1]["elapsed_ms"] == events[0]["elapsed_ms"]
+        assert metadata["complete"] is True
+    else:
+        assert metadata["dropped_events"] == 1
+        assert metadata["complete"] is False
+        assert frames[0]["seq"] not in {row["seq"] for row in events}
+
+
+def test_private_trace_second_file_open_failure_erases_all_partial_bytes(
+    monkeypatch, tmp_path, allpowers_registry, capsys
+):
+    from pathlib import Path
+
+    fake = TraceHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    actual_open = cli.os.open
+
+    def fail_second_private_file(path, flags, mode=0o777):
+        if Path(path).name == "frames.jsonl":
+            raise OSError("PRIVATE path/unsafe-space")
+        return actual_open(path, flags, mode)
+
+    monkeypatch.setattr(cli.os, "open", fail_second_private_file)
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--duration",
+                "1",
+                "--non-interactive",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    (directory,) = list(root.iterdir())
+    assert sorted(p.name for p in directory.iterdir()) == [
+        "environment.json",
+        "session.json",
+    ]
+    assert (
+        json.loads((directory / "session.json").read_text())["qualification_status"]
+        == "inconclusive"
+    )
+    log = capsys.readouterr()
+    assert "PRIVATE path" not in log.err
+    assert "Private HIL trace could not be saved" in log.err
+
+
+def test_private_trace_manifest_write_failure_scrubs_created_jsonl(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = TraceHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    actual_dump = cli.json.dump
+
+    def fail_manifest(data, stream, *args, **kwargs):
+        if isinstance(data, dict) and data.get("capture_id") == "private-capture":
+            stream.write("PRIVATE_PARTIAL")
+            raise OSError("full disk")
+        return actual_dump(data, stream, *args, **kwargs)
+
+    monkeypatch.setattr(cli.json, "dump", fail_manifest)
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--duration",
+                "1",
+                "--non-interactive",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    (directory,) = list(root.iterdir())
+    assert not (directory / "trace.json").exists()
+    assert not (directory / "events.jsonl").exists()
+    assert not (directory / "frames.jsonl").exists()
+    assert (directory / "session.json").exists()
