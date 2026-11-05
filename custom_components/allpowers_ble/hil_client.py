@@ -90,9 +90,7 @@ class HilClientTracer:
         else:
             self.capture.record(event, session_generation=generation)
 
-    def control_rejection(
-        self, generation: int | None, kind: str, reason: str
-    ) -> None:
+    def control_rejection(self, generation: int | None, kind: str, reason: str) -> None:
         """Keep rejection categories separate from production safety decisions."""
         self.capture.record(
             "control_rejected",
