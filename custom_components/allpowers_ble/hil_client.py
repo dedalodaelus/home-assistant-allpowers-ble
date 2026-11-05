@@ -63,13 +63,19 @@ class HilClientTracer:
         return tuple(snapshots)
 
     def attach_runtime(
-        self, output: PendingTransactionView | None, settings: PendingTransactionView | None
+        self,
+        output: PendingTransactionView | None,
+        settings: PendingTransactionView | None,
     ) -> None:
         """Attach to existing pending TX without changing its ID or phase."""
         self.attach(self._pending_snapshots(output, settings))
 
     def transaction_runtime(
-        self, event: str, transaction: PendingTransactionView, *, reason: str | None = None
+        self,
+        event: str,
+        transaction: PendingTransactionView,
+        *,
+        reason: str | None = None,
     ) -> None:
         """Format a TX transition already determined by the BLE state machine."""
         kind = "output" if hasattr(transaction, "target_dc") else "settings"
