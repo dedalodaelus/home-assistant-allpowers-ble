@@ -42,6 +42,14 @@ class _CaptureClient:
         assert self.hil_capture is capture
 
 
+def _capture_of(client):
+    """Read current capture in tests, not through a production public getter."""
+    if isinstance(client, _CaptureClient):
+        return _capture_of(client)
+    tracer = client._hil
+    return tracer.capture if tracer is not None else None
+
+
 def new_capture():
     return Capture("entry", "user", "abc12345", "status", "active_proxy")
 
@@ -151,7 +159,7 @@ async def test_websocket_explicit_start_stop_fetch_and_scope():
         "requested_route": "active_proxy",
     }
     await ws_start(hass, connection, start)
-    capture = client.hil_capture
+    capture = _capture_of(client)
     assert capture is not None
     assert capture.requested_route == "active_proxy"
     assert capture.snapshot()["observed_route"] == "unverified"
@@ -164,7 +172,7 @@ async def test_websocket_explicit_start_stop_fetch_and_scope():
     connection.send_error.assert_called()
     connection.user.id = "user"
     await ws_stop(hass, connection, common)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     assert capture.closed
     clear_entry_capture(hass, "entry")
 
@@ -181,12 +189,12 @@ async def test_websocket_rejects_nonadmin_invalid_input_and_busy():
     }
     connection.user.is_admin = False
     await ws_start(hass, connection, start)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     connection.user.is_admin = True
     await ws_start(hass, connection, {**start, "run_id": "a"})
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     await ws_start(hass, connection, start)
-    assert client.hil_capture is not None
+    assert _capture_of(client) is not None
     await ws_start(hass, connection, start)
     assert connection.send_error.call_count >= 3
     clear_entry_capture(hass, "entry")
@@ -204,11 +212,11 @@ async def test_websocket_rejects_foreign_entry_and_not_ready():
     }
     hass.config_entries.async_get_entry.return_value.domain = "unrelated"
     await ws_start(hass, connection, msg)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     hass.config_entries.async_get_entry.return_value.domain = "allpowers_ble"
     hass.config_entries.async_get_entry.return_value.runtime_data = None
     await ws_start(hass, connection, msg)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 def test_record_failure_cannot_disrupt_ble():
@@ -229,7 +237,7 @@ async def test_expired_owner_lookup_erases_data():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, start)
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture.record("rx", frame=b"private")
     capture.started -= 121
     await ws_fetch(
@@ -237,7 +245,7 @@ async def test_expired_owner_lookup_erases_data():
         connection,
         {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id},
     )
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     assert capture.frames == []
     assert "allpowers_ble_hil_capture" not in hass.data
     connection.send_error.assert_called()
@@ -258,7 +266,7 @@ async def test_expired_lookup_without_runtime_erases_private_data() -> None:
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     assert capture is not None
     capture.record("notification_received", frame=b"private", direction="rx")
     capture.started -= 121
@@ -274,7 +282,7 @@ async def test_expired_lookup_without_runtime_erases_private_data() -> None:
     assert "allpowers_ble_hil_capture" not in hass.data
     connection.send_error.assert_called_with(2, "expired", "HIL request rejected")
     client.detach_hil_capture(capture)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 @pytest.mark.asyncio
@@ -288,11 +296,11 @@ async def test_new_session_retains_prior_sealed_retry():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, start)
-    old = client.hil_capture
+    old = _capture_of(client)
     old.record("rx", frame=b"private")
     old.stop()
     await ws_start(hass, connection, start)
-    assert client.hil_capture is not old
+    assert _capture_of(client) is not old
     assert old.frames and old.retrievable()
     assert hass.data["allpowers_ble_hil_capture"].sealed[old.capture_id] is old
     await ws_fetch(
@@ -331,7 +339,7 @@ async def test_new_session_replaces_unloaded_prior_entry():
             "requested_route": "auto",
         },
     )
-    assert client.hil_capture is not previous
+    assert _capture_of(client) is not previous
     assert store.sealed[previous.capture_id] is previous
     clear_entry_capture(hass, "entry")
     assert store.sealed[previous.capture_id] is previous
@@ -353,11 +361,11 @@ async def test_timer_expires_and_scrubs_even_without_fetch():
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture.record("rx", frame=b"secret")
     callback = capture._expiry_handle._callback
     callback()
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     assert capture.frames == []
     assert not hass.data
     callback()
@@ -377,14 +385,14 @@ async def test_timer_does_not_clear_replacement_capture():
             "requested_route": "auto",
         },
     )
-    prior = client.hil_capture
+    prior = _capture_of(client)
     callback = prior._expiry_handle._callback
     replacement = new_capture()
     store = hass.data["allpowers_ble_hil_capture"]
     store.active = replacement
     client.attach_hil_capture(replacement)
     callback()
-    assert client.hil_capture is replacement
+    assert _capture_of(client) is replacement
     assert store.active is replacement
     clear_entry_capture(hass, "entry")
 
@@ -400,7 +408,7 @@ async def test_invalid_stop_fetch_admin_and_missing_capture():
     await ws_stop(hass, connection, msg)
     await ws_fetch(hass, connection, msg)
     assert connection.send_error.call_count == 4
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 @pytest.mark.asyncio
@@ -417,7 +425,7 @@ async def test_stop_without_runtime_does_not_leak():
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     hass.config_entries.async_get_entry.return_value.runtime_data = None
     await ws_stop(
         hass,
@@ -435,7 +443,7 @@ async def test_register_and_integration_setup_are_explicit():
     hass, connection, client = _api_case()
     assert await async_setup(hass, {})
     await async_register(hass)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 @pytest.mark.asyncio
@@ -522,13 +530,13 @@ async def test_connect_and_failed_setup_trace(monkeypatch):
     monkeypatch.setattr(client_module, "establish_connection", establish)
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
     await client._connect_once()
-    assert any(row["event"] == "connect_attempt" for row in client.hil_capture.events)
+    assert any(row["event"] == "connect_attempt" for row in _capture_of(client).events)
     assert any(
         row["event"] == "model_profile_selected"
         and row["inferred_model_profile"] == "r600-unverified-revision"
-        for row in client.hil_capture.events
+        for row in _capture_of(client).events
     )
-    assert any(row["event"] == "connected" for row in client.hil_capture.events)
+    assert any(row["event"] == "connected" for row in _capture_of(client).events)
     await client.async_stop()
 
     failing = make_client()
@@ -544,7 +552,7 @@ async def test_connect_and_failed_setup_trace(monkeypatch):
     monkeypatch.setattr(failing, "_fresh_ble_device", lambda: FakeDevice())
     with pytest.raises(UnsupportedDeviceError):
         await failing._connect_once()
-    assert any(row["event"] == "connect_failed" for row in failing.hil_capture.events)
+    assert any(row["event"] == "connect_failed" for row in _capture_of(failing).events)
 
 
 @pytest.mark.asyncio
@@ -562,7 +570,7 @@ async def test_expired_capture_preserves_unrelated_runtime_attachment():
         connection,
         {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id},
     )
-    assert client.hil_capture is unrelated
+    assert _capture_of(client) is unrelated
     assert "allpowers_ble_hil_capture" not in hass.data
 
 
@@ -849,13 +857,13 @@ async def test_stop_response_failure_recovered_by_fetch():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, req)
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture.record("tx", frame=b"secret", direction="tx")
     stop = {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id}
     connection.send_result.side_effect = RuntimeError("lost socket")
     with pytest.raises(RuntimeError):
         await ws_stop(hass, connection, stop)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     assert capture.closed and capture.retrievable()
     connection.send_result.side_effect = None
     await ws_fetch(hass, connection, stop)
@@ -898,7 +906,7 @@ async def test_stop_rearms_bounded_expiry_when_timer_reference_is_missing():
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture._expiry_handle.cancel()
     capture._expiry_handle = None
     await ws_stop(
@@ -935,7 +943,7 @@ async def test_opt_in_capture_does_not_add_ble_writes_or_change_status_request()
             assert len(capture.frames) == 1
             assert capture.frames[0]["hex"] == encode_status_request().hex()
         else:
-            assert client.hil_capture is None
+            assert _capture_of(client) is None
     assert writes == [[encode_status_request()], [encode_status_request()]]
 
 
@@ -973,7 +981,7 @@ async def test_runtime_stop_seals_incomplete_once_and_preserves_retry_bytes():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, start)
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture.record("notification_received", frame=b"private", direction="rx")
     original_ttl = capture._expiry_handle
     await client.async_stop()
@@ -1014,7 +1022,7 @@ async def test_requested_stop_keeps_complete_and_sealed_timer_on_retry():
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     capture.record("notification_received", frame=b"ok", direction="rx")
     old_timer = capture._expiry_handle
     stop = {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id}
@@ -1141,7 +1149,7 @@ async def test_user_stop_records_silent_pending_state_without_mutating_it(
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     if kind == "output":
         await client.async_set_ac(True)
         original = client._pending_output_transaction
@@ -1194,12 +1202,12 @@ def test_pending_trace_finalizer_is_read_only_and_skips_confirmed():
     from tests.test_client_runtime import make_client
 
     client = make_client()
-    client.finalize_hil_capture(client.hil_capture)
+    client.finalize_hil_capture(_capture_of(client))
     capture = new_capture()
     client.attach_hil_capture(capture)
     client._pending_output_transaction = None
     client._pending_settings_transaction = None
-    client.finalize_hil_capture(client.hil_capture)
+    client.finalize_hil_capture(_capture_of(client))
     from custom_components.allpowers_ble.client import PendingOutputTransaction
 
     client._pending_output_transaction = PendingOutputTransaction(
@@ -1213,7 +1221,7 @@ def test_pending_trace_finalizer_is_read_only_and_skips_confirmed():
         phase=TransactionPhase.CONFIRMED,
         hil_transaction_id="tx-confirmed",
     )
-    client.finalize_hil_capture(client.hil_capture)
+    client.finalize_hil_capture(_capture_of(client))
     assert not capture.events
     assert client._pending_output_transaction.phase is TransactionPhase.CONFIRMED
 
@@ -1409,14 +1417,14 @@ async def test_sealed_capture_survives_new_active_run_and_remains_private():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, request)
-    first = client.hil_capture
+    first = _capture_of(client)
     first.record("notification_received", frame=b"private-A", direction="rx")
     stop_a = {"id": 2, "entry_id": "entry", "capture_id": first.capture_id}
     await ws_stop(hass, connection, stop_a)
     sealed = connection.send_result.call_args.args[1]
     assert sealed["complete"] and sealed["frame_count"] == 1
     await ws_start(hass, connection, {**request, "id": 3, "scenario_id": "second"})
-    second = client.hil_capture
+    second = _capture_of(client)
     store = hass.data["allpowers_ble_hil_capture"]
     assert store.active is second and store.sealed[first.capture_id] is first
     second.record("notification_received", frame=b"private-B", direction="rx")
@@ -1433,7 +1441,7 @@ async def test_sealed_capture_survives_new_active_run_and_remains_private():
     assert connection.send_error.call_args.args[1] == "not_found"
     first._expiry_handle._callback()
     assert first.frames == [] and first.capture_id not in store.sealed
-    assert client.hil_capture is second and store.active is second
+    assert _capture_of(client) is second and store.active is second
     clear_entry_capture(hass, "entry")
     assert not second.frames and not hass.data
 
@@ -1454,7 +1462,7 @@ async def test_sealed_fifo_evicts_only_oldest_and_entry_unload_erases_every_run(
                 "requested_route": "auto",
             },
         )
-        capture = client.hil_capture
+        capture = _capture_of(client)
         capture.record(
             "notification_received", frame=f"private-{number}".encode(), direction="rx"
         )
@@ -1484,13 +1492,13 @@ async def test_sealed_fifo_evicts_only_oldest_and_entry_unload_erases_every_run(
             "requested_route": "auto",
         },
     )
-    latest = client.hil_capture
+    latest = _capture_of(client)
     latest.record("notification_received", frame=b"private-latest", direction="rx")
     clear_entry_capture(hass, "entry")
     assert not hass.data
     assert not latest.frames and latest._expiry_handle is None
     assert all(not item.frames and item._expiry_handle is None for item in sealed)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 @pytest.mark.asyncio
@@ -1515,7 +1523,7 @@ async def test_unload_first_entry_preserves_other_entry_active_capture():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, request)
-    first = client.hil_capture
+    first = _capture_of(client)
     first.record("notification_received", frame=b"first", direction="rx")
     await ws_stop(
         hass,
@@ -1527,13 +1535,13 @@ async def test_unload_first_entry_preserves_other_entry_active_capture():
         connection,
         {**request, "entry_id": "other-entry", "scenario_id": "second"},
     )
-    second = other_client.hil_capture
+    second = _capture_of(other_client)
     second.record("notification_received", frame=b"second", direction="rx")
     clear_entry_capture(hass, "entry")
     store = hass.data["allpowers_ble_hil_capture"]
     assert not first.frames and first.capture_id not in store.sealed
     assert store.active is second and second.frames
-    assert other_client.hil_capture is second
+    assert _capture_of(other_client) is second
     clear_entry_capture(hass, "other-entry")
     assert not hass.data
 
@@ -1580,7 +1588,7 @@ async def test_new_run_inherits_pending_transaction_without_replaying_tx(
         "requested_route": "auto",
     }
     await ws_start(hass, connection, request)
-    first = client.hil_capture
+    first = _capture_of(client)
     if kind == "output":
         await client.async_set_ac(True)
         pending = client._pending_output_transaction
@@ -1602,7 +1610,7 @@ async def test_new_run_inherits_pending_transaction_without_replaying_tx(
         for e in first.events
     )
     await ws_start(hass, connection, {**request, "id": 3, "scenario_id": "capture-B"})
-    second = client.hil_capture
+    second = _capture_of(client)
     inherited = [r for r in second.events if r["event"] == "transaction_inherited"]
     assert len(inherited) == 1
     assert inherited[0]["transaction_id"] == previous_id
@@ -1682,7 +1690,7 @@ async def test_new_capture_marks_untraced_pending_write_as_unattributed(
             "requested_route": "auto",
         },
     )
-    capture = client.hil_capture
+    capture = _capture_of(client)
     inherited = [r for r in capture.events if r["event"] == "transaction_inherited"]
     assert len(inherited) == 1
     assert inherited[0]["transaction_id"] is None
@@ -1727,7 +1735,7 @@ async def test_attaching_trace_skips_already_confirmed_transaction():
     )
     capture = new_capture()
     client.attach_hil_capture(capture)
-    assert client.hil_capture is capture
+    assert _capture_of(client) is capture
     assert not capture.events
 
 
@@ -1922,11 +1930,11 @@ async def test_disabled_trace_does_not_add_pre_write_guard_observations():
 
     client = make_client()
     fake = connect_fake(client)
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
     with pytest.raises(StateUnavailableError):
         await client.async_set_ac(True)
     assert fake.writes == []
-    assert client.hil_capture is None
+    assert _capture_of(client) is None
 
 
 def test_transaction_namespace_is_distinct_from_private_capture_capability():
@@ -1954,13 +1962,13 @@ async def test_new_start_forgets_expired_active_capture_without_erasing_replacem
         "requested_route": "auto",
     }
     await ws_start(hass, connection, start)
-    old = client.hil_capture
+    old = _capture_of(client)
     old.record("notification_received", frame=b"secret", direction="rx")
     old.started -= 121
     if not still_attached:
-        client.detach_hil_capture(client.hil_capture)
+        client.detach_hil_capture(_capture_of(client))
     await ws_start(hass, connection, {**start, "id": 2, "scenario_id": "new-b"})
-    new = client.hil_capture
+    new = _capture_of(client)
     assert new is not None and new is not old
     assert old.frames == [] and old._expiry_handle is None
     assert hass.data["allpowers_ble_hil_capture"].active is new
@@ -2173,7 +2181,7 @@ async def test_expired_active_capture_detaches_own_entry_not_new_entry(origin):
         "requested_route": "auto",
     }
     await ws_start(hass, connection, request)
-    first_capture = first_client.hil_capture
+    first_capture = _capture_of(first_client)
     first_capture.record("notification_received", frame=b"A-private", direction="rx")
     first_timer = first_capture._expiry_handle
     expiry_callback = first_timer._callback
@@ -2187,17 +2195,17 @@ async def test_expired_active_capture_detaches_own_entry_not_new_entry(origin):
         connection,
         {**request, "id": 2, "entry_id": "entry-B", "scenario_id": "second"},
     )
-    second_capture = second_client.hil_capture
+    second_capture = _capture_of(second_client)
     assert second_capture is not None and second_capture is not first_capture
     assert second_capture.entry_id == "entry-B"
     if origin == "loaded":
-        assert first_client.hil_capture is None
+        assert _capture_of(first_client) is None
     assert first_capture.events == [] and first_capture.frames == []
     assert first_timer.cancelled()
     store = hass.data["allpowers_ble_hil_capture"]
     assert store.active is second_capture
     expiry_callback()
-    assert second_client.hil_capture is second_capture
+    assert _capture_of(second_client) is second_capture
     assert store.active is second_capture
     await ws_fetch(
         hass,
@@ -2212,7 +2220,7 @@ async def test_expired_active_capture_detaches_own_entry_not_new_entry(origin):
     )
     # A live B must continue owning the one active slot.
     assert store.active is second_capture
-    assert second_client.hil_capture is second_capture
+    assert _capture_of(second_client) is second_capture
     clear_entry_capture(hass, "entry-B")
     assert not hass.data
 
@@ -2239,13 +2247,13 @@ async def test_start_for_other_entry_rejects_busy_active_capture():
         "requested_route": "auto",
     }
     await ws_start(hass, connection, request)
-    active = first_client.hil_capture
+    active = _capture_of(first_client)
     await ws_start(
         hass,
         connection,
         {**request, "id": 2, "entry_id": "entry-B", "scenario_id": "second"},
     )
-    assert first_client.hil_capture is active
-    assert second_client.hil_capture is None
+    assert _capture_of(first_client) is active
+    assert _capture_of(second_client) is None
     assert connection.send_error.call_args.args[1] == "busy"
     clear_entry_capture(hass, "entry")
