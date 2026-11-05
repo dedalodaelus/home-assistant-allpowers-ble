@@ -169,9 +169,13 @@ class Capture:
             backend_kind=route.backend_kind,
             evidence=route.evidence,
         )
-        row = self.events[-1] if self.events else None
-        if isinstance(row, dict) and row["seq"] == self.seq:
-            item.update({key: row[key] for key in ("seq", "utc", "elapsed_ms")})
+        if self.events and self.events[-1]["seq"] == self.seq:
+            item.update(
+                {
+                    key: self.events[-1][key]
+                    for key in ("seq", "utc", "elapsed_ms")
+                }
+            )
         else:
             item["seq"] = self.seq
             item["utc"] = datetime.now(UTC).isoformat()
