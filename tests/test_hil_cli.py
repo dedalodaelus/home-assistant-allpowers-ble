@@ -1125,6 +1125,9 @@ class TraceHA(FakeHA):
         elif self.bad_result == "equal_elapsed":
             events.append({**common, "seq": 2})
             result["event_count"] = len(events)
+        elif self.bad_result == "observer_loss":
+            result["dropped_events"] = 1
+            result["complete"] = False
         elif self.bad_result == "orphan_with_drops":
             frames[0]["seq"] = 2
             result["dropped_events"] = 1
@@ -1504,3 +1507,35 @@ def test_private_trace_manifest_write_failure_scrubs_created_jsonl(
     assert not (directory / "events.jsonl").exists()
     assert not (directory / "frames.jsonl").exists()
     assert (directory / "session.json").exists()
+
+def test_trace_cli_with_observer_loss_fails_with_valid_gatt_frame(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    """Recorded GATT bytes cannot make a failed observer capture successful."""
+    fake = TraceHA(allpowers_registry)
+    fake.bad_result = "observer_loss"
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    root = tmp_path / "results"
+    assert (
+        cli.main(
+            [
+                "trace",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--duration",
+                "1",
+                "--output-root",
+                str(root),
+            ]
+        )
+        == 2
+    )
+    (directory,) = list(root.iterdir())
+    trace = json.loads((directory / "trace.json").read_text())
+    assert trace["frame_count"] == 1
+    assert trace["dropped_events"] == 1
+    assert trace["complete"] is False
+    assert trace["qualification_allowed"] is False
