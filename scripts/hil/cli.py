@@ -465,7 +465,10 @@ def execute(args: argparse.Namespace) -> int:
     print("ALLPOWERS manifest version:", installed or "unknown")
     print("Installed integration commit: unverified by the standard HA API")
     _device_list(devices)
-    print("Bluetooth connection route: unverified (no route instrumentation yet)")
+    print(
+        "Bluetooth route: not verified by preflight; "
+        "use 'trace' for connected-backend attribution"
+    )
     print(
         "HA host / adapter / proxy details: unavailable without an authorized collector"
     )
