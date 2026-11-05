@@ -172,27 +172,20 @@ def test_extractor_handles_faulty_attributes_and_optional_import_failure():
     )
     assert "PRIVATE" not in repr(routes.connected_route(Wrapper(Bad(), scanner)))
 
+
 @pytest.mark.parametrize("missing_proxy", [True, False])
 def test_real_import_contract_has_optional_proxy_support(monkeypatch, missing_proxy):
     """Cover late backend type imports and a missing optional ESPHome package."""
     from types import SimpleNamespace
 
-    original = routes._backend_types.__wrapped__ if hasattr(
-        routes._backend_types, "__wrapped__"
-    ) else _ORIGINAL_BACKEND_TYPES
+    original = _ORIGINAL_BACKEND_TYPES
 
     imports = {
         "habluetooth.wrappers": SimpleNamespace(HaBleakClientWrapper=Wrapper),
         "habluetooth.scanner_bleak": SimpleNamespace(HaScanner=Local),
-        "bleak.backends.bluezdbus.client": SimpleNamespace(
-            BleakClientBlueZDBus=BlueZ
-        ),
-        "bleak_esphome.backend.client": SimpleNamespace(
-            ESPHomeClient=ESPHomeClient
-        ),
-        "bleak_esphome.backend.scanner": SimpleNamespace(
-            ESPHomeScanner=ESPHomeScanner
-        ),
+        "bleak.backends.bluezdbus.client": SimpleNamespace(BleakClientBlueZDBus=BlueZ),
+        "bleak_esphome.backend.client": SimpleNamespace(ESPHomeClient=ESPHomeClient),
+        "bleak_esphome.backend.scanner": SimpleNamespace(ESPHomeScanner=ESPHomeScanner),
     }
     real_import = builtins.__import__
 
