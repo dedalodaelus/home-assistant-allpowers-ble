@@ -21,7 +21,6 @@ def allpowers_registry():
     return _registry_fixture.__wrapped__()
 
 
-
 LOCAL = ConnectedRoute("local_adapter", "bluez", "bluez_device_path", adapter_id="hci1")
 PROXY = ConnectedRoute(
     "active_proxy",
