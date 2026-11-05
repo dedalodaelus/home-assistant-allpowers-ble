@@ -1541,6 +1541,7 @@ def test_trace_cli_with_observer_loss_fails_with_valid_gatt_frame(
     assert trace["complete"] is False
     assert trace["qualification_allowed"] is False
 
+
 @pytest.mark.parametrize("command", ("doctor", "run", "trace"))
 def test_cli_route_text_distinguishes_preflight_and_connected_trace(
     monkeypatch, tmp_path, capsys, allpowers_registry, command
