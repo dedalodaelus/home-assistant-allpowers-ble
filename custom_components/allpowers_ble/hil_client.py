@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .client_observer import PendingTransactionView
-
 from .const import NOTIFY_UUID, WRITE_UUID
+
 if TYPE_CHECKING:
     from .hil_trace import Capture
 
