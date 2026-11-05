@@ -50,7 +50,10 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
         model_classification="supported",
     )
     observer.connection(
-        "model_profile_selected", 4, profile="r600", classification="supported"
+        "model_profile_selected",
+        4,
+        profile="r600",
+        classification="supported",
     )
     original.record("connected", session_generation=4)
     observer.connection("connected", 4)
@@ -133,7 +136,9 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
         )
         observer.transaction(event, tx, reason=reason)
     original.record(
-        "disconnected", session_generation=4, reason_category="telemetry_watchdog"
+        "disconnected",
+        session_generation=4,
+        reason_category="telemetry_watchdog",
     )
     observer.connection("disconnected", 4, stage="telemetry_watchdog")
     original.record("client_stopped", session_generation=None)
@@ -184,7 +189,8 @@ def test_observer_negative_and_inherited_outcomes() -> None:
     tracer.finalize_pending(
         (
             PendingTraceState(3, "tx-timeout", "output", "sending", 10),
-            unknown, confirmed,
+            unknown,
+            confirmed,
         ),
         now=15,
         disconnected=True,
@@ -207,7 +213,10 @@ def test_error_write_paths_stay_private_and_causally_distinct() -> None:
     tracer = HilClientTracer(capture)
     raw = b"\xaa\xbb"
     tracer.connection(
-        "connect_failed", 7, stage="gatt_connection", error_type="TimeoutError"
+        "connect_failed",
+        7,
+        stage="gatt_connection",
+        error_type="TimeoutError",
     )
     tracer.write("write_rejected", 7, frame=raw, transaction_id=None)
     tracer.write("write_attempt", 7, frame=raw, write_with_response=False)
