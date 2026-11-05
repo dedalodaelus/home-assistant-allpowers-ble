@@ -7,6 +7,7 @@ backend/scanner attributes are version-dependent and strictly optional.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import re
 from typing import Any, Literal
@@ -112,8 +113,7 @@ def connected_route(client: object) -> ConnectedRoute:
             )
 
         return ConnectedRoute(evidence="unsupported_backend")
-    except (Exception, BaseException) as ex:
-        # Suppress backend property errors, including cancellation, without
-        # leaking private IDs or changing the production connection lifecycle.
-        del ex
+    except (Exception, asyncio.CancelledError):
+        # Property errors and cancellation cannot change the BLE lifecycle
+        # or leak device paths, exceptions, or scanner identifiers.
         return ConnectedRoute(evidence="inspection_failed")

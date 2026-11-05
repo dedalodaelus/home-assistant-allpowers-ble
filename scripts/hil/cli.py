@@ -120,8 +120,9 @@ def _check_trace_rows(
     run_id: str,
     scenario_id: str,
     frame: bool,
+    schema_version: int = 1,
 ) -> dict[int, dict[str, Any]]:
-    """Validate ordered v1 event/frame rows without decoding private payloads."""
+    """Validate ordered v1/v2 event/frame rows without decoding private payloads."""
     by_seq: dict[int, dict[str, Any]] = {}
     previous = 0
     previous_elapsed = 0.0
@@ -130,11 +131,16 @@ def _check_trace_rows(
         if (
             not _natural_int(seq)
             or seq <= previous
-            or row.get("schema_version") != 1
+            or row.get("schema_version") != schema_version
             or row.get("run_id") != run_id
             or row.get("scenario_id") != scenario_id
             or row.get("layer") != "gatt_api"
-            or row.get("observed_route") != "unverified"
+            or row.get("observed_route")
+            not in (
+                ("unverified",)
+                if schema_version == 1
+                else ("local_adapter", "active_proxy", "unverified")
+            )
             or not isinstance(row.get("event"), str)
             or re.fullmatch(r"[a-z][a-z0-9_]*", row["event"]) is None
         ):
@@ -198,6 +204,139 @@ def _check_trace_rows(
     return by_seq
 
 
+def _check_v2_routes(
+    result: dict[str, Any],
+    events: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
+) -> None:
+    """Validate per-generation proof and row-time binding before private I/O."""
+    observations = result.get("route_observations")
+    if not isinstance(observations, list):
+        raise HAAPIError("Missing HIL v2 route observations")
+    routes: dict[int, dict[str, Any]] = {}
+    previous_seq = 0
+    previous_elapsed = 0.0
+    for item in observations:
+        if not isinstance(item, dict):
+            raise HAAPIError("Malformed route observation")
+        required = {
+            "session_generation",
+            "seq",
+            "utc",
+            "elapsed_ms",
+            "observed_route",
+            "backend_kind",
+            "evidence",
+        }
+        if not required.issubset(item) or set(item) - (
+            required | {"adapter_id", "proxy_id"}
+        ):
+            raise HAAPIError("Malformed route observation fields")
+        gen = item["session_generation"]
+        seq = item["seq"]
+        elapsed = item["elapsed_ms"]
+        try:
+            when = datetime.fromisoformat(item["utc"])
+        except (TypeError, ValueError) as ex:
+            raise HAAPIError("Invalid route observation timestamp") from ex
+        if (
+            not _natural_int(gen)
+            or gen < 1
+            or gen in routes
+            or not _natural_int(seq)
+            or seq <= previous_seq
+            or type(elapsed) not in (float, int)
+            or not math.isfinite(elapsed)
+            or elapsed < previous_elapsed
+            or when.utcoffset() is None
+            or when.utcoffset().total_seconds() != 0
+        ):
+            raise HAAPIError("Invalid route observation generation or order")
+        route = item["observed_route"]
+        backend = item["backend_kind"]
+        evidence = item["evidence"]
+        if route == "local_adapter":
+            adapter = item.get("adapter_id")
+            if (
+                backend != "bluez"
+                or evidence != "bluez_device_path"
+                or type(adapter) is not str
+                or re.fullmatch(r"hci[0-9]+", adapter) is None
+                or "proxy_id" in item
+            ):
+                raise HAAPIError("Malformed local connected backend proof")
+        elif route == "active_proxy":
+            proxy = item.get("proxy_id")
+            if (
+                backend != "esphome"
+                or evidence != "esphome_scanner_binding"
+                or type(proxy) is not str
+                or not proxy
+                or len(proxy) > 128
+                or not proxy.isprintable()
+                or "adapter_id" in item
+            ):
+                raise HAAPIError("Malformed active proxy connected backend proof")
+        elif route == "unverified":
+            if (
+                backend != "unknown"
+                or evidence
+                not in (
+                    "no_ha_wrapper",
+                    "not_connected",
+                    "missing_tracking",
+                    "local_backend_mismatch",
+                    "bluez_path_mismatch",
+                    "esphome_backend_mismatch",
+                    "esphome_scanner_mismatch",
+                    "unsupported_backend",
+                    "inspection_failed",
+                )
+                or "adapter_id" in item
+                or "proxy_id" in item
+            ):
+                raise HAAPIError("Unverified connected route has forged backend proof")
+        else:
+            raise HAAPIError("Unrecognized connected route")
+        routes[gen] = item
+        previous_seq = seq
+        previous_elapsed = elapsed
+
+    observed = [row["observed_route"] for row in observations]
+    summary = (
+        "unverified"
+        if not observed or "unverified" in observed
+        else observed[0]
+        if len(set(observed)) == 1
+        else "mixed"
+    )
+    if result.get("observed_route") != summary:
+        raise HAAPIError("Connected route summary disagrees with its evidence")
+
+    found_observations: set[int] = set()
+    for row in events + frames:
+        generation = row.get("session_generation")
+        route_item = routes.get(generation)
+        expected = (
+            route_item["observed_route"]
+            if route_item is not None and row["seq"] >= route_item["seq"]
+            else "unverified"
+        )
+        if row["observed_route"] != expected:
+            raise HAAPIError("Connected backend route contradicts event timing")
+        if row["event"] == "route_observed":
+            if (
+                route_item is None
+                or row["seq"] != route_item["seq"]
+                or row.get("backend_kind") != route_item["backend_kind"]
+                or row.get("evidence") != route_item["evidence"]
+            ):
+                raise HAAPIError("Route observation is not bound to its generation")
+            found_observations.add(generation)
+    if result["dropped_events"] == 0 and found_observations != set(routes):
+        raise HAAPIError("Missing connected backend observation event")
+
+
 def _validate_trace_result(
     result: Any,
     *,
@@ -205,17 +344,27 @@ def _validate_trace_result(
     scenario_id: str,
     capture_id: str,
     requested_route: str,
+    expected_version: int | None = None,
 ) -> None:
-    """Fail closed on malformed private v1 evidence, before writing any raw files."""
+    """Fail closed on private v1/v2 evidence, before writing any raw files."""
     if (
         not isinstance(result, dict)
-        or result.get("schema_version") != 1
+        or result.get("schema_version") not in (1, 2)
+        or (
+            expected_version is not None
+            and result.get("schema_version") != expected_version
+        )
         or result.get("run_id") != run_id
         or result.get("scenario_id") != scenario_id
         or result.get("capture_id") != capture_id
         or result.get("requested_route") != requested_route
         or result.get("qualification_allowed") is not False
-        or result.get("observed_route") != "unverified"
+        or (
+            result.get("observed_route") != "unverified"
+            if result.get("schema_version") == 1
+            else result.get("observed_route")
+            not in ("local_adapter", "active_proxy", "mixed", "unverified")
+        )
         or result.get("capture_layer") != "gatt_api_not_rf"
         or result.get("private_raw_bytes") is not True
         or result.get("closed") is not True
@@ -249,10 +398,25 @@ def _validate_trace_result(
     )
     if result["complete"] is not expected_complete:
         raise HAAPIError("Contradictory HIL capture integrity fields")
+    version = result["schema_version"]
     events_by_seq = _check_trace_rows(
-        events, run_id=run_id, scenario_id=scenario_id, frame=False
+        events,
+        run_id=run_id,
+        scenario_id=scenario_id,
+        frame=False,
+        schema_version=version,
     )
-    _check_trace_rows(frames, run_id=run_id, scenario_id=scenario_id, frame=True)
+    _check_trace_rows(
+        frames,
+        run_id=run_id,
+        scenario_id=scenario_id,
+        frame=True,
+        schema_version=version,
+    )
+    if version == 2:
+        _check_v2_routes(result, events, frames)
+    elif "route_observations" in result:
+        raise HAAPIError("Unexpected connected backend proof in v1 trace")
     common_fields = (
         "schema_version",
         "seq",
@@ -406,7 +570,7 @@ def execute(args: argparse.Namespace) -> int:
         )[0]
         if (
             not isinstance(start, dict)
-            or start.get("schema_version") != 1
+            or start.get("schema_version") not in (1, 2)
             or not isinstance(start.get("capture_id"), str)
         ):
             raise HAAPIError("Unexpected HIL capture start response")
@@ -439,6 +603,7 @@ def execute(args: argparse.Namespace) -> int:
             scenario_id=args.scenario_id,
             capture_id=capture_id,
             requested_route=args.route,
+            expected_version=start["schema_version"],
         )
         private_paths = (
             output_dir / "events.jsonl",
@@ -478,7 +643,11 @@ def execute(args: argparse.Namespace) -> int:
             f"{result.get('dropped_frames')}"
         )
         print("Capture termination:", result["termination_reason"])
-        print("Observed connection route: unverified; HIL PASS not permitted")
+        print(
+            "Observed connection route:",
+            result["observed_route"],
+            "(GATT backend only; physical HIL PASS not permitted)",
+        )
         return 0 if result["complete"] and result["frame_count"] else 2
     print("Read-only preflight saved to:", output_dir)
     print("Read-only readiness:", session["preflight"]["overall"])
