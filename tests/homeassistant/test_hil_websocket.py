@@ -24,17 +24,21 @@ class _CaptureClient:
 
     def __init__(self, generation):
         self._active_session_generation = generation
-        self.hil_capture = None
+        self.observer = None
 
-    def attach_hil_capture(self, capture):
-        self.hil_capture = capture
+    @property
+    def hil_capture(self):
+        return self.observer.capture if self.observer is not None else None
 
-    def detach_hil_capture(self, capture):
-        if self.hil_capture is capture:
-            self.hil_capture = None
+    def attach_observer(self, observer):
+        self.observer = observer
 
-    def finalize_hil_capture(self, capture):
-        assert self.hil_capture is capture
+    def detach_observer(self, observer):
+        if self.observer is observer:
+            self.observer = None
+
+    def finalize_observer(self, observer):
+        assert self.observer is observer
 
 
 @pytest.mark.asyncio

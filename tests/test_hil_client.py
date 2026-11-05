@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from unittest.mock import MagicMock
 
 import pytest
 
+from custom_components.allpowers_ble.client_observer import ClientObserver, ObserverSlot
 from custom_components.allpowers_ble.hil_client import (
     HilClientTracer,
     PendingTraceState,
@@ -240,34 +242,51 @@ def test_error_write_paths_stay_private_and_causally_distinct() -> None:
 
 def _capture_of(client) -> Capture | None:
     """Keep the production client's capture identity private to the observer."""
-    tracer = client._hil
-    return tracer.capture if tracer is not None else None
+    slot = client._observer
+    return slot.target.capture if slot is not None else None
 
 
 def test_production_client_identity_guard_and_disabled_allocation() -> None:
     client = make_client()
     assert _capture_of(client) is None
-    assert client._hil is None
-    client.finalize_hil_capture(None)
-    client.finalize_hil_capture(_capture())
-    client.detach_hil_capture(_capture())
-    assert client._hil is None
+    assert client._observer is None
+    client.finalize_observer(None)
+    client.finalize_observer(HilClientTracer(_capture()))
+    client.detach_observer(HilClientTracer(_capture()))
+    assert client._observer is None
 
-    a, b = _capture(), _capture()
-    client.attach_hil_capture(a)
-    assert _capture_of(client) is a
-    client.finalize_hil_capture(None)
-    client.finalize_hil_capture(b)
-    client.detach_hil_capture(b)
-    assert _capture_of(client) is a
-    client.attach_hil_capture(b)
-    assert _capture_of(client) is b
-    client.finalize_hil_capture(a)
-    client.detach_hil_capture(a)
-    assert _capture_of(client) is b
-    client.detach_hil_capture(b)
+    a, b = HilClientTracer(_capture()), HilClientTracer(_capture())
+    client.attach_observer(a)
+    assert _capture_of(client) is a.capture
+    client.finalize_observer(None)
+    client.finalize_observer(b)
+    client.detach_observer(b)
+    assert _capture_of(client) is a.capture
+    client.attach_observer(b)
+    assert _capture_of(client) is b.capture
+    client.finalize_observer(a)
+    client.detach_observer(a)
+    assert _capture_of(client) is b.capture
+    client.detach_observer(b)
     assert _capture_of(client) is None
-    assert client._hil is None
+    assert client._observer is None
+
+
+def test_generic_observer_slot_isolated_from_transport_failures() -> None:
+    """A faulty observer cannot change BLE results or fabricate correlation IDs."""
+    broken = MagicMock(spec=ClientObserver)
+    broken.connection.side_effect = RuntimeError("observer error")
+    broken.new_transaction_id.side_effect = RuntimeError("allocation error")
+    slot = ObserverSlot(broken)
+    slot.emit("connection", "connected", 4)
+    assert slot.transaction_id() is None
+    broken.new_transaction_id.side_effect = None
+    broken.new_transaction_id.return_value = "tx-success"
+    assert slot.transaction_id() == "tx-success"
+    slot.emit("control_rejection", 4, "output", "stale_telemetry")
+    broken.control_rejection.assert_called_once_with(
+        4, "output", "stale_telemetry"
+    )
 
 
 def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> None:
@@ -290,7 +309,7 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         sent_monotonic=7,
         confirm_deadline_monotonic=20,
         phase=TransactionPhase.SENDING,
-        hil_transaction_id="tx-old-1",
+        observation_id="tx-old-1",
     )
     setting = PendingSettingsTransaction(
         session_generation=8,
@@ -299,7 +318,7 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         sent_monotonic=7,
         confirm_deadline_monotonic=9,
         phase=TransactionPhase.AWAITING_CONFIRMATION,
-        hil_transaction_id=None,
+        observation_id=None,
     )
     tracer.attach_runtime(output, setting)
     assert [
@@ -329,8 +348,8 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         "session_disconnected",
         "deadline_passed",
     ]
-    assert output.hil_transaction_id == "tx-old-1"
-    assert setting.hil_transaction_id is None
+    assert output.observation_id == "tx-old-1"
+    assert setting.observation_id is None
 
 
 def test_runtime_observer_handles_empty_and_confirmed_pending() -> None:
@@ -353,7 +372,7 @@ def test_runtime_observer_handles_empty_and_confirmed_pending() -> None:
         sent_monotonic=1,
         confirm_deadline_monotonic=10,
         phase=TransactionPhase.CONFIRMED,
-        hil_transaction_id="tx-confirmed",
+        observation_id="tx-confirmed",
     )
     tracer.attach_runtime(confirmed, None)
     tracer.finalize_runtime(confirmed, None, now=1, disconnected=False)
