@@ -7,11 +7,13 @@ connection, decides transaction outcomes, or changes runtime pending state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING
+
+from .client_observer import PendingTransactionView
 
 from .const import NOTIFY_UUID, WRITE_UUID
-from .hil_trace import Capture
+if TYPE_CHECKING:
+    from .hil_trace import Capture
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,22 +27,6 @@ class PendingTraceState:
     deadline: float
 
 
-class PendingTraceSource(Protocol):
-    """Read-only fields shared by the two production pending TX dataclasses."""
-
-    @property
-    def session_generation(self) -> int: ...
-
-    @property
-    def hil_transaction_id(self) -> str | None: ...
-
-    @property
-    def phase(self) -> Enum: ...
-
-    @property
-    def confirm_deadline_monotonic(self) -> float: ...
-
-
 class HilClientTracer:
     """Format and dispatch optional HIL records without performing BLE I/O."""
 
@@ -52,11 +38,11 @@ class HilClientTracer:
         return self.capture is expected
 
     @staticmethod
-    def _snapshot(transaction: PendingTraceSource, kind: str) -> PendingTraceState:
+    def _snapshot(transaction: PendingTransactionView, kind: str) -> PendingTraceState:
         """Convert production state into private immutable trace fields."""
         return PendingTraceState(
             generation=transaction.session_generation,
-            transaction_id=transaction.hil_transaction_id,
+            transaction_id=transaction.observation_id,
             kind=kind,
             phase=transaction.phase.name.lower(),
             deadline=transaction.confirm_deadline_monotonic,
@@ -65,8 +51,8 @@ class HilClientTracer:
     @classmethod
     def _pending_snapshots(
         cls,
-        output: PendingTraceSource | None,
-        settings: PendingTraceSource | None,
+        output: PendingTransactionView | None,
+        settings: PendingTransactionView | None,
     ) -> tuple[PendingTraceState, ...]:
         """Bind output/settings meaning without client-side trace formatting."""
         snapshots: list[PendingTraceState] = []
@@ -77,13 +63,13 @@ class HilClientTracer:
         return tuple(snapshots)
 
     def attach_runtime(
-        self, output: PendingTraceSource | None, settings: PendingTraceSource | None
+        self, output: PendingTransactionView | None, settings: PendingTransactionView | None
     ) -> None:
         """Attach to existing pending TX without changing its ID or phase."""
         self.attach(self._pending_snapshots(output, settings))
 
     def transaction_runtime(
-        self, event: str, transaction: PendingTraceSource, *, reason: str | None = None
+        self, event: str, transaction: PendingTransactionView, *, reason: str | None = None
     ) -> None:
         """Format a TX transition already determined by the BLE state machine."""
         kind = "output" if hasattr(transaction, "target_dc") else "settings"
@@ -91,8 +77,8 @@ class HilClientTracer:
 
     def finalize_runtime(
         self,
-        output: PendingTraceSource | None,
-        settings: PendingTraceSource | None,
+        output: PendingTransactionView | None,
+        settings: PendingTransactionView | None,
         *,
         now: float,
         disconnected: bool,
