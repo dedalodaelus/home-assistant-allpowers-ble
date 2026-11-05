@@ -30,6 +30,7 @@ from .const import (
     WRITE_UUID,
 )
 from .client_observer import ClientObserver, ObserverSlot, TransactionObservation
+from .route_attribution import ConnectedRoute, connected_route
 from .model_support import (
     ModelSupport,
     canonical_model_identity,
@@ -173,6 +174,7 @@ class AllpowersBLEClient:
         self._options = options
 
         self._observer: ObserverSlot | None = None
+        self._connected_route: tuple[int, ConnectedRoute] | None = None
         self._disconnect_reason_category: str | None = None
         self._client: BleakClient | None = None
         self._write_characteristic: BleakGATTCharacteristic | None = None
@@ -548,6 +550,13 @@ class AllpowersBLEClient:
         slot = ObserverSlot(observer)
         self._observer = slot
         slot.emit("attach_runtime", *self._pending_observations())
+        route = self._connected_route
+        if (
+            route is not None
+            and self._connected
+            and self._active_session_generation == route[0]
+        ):
+            slot.emit("route_connected", *route)
 
     def detach_observer(self, expected_observer: ClientObserver | None) -> None:
         """Late cleanup cannot remove a more recently attached observer."""
@@ -1053,6 +1062,11 @@ class AllpowersBLEClient:
                 ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
+            # Capture the effective backend before HA can untrack on disconnect.
+            route = connected_route(client)
+            self._connected_route = (session_generation, route)
+            if self._observer is not None:
+                self._observer.emit("route_connected", session_generation, route)
         except BaseException as ex:
             if self._observer is not None:
                 self._observer.emit(
@@ -1202,6 +1216,7 @@ class AllpowersBLEClient:
             self._report_pending_observations(disconnected=True)
             self._disconnect_reason_category = None
             self._active_session_generation = None
+            self._connected_route = None
             self._ready_event.clear()
             self._client = None
             self._write_characteristic = None

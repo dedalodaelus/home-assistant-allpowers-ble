@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from .client_observer import ClientObserver
 from .const import DOMAIN
 from .hil_client import HilClientTracer
+from .route_attribution import ConnectedRoute
 from .protocol.codec import (
     HEADER,
     SETTINGS_WRITE_COMMAND,
@@ -27,7 +28,7 @@ from .protocol.codec import (
 )
 
 KEY = DOMAIN + "_hil_capture"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TTL = 120
 MAX_EVENTS = 256
 MAX_FRAMES = 128
@@ -91,6 +92,7 @@ class Capture:
         self.started = monotonic()
         self.events: list[dict[str, Any]] = []
         self.frames: list[dict[str, Any]] = []
+        self.route_observations: dict[int, dict[str, Any]] = {}
         self.dropped_events = 0
         self.dropped_frames = 0
         self.closed = False
@@ -123,6 +125,47 @@ class Capture:
             return now - self.sealed_at < SEALED_RETRIEVAL_SECONDS
         return now - self.started < TTL
 
+    def observe_route(self, generation: int, route: ConnectedRoute) -> None:
+        """Retain one immutable connected-route proof per successful generation."""
+        if not self.active():
+            return
+        if generation in self.route_observations:
+            if self.route_observations[generation]["observed_route"] != route.observed_route:
+                self.dropped_events += 1
+            return
+        item: dict[str, Any] = {
+            "session_generation": generation,
+            "observed_route": route.observed_route,
+            "backend_kind": route.backend_kind,
+            "evidence": route.evidence,
+        }
+        if route.adapter_id is not None:
+            item["adapter_id"] = route.adapter_id
+        if route.proxy_id is not None:
+            item["proxy_id"] = route.proxy_id
+        self.route_observations[generation] = item
+        self.record(
+            "route_observed",
+            session_generation=generation,
+            backend_kind=route.backend_kind,
+            evidence=route.evidence,
+        )
+        row = self.events[-1] if self.events else None
+        if row is not None and row["seq"] == self.seq:
+            item.update({key: row[key] for key in ("seq", "utc", "elapsed_ms")})
+        else:
+            item["seq"] = self.seq
+            item["utc"] = datetime.now(UTC).isoformat()
+            item["elapsed_ms"] = round((monotonic() - self.started) * 1000, 3)
+
+    @staticmethod
+    def summary_route(routes: list[str]) -> str:
+        """Unknown connected generations veto an otherwise verified summary."""
+        if not routes or "unverified" in routes:
+            return "unverified"
+        unique = set(routes)
+        return unique.pop() if len(unique) == 1 else "mixed"
+
     def record(
         self,
         event: str,
@@ -136,6 +179,8 @@ class Capture:
             if not self.active():
                 return
             self.seq += 1
+            generation = fields.pop("session_generation", None)
+            known = self.route_observations.get(generation)
             row: dict[str, Any] = {
                 "schema_version": SCHEMA_VERSION,
                 "seq": self.seq,
@@ -144,9 +189,11 @@ class Capture:
                 "run_id": self.run_id,
                 "scenario_id": self.scenario_id,
                 "event": event,
-                "session_generation": fields.pop("session_generation", None),
+                "session_generation": generation,
                 "layer": "gatt_api",
-                "observed_route": "unverified",
+                "observed_route": (
+                    known["observed_route"] if known is not None else "unverified"
+                ),
                 **fields,
             }
             if frame is not None:
@@ -199,6 +246,7 @@ class Capture:
         self.sealed_at = monotonic()
         self.events.clear()
         self.frames.clear()
+        self.route_observations.clear()
         if self._expiry_handle is not None:
             self._expiry_handle.cancel()
             self._expiry_handle = None
@@ -214,7 +262,12 @@ class Capture:
             "event_count": len(self.events),
             "frame_count": len(self.frames),
             "requested_route": self.requested_route,
-            "observed_route": "unverified",
+            "observed_route": self.summary_route(
+                [item["observed_route"] for item in self.route_observations.values()]
+            ),
+            "route_observations": [
+                item.copy() for item in self.route_observations.values()
+            ],
             "capture_layer": "gatt_api_not_rf",
             "private_raw_bytes": True,
             "qualification_allowed": False,
