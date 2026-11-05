@@ -290,9 +290,7 @@ def test_generic_observer_slot_isolated_from_transport_failures() -> None:
     broken.new_transaction_id.return_value = "tx-success"
     assert slot.transaction_id() == "tx-success"
     slot.emit("control_rejection", 4, "output", "stale_telemetry")
-    broken.control_rejection.assert_called_once_with(
-        4, "output", "stale_telemetry"
-    )
+    broken.control_rejection.assert_called_once_with(4, "output", "stale_telemetry")
 
 
 def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> None:
