@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 
 from custom_components.allpowers_ble import client as client_module
@@ -79,7 +77,9 @@ async def test_runtime_and_probe_use_late_patched_client_class(
 
 
 @pytest.mark.asyncio
-async def test_route_on_success_reconnect_updates_generation_not_prior_rows(monkeypatch):
+async def test_route_on_success_reconnect_updates_generation_not_prior_rows(
+    monkeypatch,
+):
     """Local→proxy is mixed; the first generation's frames remain local."""
     client = make_client()
     capture, tracer = _trace()
