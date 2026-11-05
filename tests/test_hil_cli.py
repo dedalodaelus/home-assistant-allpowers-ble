@@ -1508,6 +1508,7 @@ def test_private_trace_manifest_write_failure_scrubs_created_jsonl(
     assert not (directory / "frames.jsonl").exists()
     assert (directory / "session.json").exists()
 
+
 def test_trace_cli_with_observer_loss_fails_with_valid_gatt_frame(
     monkeypatch, tmp_path, allpowers_registry
 ):
