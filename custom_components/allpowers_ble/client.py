@@ -15,11 +15,8 @@ from typing import Any
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import (
-    BLEAK_RETRY_EXCEPTIONS,
-    BleakClientWithServiceCache,
-    establish_connection,
-)
+import bleak_retry_connector as brc
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS, establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -1046,7 +1043,7 @@ class AllpowersBLEClient:
 
             stage = "gatt_connection"
             client = await establish_connection(
-                BleakClientWithServiceCache,
+                brc.BleakClientWithServiceCache,
                 device,
                 self._advertised_name,
                 disconnected_callback=self._make_disconnected_callback(
@@ -2019,7 +2016,7 @@ async def async_probe_device(
     try:
         async with asyncio.timeout(remaining("connection")):
             client = await establish_connection(
-                BleakClientWithServiceCache,
+                brc.BleakClientWithServiceCache,
                 device,
                 advertised_name,
                 max_attempts=CONNECTION_ATTEMPTS,
