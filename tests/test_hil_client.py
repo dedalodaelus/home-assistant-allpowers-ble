@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from unittest.mock import MagicMock
 
 import pytest
 
-from custom_components.allpowers_ble.client_observer import ClientObserver, ObserverSlot
+from custom_components.allpowers_ble.client_observer import (
+    ClientObserver,
+    ObserverSlot,
+    TransactionObservation,
+)
 from custom_components.allpowers_ble.hil_client import (
     HilClientTracer,
     PendingTraceState,
@@ -90,7 +94,7 @@ def test_scripted_v1_event_and_frame_equivalence() -> None:
         frame=payload,
         write_with_response=True,
     )
-    rx = bytearray(b"\x01\x02")
+    rx = bytes((1, 2))
     original.record(
         "notification_received",
         direction="rx",
@@ -291,10 +295,16 @@ def test_generic_observer_slot_isolated_from_transport_failures() -> None:
     assert slot.transaction_id() == "tx-success"
     slot.emit("control_rejection", 4, "output", "stale_telemetry")
     broken.control_rejection.assert_called_once_with(4, "output", "stale_telemetry")
+    assert [call.args for call in broken.observation_failed.call_args_list] == [
+        ("connection",),
+        ("connection",),
+        ("new_transaction_id",),
+        ("new_transaction_id",),
+    ]
 
 
 def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> None:
-    """The observer formats both kinds without importing production classes."""
+    """A frozen minimal transaction view excludes real control target fields."""
     from custom_components.allpowers_ble.client import (
         PendingOutputTransaction,
         PendingSettingsTransaction,
@@ -302,6 +312,7 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
     )
     from tests.helpers import settings
 
+    client = make_client()
     capture = _capture()
     tracer = HilClientTracer(capture)
     output = PendingOutputTransaction(
@@ -324,15 +335,33 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         phase=TransactionPhase.AWAITING_CONFIRMATION,
         observation_id=None,
     )
-    tracer.attach_runtime(output, setting)
+    client._pending_output_transaction = output
+    client._pending_settings_transaction = setting
+    client.attach_observer(tracer)
     assert [
         (row["transaction_kind"], row["transaction_id"]) for row in capture.events
-    ] == [
-        ("output", "tx-old-1"),
-        ("settings", None),
-    ]
-    tracer.transaction_runtime("transaction_submitted", output)
-    tracer.transaction_runtime(
+    ] == [("output", "tx-old-1"), ("settings", None)]
+    output_view, settings_view = client._pending_observations()
+    assert output_view == TransactionObservation(9, "tx-old-1", "output", "sending", 20)
+    assert settings_view == TransactionObservation(
+        8, None, "settings", "awaiting_confirmation", 9
+    )
+    assert tuple(f.name for f in fields(TransactionObservation)) == (
+        "generation",
+        "transaction_id",
+        "kind",
+        "phase",
+        "deadline",
+    )
+    assert not hasattr(output_view, "target_dc")
+    assert not hasattr(settings_view, "target")
+    with pytest.raises(FrozenInstanceError):
+        output_view.phase = "confirmed"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        settings_view.deadline = 1.0  # type: ignore[misc]
+
+    client._observe_transaction("transaction_submitted", output)
+    client._observe_transaction(
         "transaction_failed", setting, reason="gatt_write_failed"
     )
     assert [row["transaction_phase"] for row in capture.events[2:]] == [
@@ -343,7 +372,7 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         "output",
         "settings",
     ]
-    tracer.finalize_runtime(output, setting, now=15, disconnected=True)
+    tracer.finalize_runtime(output_view, settings_view, now=15, disconnected=True)
     assert [row["event"] for row in capture.events[-2:]] == [
         "transaction_abandoned",
         "transaction_timed_out",
@@ -352,12 +381,14 @@ def test_runtime_transaction_snapshot_mapping_preserves_original_objects() -> No
         "session_disconnected",
         "deadline_passed",
     ]
+    assert client._pending_output_transaction is output
+    assert client._pending_settings_transaction is setting
     assert output.observation_id == "tx-old-1"
     assert setting.observation_id is None
 
 
 def test_runtime_observer_handles_empty_and_confirmed_pending() -> None:
-    """Attach/finalize are no-ops for absent or already-confirmed pending TX."""
+    """Attach/finalize skip absent and confirmed transactions without mutation."""
     from custom_components.allpowers_ble.client import (
         PendingOutputTransaction,
         TransactionPhase,
@@ -378,8 +409,9 @@ def test_runtime_observer_handles_empty_and_confirmed_pending() -> None:
         phase=TransactionPhase.CONFIRMED,
         observation_id="tx-confirmed",
     )
-    tracer.attach_runtime(confirmed, None)
-    tracer.finalize_runtime(confirmed, None, now=1, disconnected=False)
+    view = make_client()._transaction_observation(confirmed)
+    tracer.attach_runtime(view, None)
+    tracer.finalize_runtime(view, None, now=1, disconnected=False)
     assert capture.events == []
 
 
@@ -402,3 +434,40 @@ def test_write_error_reason_is_private_value_only() -> None:
         assert capture.events[-1]["reason_category"] == expected
         assert capture.events[-1]["error_type"] == "RuntimeError"
     assert capture.frames == []
+
+@pytest.mark.parametrize("invalid_id", [None, "", "   ", 0])
+def test_invalid_observer_transaction_id_fails_closed(invalid_id) -> None:
+    """No malformed identifier may silently produce a purportedly complete HIL."""
+    capture = _capture()
+    tracer = HilClientTracer(capture)
+    slot = ObserverSlot(tracer)
+    tracer.new_transaction_id = lambda: invalid_id  # type: ignore[method-assign]
+    assert slot.transaction_id() is None
+    assert capture.dropped_events == 1
+    assert not capture.frames
+    capture.stop()
+    assert capture.snapshot()["complete"] is False
+
+
+def test_observer_failure_handler_is_nonrecursive_and_nonleaking() -> None:
+    """Even a failing failure-report hook cannot change BLE execution."""
+    target = MagicMock(spec=ClientObserver)
+    target.notification_received.side_effect = RuntimeError("PRIVATE:MAC")
+    target.observation_failed.side_effect = asyncio.CancelledError()
+    slot = ObserverSlot(target)
+    slot.emit("notification_received", 3, bytes((1, 2, 3)))
+    target.observation_failed.assert_called_once_with("notification_received")
+    target.observation_failed.side_effect = RuntimeError("PRIVATE:IP")
+    slot.emit("notification_received", 3, bytes((1, 2, 3)))
+    assert target.observation_failed.call_count == 2
+
+
+def test_late_observer_failures_never_modify_sealed_capture() -> None:
+    """A sealed run is immutable even if its old observer is invoked late."""
+    capture = _capture()
+    tracer = HilClientTracer(capture)
+    tracer.observation_failed("notification_received")
+    assert capture.dropped_events == 1
+    capture.stop("requested_stop")
+    tracer.observation_failed("transaction_runtime")
+    assert capture.dropped_events == 1
