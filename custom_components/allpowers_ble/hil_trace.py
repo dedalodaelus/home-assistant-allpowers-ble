@@ -15,7 +15,9 @@ import probatio as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
+from .client_observer import ClientObserver
 from .const import DOMAIN
+from .hil_client import HilClientTracer
 from .protocol.codec import (
     HEADER,
     SETTINGS_WRITE_COMMAND,
@@ -238,7 +240,12 @@ class CaptureStore:
 
     def __init__(self) -> None:
         self.active: Capture | None = None
+        self.active_observer: ClientObserver | None = None
         self.sealed: OrderedDict[str, Capture] = OrderedDict()
+
+    def observer_for(self, capture: Capture) -> ClientObserver | None:
+        """Only the active capture can own an attached observer."""
+        return self.active_observer if self.active is capture else None
 
     def find(self, capture_id: str) -> Capture | None:
         """Look up an active or sealed capture without changing its retention."""
@@ -250,6 +257,7 @@ class CaptureStore:
         """Remove one exact capture, never another with a newer ID."""
         if self.active is capture:
             self.active = None
+            self.active_observer = None
         if self.sealed.get(capture.capture_id) is capture:
             del self.sealed[capture.capture_id]
 
@@ -310,8 +318,9 @@ def _lookup(
     if not capture.retrievable():
         entry = hass.config_entries.async_get_entry(capture.entry_id)
         runtime = getattr(entry, "runtime_data", None)
-        if runtime is not None:
-            runtime.client.detach_hil_capture(capture)
+        observer = store.observer_for(capture)
+        if runtime is not None and observer is not None:
+            runtime.client.detach_observer(observer)
         _forget(hass, store, capture)
         _deny(connection, msg, "expired")
         return None
@@ -346,8 +355,9 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
     if old is not None:
         old_entry = hass.config_entries.async_get_entry(old.entry_id)
         old_runtime = getattr(old_entry, "runtime_data", None)
-        if old_runtime is not None:
-            old_runtime.client.detach_hil_capture(old)
+        old_observer = store.observer_for(old)
+        if old_runtime is not None and old_observer is not None:
+            old_runtime.client.detach_observer(old_observer)
         _forget(hass, store, old)
         # Expired A may have removed the empty store; B must re-register it.
         hass.data[KEY] = store
@@ -358,10 +368,12 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
         msg["scenario_id"],
         msg["requested_route"],
     )
+    observer = HilClientTracer(capture)
     store.active = capture
+    store.active_observer = observer
 
     def expire() -> None:
-        runtime.client.detach_hil_capture(capture)
+        runtime.client.detach_observer(observer)
         _forget(hass, store, capture)
 
     capture._on_expire = expire
@@ -371,7 +383,7 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
         "capture_started",
         session_generation=runtime.client._active_session_generation,
     )
-    runtime.client.attach_hil_capture(capture)
+    runtime.client.attach_observer(observer)
     connection.send_result(
         msg["id"],
         {
@@ -392,13 +404,15 @@ async def ws_stop(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
         return
     entry = hass.config_entries.async_get_entry(capture.entry_id)
     runtime = getattr(entry, "runtime_data", None)
+    store = hass.data.get(KEY)
+    observer = store.observer_for(capture) if isinstance(store, CaptureStore) else None
     if not capture.closed:
-        if runtime is not None:
-            runtime.client.finalize_hil_capture(capture)
+        if runtime is not None and observer is not None:
+            runtime.client.finalize_observer(observer)
         capture.record("capture_stopped")
         capture.stop("requested_stop")
-    if runtime is not None:
-        runtime.client.detach_hil_capture(capture)
+    if runtime is not None and observer is not None:
+        runtime.client.detach_observer(observer)
     connection.send_result(msg["id"], capture.snapshot())
 
 
@@ -433,6 +447,7 @@ def clear_entry_capture(hass: HomeAssistant, entry_id: str) -> None:
     for capture in candidates:
         if capture.entry_id != entry_id:
             continue
-        if runtime is not None:
-            runtime.client.detach_hil_capture(capture)
+        observer = store.observer_for(capture)
+        if runtime is not None and observer is not None:
+            runtime.client.detach_observer(observer)
         _forget(hass, store, capture)
