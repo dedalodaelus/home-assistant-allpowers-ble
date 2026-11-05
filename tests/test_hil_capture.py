@@ -2287,3 +2287,287 @@ async def test_start_for_other_entry_rejects_busy_active_capture():
     assert _capture_of(second_client) is None
     assert connection.send_error.call_args.args[1] == "busy"
     clear_entry_capture(hass, "entry")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failed_method",
+    [
+        "notification_received",
+        "transaction_runtime",
+        "finalize_runtime",
+        "new_transaction_id",
+    ],
+)
+async def test_observer_loss_is_nonfatal_but_capture_is_incomplete(
+    monkeypatch, status_frame, failed_method
+):
+    """Every lost callback or correlation ID invalidates evidence integrity."""
+    from scripts.hil.cli import _validate_trace_result
+    from tests.ha_stubs import FakeCharacteristic
+    from tests.helpers import status
+    from tests.test_client_runtime import connect_fake, make_client
+
+    client = make_client()
+    fake = connect_fake(client)
+    capture = new_capture()
+    observer = _attach_capture(client, capture)
+    client._status = status()
+    client._status_monotonic = client._loop_time()
+    client._settings_monotonic = client._loop_time()
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+
+    # Valid, live GATT bytes must never mask an unrecorded observer failure.
+    await client.async_request_status()
+    assert len(fake.writes) == 1 and capture.frames
+
+    def broken(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("PRIVATE:AA:BB:CC")
+
+    monkeypatch.setattr(observer, failed_method, broken)
+    if failed_method == "notification_received":
+        client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+        assert client.snapshot().status == status(ac_enabled=True, raw_flags=0x13)
+        assert client.snapshot().statistics.valid_packets == 1
+    elif failed_method == "finalize_runtime":
+        client.finalize_observer(observer)
+    else:
+        await client.async_set_ac(True)
+        assert len(fake.writes) == 2
+        assert client._pending_output_transaction is not None
+        if failed_method == "new_transaction_id":
+            assert client._pending_output_transaction.observation_id is None
+        else:
+            assert client._pending_output_transaction.observation_id is not None
+
+    assert capture.dropped_events == 1
+    assert capture.dropped_frames == 0
+    capture.record("capture_stopped")
+    capture.stop("requested_stop")
+    result = capture.snapshot()
+    assert result["termination_reason"] == "requested_stop"
+    assert result["frame_count"] >= 1
+    assert result["dropped_events"] == 1
+    assert result["complete"] is False
+    assert result["qualification_allowed"] is False
+    _validate_trace_result(
+        result,
+        run_id=capture.run_id,
+        scenario_id=capture.scenario_id,
+        capture_id=capture.capture_id,
+        requested_route=capture.requested_route,
+    )
+    assert "PRIVATE" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_mutating_generic_observer_cannot_change_notification_decoder(
+    monkeypatch, status_frame, settings_frame
+):
+    """Only an immutable copy reaches observers; the decoder keeps live input."""
+    from unittest.mock import MagicMock
+
+    from custom_components.allpowers_ble import client as client_module
+    from custom_components.allpowers_ble.client_observer import ClientObserver
+    from tests.ha_stubs import FakeCharacteristic
+    from tests.test_client_runtime import connect_fake, make_client
+
+    with_observer = make_client()
+    without_observer = make_client()
+    observed_gatt = connect_fake(with_observer)
+    plain_gatt = connect_fake(without_observer)
+    mutator = MagicMock(spec=ClientObserver)
+    received = []
+
+    def try_mutate(_generation, data):
+        received.append(data)
+        assert type(data) is bytes
+        with pytest.raises(TypeError):
+            data[0] = 0  # type: ignore[index]
+
+    mutator.notification_received.side_effect = try_mutate
+    with_observer.attach_observer(mutator)
+
+    for frame in (status_frame, settings_frame):
+        with_observer._notification_handler(FakeCharacteristic(), bytearray(frame))
+    assert received == [status_frame, settings_frame]
+
+    copied = []
+    builtin_bytes = bytes
+
+    def copy_spy(data):
+        copied.append(len(data))
+        return builtin_bytes(data)
+
+    monkeypatch.setattr(client_module, "bytes", copy_spy, raising=False)
+    for frame in (status_frame, settings_frame):
+        without_observer._notification_handler(FakeCharacteristic(), bytearray(frame))
+    assert copied == [], "Disabled observers must not copy notification chunks"
+    assert with_observer._status == without_observer._status
+    assert with_observer._settings == without_observer._settings
+    assert with_observer._statistics == without_observer._statistics
+    assert observed_gatt.writes == plain_gatt.writes == []
+    mutator.observation_failed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
+    monkeypatch, notification_builder, status_frame
+):
+    """Fixed v1 witness: connect, GATT TX, mismatch, match, disconnect and stop."""
+    from custom_components.allpowers_ble import client as client_module
+    from tests.ha_stubs import FakeCharacteristic, FakeClient, FakeDevice
+    from tests.helpers import status
+    from tests.test_client_runtime import Services, make_client
+
+    hass, connection, _ = _api_case()
+    client = make_client()
+    hass.config_entries.async_get_entry.return_value.runtime_data.client = client
+    fake = FakeClient()
+    fake.services = Services()
+
+    async def establish(*args, **kwargs):
+        del args, kwargs
+        return current_gatt[0]
+
+    current_gatt = [fake]
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
+    await ws_start(
+        hass,
+        connection,
+        {
+            "id": 1,
+            "entry_id": "entry",
+            "run_id": "abc12345",
+            "scenario_id": "golden-client-v1",
+            "requested_route": "auto",
+        },
+    )
+    capture = _capture_of(client)
+    assert capture is not None
+    await client._connect_once()
+    client._status = status()
+    client._status_monotonic = client._loop_time()
+    client._settings_monotonic = client._loop_time()
+    monkeypatch.setattr(client, "_schedule_status_refresh", lambda: None)
+    await client.async_set_ac(True)
+
+    # Fixed v1 inputs rather than expectations computed from the new tracer.
+    mismatch = notification_builder(
+        0x01, bytes((0x11, 73, 1, 44, 0, 150, 0, 120))
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(mismatch))
+    client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert client._pending_output_transaction is None
+
+    client._disconnect_reason_category = "manual"
+    await client._disconnect_client()
+    await ws_stop(
+        hass,
+        connection,
+        {"id": 2, "entry_id": "entry", "capture_id": capture.capture_id},
+    )
+    rows = capture.events
+    expected_events = [
+        ("capture_started", None),
+        ("connect_attempt", 1),
+        ("model_profile_selected", 1),
+        ("connected", 1),
+        ("write_attempt", 1),
+        ("write_ok", 1),
+        ("transaction_accepted", 1),
+        ("write_attempt", 1),
+        ("write_ok", 1),
+        ("transaction_submitted", 1),
+        ("notification_received", 1),
+        ("telemetry_mismatch", 1),
+        ("notification_decoded", 1),
+        ("notification_received", 1),
+        ("transaction_confirmed", 1),
+        ("notification_decoded", 1),
+        ("disconnected", 1),
+        ("capture_stopped", None),
+    ]
+    assert [(r["event"], r["session_generation"]) for r in rows] == expected_events
+    assert [r["seq"] for r in rows] == list(range(1, 19))
+
+    tx_id = rows[6]["transaction_id"]
+    assert isinstance(tx_id, str) and tx_id.startswith("tx-")
+    assert tx_id.endswith("-1")
+    assert [rows[i]["transaction_id"] for i in (6, 7, 8, 9, 11, 14)] == [
+        tx_id
+    ] * 6
+    assert [
+        (rows[i]["event"], rows[i]["transaction_phase"], rows[i]["reason"])
+        for i in (6, 9, 11, 14)
+    ] == [
+        ("transaction_accepted", "sending", None),
+        ("transaction_submitted", "sending", None),
+        ("telemetry_mismatch", "awaiting_confirmation", "unconfirmed_or_contradictory"),
+        ("transaction_confirmed", "awaiting_confirmation", "matching_validated_telemetry"),
+    ]
+    assert rows[2]["inferred_model_profile"] == "r600-unverified-revision"
+    assert rows[16]["reason_category"] == "manual"
+
+    # Externally fixed v1 byte vectors, including XOR checksum and sequence joins.
+    assert [
+        (frame["seq"], frame["event"], frame["hex"], frame.get("transaction_id"))
+        for frame in capture.frames
+    ] == [
+        (5, "write_attempt", "a565b1000106010000000000", None),
+        (8, "write_attempt", "a56500b10101002352", tx_id),
+        (11, "notification_received", "a56500000008011149012c0096007852", None),
+        (14, "notification_received", "a56500000008011349012c0096007850", None),
+    ]
+    for frame in capture.frames:
+        matching_event = rows[frame["seq"] - 1]
+        assert frame["event"] == matching_event["event"]
+        assert frame.get("transaction_id") == matching_event.get("transaction_id")
+    assert [f["command_type"] for f in capture.frames] == [
+        "status_request",
+        "output_control",
+        "unknown",
+        "unknown",
+    ]
+    result = connection.send_result.call_args.args[1]
+    assert result["schema_version"] == 1
+    assert result["event_count"] == 18
+    assert result["frame_count"] == 4
+    assert result["complete"] is True
+    assert result["termination_reason"] == "requested_stop"
+    assert result["dropped_events"] == result["dropped_frames"] == 0
+
+    # Repeat actual connect/write/RX on an unobserved client: same traffic, no copies.
+    plain = make_client()
+    fresh = FakeClient()
+    fresh.services = Services()
+    current_gatt[0] = fresh
+    monkeypatch.setattr(plain, "_fresh_ble_device", lambda: FakeDevice())
+    await plain._connect_once()
+    plain._status = status()
+    plain._status_monotonic = plain._loop_time()
+    plain._settings_monotonic = plain._loop_time()
+    monkeypatch.setattr(plain, "_schedule_status_refresh", lambda: None)
+    await plain.async_set_ac(True)
+
+    copied = []
+    real_bytes = bytes
+
+    def count_copies(data):
+        copied.append(len(data))
+        return real_bytes(data)
+
+    monkeypatch.setattr(client_module, "bytes", count_copies, raising=False)
+    plain._notification_handler(FakeCharacteristic(), bytearray(mismatch))
+    plain._notification_handler(FakeCharacteristic(), bytearray(status_frame))
+    assert copied == []
+    assert fresh.writes == fake.writes
+    assert plain.snapshot().status == client.snapshot().status
+    assert plain.snapshot().statistics.notifications == 2
+    assert client.snapshot().statistics.notifications == 2
+    assert plain._pending_output_transaction is None
+    plain._disconnect_reason_category = "manual"
+    await plain._disconnect_client()
+    assert plain.snapshot().statistics.disconnects == 1
