@@ -2325,7 +2325,14 @@ async def test_observer_loss_is_nonfatal_but_capture_is_incomplete(
         del args, kwargs
         raise RuntimeError("PRIVATE:AA:BB:CC")
 
-    monkeypatch.setattr(observer, failed_method, broken)
+    original = getattr(observer, failed_method)
+
+    def once_broken(*args, **kwargs):
+        if failed_method == "transaction_runtime" and args[0] != "transaction_accepted":
+            return original(*args, **kwargs)
+        return broken(*args, **kwargs)
+
+    monkeypatch.setattr(observer, failed_method, once_broken)
     if failed_method == "notification_received":
         client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
         assert client.snapshot().status == status(ac_enabled=True, raw_flags=0x13)
@@ -2505,8 +2512,16 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
     ] == [
         ("transaction_accepted", "sending", None),
         ("transaction_submitted", "sending", None),
-        ("telemetry_mismatch", "awaiting_confirmation", "unconfirmed_or_contradictory"),
-        ("transaction_confirmed", "awaiting_confirmation", "matching_validated_telemetry"),
+        (
+            "telemetry_mismatch",
+            "awaiting_confirmation",
+            "unconfirmed_or_contradictory",
+        ),
+        (
+            "transaction_confirmed",
+            "awaiting_confirmation",
+            "matching_validated_telemetry",
+        ),
     ]
     assert rows[2]["inferred_model_profile"] == "r600-unverified-revision"
     assert rows[16]["reason_category"] == "manual"
