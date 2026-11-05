@@ -67,9 +67,7 @@ class ClientObserver(Protocol):
         reason: str | None = None,
     ) -> None: ...
 
-    def notification_received(
-        self, generation: int | None, data: bytes
-    ) -> None: ...
+    def notification_received(self, generation: int | None, data: bytes) -> None: ...
 
     def notification_decoded(
         self,

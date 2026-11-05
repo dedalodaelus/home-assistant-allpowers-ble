@@ -2462,9 +2462,7 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
     await client.async_set_ac(True)
 
     # Fixed v1 inputs rather than expectations computed from the new tracer.
-    mismatch = notification_builder(
-        0x01, bytes((0x11, 73, 1, 44, 0, 150, 0, 120))
-    )
+    mismatch = notification_builder(0x01, bytes((0x11, 73, 1, 44, 0, 150, 0, 120)))
     client._notification_handler(FakeCharacteristic(), bytearray(mismatch))
     client._notification_handler(FakeCharacteristic(), bytearray(status_frame))
     assert client._pending_output_transaction is None
@@ -2503,9 +2501,7 @@ async def test_v1_golden_real_ble_client_path_from_pre_refactor_contract(
     tx_id = rows[6]["transaction_id"]
     assert isinstance(tx_id, str) and tx_id.startswith("tx-")
     assert tx_id.endswith("-1")
-    assert [rows[i]["transaction_id"] for i in (6, 7, 8, 9, 11, 14)] == [
-        tx_id
-    ] * 6
+    assert [rows[i]["transaction_id"] for i in (6, 7, 8, 9, 11, 14)] == [tx_id] * 6
     assert [
         (rows[i]["event"], rows[i]["transaction_phase"], rows[i]["reason"])
         for i in (6, 9, 11, 14)
