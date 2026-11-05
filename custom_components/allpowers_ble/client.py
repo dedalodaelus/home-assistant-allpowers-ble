@@ -24,10 +24,6 @@ from bleak_retry_connector import (
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 
-from .hil_client import HilClientTracer, PendingTraceState
-
-if TYPE_CHECKING:
-    from .hil_trace import Capture
 from .const import (
     COMMAND_REFRESH_DELAY,
     CONNECTION_ATTEMPTS,
@@ -36,6 +32,7 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
+from .hil_client import HilClientTracer, PendingTraceState
 from .model_support import (
     ModelSupport,
     canonical_model_identity,
@@ -59,6 +56,10 @@ from .protocol import (
     status_write_validation_errors,
     updated_settings,
 )
+
+if TYPE_CHECKING:
+    from .hil_trace import Capture
+
 
 _LOGGER = logging.getLogger(__name__)
 
