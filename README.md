@@ -3,9 +3,9 @@
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.10.4%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Español](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/README.es.md)
+[Español](README.es.md)
 
 <p align="center"><img src="https://raw.githubusercontent.com/dedalodaelus/home-assistant-allpowers-ble/main/docs/assets/branding/readme-banner.png" alt="ALLPOWERS BLE community integration for Home Assistant" width="560"></p>
 
@@ -33,7 +33,7 @@ No vendor cloud or device-side ESPHome component is required.
 | AP S500 / AP S700 V2 | Rejected: different protocol revision |
 
 Code-profile recognition does not mean hardware qualification. Unknown candidates
-stay read-only; rejected models remain rejected. See the [full compatibility matrix](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/compatibility.md).
+stay read-only; rejected models remain rejected. See the [full compatibility matrix](docs/compatibility.md).
 
 ## Requirements & installation
 
@@ -76,22 +76,22 @@ Writes require fresh same-session snapshots and verified capabilities.
 Experimental profiles are read-only. A matching notification shows observed
 convergence but cannot prove command causality; the protocol has no transaction
 ID. Physical HIL qualification remains pending for the recognized profiles. Review
-the [full safety model](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/user-guide.md#safety-model)
+the [full safety model](docs/user-guide.md#safety-model)
 before enabling controls or automations.
 
 ## Documentation & support
 
-- [Full user guide](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/user-guide.md)
-  · [Guía de usuario en español](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/user-guide.es.md)
-- [Compatibility](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/compatibility.md)
+- [Full user guide](docs/user-guide.md)
+  · [Guía de usuario en español](docs/user-guide.es.md)
+- [Compatibility](docs/compatibility.md)
   ·
-  [Troubleshooting](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/troubleshooting.md)
-- [Architecture](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/architecture/README.md)
+  [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture/README.md)
   ·
-  [Protocol](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/protocol.md)
+  [Protocol](docs/protocol.md)
   ·
-  [Development](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/docs/development.md)
+  [Development](docs/development.md)
 - [Report a bug or compatibility issue](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose)
   · [Report a vulnerability](https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new)
 - Community-maintained custom integration; not part of or supported by Home
-  Assistant Core. [MIT License](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/main/LICENSE).
+  Assistant Core. [MIT License](LICENSE).
