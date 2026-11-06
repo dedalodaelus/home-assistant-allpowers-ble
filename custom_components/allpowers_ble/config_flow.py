@@ -66,6 +66,13 @@ from .const import (
     MIN_WATCHDOG_TIMEOUT,
     SERVICE_UUID,
 )
+from .hil_probe import (
+    clear_flow,
+    consume_probe,
+    finish_probe,
+    register_flow_candidates,
+    skip_probe,
+)
 from .model_support import has_specific_model_identity, identify_model
 from .options import ConnectionOptions
 from .repairs import async_unload_block_reason
@@ -91,6 +98,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._probe_error: str | None = None
+
+    @callback
+    def async_remove(self) -> None:
+        """Scrub candidate and unsubmitted capture state when HA removes flow."""
+        clear_flow(self.hass, getattr(self, "flow_id", None))
 
     @staticmethod
     @callback
@@ -138,6 +150,12 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = self._probe_error or "unknown"
 
         self._set_confirm_only()
+        register_flow_candidates(
+            self.hass,
+            getattr(self, "flow_id", None),
+            "confirm",
+            [self._discovery_info.address],
+        )
         return cast(Any, self.async_show_form)(
             step_id="confirm",
             data_schema=vol.Schema({}),
@@ -167,6 +185,12 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         if not self._discovered_devices:
             return self.async_abort(reason="no_devices_found")
 
+        register_flow_candidates(
+            self.hass,
+            getattr(self, "flow_id", None),
+            "user",
+            list(self._discovered_devices),
+        )
         return cast(Any, self.async_show_form)(
             step_id="user",
             data_schema=vol.Schema(
@@ -277,6 +301,8 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                         address=address,
                         advertised_name=discovery_info.name or current_name,
                     )
+                else:
+                    skip_probe(self.hass, getattr(self, "flow_id", None), address)
                 if unload_error := async_unload_block_reason(
                     self.hass, reconfigure_entry
                 ):
@@ -371,7 +397,6 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                             unique_id=address,
                             title=entry_title,
                             data_updates=data_updates,
-                            reason="reconfigure_successful",
                         )
                         if not reconfigure_entry.update_listeners and (
                             changed
@@ -386,6 +411,12 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                             )
                         return result
 
+        register_flow_candidates(
+            self.hass,
+            getattr(self, "flow_id", None),
+            "reconfigure",
+            list(discovered_devices),
+        )
         return cast(Any, self.async_show_form)(
             step_id="reconfigure",
             data_schema=schema,
@@ -510,39 +541,49 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         address: str,
         advertised_name: str,
     ) -> str | None:
-        """Probe a candidate and map transport/protocol failures to flow errors."""
+        """Probe the selected candidate and seal any exact, authorized arm."""
         self._probe_error = None
+        tracer = consume_probe(self.hass, getattr(self, "flow_id", None), address)
+        outcome = "cancelled"
+        reason: str | None = None
         try:
-            await async_probe_device(
-                self.hass,
-                address=address,
-                advertised_name=advertised_name,
-                timeout=INITIAL_CONNECT_TIMEOUT,
-            )
-        except UnsupportedDeviceError:
-            self._probe_error = None
-            return "not_supported"
-        except DeviceNotFoundError as ex:
-            _LOGGER.debug("No connectable path during setup: %s", ex)
-            self._probe_error = "cannot_connect"
-        except ProbeConnectionTimeoutError as ex:
-            _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
-            self._probe_error = "connect_timeout"
-        except ProbeGattValidationError as ex:
-            _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
-            self._probe_error = "gatt_unavailable"
-        except ProbeNotificationSetupError as ex:
-            _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
-            self._probe_error = "notify_failed"
-        except ProbeStatusTimeoutError:
-            self._probe_error = "timeout"
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            _LOGGER.debug("Bluetooth probe failed: %s", ex, exc_info=True)
-            self._probe_error = "cannot_connect"
-        except Exception:
-            _LOGGER.exception("Unexpected error while probing ALLPOWERS BLE")
-            self._probe_error = "unknown"
-        return None
+            try:
+                await async_probe_device(
+                    self.hass,
+                    address=address,
+                    advertised_name=advertised_name,
+                    timeout=INITIAL_CONNECT_TIMEOUT,
+                    observer=tracer,
+                )
+            except UnsupportedDeviceError:
+                outcome = "failure"
+                reason = "not_supported"
+                return "not_supported"
+            except DeviceNotFoundError as ex:
+                _LOGGER.debug("No connectable path during setup: %s", ex)
+                self._probe_error = "cannot_connect"
+            except ProbeConnectionTimeoutError as ex:
+                _LOGGER.debug("Probe connection timeout: %s", ex, exc_info=True)
+                self._probe_error = "connect_timeout"
+            except ProbeGattValidationError as ex:
+                _LOGGER.debug("Probe GATT validation failed: %s", ex, exc_info=True)
+                self._probe_error = "gatt_unavailable"
+            except ProbeNotificationSetupError as ex:
+                _LOGGER.debug("Probe notification setup failed: %s", ex, exc_info=True)
+                self._probe_error = "notify_failed"
+            except ProbeStatusTimeoutError:
+                self._probe_error = "timeout"
+            except BLEAK_RETRY_EXCEPTIONS as ex:
+                _LOGGER.debug("Bluetooth probe failed: %s", ex, exc_info=True)
+                self._probe_error = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error while probing ALLPOWERS BLE")
+                self._probe_error = "unknown"
+            outcome = "failure" if self._probe_error is not None else "success"
+            reason = self._probe_error
+            return None
+        finally:
+            finish_probe(tracer, outcome, reason=reason)
 
 
 class AllpowersOptionsFlow(OptionsFlow):

@@ -15,11 +15,8 @@ from typing import Any
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import (
-    BLEAK_RETRY_EXCEPTIONS,
-    BleakClientWithServiceCache,
-    establish_connection,
-)
+import bleak_retry_connector as brc
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS, establish_connection
 
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
@@ -32,6 +29,8 @@ from .const import (
     WRITE_TIMEOUT,
     WRITE_UUID,
 )
+from .client_observer import ClientObserver, ObserverSlot, TransactionObservation
+from .route_attribution import ConnectedRoute, connected_route
 from .model_support import (
     ModelSupport,
     canonical_model_identity,
@@ -125,6 +124,7 @@ class PendingOutputTransaction:
     sent_monotonic: float
     confirm_deadline_monotonic: float
     phase: TransactionPhase = TransactionPhase.AWAITING_CONFIRMATION
+    observation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +137,7 @@ class PendingSettingsTransaction:
     sent_monotonic: float
     confirm_deadline_monotonic: float
     phase: TransactionPhase = TransactionPhase.AWAITING_CONFIRMATION
+    observation_id: str | None = None
 
 
 class AllpowersBLEClient:
@@ -172,6 +173,9 @@ class AllpowersBLEClient:
         self._identity_conflict_callback = identity_conflict_callback
         self._options = options
 
+        self._observer: ObserverSlot | None = None
+        self._connected_route: tuple[int, ConnectedRoute] | None = None
+        self._disconnect_reason_category: str | None = None
         self._client: BleakClient | None = None
         self._write_characteristic: BleakGATTCharacteristic | None = None
         self._decoder = NotificationStreamDecoder()
@@ -276,6 +280,8 @@ class AllpowersBLEClient:
 
     async def async_stop(self) -> None:
         """Stop all tasks and release the Bluetooth connection slot."""
+        if self._disconnect_reason_category is None:
+            self._disconnect_reason_category = "manual"
         self._stop_event.set()
         self._disconnect_event.set()
         self._advertisement_event.set()
@@ -297,6 +303,9 @@ class AllpowersBLEClient:
         self._maintenance_task = None
         self._connection_task = None
         await self._disconnect_client()
+        if self._observer is not None:
+            self._observer.emit("stop_runtime", self._active_session_generation)
+            self._observer = None
         self._loop = None
         self._update_callback = None
 
@@ -358,6 +367,14 @@ class AllpowersBLEClient:
     async def async_reconnect(self, reason: str = "Manual reconnect") -> None:
         """Disconnect now so the connection loop can establish a fresh route."""
         self._last_error = reason
+        if self._disconnect_reason_category is None:
+            self._disconnect_reason_category = {
+                "Telemetry watchdog expired": "telemetry_watchdog",
+                "Transport watchdog expired": "transport_watchdog",
+                "Settings confirmation unavailable; renewing BLE session": (
+                    "settings_recovery"
+                ),
+            }.get(reason, "manual")
         self._request_disconnect(self._advertisement_generation)
         self._wake_maintenance_loop()
         await self._disconnect_client()
@@ -389,6 +406,7 @@ class AllpowersBLEClient:
             target_light = current_light if light is None else light
             active_generation = self._active_session_generation
             if active_generation is None:
+                self._observe_rejection("output", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             if (target_dc, target_ac, target_light) == (
                 current_dc,
@@ -428,6 +446,7 @@ class AllpowersBLEClient:
     async def async_set_car_charger(self, enabled: bool) -> None:
         """Set the optional car-charger bit when explicitly enabled by the user."""
         if not self._options.enable_car_charger:
+            self._observe_rejection("settings", "unsupported_capability")
             raise StateUnavailableError(
                 "Car charger control is disabled in integration options"
             )
@@ -444,15 +463,20 @@ class AllpowersBLEClient:
         async with self._operation_lock:
             self._require_settings_write_capability_unlocked()
             current = self._safe_settings_snapshot()
-            target = updated_settings(
-                current,
-                eco_enabled=eco_enabled,
-                work_mode=work_mode,
-                car_charger_enabled=car_charger_enabled,
-                eco_timeout_hours=eco_timeout_hours,
-            )
+            try:
+                target = updated_settings(
+                    current,
+                    eco_enabled=eco_enabled,
+                    work_mode=work_mode,
+                    car_charger_enabled=car_charger_enabled,
+                    eco_timeout_hours=eco_timeout_hours,
+                )
+            except ValueError, TypeError:
+                self._observe_rejection("settings", "semantic_validation")
+                raise
             active_generation = self._active_session_generation
             if active_generation is None:
+                self._observe_rejection("settings", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             if target == current:
                 return
@@ -474,11 +498,12 @@ class AllpowersBLEClient:
         """Re-send the current settings snapshot to keep vendor state alive."""
         async with self._operation_lock:
             self._require_settings_keepalive_capability_unlocked()
-            current = self._safe_settings_snapshot()
+            current = self._safe_settings_snapshot(control_kind="keepalive")
             frame = encode_settings_control(current)
             now = self._loop_time()
             active_generation = self._active_session_generation
             if active_generation is None:
+                self._observe_rejection("keepalive", "disconnected")
                 raise NotConnectedError("The ALLPOWERS device is not connected")
             transaction = PendingSettingsTransaction(
                 session_generation=active_generation,
@@ -492,18 +517,116 @@ class AllpowersBLEClient:
             self._record_settings_write_activity(now)
         self._schedule_status_refresh()
 
+    @staticmethod
+    def _transaction_observation(
+        transaction: PendingOutputTransaction | PendingSettingsTransaction,
+    ) -> TransactionObservation:
+        """Expose only frozen decision metadata, never mutable command targets."""
+        return TransactionObservation(
+            generation=transaction.session_generation,
+            transaction_id=transaction.observation_id,
+            kind=(
+                "output"
+                if isinstance(transaction, PendingOutputTransaction)
+                else "settings"
+            ),
+            phase=transaction.phase.name.lower(),
+            deadline=transaction.confirm_deadline_monotonic,
+        )
+
+    def _pending_observations(
+        self,
+    ) -> tuple[TransactionObservation | None, TransactionObservation | None]:
+        """Build snapshots only while an observer is actually attached."""
+        output = self._pending_output_transaction
+        settings = self._pending_settings_transaction
+        return (
+            self._transaction_observation(output) if output is not None else None,
+            self._transaction_observation(settings) if settings is not None else None,
+        )
+
+    def attach_observer(self, observer: ClientObserver) -> None:
+        """Install an optional, non-owning observer without any BLE replay."""
+        slot = ObserverSlot(observer)
+        self._observer = slot
+        slot.emit("attach_runtime", *self._pending_observations())
+        route = self._connected_route
+        if (
+            route is not None
+            and self._connected
+            and self._active_session_generation == route[0]
+        ):
+            slot.emit("route_connected", *route)
+
+    def detach_observer(self, expected_observer: ClientObserver | None) -> None:
+        """Late cleanup cannot remove a more recently attached observer."""
+        if self._observer is not None and self._observer.target is expected_observer:
+            self._observer = None
+
+    def finalize_observer(self, expected_observer: ClientObserver | None) -> None:
+        """Finalize only the matching observer without modifying transaction state."""
+        slot = self._observer
+        if slot is not None and slot.target is expected_observer:
+            slot.emit(
+                "finalize_runtime",
+                *self._pending_observations(),
+                now=self._loop_time(),
+                disconnected=False,
+            )
+
+    def _observe_rejection(self, kind: str, reason: str) -> None:
+        """Report a control guard outcome without altering the decision."""
+        if self._observer is not None:
+            self._observer.emit(
+                "control_rejection", self._active_session_generation, kind, reason
+            )
+
+    def _observe_transaction(
+        self,
+        event: str,
+        transaction: PendingOutputTransaction | PendingSettingsTransaction,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Report an already-decided transport transaction transition."""
+        if self._observer is not None:
+            self._observer.emit(
+                "transaction_runtime",
+                event,
+                self._transaction_observation(transaction),
+                reason=reason,
+            )
+
+    def _report_pending_observations(self, *, disconnected: bool) -> None:
+        """Report pending outcomes before runtime teardown changes them."""
+        if self._observer is not None:
+            self._observer.emit(
+                "finalize_runtime",
+                *self._pending_observations(),
+                now=self._loop_time(),
+                disconnected=disconnected,
+            )
+
     async def _write_transaction_unlocked(
         self,
         frame: bytes,
         transaction: PendingOutputTransaction | PendingSettingsTransaction,
     ) -> None:
         """Publish before yielding; failed submissions require a new snapshot."""
+        if self._observer is not None:
+            transaction = replace(
+                transaction,
+                observation_id=self._observer.transaction_id(),
+            )
         if isinstance(transaction, PendingOutputTransaction):
             self._pending_output_transaction = transaction
         else:
             self._pending_settings_transaction = transaction
+        self._observe_transaction("transaction_accepted", transaction)
         try:
-            await self._write_frame_unlocked(frame)
+            await self._write_frame_unlocked(
+                frame, observation_id=transaction.observation_id
+            )
             if self._disconnect_event.is_set() or (
                 self._client is None or not self._client.is_connected
             ):
@@ -511,6 +634,9 @@ class AllpowersBLEClient:
                     "The ALLPOWERS device disconnected during write"
                 )
         except Exception, asyncio.CancelledError:
+            self._observe_transaction(
+                "transaction_failed", transaction, reason="gatt_write_failed"
+            )
             same_session = (
                 transaction.session_generation == self._active_session_generation
             )
@@ -536,9 +662,16 @@ class AllpowersBLEClient:
                     self._settings_blocked_until_version = self._settings_version + 1
             raise
 
+        self._observe_transaction("transaction_submitted", transaction)
         if isinstance(transaction, PendingOutputTransaction):
             pending_output = self._pending_output_transaction
             if pending_output is not None:
+                if pending_output.phase is TransactionPhase.CONFIRMED:
+                    self._observe_transaction(
+                        "transaction_confirmed",
+                        pending_output,
+                        reason="matching_validated_telemetry",
+                    )
                 self._pending_output_transaction = (
                     None
                     if pending_output.phase is TransactionPhase.CONFIRMED
@@ -549,6 +682,12 @@ class AllpowersBLEClient:
         else:
             pending_settings = self._pending_settings_transaction
             if pending_settings is not None:
+                if pending_settings.phase is TransactionPhase.CONFIRMED:
+                    self._observe_transaction(
+                        "transaction_confirmed",
+                        pending_settings,
+                        reason="matching_validated_telemetry",
+                    )
                 self._pending_settings_transaction = (
                     None
                     if pending_settings.phase is TransactionPhase.CONFIRMED
@@ -559,6 +698,7 @@ class AllpowersBLEClient:
 
     def _safe_output_snapshot(self) -> tuple[bool, bool, bool]:
         if not self._connected or self._disconnect_event.is_set():
+            self._observe_rejection("output", "disconnected")
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
@@ -566,17 +706,26 @@ class AllpowersBLEClient:
         pending = self._pending_output_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
+                self._observe_transaction(
+                    "transaction_rejected", pending, reason="confirmation_pending"
+                )
+                self._observe_rejection("output", "confirmation_pending")
                 raise StateUnavailableError(
                     "Output command confirmation is pending; wait for a status update"
                 )
+            self._observe_transaction(
+                "transaction_timed_out", pending, reason="no_confirming_telemetry"
+            )
             self._pending_output_transaction = None
             self._output_blocked_until_version = self._status_version + 1
+            self._observe_rejection("output", "confirmation_timed_out")
             raise StateUnavailableError(
                 "Output command confirmation timed out; wait for a fresh status update"
             )
 
         blocked_until = self._output_blocked_until_version
         if blocked_until is not None and self._status_version < blocked_until:
+            self._observe_rejection("output", "ambiguous_state")
             raise StateUnavailableError(
                 "Output command state is ambiguous; wait for a fresh status update"
             )
@@ -586,6 +735,7 @@ class AllpowersBLEClient:
             or self._status_monotonic is None
             or now - self._status_monotonic > self._options.stale_timeout
         ):
+            self._observe_rejection("output", "stale_telemetry")
             raise StateUnavailableError(
                 "A fresh status snapshot is required before changing outputs"
             )
@@ -593,6 +743,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         errors = status_write_validation_errors(support.profile, self._status)
         if errors:
+            self._observe_rejection("output", "semantic_validation")
             raise StateUnavailableError(
                 "Output writes are blocked by semantic validation: " + "; ".join(errors)
             )
@@ -602,8 +753,11 @@ class AllpowersBLEClient:
             self._status.light_enabled,
         )
 
-    def _safe_settings_snapshot(self) -> SettingsData:
+    def _safe_settings_snapshot(
+        self, *, control_kind: str = "settings"
+    ) -> SettingsData:
         if not self._connected or self._disconnect_event.is_set():
+            self._observe_rejection(control_kind, "disconnected")
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
@@ -611,17 +765,26 @@ class AllpowersBLEClient:
         pending = self._pending_settings_transaction
         if pending is not None:
             if now <= pending.confirm_deadline_monotonic:
+                self._observe_transaction(
+                    "transaction_rejected", pending, reason="confirmation_pending"
+                )
+                self._observe_rejection(control_kind, "confirmation_pending")
                 raise StateUnavailableError(
                     "Settings command confirmation is pending; wait for a settings update"
                 )
+            self._observe_transaction(
+                "transaction_timed_out", pending, reason="no_confirming_telemetry"
+            )
             self._pending_settings_transaction = None
             self._settings_blocked_until_version = self._settings_version + 1
+            self._observe_rejection(control_kind, "confirmation_timed_out")
             raise StateUnavailableError(
                 "Settings command confirmation timed out; wait for a fresh settings update"
             )
 
         blocked_until = self._settings_blocked_until_version
         if blocked_until is not None and self._settings_version < blocked_until:
+            self._observe_rejection(control_kind, "ambiguous_state")
             raise StateUnavailableError(
                 "Settings command state is ambiguous; wait for a fresh settings update"
             )
@@ -631,6 +794,7 @@ class AllpowersBLEClient:
             or self._settings_monotonic is None
             or now - self._settings_monotonic > self._options.settings_stale_timeout
         ):
+            self._observe_rejection(control_kind, "stale_telemetry")
             raise StateUnavailableError(
                 "A fresh settings snapshot is required before changing settings"
             )
@@ -638,6 +802,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         errors = settings_write_validation_errors(support.profile, self._settings)
         if errors:
+            self._observe_rejection(control_kind, "semantic_validation")
             raise StateUnavailableError(
                 "Settings writes are blocked by semantic validation: "
                 + "; ".join(errors)
@@ -767,6 +932,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_output_controls:
             return
+        self._observe_rejection("output", "unsupported_capability")
         raise StateUnavailableError(
             f"Unsupported output command for active model profile: {support.profile}"
         )
@@ -776,6 +942,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_settings_controls:
             return
+        self._observe_rejection("settings", "unsupported_capability")
         raise StateUnavailableError(
             f"Unsupported settings command for active model profile: {support.profile}"
         )
@@ -785,6 +952,7 @@ class AllpowersBLEClient:
         support = self._runtime_model_support()
         if support.capabilities.write_settings_keepalive:
             return
+        self._observe_rejection("keepalive", "unsupported_capability")
         raise StateUnavailableError(
             "Unsupported settings keepalive command for active model profile: "
             f"{support.profile}"
@@ -849,35 +1017,69 @@ class AllpowersBLEClient:
 
     async def _connect_once(self) -> None:
         session_generation = self._activate_session_generation()
+        if self._observer is not None:
+            self._observer.emit("connection", "connect_attempt", session_generation)
         self._statistics = replace(
             self._statistics,
             connection_attempts=self._statistics.connection_attempts + 1,
         )
         self._emit_update()
 
-        device = self._fresh_ble_device()
-        if device is None:
-            raise DeviceNotFoundError(
-                "No connectable Bluetooth adapter or proxy can currently reach "
-                f"{self.address}"
+        stage = "device_selection"
+        try:
+            device = self._fresh_ble_device()
+            if device is None:
+                raise DeviceNotFoundError(
+                    "No connectable Bluetooth adapter or proxy can currently reach "
+                    f"{self.address}"
+                )
+
+            def fresh_device_for_retry() -> BLEDevice:
+                return self._fresh_ble_device() or device
+
+            stage = "model_support"
+            support = identify_model(self._device_identity)
+            if self._observer is not None:
+                self._observer.emit(
+                    "connection",
+                    "model_profile_selected",
+                    session_generation,
+                    profile=support.profile,
+                    classification=support.classification,
+                )
+            if not support.supported and not self._identity_conflicted:
+                raise UnsupportedDeviceError(support.reason or "Unsupported model")
+
+            stage = "gatt_connection"
+            client = await establish_connection(
+                brc.BleakClientWithServiceCache,
+                device,
+                self._advertised_name,
+                disconnected_callback=self._make_disconnected_callback(
+                    session_generation
+                ),
+                max_attempts=CONNECTION_ATTEMPTS,
+                ble_device_callback=fresh_device_for_retry,
+                use_services_cache=True,
             )
+            # Capture the effective backend before HA can untrack on disconnect.
+            route = connected_route(client)
+            self._connected_route = (session_generation, route)
+            if self._observer is not None:
+                self._observer.emit("route_connected", session_generation, route)
+        except BaseException as ex:
+            if self._observer is not None:
+                self._observer.emit(
+                    "connection",
+                    "connect_failed",
+                    session_generation,
+                    stage=stage,
+                    error_type=type(ex).__name__,
+                )
+            self._active_session_generation = None
+            self._ready_event.clear()
+            raise
 
-        def fresh_device_for_retry() -> BLEDevice:
-            return self._fresh_ble_device() or device
-
-        support = identify_model(self._device_identity)
-        if not support.supported and not self._identity_conflicted:
-            raise UnsupportedDeviceError(support.reason or "Unsupported model")
-
-        client = await establish_connection(
-            BleakClientWithServiceCache,
-            device,
-            self._advertised_name,
-            disconnected_callback=self._make_disconnected_callback(session_generation),
-            max_attempts=CONNECTION_ATTEMPTS,
-            ble_device_callback=fresh_device_for_retry,
-            use_services_cache=True,
-        )
         # Ownership transfers as soon as this client is published under the
         # operation lock. Never infer past ownership from self._client later:
         # another teardown can clear it while disconnect() is still running.
@@ -921,6 +1123,8 @@ class AllpowersBLEClient:
                 self._connected = True
                 self._connected_monotonic = now
                 self._last_connected_at = _utcnow()
+                if self._observer is not None:
+                    self._observer.emit("connection", "connected", session_generation)
                 self._last_error = None
                 self._persist_model_identity_if_validated()
                 self._statistics = replace(
@@ -931,7 +1135,15 @@ class AllpowersBLEClient:
                 await self._write_frame_unlocked(encode_status_request())
                 self._last_status_request_monotonic = self._loop_time()
                 self._wake_maintenance_loop()
-        except BaseException:
+        except BaseException as ex:
+            if self._observer is not None:
+                self._observer.emit(
+                    "connection",
+                    "connect_failed",
+                    session_generation,
+                    stage="gatt_setup",
+                    error_type=type(ex).__name__,
+                )
             # Invalidate before yielding: a writer already waiting for the lock
             # must not use a session whose initial setup has failed.
             self._active_session_generation = None
@@ -941,7 +1153,11 @@ class AllpowersBLEClient:
             # cancellation (e.g. concurrent async_stop calls) must not abandon
             # a connected client which was never registered in self._client.
             cleanup_task = asyncio.create_task(
-                self._cleanup_failed_connection(client, published=client_published),
+                self._cleanup_failed_connection(
+                    client,
+                    published=client_published,
+                    session_generation=session_generation,
+                ),
                 name=f"allpowers-connect-cleanup-{self.address}",
             )
             while not cleanup_task.done():
@@ -964,25 +1180,43 @@ class AllpowersBLEClient:
         self._emit_update()
 
     async def _cleanup_failed_connection(
-        self, client: BleakClient, *, published: bool
+        self,
+        client: BleakClient,
+        *,
+        published: bool,
+        session_generation: int | None = None,
     ) -> None:
         """Release a failed setup using its ownership at publication time."""
         async with asyncio.timeout(WRITE_TIMEOUT):
             if published:
                 # Wait for a competing teardown holding the lock, even if it
                 # already cleared self._client but is still disconnecting.
-                await self._disconnect_client()
+                await self._disconnect_client(
+                    failed_client=client, failed_generation=session_generation
+                )
             elif client.is_connected:
                 # Never published: do not wait for _operation_lock, since the
                 # setup task might have been cancelled while acquiring it.
                 await client.disconnect()
 
-    async def _disconnect_client(self) -> None:
+    async def _disconnect_client(
+        self,
+        *,
+        failed_client: BleakClient | None = None,
+        failed_generation: int | None = None,
+    ) -> None:
         cancelled = False
         async with self._operation_lock:
             client = self._client
             was_connected = self._connected
+            old_generation = self._active_session_generation
+            if old_generation is None and was_connected and client is failed_client:
+                old_generation = failed_generation
+            cause = self._disconnect_reason_category or "unsolicited_disconnect"
+            self._report_pending_observations(disconnected=True)
+            self._disconnect_reason_category = None
             self._active_session_generation = None
+            self._connected_route = None
             self._ready_event.clear()
             self._client = None
             self._write_characteristic = None
@@ -1003,6 +1237,13 @@ class AllpowersBLEClient:
                 refresh_task.cancel()
 
             if was_connected:
+                if self._observer is not None:
+                    self._observer.emit(
+                        "connection",
+                        "disconnected",
+                        old_generation,
+                        stage=cause,
+                    )
                 self._last_disconnected_at = _utcnow()
                 self._statistics = replace(
                     self._statistics,
@@ -1048,6 +1289,8 @@ class AllpowersBLEClient:
 
     def _request_disconnect(self, after_generation: int) -> None:
         """Wake the connection loop and require a newer advertisement for retry."""
+        if self._disconnect_reason_category is None:
+            self._disconnect_reason_category = "unsolicited_disconnect"
         self._retry_after_advertisement_generation = after_generation
         self._disconnect_event.set()
 
@@ -1063,6 +1306,8 @@ class AllpowersBLEClient:
                 self._pending_model_identity_generation = None
         self._session_generation_counter += 1
         self._active_session_generation = self._session_generation_counter
+        self._connected_route = None
+        self._disconnect_reason_category = None
         self._session_hardware_revision = None
         self._decoder = NotificationStreamDecoder()
         self._ready_event.clear()
@@ -1110,6 +1355,10 @@ class AllpowersBLEClient:
         characteristic: BleakGATTCharacteristic,
         data: bytearray,
     ) -> None:
+        if self._observer is not None:
+            self._observer.emit(
+                "notification_received", self._active_session_generation, bytes(data)
+            )
         del characteristic
         self._statistics = replace(
             self._statistics,
@@ -1150,8 +1399,18 @@ class AllpowersBLEClient:
                         pending_output.session_generation
                         != self._active_session_generation
                     ):
+                        self._observe_transaction(
+                            "transaction_abandoned",
+                            pending_output,
+                            reason="session_changed",
+                        )
                         self._pending_output_transaction = None
                     elif now > pending_output.confirm_deadline_monotonic:
+                        self._observe_transaction(
+                            "transaction_timed_out",
+                            pending_output,
+                            reason="telemetry_after_deadline",
+                        )
                         self._pending_output_transaction = None
                         self._output_blocked_until_version = self._status_version + 1
                     elif (
@@ -1163,6 +1422,21 @@ class AllpowersBLEClient:
                         and packet.ac_enabled == pending_output.target_ac
                         and packet.light_enabled == pending_output.target_light
                     ):
+                        if pending_output.phase is TransactionPhase.SENDING:
+                            self._observe_transaction(
+                                "telemetry_match_pending_submission",
+                                pending_output,
+                                reason="matching_validated_telemetry",
+                            )
+                        elif (
+                            pending_output.phase
+                            is TransactionPhase.AWAITING_CONFIRMATION
+                        ):
+                            self._observe_transaction(
+                                "transaction_confirmed",
+                                pending_output,
+                                reason="matching_validated_telemetry",
+                            )
                         self._pending_output_transaction = (
                             None
                             if pending_output.phase
@@ -1172,8 +1446,19 @@ class AllpowersBLEClient:
                             )
                         )
                     elif pending_output.phase is TransactionPhase.CONFIRMED:
+                        self._observe_transaction(
+                            "telemetry_mismatch",
+                            pending_output,
+                            reason="unconfirmed_or_contradictory",
+                        )
                         self._pending_output_transaction = replace(
                             pending_output, phase=TransactionPhase.SENDING
+                        )
+                    else:
+                        self._observe_transaction(
+                            "telemetry_mismatch",
+                            pending_output,
+                            reason="unconfirmed_or_contradictory",
                         )
                 self._ready_event.set()
             elif isinstance(packet, SettingsData):
@@ -1196,8 +1481,18 @@ class AllpowersBLEClient:
                         pending_settings.session_generation
                         != self._active_session_generation
                     ):
+                        self._observe_transaction(
+                            "transaction_abandoned",
+                            pending_settings,
+                            reason="session_changed",
+                        )
                         self._pending_settings_transaction = None
                     elif now > pending_settings.confirm_deadline_monotonic:
+                        self._observe_transaction(
+                            "transaction_timed_out",
+                            pending_settings,
+                            reason="telemetry_after_deadline",
+                        )
                         self._pending_settings_transaction = None
                         self._settings_blocked_until_version = (
                             self._settings_version + 1
@@ -1209,6 +1504,21 @@ class AllpowersBLEClient:
                         )
                         and packet == pending_settings.target
                     ):
+                        if pending_settings.phase is TransactionPhase.SENDING:
+                            self._observe_transaction(
+                                "telemetry_match_pending_submission",
+                                pending_settings,
+                                reason="matching_validated_telemetry",
+                            )
+                        elif (
+                            pending_settings.phase
+                            is TransactionPhase.AWAITING_CONFIRMATION
+                        ):
+                            self._observe_transaction(
+                                "transaction_confirmed",
+                                pending_settings,
+                                reason="matching_validated_telemetry",
+                            )
                         self._pending_settings_transaction = (
                             None
                             if pending_settings.phase
@@ -1218,8 +1528,19 @@ class AllpowersBLEClient:
                             )
                         )
                     elif pending_settings.phase is TransactionPhase.CONFIRMED:
+                        self._observe_transaction(
+                            "telemetry_mismatch",
+                            pending_settings,
+                            reason="unconfirmed_or_contradictory",
+                        )
                         self._pending_settings_transaction = replace(
                             pending_settings, phase=TransactionPhase.SENDING
+                        )
+                    else:
+                        self._observe_transaction(
+                            "telemetry_mismatch",
+                            pending_settings,
+                            reason="unconfirmed_or_contradictory",
                         )
                 if (
                     self._pending_settings_transaction is None
@@ -1230,12 +1551,28 @@ class AllpowersBLEClient:
                 self._advertised_name = packet.name
                 self._observe_model_identity(packet.name.strip())
 
+        if self._observer is not None:
+            self._observer.emit(
+                "notification_decoded",
+                self._active_session_generation,
+                packet_types=tuple(type(packet).__name__ for packet in packets),
+                profile=self._runtime_model_support().profile,
+                hardware_revision=(
+                    self._session_hardware_revision[0]
+                    if self._session_hardware_revision is not None
+                    else None
+                ),
+                discarded_frames=discarded,
+                discarded_bytes=discarded_bytes,
+            )
         if packets or discarded or discarded_bytes:
             self._reported_freshness = self._freshness(self._loop_time())
             self._wake_maintenance_loop()
             self._emit_update()
 
-    async def _write_frame_unlocked(self, frame: bytes) -> None:
+    async def _write_frame_unlocked(
+        self, frame: bytes, *, observation_id: str | None = None
+    ) -> None:
         client = self._client
         characteristic = self._write_characteristic
         active_generation = self._active_session_generation
@@ -1246,8 +1583,25 @@ class AllpowersBLEClient:
             or characteristic is None
             or active_generation is None
         ):
+            if self._observer is not None:
+                self._observer.emit(
+                    "write",
+                    "write_rejected",
+                    active_generation,
+                    transaction_id=observation_id,
+                    frame=frame,
+                )
             raise NotConnectedError("The ALLPOWERS device is not connected")
 
+        if self._observer is not None:
+            self._observer.emit(
+                "write",
+                "write_attempt",
+                active_generation,
+                transaction_id=observation_id,
+                frame=frame,
+                write_with_response=_write_with_response(characteristic),
+            )
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
                 await client.write_gatt_char(
@@ -1261,14 +1615,43 @@ class AllpowersBLEClient:
                 or not self._connected
             ):
                 raise NotConnectedError("The ALLPOWERS device session changed")
+            if self._observer is not None:
+                self._observer.emit(
+                    "write",
+                    "write_ok",
+                    active_generation,
+                    transaction_id=observation_id,
+                )
         except (TimeoutError, *BLEAK_RETRY_EXCEPTIONS) as ex:
+            if self._observer is not None:
+                self._observer.emit(
+                    "write",
+                    "write_error",
+                    active_generation,
+                    transaction_id=observation_id,
+                    error_type=type(ex).__name__,
+                    reason_category="transport_failure",
+                )
             self._statistics = replace(
                 self._statistics,
                 write_errors=self._statistics.write_errors + 1,
             )
             self._last_error = f"{type(ex).__name__}: {ex}"
+            if self._disconnect_reason_category is None:
+                self._disconnect_reason_category = "write_failure"
             self._request_disconnect(self._advertisement_generation)
             self._emit_update()
+            raise
+        except (Exception, asyncio.CancelledError) as ex:
+            if self._observer is not None:
+                self._observer.emit(
+                    "write_unexpected_error",
+                    active_generation,
+                    transaction_id=observation_id,
+                    error_type=type(ex).__name__,
+                    session_changed=isinstance(ex, NotConnectedError),
+                    cancelled=isinstance(ex, asyncio.CancelledError),
+                )
             raise
 
     def _schedule_status_refresh(self) -> None:
@@ -1619,10 +2002,21 @@ async def async_probe_device(
     address: str,
     advertised_name: str,
     timeout: float,
+    observer: ClientObserver | None = None,
 ) -> ProbeResult:
-    """Connect, verify GATT characteristics, and require one valid status frame."""
+    """Use HA's existing GATT probe, with optional read-only observations."""
+    slot = ObserverSlot(observer) if observer is not None else None
+    generation = 1
     normalized_address = address.upper()
     support = identify_model(advertised_name)
+    if slot is not None:
+        slot.emit(
+            "connection",
+            "model_profile_selected",
+            generation,
+            profile=support.profile,
+            classification=support.classification,
+        )
     if not support.supported:
         raise UnsupportedDeviceError(support.reason or "Unsupported model")
 
@@ -1631,8 +2025,18 @@ async def async_probe_device(
             hass, normalized_address, connectable=True
         )
 
+    if slot is not None:
+        slot.emit("connection", "connect_attempt", generation)
     device = fresh_device()
     if device is None:
+        if slot is not None:
+            slot.emit(
+                "connection",
+                "connect_failed",
+                generation,
+                stage="device_selection",
+                error_type="DeviceNotFoundError",
+            )
         raise DeviceNotFoundError(
             f"No connectable Bluetooth adapter or proxy can reach {normalized_address}"
         )
@@ -1649,17 +2053,31 @@ async def async_probe_device(
     try:
         async with asyncio.timeout(remaining("connection")):
             client = await establish_connection(
-                BleakClientWithServiceCache,
+                brc.BleakClientWithServiceCache,
                 device,
                 advertised_name,
                 max_attempts=CONNECTION_ATTEMPTS,
                 ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
-    except TimeoutError as ex:
-        raise ProbeConnectionTimeoutError(
-            f"Probe connection timed out for {normalized_address}"
-        ) from ex
+    except BaseException as ex:
+        if slot is not None:
+            slot.emit(
+                "connection",
+                "connect_failed",
+                generation,
+                stage="gatt_connection",
+                error_type=type(ex).__name__,
+            )
+        if isinstance(ex, TimeoutError):
+            raise ProbeConnectionTimeoutError(
+                f"Probe connection timed out for {normalized_address}"
+            ) from ex
+        raise
+
+    if slot is not None:
+        slot.emit("route_connected", generation, connected_route(client))
+        slot.emit("connection", "connected", generation)
 
     decoder = NotificationStreamDecoder()
     status: StatusData | None = None
@@ -1667,6 +2085,7 @@ async def async_probe_device(
     status_event = asyncio.Event()
     notify_characteristic: BleakGATTCharacteristic | None = None
     notify_started = False
+    probe_transaction_id: str | None = None
 
     def notification_handler(
         characteristic: BleakGATTCharacteristic,
@@ -1674,12 +2093,42 @@ async def async_probe_device(
     ) -> None:
         nonlocal status, settings
         del characteristic
-        for packet in decoder.feed(data):
+        if slot is not None:
+            slot.emit(
+                "notification_received",
+                generation,
+                bytes(data),
+                transaction_id=probe_transaction_id,
+            )
+        discarded_before = decoder.discarded_frames
+        bytes_before = decoder.discarded_bytes
+        packets = decoder.feed(data)
+        if slot is not None:
+            slot.emit(
+                "notification_decoded",
+                generation,
+                packet_types=tuple(type(packet).__name__ for packet in packets),
+                profile=support.profile,
+                hardware_revision=None,
+                discarded_frames=decoder.discarded_frames - discarded_before,
+                discarded_bytes=decoder.discarded_bytes - bytes_before,
+                transaction_id=probe_transaction_id,
+            )
+        for packet in packets:
             if isinstance(packet, StatusData):
                 status = packet
+                if slot is not None:
+                    slot.emit(
+                        "probe_record",
+                        "probe_status_received",
+                        generation,
+                        transaction_id=probe_transaction_id,
+                    )
                 status_event.set()
             elif isinstance(packet, SettingsData):
                 settings = packet
+                if slot is not None:
+                    slot.emit("probe_record", "probe_settings_received", generation)
 
     try:
         try:
@@ -1687,41 +2136,98 @@ async def async_probe_device(
                 client
             )
         except UnsupportedDeviceError as ex:
+            if slot is not None:
+                slot.emit(
+                    "probe_record",
+                    "probe_gatt_rejected",
+                    generation,
+                    reason_category="missing_characteristics",
+                )
             raise ProbeGattValidationError(str(ex)) from ex
+        if slot is not None:
+            slot.emit("probe_record", "probe_gatt_validated", generation)
 
         try:
             async with asyncio.timeout(remaining("notify")):
                 await client.start_notify(notify_characteristic, notification_handler)
             notify_started = True
-        except TimeoutError as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe notification setup timed out for {normalized_address}"
-            ) from ex
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe notification setup failed for {normalized_address}: {ex}"
-            ) from ex
+        except BaseException as ex:
+            if slot is not None:
+                slot.emit(
+                    "probe_record",
+                    "probe_notify_failed",
+                    generation,
+                    reason_category=(
+                        "timeout" if isinstance(ex, TimeoutError) else "error"
+                    ),
+                )
+            if isinstance(ex, TimeoutError):
+                raise ProbeNotificationSetupError(
+                    f"Probe notification setup timed out for {normalized_address}"
+                ) from ex
+            if isinstance(ex, BLEAK_RETRY_EXCEPTIONS):
+                raise ProbeNotificationSetupError(
+                    f"Probe notification setup failed for {normalized_address}: {ex}"
+                ) from ex
+            raise
+        if slot is not None:
+            slot.emit("probe_record", "probe_notify_started", generation)
 
+        frame = encode_status_request()
+        with_response = _write_with_response(write_characteristic)
+        if slot is not None:
+            probe_transaction_id = slot.transaction_id()
+        if slot is not None:
+            slot.emit(
+                "write",
+                "write_attempt",
+                generation,
+                transaction_id=probe_transaction_id,
+                frame=frame,
+                write_with_response=with_response,
+            )
         try:
             async with asyncio.timeout(remaining("status_request")):
                 await client.write_gatt_char(
                     write_characteristic,
-                    encode_status_request(),
-                    response=_write_with_response(write_characteristic),
+                    frame,
+                    response=with_response,
                 )
-        except TimeoutError as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe status request timed out for {normalized_address}"
-            ) from ex
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe status request failed for {normalized_address}: {ex}"
-            ) from ex
+        except BaseException as ex:
+            if slot is not None:
+                slot.emit(
+                    "write",
+                    "write_error",
+                    generation,
+                    transaction_id=probe_transaction_id,
+                    error_type=type(ex).__name__,
+                    reason_category=(
+                        "timeout" if isinstance(ex, TimeoutError) else "write_failure"
+                    ),
+                )
+            if isinstance(ex, TimeoutError):
+                raise ProbeNotificationSetupError(
+                    f"Probe status request timed out for {normalized_address}"
+                ) from ex
+            if isinstance(ex, BLEAK_RETRY_EXCEPTIONS):
+                raise ProbeNotificationSetupError(
+                    f"Probe status request failed for {normalized_address}: {ex}"
+                ) from ex
+            raise
+        if slot is not None:
+            slot.emit(
+                "write",
+                "write_ok",
+                generation,
+                transaction_id=probe_transaction_id,
+            )
 
         try:
             async with asyncio.timeout(remaining("status")):
                 await status_event.wait()
         except TimeoutError as ex:
+            if slot is not None:
+                slot.emit("probe_record", "probe_status_timeout", generation)
             raise ProbeStatusTimeoutError(
                 f"Probe status timed out for {normalized_address}"
             ) from ex
@@ -1747,7 +2253,17 @@ async def async_probe_device(
                         if callable(stop_notify):
                             async with asyncio.timeout(WRITE_TIMEOUT):
                                 await stop_notify(notify_characteristic)
+                            if slot is not None:
+                                slot.emit(
+                                    "probe_record", "probe_notify_stopped", generation
+                                )
                     except Exception:
+                        if slot is not None:
+                            slot.emit(
+                                "probe_record",
+                                "probe_notify_stop_failed",
+                                generation,
+                            )
                         _LOGGER.debug(
                             "Probe notification cleanup failed for %s",
                             normalized_address,
@@ -1757,7 +2273,20 @@ async def async_probe_device(
                 try:
                     async with asyncio.timeout(WRITE_TIMEOUT):
                         await client.disconnect()
+                    if slot is not None:
+                        slot.emit(
+                            "connection",
+                            "disconnected",
+                            generation,
+                            stage="probe_cleanup",
+                        )
                 except Exception:
+                    if slot is not None:
+                        slot.emit(
+                            "probe_record",
+                            "probe_disconnect_failed",
+                            generation,
+                        )
                     _LOGGER.debug(
                         "Probe disconnect failed for %s",
                         normalized_address,
