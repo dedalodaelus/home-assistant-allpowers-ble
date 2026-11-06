@@ -580,6 +580,7 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         finally:
             finish_probe(tracer, outcome, reason=reason)
 
+
 class AllpowersOptionsFlow(OptionsFlow):
     """Manage connection health and experimental settings."""
 

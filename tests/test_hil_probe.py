@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from time import monotonic
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -172,7 +170,9 @@ async def test_probe_list_filters_nonactive_and_nonadmin_without_private_data():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["missing", "wrong_token", "run", "scenario", "route"])
+@pytest.mark.parametrize(
+    "invalid", ["missing", "wrong_token", "run", "scenario", "route"]
+)
 async def test_arm_rejects_invalid_target_and_format(invalid):
     hass, connection = setup_case()
     register_flow_candidates(hass, "flow-a", "user", [ADDRESS])
@@ -293,7 +293,9 @@ async def test_stop_while_armed_or_probing_never_disconnects_ha_probe():
     capture, _ = await arm(hass, connection)
     tracer = consume_probe(hass, "flow-a", ADDRESS)
     assert tracer is not None
-    await ws_probe_stop(hass, connection, {"id": 5, **msg, "capture_id": capture.capture_id})
+    await ws_probe_stop(
+        hass, connection, {"id": 5, **msg, "capture_id": capture.capture_id}
+    )
     finish_probe(tracer, "success")
     assert capture.probe_outcome == "interrupted"
     assert capture.snapshot()["frame_count"] == 0
@@ -310,7 +312,9 @@ async def test_skip_active_reconfigure_only_consumes_exact_target():
     assert capture.probe_outcome == "skipped"
     assert capture.snapshot()["frame_count"] == 0
     assert capture.snapshot()["capture_complete"] is False
-    assert capture.snapshot()["events"][-1]["reason_category"] == "active_session_reused"
+    assert (
+        capture.snapshot()["events"][-1]["reason_category"] == "active_session_reused"
+    )
     capture.erase()
 
 
@@ -395,7 +399,8 @@ async def test_real_probe_records_status_tx_rx_decoder_route_and_cleanup(
 
     monkeypatch.setattr(client_module, "establish_connection", establish)
     monkeypatch.setattr(
-        client_module.bluetooth, "async_ble_device_from_address",
+        client_module.bluetooth,
+        "async_ble_device_from_address",
         lambda *args, **kwargs: FakeDevice(),
     )
     result = await client_module.async_probe_device(
@@ -474,9 +479,11 @@ async def test_probe_failures_keep_typed_private_evidence(
         lambda *args, **kwargs: None if failure == "not_found" else FakeDevice(),
     )
     if failure == "notify":
+
         async def broken_notify(*args, **kwargs):
             del args, kwargs
             raise FakeBleakError("PRIVATE-NOTIFY")
+
         fake.start_notify = broken_notify
     with pytest.raises(
         (
@@ -488,8 +495,11 @@ async def test_probe_failures_keep_typed_private_evidence(
         )
     ):
         await client_module.async_probe_device(
-            hass, address=ADDRESS, advertised_name="ALLPOWERS R600",
-            timeout=0.05, observer=tracer,
+            hass,
+            address=ADDRESS,
+            advertised_name="ALLPOWERS R600",
+            timeout=0.05,
+            observer=tracer,
         )
     finish_probe(tracer, "failure", reason="safe_failure")
     events = [row["event"] for row in capture.events]

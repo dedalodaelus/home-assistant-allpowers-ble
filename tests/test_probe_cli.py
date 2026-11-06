@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -238,12 +237,13 @@ def test_probe_cli_explicit_opaque_or_ordinal_selection(
     monkeypatch, tmp_path, allpowers_registry
 ):
     fake = ProbeHA(allpowers_registry)
-    fake.flows[0]["candidates"].append(
-        {"token": "opaque-B", "label": "Candidate 2"}
+    fake.flows[0]["candidates"].append({"token": "opaque-B", "label": "Candidate 2"})
+    assert (
+        run_probe(
+            monkeypatch, tmp_path, fake, "--flow-id", "flow-a", "--candidate", "2"
+        )
+        == 0
     )
-    assert run_probe(
-        monkeypatch, tmp_path, fake, "--flow-id", "flow-a", "--candidate", "2"
-    ) == 0
     assert fake.selected == ("flow-a", "opaque-B")
 
 
@@ -251,9 +251,7 @@ def test_probe_cli_interactive_choice_does_not_show_internal_identifiers(
     monkeypatch, tmp_path, capsys, allpowers_registry
 ):
     fake = ProbeHA(allpowers_registry)
-    fake.flows[0]["candidates"].append(
-        {"token": "opaque-B", "label": "Candidate 2"}
-    )
+    fake.flows[0]["candidates"].append({"token": "opaque-B", "label": "Candidate 2"})
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setattr(cli, "sleep", lambda _: None)
     monkeypatch.setattr("builtins.input", lambda *_: "2")
@@ -298,8 +296,13 @@ def test_probe_cli_noninteractive_ttl_timeout_stops_without_ble_requests(
 )
 def test_probe_cli_schema_validation_denies_false_qualification(field, value):
     capture = ProbeCapture(
-        "flow-a", "AA:BB:CC:DD:EE:FF", "token", "admin",
-        "run12345", "scenario", "auto",
+        "flow-a",
+        "AA:BB:CC:DD:EE:FF",
+        "token",
+        "admin",
+        "run12345",
+        "scenario",
+        "auto",
     )
     capture.record("probe_started", session_generation=1)
     capture.finish("success")
@@ -334,9 +337,7 @@ def test_probe_cli_rejects_candidate_address_used_as_opaque_token():
                 "flows": [
                     {
                         "flow_id": "flow-a",
-                        "candidates": [
-                            {"token": "opaque-A", "label": "Candidate 1"}
-                        ],
+                        "candidates": [{"token": "opaque-A", "label": "Candidate 1"}],
                     }
                 ]
             },
@@ -363,16 +364,19 @@ def test_probe_cli_private_save_failure_scrubs_only_trace_files(
     monkeypatch.setattr(cli, "sleep", lambda _: None)
     monkeypatch.setattr(cli.os, "open", fail_second_jsonl)
     monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
-    assert cli.main(
-        [
-            "probe-trace",
-            "--ha-url",
-            "https://example.test",
-            "--non-interactive",
-            "--output-root",
-            str(tmp_path / "private"),
-        ]
-    ) == 2
+    assert (
+        cli.main(
+            [
+                "probe-trace",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--output-root",
+                str(tmp_path / "private"),
+            ]
+        )
+        == 2
+    )
     (directory,) = list((tmp_path / "private").iterdir())
     assert not (directory / "events.jsonl").exists()
     assert not (directory / "frames.jsonl").exists()

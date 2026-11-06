@@ -439,9 +439,8 @@ def _validate_trace_result(
         and result["dropped_events"] == 0
         and result["dropped_frames"] == 0
     )
-    if (
-        result["complete"] is not expected_complete
-        or (is_probe and result.get("capture_complete") is not expected_complete)
+    if result["complete"] is not expected_complete or (
+        is_probe and result.get("capture_complete") is not expected_complete
     ):
         raise HAAPIError("Contradictory HIL capture integrity fields")
     version = result["schema_version"]
@@ -492,7 +491,6 @@ def _validate_trace_result(
             raise HAAPIError("HIL frame metadata differs from its matching event")
 
 
-
 def _save_private_trace(output_dir: Path, result: dict[str, Any]) -> None:
     """Write only validated private evidence, scrubbing partial failures."""
     private_paths = (
@@ -507,7 +505,9 @@ def _save_private_trace(output_dir: Path, result: dict[str, Any]) -> None:
                 for record in result[key]:
                     stream.write(json.dumps(record, sort_keys=True) + "\n")
         metadata = {
-            key: value for key, value in result.items() if key not in ("events", "frames")
+            key: value
+            for key, value in result.items()
+            if key not in ("events", "frames")
         }
         fd = os.open(private_paths[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -545,17 +545,13 @@ def _select_probe(listed: Any, args: argparse.Namespace) -> tuple[str, str]:
                 or not isinstance(candidate.get("label"), str)
             ):
                 raise HAAPIError("Invalid opaque probe candidate")
-            available.append(
-                (flow["flow_id"], candidate["token"], candidate["label"])
-            )
+            available.append((flow["flow_id"], candidate["token"], candidate["label"]))
     if args.flow_id is not None:
         available = [item for item in available if item[0] == args.flow_id]
     if args.candidate is not None:
         if args.candidate.isdecimal():
             index = int(args.candidate)
-            available = (
-                [available[index - 1]] if 1 <= index <= len(available) else []
-            )
+            available = [available[index - 1]] if 1 <= index <= len(available) else []
         else:
             available = [item for item in available if item[1] == args.candidate]
     if not available:
@@ -605,7 +601,10 @@ def _execute_probe_trace(
         "schema_version": 1,
         "run_id": run_id,
         "scenario_id": args.scenario_id,
-        "route": {"requested": args.route, "observed": {"verified": False, "value": None}},
+        "route": {
+            "requested": args.route,
+            "observed": {"verified": False, "value": None},
+        },
         "device": {"unavailable_reason": "config_flow_entry_not_created"},
         "integration_build": environment["integration"],
         "qualification_status": "inconclusive",
@@ -639,7 +638,7 @@ def _execute_probe_trace(
             sleep(1)
         else:
             result = api.websocket([stop])[0]
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt, EOFError:
         result = api.websocket([stop])[0]
     if not isinstance(result, dict):
         raise HAAPIError("Invalid final probe trace")

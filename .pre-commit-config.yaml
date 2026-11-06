@@ -18,6 +18,5 @@ repos:
     rev: v0.15.22
     hooks:
       - id: ruff-check
-        args: [--diff]
+        args: [--fix]
       - id: ruff-format
-        args: [--diff]

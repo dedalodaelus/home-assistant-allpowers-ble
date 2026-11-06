@@ -174,14 +174,12 @@ def _active_flow(hass: HomeAssistant, flow_id: str) -> dict[str, Any] | None:
                 and item.get("handler") == DOMAIN
             ):
                 return item
-    except (AttributeError, KeyError, ValueError):
+    except AttributeError, KeyError, ValueError:
         return None
     return None
 
 
-def _eligible(
-    hass: HomeAssistant, flow_id: str
-) -> FlowCandidates | None:
+def _eligible(hass: HomeAssistant, flow_id: str) -> FlowCandidates | None:
     record = _registry(hass).get(flow_id)
     if (
         record is None
@@ -239,9 +237,7 @@ def _probe_lookup(
     hass: HomeAssistant, connection: Any, msg: dict[str, Any]
 ) -> ProbeCapture | None:
     store = hass.data.get(KEY)
-    capture = (
-        store.find(msg["capture_id"]) if isinstance(store, CaptureStore) else None
-    )
+    capture = store.find(msg["capture_id"]) if isinstance(store, CaptureStore) else None
     if (
         not isinstance(capture, ProbeCapture)
         or capture.flow_id != msg["flow_id"]

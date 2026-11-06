@@ -2233,7 +2233,9 @@ async def async_probe_device(
                             async with asyncio.timeout(WRITE_TIMEOUT):
                                 await stop_notify(notify_characteristic)
                             if slot is not None:
-                                slot.emit("probe_record", "probe_notify_stopped", generation)
+                                slot.emit(
+                                    "probe_record", "probe_notify_stopped", generation
+                                )
                     except Exception:
                         if slot is not None:
                             slot.emit(
