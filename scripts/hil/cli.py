@@ -25,6 +25,8 @@ from .environment import (
     read_only_sample,
 )
 from .storage import write_run
+from .runner import plan as plan_scenarios, plan_as_dict
+from .scenarios import SUITES
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -66,7 +68,23 @@ def make_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
-    commands.add_parser("run", parents=[common], help="Capture a read-only snapshot")
+    run_parser = commands.add_parser(
+        "run",
+        parents=[common],
+        help="Capture a read-only snapshot or guided scenario suite",
+    )
+    run_parser.add_argument("--suite", choices=(*SUITES, "all"))
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print scenario eligibility without contacting Home Assistant",
+    )
+    run_parser.add_argument(
+        "--list-suites", action="store_true", help="List available scenario suites"
+    )
+    run_parser.add_argument(
+        "--resume", type=Path, help="Resume a validated scenario run directory"
+    )
     trace_parser = commands.add_parser(
         "trace",
         parents=[common],
@@ -683,6 +701,31 @@ def _execute_probe_trace(
 
 def execute(args: argparse.Namespace) -> int:
     """Execute read-only preflight and explicitly requested private HIL capture."""
+    if args.command == "run":
+        if args.list_suites:
+            print("Available HIL suites:")
+            for suite in SUITES:
+                print(f"  {suite}")
+            return 0
+        if args.resume is not None:
+            raise HAAPIError("Scenario checkpoint resume is not yet available")
+        if args.dry_run:
+            suite = args.suite or "read-only"
+            planned = plan_scenarios(suite, non_interactive=args.non_interactive)
+            if not planned:
+                print(
+                    f"blocked: {suite} — no runnable scenario declarations are available yet"
+                )
+            for item in planned:
+                entry = plan_as_dict(item)
+                status = "eligible" if entry["eligible"] else "blocked"
+                print(f"{status}: {entry['id']} [{entry['suite']}] — {entry['reason']}")
+                print("  requested actions:", ", ".join(entry["requested_effects"]))
+            return 0
+        if args.suite not in (None, "read-only"):
+            raise HAAPIError(
+                "This suite is declarative but execution is not implemented yet; use --dry-run"
+            )
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)

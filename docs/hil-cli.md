@@ -88,6 +88,22 @@ If `doctor` exits 2 because the optional freshness sensor is disabled, that mean
 
 ## Verification
 
+## Guided scenario runner (#230)
+
+The scenario interface is being introduced incrementally. List declarations and
+inspect a side-effect-free plan with:
+
+```bash
+python -m scripts.hil run --list-suites
+python -m scripts.hil run --suite read-only --dry-run
+python -m scripts.hil run --suite all --dry-run
+```
+
+`all` currently selects only read-only scenarios. Write, recovery and soak
+suites are never implicitly enabled; an empty suite reports as blocked until
+its declarations and executor are implemented. The ordinary `run` command
+remains the #228 read-only snapshot. Checkpoint resume is not available yet.
+
 ```bash
 python -m pytest tests/test_hil_cli.py
 ruff format --check scripts tests

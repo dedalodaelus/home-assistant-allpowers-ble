@@ -192,3 +192,19 @@ This integration deliberately keeps confirmed and requested state separate and
 requires fresh settings after session renewal instead of adopting optimistic
 replay. Physical capture must compare both implementations on the same R600
 revision and routes, including whether reconnect reacquires settings.
+
+## Guided scenarios (#230 status)
+
+The current CLI exposes `run --list-suites` and side-effect-free
+`run --suite read-only --dry-run`. Only the read-only snapshot declaration is
+currently available. Write authorization, capability metadata, physical
+confirmations, recovery observation, resumable checkpoints, and the 24-hour
+soak executor remain unimplemented; no physical qualification is claimed.
+
+## Guided scenarios (#230 status)
+
+The current CLI exposes `run --list-suites` and side-effect-free
+`run --suite read-only --dry-run`. Only the read-only snapshot declaration is
+currently available. Write authorization, capability metadata, physical
+confirmations, recovery observation, resumable checkpoints, and the 24-hour
+soak executor remain unimplemented; no physical qualification is claimed.
