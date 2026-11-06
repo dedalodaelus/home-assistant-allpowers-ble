@@ -579,6 +579,8 @@ async def test_hil_probe_commands_register_without_autoarming(monkeypatch):
         ws_probe_fetch,
     ]
     assert KEY not in hass.data
+
+
 @pytest.mark.asyncio
 async def test_registry_capacity_preserves_armed_target_and_evicts_inactive():
     """Do not evict a live arm; bounded stale form records may be replaced."""
