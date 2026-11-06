@@ -65,7 +65,7 @@ intervals or watchdogs shorter than freshness windows.
 - [`config_flow.py`](../../../custom_components/allpowers_ble/config_flow.py)
 - [`__init__.py`](../../../custom_components/allpowers_ble/__init__.py)
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
-- [README runtime options](../../../README.md#runtime-options)
+- [User guide: runtime options](../../user-guide.md#runtime-options)
 
 ## Fitness functions
 

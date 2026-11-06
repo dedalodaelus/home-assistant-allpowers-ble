@@ -66,7 +66,7 @@ harder.
 - [`options.py`](../../../custom_components/allpowers_ble/options.py)
 - [`entity.py`](../../../custom_components/allpowers_ble/entity.py)
 - [Compatibility](../../compatibility.md)
-- [README compatibility table](../../../README.md#compatibility)
+- [User guide: compatibility](../../user-guide.md#compatibility)
 
 ## Fitness functions
 

@@ -61,7 +61,7 @@ compatibility, and maintenance surface.
 - [`config_flow.py`](../../../custom_components/allpowers_ble/config_flow.py)
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
 - [Existing architecture summary](../implementation-architecture.md)
-- [README Bluetooth Proxy section](../../../README.md#bluetooth-proxy)
+- [User guide: Bluetooth Proxy](../../user-guide.md#bluetooth-proxy)
 
 ## Fitness functions
 

@@ -15,13 +15,13 @@ marked as `Blocked` with an issue reference, or `N/A` with an explicit rationale
 
 | Criterion | How it is measured | Evidence | Status | Blocking issues |
 |---|---|---|---|---|
-| IQS-01 custom integration scope is explicit | `README.md` and roadmap state this is a community custom integration and not Home Assistant Core certification | [README project status](../README.md#project-status), [Roadmap quality flow](roadmap.md#release-and-quality-flow) | Done | None |
+| IQS-01 custom integration scope is explicit | The landing page and roadmap state this is a community custom integration and not Home Assistant Core certification | [Roadmap quality flow](roadmap.md#release-and-quality-flow) | Done | None |
 | IQS-02 rule-by-rule quality contract is maintained | This section exists with measurable criteria, evidence links, and explicit status per criterion | [Quality contract](#10-readiness-contract), [Repository validator](../scripts/validate_repository.py) | Done | None |
 | IQS-03 lifecycle, reconfigure, and repairs behavior is regression-tested | CI executes lifecycle, config-flow, and repairs tests and enforces coverage thresholds | [Lifecycle tests](../tests/homeassistant/test_lifecycle_runtime.py), [Config flow tests](../tests/test_config_flow.py), [Repairs tests](../tests/test_repairs.py), [CI workflow](../.github/workflows/ci.yml) | Done | None |
 | IQS-04 diagnostics redaction and repository safety checks are enforced | Diagnostics tests and repository checks verify redaction, required files, metadata, and static-analysis contracts | [Diagnostics tests](../tests/test_diagnostics.py), [Repository validator](../scripts/validate_repository.py) | Done | None |
 | IQS-05 HIL qualification status and evidence scope are tracked for every verified code profile | Matrix records routes, scenarios, write capabilities, evidence scope, and pending results without implying completion | [Qualification matrix](../tests/hil/qualification_matrix.json), [HIL runbook](hil-qualification.md), [HIL validator](../scripts/validate_hil_qualification.py) | Done | None |
 | IQS-06 stable promotion is blocked until release blockers are cleared | Stable milestone close requires zero open `release-blocker` issues and all criteria marked `Done` or justified `N/A` | [Release checklist](release-checklist.md), [Merge gate workflow](../.github/workflows/merge-gate.yml), [Issue #55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55) | Done | None |
-| IQS-07 Home Assistant Core maintainership requirement | Not applicable to this repository because it is intentionally distributed as a custom integration through HACS/manual install | [README project status](../README.md#project-status), [Roadmap quality flow](roadmap.md#release-and-quality-flow) | N/A | Not applicable by scope |
+| IQS-07 Home Assistant Core maintainership requirement | Not applicable to this repository because it is intentionally distributed as a custom integration through HACS/manual install | [Roadmap quality flow](roadmap.md#release-and-quality-flow) | N/A | Not applicable by scope |
 
 ## Stable release review cadence
 

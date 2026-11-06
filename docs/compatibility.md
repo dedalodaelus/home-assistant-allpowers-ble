@@ -1,5 +1,17 @@
 # Compatibility
 
+## Home Assistant version
+
+The project's declared support minimum is Home Assistant Core **2026.10.4**.
+The owner set this HACS installation floor to align supported releases with the
+repository's current real-Core test baseline (`requirements_test.txt`). This is
+a project support policy: earlier Core releases are outside declared support,
+but are not asserted to be technically incompatible.
+
+The read-only HIL preflight CLI has a separate **2026.8+** requirement for its
+remote registry contract; see the [HIL CLI guide](hil-cli.md). That tool-specific
+minimum does not lower the integration requirement.
+
 ## Support levels
 
 The repository distinguishes three runtime code-profile levels:

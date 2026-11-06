@@ -92,7 +92,7 @@ radio latency reliably.
 - [`client.py`](../../../custom_components/allpowers_ble/client.py)
 - [Existing architecture summary](../implementation-architecture.md#safe-command-construction)
 - [Quality strategy](../../quality.md#deterministic-sequence-regression-fixtures)
-- [README safety model](../../../README.md#safety-model)
+- [User guide: safety model](../../user-guide.md#safety-model)
 
 ## Fitness functions
 
