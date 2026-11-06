@@ -192,3 +192,74 @@ This integration deliberately keeps confirmed and requested state separate and
 requires fresh settings after session renewal instead of adopting optimistic
 replay. Physical capture must compare both implementations on the same R600
 revision and routes, including whether reconnect reacquires settings.
+
+## Issue #213: REST/live state observation
+
+A stationary REST `last_reported` does not establish a telemetry freeze. In Core
+2026.10.4, identical writes advance the live `State.last_reported` while cached
+serialization can retain an older timestamp. This behavior is tracked in
+[Core #181392](https://github.com/home-assistant/core/issues/181392) and
+[Core PR #181577](https://github.com/home-assistant/core/pull/181577).
+The upstream PR remains open; maintainers have raised cache-invalidation overhead
+and API-semantics concerns. This integration does not patch Core or force state
+changes to refresh its serialization.
+
+### Physical comparison received 2026-11-01
+
+The maintainer's sanitized capture from the dedicated R600 instance is retained
+as [`issue213-live-rest-2026-11-01.json`](../tests/hil/fixtures/r600-hw03/issue213-live-rest-2026-11-01.json).
+Live samples span 01:07:59.285001Z–01:09:29.303712Z (90.018711 seconds).
+
+| Measurement | Observed change |
+| --- | --- |
+| Notifications / valid packets | 3176 → 3332 each (+156) |
+| Status / settings monotonic freshness | +89.583945 s / +89.587918 s |
+| Battery live report | +89.587951 s |
+| Connected live report | +89.587902 s |
+| Telemetry-availability live report | +89.587904 s |
+| All three REST report timestamps | Stationary near 00:37:28Z |
+
+All three targets were present and belonged to the same loaded ALLPOWERS entry.
+Battery stayed at 78%; connected and telemetry availability stayed on. Parser
+errors/discards, disconnects, and reconnects remained zero. The second live
+reports were about 0.507 seconds old. These observations support a stale REST
+serialization boundary for this interval, rather than an R600 BLE publication
+freeze. They do not establish a Core repair or exclude other historical faults.
+
+The retained historical capture includes null investigation-only counters.
+Those counters were not measured on hardware and have been removed from the
+final integration changes; null is not zero. Existing snapshot statistics and
+freshness timestamps remain available without adding runtime instrumentation.
+
+### Repeat the live/REST comparison
+
+On a machine with Python 3 and access to the dedicated HA instance, run:
+
+```bash
+python3 scripts/capture_telemetry_publication.py \
+  --interval 90 --output /tmp/telemetry-publication.json
+```
+
+The script prompts for the HA URL, exact battery/connected/enabled
+telemetry-availability IDs, and an existing admin token using hidden input.
+It brackets direct scalar `/api/template` readings and existing integration
+diagnostics with REST reads, twice 90 seconds apart, and checks target ownership.
+Shared output contains logical aliases and whitelisted states, timestamps, and
+snapshot counters; credentials, URLs, IDs, names, attributes, and raw diagnostics
+are excluded. Diagnostics HTTP failures are recorded by status only. The script
+sends no state/device writes, reconnects, reloads, or BLE commands.
+
+`cached_rest_discrepancy_observed` reports an observation, not a required runtime
+behavior. It is false when REST advances. Integration tests require valid packet
+processing, coordinator propagation, actual live reports, rejection of old-session
+callbacks, malformed-frame freshness protection, and listener cleanup after reload.
+They do not require the upstream serialization behavior to remain unfixed.
+Parser errors may publish diagnostics without refreshing valid telemetry.
+
+If live reports also stop, compare existing valid-packet counters and status/
+settings freshness before investigating target listeners and platform lifecycle.
+For BLE qualification, verify the loaded build and selected route; correlate
+synchronized diagnostics/live reports with HCI counts on the local adapter or
+proxy-side counts on an active ESPHome proxy. Follow the route/scenario and
+recovery requirements above. Keep #213 open for the upstream follow-up and keep
+the general HIL matrix pending; this scoped capture is not a qualification pass.

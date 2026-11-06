@@ -9,6 +9,30 @@ from custom_components.allpowers_ble.protocol import (
 )
 
 
+R600_STATUS = bytes.fromhex("a565b100010801004e0000000012b590")
+R600_SETTINGS = bytes.fromhex("a565b1000106030101ffff030274")
+
+
+def test_issue_213_repeated_captured_frames_decode_without_discards() -> None:
+    decoder = NotificationStreamDecoder()
+
+    for _ in range(3):
+        status = decoder.feed(R600_STATUS)
+        settings = decoder.feed(R600_SETTINGS)
+        assert len(status) == len(settings) == 1
+        assert isinstance(status[0], StatusData)
+        assert status[0].battery_percent == 78
+        assert isinstance(settings[0], SettingsData)
+        assert settings[0].hardware_version == "0.3"
+        assert settings[0].firmware_version == "0.2"
+
+    invalid = bytearray(R600_STATUS)
+    invalid[-1] ^= 1
+    assert decoder.feed(invalid) == []
+    assert decoder.discarded_frames == 1
+    assert decoder.feed(R600_STATUS)[0].battery_percent == 78
+
+
 def test_fragmented_frame(status_frame: bytes) -> None:
     decoder = NotificationStreamDecoder()
 
