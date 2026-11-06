@@ -196,7 +196,7 @@ async def test_arm_rejects_invalid_target_and_format(invalid):
     await ws_probe_arm(hass, connection, request)
     connection.send_error.assert_called_once()
     assert KEY not in hass.data or hass.data[KEY].active is None
-    record.timer.cancel()
+    assert record.deadline > monotonic()
 
 
 @pytest.mark.asyncio
