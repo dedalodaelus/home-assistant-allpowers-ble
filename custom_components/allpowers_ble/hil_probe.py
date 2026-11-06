@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from time import monotonic
 import re
 import secrets
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 
@@ -29,6 +29,7 @@ from .hil_trace import (
 )
 
 REGISTRY_KEY = DOMAIN + "_hil_probe_candidates"
+MAX_REGISTERED_FLOWS = 64
 _ADDRESS = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 _STEPS = frozenset(("confirm", "user", "reconfigure"))
 _OUTCOMES = {
@@ -47,7 +48,6 @@ class FlowCandidates:
     step: str
     tokens: dict[str, str]
     deadline: float
-    timer: asyncio.TimerHandle
 
 
 class ProbeCapture(Capture):
@@ -109,10 +109,15 @@ class ProbeCapture(Capture):
 
 
 def _registry(hass: HomeAssistant) -> dict[str, FlowCandidates]:
+    """Lazily erase expired flow selectors; never schedule timers for forms."""
     records = hass.data.get(REGISTRY_KEY)
     if not isinstance(records, dict):
         records = {}
         hass.data[REGISTRY_KEY] = records
+    now = monotonic()
+    for flow_id, record in tuple(records.items()):
+        if record.deadline <= now:
+            del records[flow_id]
     return records
 
 
@@ -137,27 +142,22 @@ def register_flow_candidates(
     if old is not None and old.deadline > monotonic():
         if old.step == step and sorted(old.tokens.values()) == valid:
             return
-    if old is not None:
-        old.timer.cancel()
-        records.pop(flow_id, None)
+    records.pop(flow_id, None)
     if not valid:
         return
+    if len(records) >= MAX_REGISTERED_FLOWS:
+        oldest = next(iter(records))
+        if isinstance(_store_active := hass.data.get(KEY), CaptureStore):
+            active = _store_active.active
+            if isinstance(active, ProbeCapture) and active.flow_id == oldest:
+                return
+        records.pop(oldest)
     tokens = {secrets.token_urlsafe(18): address for address in valid}
-    deadline = monotonic() + TTL
-
-    def expire() -> None:
-        if records.get(flow_id) is record:
-            del records[flow_id]
-            if not records and hass.data.get(REGISTRY_KEY) is records:
-                hass.data.pop(REGISTRY_KEY, None)
-
-    record = FlowCandidates(
+    records[flow_id] = FlowCandidates(
         step=step,
         tokens=tokens,
-        deadline=deadline,
-        timer=asyncio.get_running_loop().call_later(TTL, expire),
+        deadline=monotonic() + TTL,
     )
-    records[flow_id] = record
 
 
 def _active_flow(hass: HomeAssistant, flow_id: str) -> dict[str, Any] | None:
@@ -173,7 +173,7 @@ def _active_flow(hass: HomeAssistant, flow_id: str) -> dict[str, Any] | None:
                 and item.get("flow_id") == flow_id
                 and item.get("handler") == DOMAIN
             ):
-                return item
+                return cast(dict[str, Any], item)
     except AttributeError, KeyError, ValueError:
         return None
     return None
@@ -237,7 +237,10 @@ def _probe_lookup(
     hass: HomeAssistant, connection: Any, msg: dict[str, Any]
 ) -> ProbeCapture | None:
     store = hass.data.get(KEY)
-    capture = store.find(msg["capture_id"]) if isinstance(store, CaptureStore) else None
+    if not isinstance(store, CaptureStore):
+        _deny(connection, msg, "not_found")
+        return None
+    capture = store.find(msg["capture_id"])
     if (
         not isinstance(capture, ProbeCapture)
         or capture.flow_id != msg["flow_id"]

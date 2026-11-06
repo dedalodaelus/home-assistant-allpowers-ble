@@ -57,6 +57,7 @@ class FlowManager:
 def setup_case():
     hass = FakeHass()
     hass.config_entries.flow = FlowManager()
+    hass.config_entries.async_get_entry = lambda _: None
     connection = MagicMock()
     connection.user.is_admin = True
     connection.user.id = "admin-a"
@@ -115,11 +116,8 @@ async def test_registered_candidates_are_ephemeral_opaque_and_rotate_on_change()
     register_flow_candidates(hass, "flow-a", "user", [other, ADDRESS])
     updated = hass.data[hil_probe.REGISTRY_KEY]["flow-a"]
     assert updated is not initial
-    assert initial.timer.cancelled()
-    initial.timer._callback()
     assert hass.data[hil_probe.REGISTRY_KEY]["flow-a"] is updated
     register_flow_candidates(hass, "flow-a", "confirm", [ADDRESS])
-    assert updated.timer.cancelled()
     assert hass.data[hil_probe.REGISTRY_KEY]["flow-a"].step == "confirm"
     register_flow_candidates(hass, "flow-a", "confirm", [])
     assert "flow-a" not in hass.data[hil_probe.REGISTRY_KEY]
@@ -131,13 +129,12 @@ async def test_flow_registry_expires_without_clearing_a_later_flow():
     register_flow_candidates(hass, "flow-a", "user", [ADDRESS])
     record = hass.data[hil_probe.REGISTRY_KEY]["flow-a"]
     assert isinstance(record, FlowCandidates)
-    record.timer._callback()
-    assert hil_probe.REGISTRY_KEY not in hass.data
+    record.deadline = monotonic() - 1
+    assert hil_probe._registry(hass) == {}
     register_flow_candidates(hass, "flow-a", "user", [ADDRESS])
     new = hass.data[hil_probe.REGISTRY_KEY]["flow-a"]
-    record.timer._callback()
-    assert hass.data[hil_probe.REGISTRY_KEY]["flow-a"] is new
-    new.timer.cancel()
+    assert new is not record
+    assert hil_probe._registry(hass)["flow-a"] is new
 
 
 @pytest.mark.asyncio

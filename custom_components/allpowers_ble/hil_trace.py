@@ -382,6 +382,7 @@ def _lookup(
     capture = store.find(msg["capture_id"])
     if (
         capture is None
+        or capture.entry_id is None
         or capture.entry_id != msg["entry_id"]
         or capture.user_id != connection.user.id
     ):
@@ -425,7 +426,11 @@ async def ws_start(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) ->
         _deny(connection, msg, "busy")
         return
     if old is not None:
-        old_entry = hass.config_entries.async_get_entry(old.entry_id)
+        old_entry = (
+            hass.config_entries.async_get_entry(old.entry_id)
+            if old.entry_id is not None
+            else None
+        )
         old_runtime = getattr(old_entry, "runtime_data", None)
         old_observer = store.observer_for(old)
         if old_runtime is not None and old_observer is not None:
@@ -472,7 +477,7 @@ async def ws_stop(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> 
     if not _authorized(connection, msg):
         return
     capture = _lookup(hass, connection, msg)
-    if capture is None:
+    if capture is None or capture.entry_id is None:
         return
     entry = hass.config_entries.async_get_entry(capture.entry_id)
     runtime = getattr(entry, "runtime_data", None)
