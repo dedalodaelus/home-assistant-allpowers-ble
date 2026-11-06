@@ -200,11 +200,3 @@ The current CLI exposes `run --list-suites` and side-effect-free
 currently available. Write authorization, capability metadata, physical
 confirmations, recovery observation, resumable checkpoints, and the 24-hour
 soak executor remain unimplemented; no physical qualification is claimed.
-
-## Guided scenarios (#230 status)
-
-The current CLI exposes `run --list-suites` and side-effect-free
-`run --suite read-only --dry-run`. Only the read-only snapshot declaration is
-currently available. Write authorization, capability metadata, physical
-confirmations, recovery observation, resumable checkpoints, and the 24-hour
-soak executor remain unimplemented; no physical qualification is claimed.
