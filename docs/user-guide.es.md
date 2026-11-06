@@ -38,8 +38,10 @@ Para cualificar hardware real, sigue la [guía de cualificación HIL](hil-qualif
 
 ## Requisitos
 
-- Home Assistant **2026.10.4 o posterior**. Es la versión fijada para las
-  pruebas de compatibilidad de la integración con Home Assistant real.
+- Mínimo de soporte del proyecto: Home Assistant **2026.10.4**. Coincide con
+  la versión fijada para las pruebas con Core real. Las versiones anteriores
+  quedan fuera de la política de soporte declarada; esto no afirma que sean
+  técnicamente incompatibles.
 - HACS para el método de instalación recomendado.
 - Una ruta Bluetooth conectable:
   - adaptador Bluetooth disponible para Home Assistant, o

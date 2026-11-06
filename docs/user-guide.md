@@ -39,8 +39,10 @@ For real hardware qualification workflow, see
 
 ## Requirements
 
-- Home Assistant **2026.10.4 or newer**. This is the pinned release used by the
-  integration's real Home Assistant compatibility tests.
+- Project support minimum: Home Assistant **2026.10.4**. This matches the
+  pinned release used by the real-Core compatibility tests. Earlier releases
+  are outside the declared support policy; this does not assert that they are
+  technically incompatible.
 - HACS for the recommended installation method.
 - A connectable Bluetooth route:
   - a Bluetooth adapter available to Home Assistant, or
