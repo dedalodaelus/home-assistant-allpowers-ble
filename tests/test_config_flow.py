@@ -18,6 +18,10 @@ from custom_components.allpowers_ble.client import (
     ProbeStatusTimeoutError,
     UnsupportedDeviceError,
 )
+from custom_components.allpowers_ble.hil_probe import (
+    REGISTRY_KEY,
+    register_flow_candidates,
+)
 from custom_components.allpowers_ble.const import (
     CONF_DEVICE_IDENTITY_CONFLICT,
     CONF_PREVIOUS_REGISTRY_ID,
@@ -53,6 +57,16 @@ def new_flow() -> config_flow.AllpowersConfigFlow:
     flow.hass = FakeHass()
     flow.context = {}
     return flow
+
+
+def test_config_flow_removal_scrubs_probe_state() -> None:
+    flow = new_flow()
+    flow.flow_id = "removed-flow"
+    register_flow_candidates(flow.hass, flow.flow_id, "confirm", [ADDRESS])
+
+    flow.async_remove()
+
+    assert REGISTRY_KEY not in flow.hass.data
 
 
 def new_reconfigure_flow(
