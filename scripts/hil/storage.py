@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import secrets
 from typing import Any
 
 from .api import HAAPIError
@@ -37,3 +38,42 @@ def write_run(
     except (OSError, ValueError) as ex:
         raise HAAPIError("Unable to create private HIL result files") from ex
     return run_dir
+
+
+def write_scenario_progress(
+    run_dir: Path, run_id: str, steps: list[dict[str, Any]]
+) -> None:
+    """Atomically persist private scenario results and a restart checkpoint."""
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise HAAPIError("Invalid private scenario directory")
+    payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "qualification_status": "inconclusive",
+        "steps": steps,
+    }
+    encoded = (
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    ).encode("utf-8")
+    created: list[Path] = []
+    try:
+        for name in ("scenarios.json", "checkpoint.json"):
+            destination = run_dir / name
+            if destination.is_symlink():
+                raise OSError("scenario path is a symlink")
+            temporary = run_dir / f".{name}.{secrets.token_hex(8)}.tmp"
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            created.append(temporary)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            created.remove(temporary)
+    except (OSError, TypeError, ValueError) as ex:
+        for path in created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise HAAPIError("Unable to persist private scenario progress") from ex

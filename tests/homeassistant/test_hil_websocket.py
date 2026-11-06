@@ -194,6 +194,7 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
     client = SimpleNamespace(
         options=SimpleNamespace(enable_car_charger=False),
         active_session_generation=7,
+        has_pending_transaction=False,
     )
     entry = MockConfigEntry(
         domain="allpowers_ble", data={}, state=ConfigEntryState.LOADED
@@ -257,6 +258,7 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 7,
+        "pending_transaction": False,
     }
     assert entry.entry_id not in str(result)
 

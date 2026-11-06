@@ -132,6 +132,7 @@ class FakeHA:
             "status_fresh": True,
             "settings_fresh": True,
             "session_generation": 3,
+            "pending_transaction": False,
         }
 
     def control_state(self, key, entity_id):
@@ -1754,6 +1755,49 @@ def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatc
     }
 
 
+def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+
+    def websocket(rows):
+        commands.extend(rows)
+        return [{"context": {}}]
+
+    monkeypatch.setattr(client, "websocket", websocket)
+    client.call_control("ac_output", "switch.station_ac", "on")
+    client.call_control("work_mode", "select.station_mode", "fast")
+    assert commands == [
+        {
+            "type": "call_service",
+            "domain": "switch",
+            "service": "turn_on",
+            "target": {"entity_id": "switch.station_ac"},
+        },
+        {
+            "type": "call_service",
+            "domain": "select",
+            "service": "select_option",
+            "service_data": {"option": "fast"},
+            "target": {"entity_id": "select.station_mode"},
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "entity_id", "value"),
+    [
+        ("ac_output", "switch.station_ac", "toggle"),
+        ("work_mode", "select.station_mode", "unsafe"),
+        ("unknown", "switch.station_ac", "on"),
+        ("ac_output", "light.station_ac", "on"),
+    ],
+)
+def test_call_control_rejects_unallowlisted_actions(key, entity_id, value):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    with pytest.raises(api.HAAPIError):
+        client.call_control(key, entity_id, value)
+
+
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
     device = discovery.Device(
         device_id="private-device",
@@ -1775,6 +1819,7 @@ def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities(
 
     capabilities = {
         "connected": True,
+        "pending_transaction": False,
         "status_fresh": True,
         "settings_fresh": False,
         "capabilities": {
@@ -1817,6 +1862,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 4,
+        "pending_transaction": False,
         "entry_id": "private-entry",
         "raw_address": "AA:BB:CC:DD:EE:FF",
     }

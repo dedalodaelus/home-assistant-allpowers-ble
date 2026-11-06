@@ -1,0 +1,32 @@
+{
+  "id": "output_ac_cycle",
+  "schema_version": 1,
+  "suite": "outputs",
+  "title": "Turn AC output on and return it to the initial off state",
+  "mode": "interactive_write",
+  "steps": [
+    {
+      "id": "ac_on",
+      "instruction": "Turn AC output on for the attended noncritical-load check.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "ac_output",
+      "expected": "on"
+    },
+    {
+      "id": "ac_off",
+      "instruction": "Turn AC output off and confirm the initial safe state is restored.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "ac_output",
+      "expected": "off"
+    }
+  ],
+  "required_evidence": [
+    "fresh_pre_and_post_state",
+    "ha_service_acknowledgement",
+    "same_session_transaction_confirmation",
+    "verified_connected_route",
+    "physical_observation"
+  ]
+}

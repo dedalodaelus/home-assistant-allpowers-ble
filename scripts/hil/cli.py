@@ -9,7 +9,7 @@ import json
 import math
 import os
 import re
-from time import sleep
+from time import monotonic, sleep
 from pathlib import Path
 import sys
 from typing import Any
@@ -25,9 +25,9 @@ from .environment import (
     read_only_sample,
     unknown,
 )
-from .storage import write_run
-from .runner import plan as plan_scenarios, plan_as_dict
-from .scenarios import SUITES
+from .storage import write_run, write_scenario_progress
+from .runner import correlate_transaction, plan as plan_scenarios, plan_as_dict, verdict
+from .scenarios import SUITES, load_scenarios
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -166,6 +166,7 @@ def _scenario_controls(
             **observed,
             "eligible": bool(
                 facts.get("connected") is True
+                and facts.get("pending_transaction") is False
                 and freshness is True
                 and control_capable is True
                 and observed["available"] is True
@@ -719,6 +720,7 @@ def _execute_probe_trace(
         expected_version=2,
         expected_scope="config_probe",
     )
+
     if result["flow_id"] != flow_id:
         raise HAAPIError("Probe evidence belongs to another flow")
     _save_private_trace(output_dir, result)
@@ -749,6 +751,227 @@ def _execute_probe_trace(
     )
 
 
+def _execute_output_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    environment: dict[str, Any],
+    output_dir: Path,
+    run_id: str,
+) -> int:
+    """Run the bounded AC cycle, requiring separate consent for each write."""
+    scenario = next(item for item in load_scenarios() if item.id == "output_ac_cycle")
+    entry_id = device.config_entry_id
+    steps: list[dict[str, Any]] = []
+
+    def checkpoint() -> None:
+        write_scenario_progress(output_dir, run_id, steps)
+
+    if args.non_interactive or entry_id is None or device.entry_state != "loaded":
+        steps.append(
+            {
+                "scenario_id": scenario.id,
+                "outcome": "not_applicable",
+                "reason": "interactive authorization or loaded entry unavailable",
+            }
+        )
+        checkpoint()
+        print(
+            "Output scenario blocked: interactive authorization and a loaded entry are required"
+        )
+        return 2
+
+    print("Scenario:", scenario.title)
+    print("Device:", device.model, "profile:", device.profile or "unknown")
+    for index, declaration in enumerate(scenario.steps, start=1):
+        key, desired = declaration["target"], declaration["expected"]
+        entity_id = device.control_entities.get(key)
+        row: dict[str, Any] = {
+            "step_id": declaration["id"],
+            "target": key,
+            "expected": desired,
+            "outcome": "inconclusive",
+        }
+        steps.append(row)
+        try:
+            caps = api.hil_capabilities(entry_id)
+            generation = caps.get("session_generation")
+            state = (
+                api.control_state(key, entity_id) if entity_id else {"available": False}
+            )
+            if (
+                caps["verified"] is not True
+                or caps["identity_conflicted"]
+                or caps["connected"] is not True
+                or caps["pending_transaction"]
+                or caps["status_fresh"] is not True
+                or type(generation) is not int
+                or caps["capabilities"]["write_output_controls"] is not True
+                or not state.get("available")
+                or state.get("state") != ("off" if desired == "on" else "on")
+            ):
+                row["reason"] = "live capability or expected pre-state check failed"
+                checkpoint()
+                print("Step", index, "blocked by live preflight")
+                break
+            print(f"Step {index}: {key} {state['state']} → {desired}")
+            print(
+                "Confirm only if the station is attended and the AC output is safe to change."
+            )
+            if input("Type 1 to authorize this single action: ").strip() != "1":
+                row["outcome"] = "skipped"
+                row["reason"] = "authorization not granted"
+                checkpoint()
+                break
+
+            capture = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/start",
+                        "entry_id": entry_id,
+                        "run_id": run_id,
+                        "scenario_id": scenario.id,
+                        "requested_route": args.route,
+                    }
+                ]
+            )[0]
+            if (
+                not isinstance(capture, dict)
+                or capture.get("schema_version") != 2
+                or not isinstance(capture.get("capture_id"), str)
+            ):
+                row["reason"] = "trace start was not validated"
+                checkpoint()
+                break
+            capture_id = capture["capture_id"]
+            row["pre_state"] = state["state"]
+            row["session_generation"] = generation
+            action_submitted = False
+            observed_caps: dict[str, Any] | None = None
+            post: dict[str, Any] = {"available": False, "state": None}
+            try:
+                api.call_control(key, entity_id, desired)
+                action_submitted = True
+            except HAAPIError:
+                row["service_call"] = "unacknowledged; no retry performed"
+            finally:
+                deadline = monotonic() + declaration["timeout_seconds"]
+                while monotonic() < deadline:
+                    try:
+                        observed_caps = api.hil_capabilities(entry_id)
+                        post = api.control_state(key, entity_id)
+                    except HAAPIError:
+                        row["telemetry"] = "unavailable during bounded observation"
+                        break
+                    if (
+                        observed_caps.get("session_generation") != generation
+                        or observed_caps.get("connected") is not True
+                    ):
+                        break
+                    if (
+                        observed_caps.get("status_fresh") is True
+                        and post.get("available") is True
+                        and post.get("state") == desired
+                    ):
+                        break
+                    sleep(min(1, max(0, deadline - monotonic())))
+                fetch_cmd = {
+                    "type": "allpowers_ble/hil/fetch",
+                    "entry_id": entry_id,
+                    "capture_id": capture_id,
+                }
+                try:
+                    trace = api.websocket(
+                        [
+                            {
+                                "type": "allpowers_ble/hil/stop",
+                                "entry_id": entry_id,
+                                "capture_id": capture_id,
+                            }
+                        ]
+                    )[0]
+                except HAAPIError:
+                    trace = api.websocket([fetch_cmd])[0]
+            _validate_trace_result(
+                trace,
+                run_id=run_id,
+                scenario_id=scenario.id,
+                capture_id=capture_id,
+                requested_route=args.route,
+                expected_version=2,
+            )
+            trace_dir = output_dir / "traces" / declaration["id"]
+            trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+            trace_dir.mkdir(mode=0o700, exist_ok=False)
+            _save_private_trace(trace_dir, trace)
+            row["trace"] = f"traces/{declaration['id']}"
+            tx = correlate_transaction(
+                trace, expected_generation=generation, kind="output"
+            )
+            row["transaction"] = tx
+            after_caps = observed_caps or api.hil_capabilities(entry_id)
+            physical = input(
+                "Physical outcome: 1=yes, 2=no, 3=unable to observe: "
+            ).strip()
+            physical_outcome = {"1": "yes", "2": "no", "3": "unable_to_observe"}.get(
+                physical
+            )
+            route_verified = trace.get("observed_route") in {
+                "local_adapter",
+                "active_proxy",
+            }
+            telemetry_matches = (
+                after_caps.get("session_generation") == generation
+                and after_caps.get("status_fresh") is True
+                and post.get("available") is True
+                and post.get("state") == desired
+            )
+            row.update(
+                {
+                    "post_state": post.get("state"),
+                    "physical_outcome": physical_outcome,
+                    "route": trace.get("observed_route"),
+                    "causal_limit": "device transaction IDs are unavailable; convergence is not causal proof",
+                }
+            )
+            row["outcome"] = verdict(
+                telemetry_matches=telemetry_matches,
+                telemetry_contradictory=post.get("available") is True
+                and post.get("state") not in (desired, state["state"]),
+                physical_outcome=physical_outcome,
+                route_verified=route_verified,
+                trace_complete=trace.get("complete") is True,
+                action_submitted=action_submitted,
+                transaction_confirmed=tx is not None,
+            )
+            checkpoint()
+            print("Step outcome:", row["outcome"])
+            if row["outcome"] != "pass":
+                break
+        except HAAPIError, OSError, EOFError, KeyboardInterrupt:
+            row["reason"] = (
+                "operation interrupted or evidence incomplete; no automatic retry"
+            )
+            checkpoint()
+            print(
+                "Step inconclusive; inspect the station and restore it manually if needed"
+            )
+            break
+    if len(steps) < len(scenario.steps) or (
+        steps and steps[-1].get("outcome") != "pass"
+    ):
+        print(
+            "Check the AC output physically and restore the intended state manually if needed."
+        )
+    print("Private scenario results saved to:", output_dir)
+    return (
+        0
+        if len(steps) == len(scenario.steps)
+        and all(s.get("outcome") == "pass" for s in steps)
+        else 2
+    )
+
+
 def execute(args: argparse.Namespace) -> int:
     """Execute read-only preflight and explicitly requested private HIL capture."""
     if args.command == "run":
@@ -772,10 +995,12 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"{status}: {entry['id']} [{entry['suite']}] — {entry['reason']}")
                 print("  requested actions:", ", ".join(entry["requested_effects"]))
             return 0
-        if args.suite not in (None, "read-only"):
+        if args.suite not in (None, "read-only", "outputs"):
             raise HAAPIError(
                 "This suite is declarative but execution is not implemented yet; use --dry-run"
             )
+        if args.suite == "outputs" and args.non_interactive:
+            raise HAAPIError("Output scenarios require interactive authorization")
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)
@@ -899,6 +1124,10 @@ def execute(args: argparse.Namespace) -> int:
     output_dir = write_run(
         args.output_root, f"{timestamp}_{run_id}", environment, session
     )
+    if args.command == "run" and args.suite == "outputs":
+        return _execute_output_suite(
+            api, args, selected, environment, output_dir, run_id
+        )
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")

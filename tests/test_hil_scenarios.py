@@ -13,8 +13,15 @@ from scripts.hil.scenarios import _validate, load_scenarios
 
 def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
     scenarios = load_scenarios()
-    assert [scenario.id for scenario in scenarios] == ["read_only_snapshot"]
-    assert all(1 <= step["timeout_seconds"] <= 86400 for step in scenarios[0].steps)
+    assert [scenario.id for scenario in scenarios] == [
+        "output_ac_cycle",
+        "read_only_snapshot",
+    ]
+    assert all(
+        1 <= step["timeout_seconds"] <= 86400
+        for scenario in scenarios
+        for step in scenario.steps
+    )
 
 
 @pytest.mark.parametrize(
@@ -62,6 +69,13 @@ def test_all_plan_never_implicitly_enables_writes() -> None:
     assert result
     assert all(item.scenario.suite == "read-only" for item in result)
     assert all(item.eligible for item in result)
+
+
+def test_write_plan_stays_blocked_until_live_preflight() -> None:
+    planned = plan("outputs")
+    assert len(planned) == 1
+    assert planned[0].eligible is False
+    assert "live capability" in planned[0].reason
 
 
 @pytest.mark.parametrize(
@@ -117,3 +131,35 @@ def test_complete_step_evidence_can_pass_with_explicit_confirmation() -> None:
         )
         == "pass"
     )
+
+
+def test_transaction_correlation_requires_submitted_then_confirmed_same_session():
+    from scripts.hil.runner import correlate_transaction
+
+    trace = {
+        "events": [
+            {
+                "seq": 4,
+                "event": "transaction_submitted",
+                "session_generation": 8,
+                "transaction_id": "tx-safe-1",
+                "transaction_kind": "output",
+            },
+            {
+                "seq": 5,
+                "event": "transaction_confirmed",
+                "session_generation": 9,
+                "transaction_id": "tx-safe-1",
+                "reason": "matching_validated_telemetry",
+            },
+        ]
+    }
+    assert correlate_transaction(trace, expected_generation=8, kind="output") is None
+    trace["events"][1]["session_generation"] = 8
+    assert correlate_transaction(trace, expected_generation=8, kind="output") == {
+        "transaction_id": "tx-safe-1",
+        "submitted_seq": 4,
+        "confirmed_seq": 5,
+        "session_generation": 8,
+        "kind": "output",
+    }

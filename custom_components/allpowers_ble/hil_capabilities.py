@@ -104,6 +104,7 @@ async def ws_capabilities(
         "status_fresh": bool(coordinator.status_is_fresh),
         "settings_fresh": bool(settings_fresh),
         "session_generation": generation,
+        "pending_transaction": bool(runtime.client.has_pending_transaction),
     }
     connection.send_result(msg["id"], result)
 

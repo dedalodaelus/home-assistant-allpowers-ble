@@ -33,7 +33,11 @@ def plan(suite: str, *, non_interactive: bool = False) -> tuple[PlannedScenario,
             )
         else:
             result.append(
-                PlannedScenario(item, False, "scenario execution is not implemented")
+                PlannedScenario(
+                    item,
+                    False,
+                    "requires live capability, fresh-state and route checks",
+                )
             )
     return tuple(result)
 
@@ -48,18 +52,63 @@ def verdict(
     trace_complete: bool = False,
     action_submitted: bool = False,
     transaction_confirmed: bool = False,
+    telemetry_contradictory: bool = False,
 ) -> str:
     """Fail-closed evidence verdict; a service call or physical yes is insufficient."""
     if unsupported:
         return "not_applicable"
+    if telemetry_contradictory or physical_outcome == "no":
+        return "fail"
     if interrupted or not telemetry_matches or not route_verified or not trace_complete:
         return "inconclusive"
-    if physical_outcome == "no":
-        return "fail"
     if physical_outcome != "yes" or not action_submitted or not transaction_confirmed:
         return "inconclusive"
     # The device has no transaction ID; callers must preserve this limitation.
     return "pass"
+
+
+def correlate_transaction(
+    trace: dict[str, Any], *, expected_generation: int, kind: str
+) -> dict[str, Any] | None:
+    """Find one submitted transaction confirmed by same-session telemetry."""
+    events = trace.get("events")
+    if not isinstance(events, list):
+        return None
+    submitted = [
+        event
+        for event in events
+        if isinstance(event, dict)
+        and event.get("event") == "transaction_submitted"
+        and event.get("transaction_kind") == kind
+        and event.get("session_generation") == expected_generation
+        and isinstance(event.get("transaction_id"), str)
+        and isinstance(event.get("seq"), int)
+    ]
+    for event in reversed(submitted):
+        transaction_id = event["transaction_id"]
+        confirmation = next(
+            (
+                item
+                for item in events
+                if isinstance(item, dict)
+                and item.get("event") == "transaction_confirmed"
+                and item.get("transaction_id") == transaction_id
+                and item.get("session_generation") == expected_generation
+                and item.get("reason") == "matching_validated_telemetry"
+                and isinstance(item.get("seq"), int)
+                and item["seq"] > event["seq"]
+            ),
+            None,
+        )
+        if confirmation is not None:
+            return {
+                "transaction_id": transaction_id,
+                "submitted_seq": event["seq"],
+                "confirmed_seq": confirmation["seq"],
+                "session_generation": expected_generation,
+                "kind": kind,
+            }
+    return None
 
 
 def plan_as_dict(item: PlannedScenario) -> dict[str, Any]:

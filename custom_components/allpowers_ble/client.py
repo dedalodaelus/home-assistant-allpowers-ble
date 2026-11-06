@@ -238,6 +238,14 @@ class AllpowersBLEClient:
         return self._active_session_generation
 
     @property
+    def has_pending_transaction(self) -> bool:
+        """Return whether any control transaction still awaits a safe outcome."""
+        return (
+            self._pending_output_transaction is not None
+            or self._pending_settings_transaction is not None
+        )
+
+    @property
     def advertised_name(self) -> str:
         """Return the most recent advertisement name."""
         return self._advertised_name

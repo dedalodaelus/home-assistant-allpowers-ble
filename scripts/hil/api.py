@@ -178,6 +178,41 @@ class HAClient:
             "options": safe_options,
         }
 
+    def call_control(self, key: str, entity_id: str, value: str) -> None:
+        """Call one allowlisted switch/select service on one registry-resolved ID."""
+        domain = _CONTROL_DOMAINS.get(key)
+        if (
+            domain is None
+            or not isinstance(entity_id, str)
+            or re.fullmatch(rf"{domain}\.[a-z0-9_]+", entity_id) is None
+        ):
+            raise HAAPIError("Invalid discovered control entity")
+        if not isinstance(value, str):
+            raise HAAPIError("Invalid control target value")
+        if domain == "switch":
+            if value not in {"on", "off"}:
+                raise HAAPIError("Invalid switch target state")
+            service = "turn_on" if value == "on" else "turn_off"
+            command: dict[str, Any] = {
+                "type": "call_service",
+                "domain": "switch",
+                "service": service,
+                "target": {"entity_id": entity_id},
+            }
+        else:
+            if value not in _CONTROL_OPTIONS[key]:
+                raise HAAPIError("Invalid select target option")
+            command = {
+                "type": "call_service",
+                "domain": "select",
+                "service": "select_option",
+                "service_data": {"option": value},
+                "target": {"entity_id": entity_id},
+            }
+        result = self.websocket([command])[0]
+        if not isinstance(result, dict) or not isinstance(result.get("context"), dict):
+            raise HAAPIError("Home Assistant did not acknowledge the service call")
+
     def hil_capabilities(self, entry_id: str) -> dict[str, Any]:
         """Fetch and strictly normalize the entry-scoped HIL capability snapshot."""
         if (
@@ -200,6 +235,7 @@ class HAClient:
             "connected",
             "status_fresh",
             "settings_fresh",
+            "pending_transaction",
         )
         if (
             not isinstance(result, dict)
@@ -248,6 +284,7 @@ class HAClient:
                 "connected",
                 "status_fresh",
                 "settings_fresh",
+                "pending_transaction",
             )
         }
         for key in ("hardware_revision", "firmware_revision"):
