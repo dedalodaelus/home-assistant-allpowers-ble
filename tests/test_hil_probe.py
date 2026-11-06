@@ -579,3 +579,191 @@ async def test_hil_probe_commands_register_without_autoarming(monkeypatch):
         ws_probe_fetch,
     ]
     assert KEY not in hass.data
+@pytest.mark.asyncio
+async def test_registry_capacity_preserves_armed_target_and_evicts_inactive():
+    """Do not evict a live arm; bounded stale form records may be replaced."""
+    hass, connection = setup_case()
+    capture, _ = await arm(hass, connection)
+    for i in range(hil_probe.MAX_REGISTERED_FLOWS - 1):
+        register_flow_candidates(hass, f"other-{i}", "user", [ADDRESS])
+    records = hass.data[hil_probe.REGISTRY_KEY]
+    assert len(records) == hil_probe.MAX_REGISTERED_FLOWS
+
+    register_flow_candidates(hass, "new-flow", "user", [ADDRESS])
+    assert "new-flow" not in records
+    assert "flow-a" in records
+
+    capture.finish("failure", reason="cannot_connect")
+    register_flow_candidates(hass, "new-flow", "user", [ADDRESS])
+    assert "flow-a" not in records
+    assert "new-flow" in records
+    capture.erase()
+
+    other_hass, _ = setup_case()
+    for i in range(hil_probe.MAX_REGISTERED_FLOWS):
+        register_flow_candidates(other_hass, f"flow-{i}", "user", [ADDRESS])
+    register_flow_candidates(other_hass, "last-flow", "user", [ADDRESS])
+    bounded = other_hass.data[hil_probe.REGISTRY_KEY]
+    assert len(bounded) == hil_probe.MAX_REGISTERED_FLOWS
+    assert "flow-0" not in bounded
+    assert "last-flow" in bounded
+
+    other_store = CaptureStore()
+    other_store.active = Capture("entry", "owner", "run12345", "test", "auto")
+    other_hass.data[KEY] = other_store
+    register_flow_candidates(other_hass, "next-flow", "user", [ADDRESS])
+    assert "flow-1" not in bounded
+    assert "next-flow" in bounded
+    other_store.active.erase()
+
+
+def test_probe_eligibility_handles_missing_or_moved_real_ha_flows():
+    """No arm is authorized by a stale candidate set alone."""
+    hass, _ = setup_case()
+    assert consume_probe(hass, "flow-a", ADDRESS) is None
+    register_flow_candidates(hass, "flow-a", "user", [ADDRESS])
+    assert hil_probe._active_flow(hass, "flow-a") is not None
+    manager = hass.config_entries.flow
+    manager.async_progress = lambda: []
+    assert hil_probe._active_flow(hass, "flow-a") is None
+    assert hil_probe._eligible(hass, "flow-a") is None
+    hass.config_entries.flow = object()
+    assert hil_probe._active_flow(hass, "flow-a") is None
+
+
+@pytest.mark.asyncio
+async def test_probe_arm_detaches_only_expired_runtime_observer():
+    """Replacing an expired runtime trace cannot leave its observer attached."""
+    from types import SimpleNamespace
+
+    hass, connection = setup_case()
+    register_flow_candidates(hass, "flow-a", "user", [ADDRESS])
+    token = next(iter(hass.data[hil_probe.REGISTRY_KEY]["flow-a"].tokens))
+    old = Capture("entry", "owner", "run12345", "test", "auto")
+    old.stop()
+    client = MagicMock()
+    observer = MagicMock()
+    hass.config_entries.async_get_entry = lambda _: SimpleNamespace(
+        runtime_data=SimpleNamespace(client=client)
+    )
+    store = CaptureStore()
+    store.active = old
+    store.active_observer = observer
+    hass.data[KEY] = store
+
+    await ws_probe_arm(
+        hass,
+        connection,
+        {
+            "id": 3,
+            "flow_id": "flow-a",
+            "candidate_token": token,
+            "run_id": "run12345",
+            "scenario_id": "test",
+            "requested_route": "auto",
+        },
+    )
+    client.detach_observer.assert_called_once_with(observer)
+    assert old.termination_reason == "erased"
+    assert isinstance(store.active, ProbeCapture)
+    store.active.erase()
+
+
+@pytest.mark.asyncio
+async def test_probe_admin_checks_and_absent_stop_are_fail_closed():
+    hass, connection = setup_case()
+    request = {
+        "id": 8,
+        "flow_id": "flow-a",
+        "candidate_token": "opaque",
+        "run_id": "run12345",
+        "scenario_id": "test",
+        "requested_route": "auto",
+    }
+    connection.user.is_admin = False
+    await ws_probe_arm(hass, connection, request)
+    await ws_probe_fetch(
+        hass, connection, {"id": 9, "flow_id": "flow-a", "capture_id": "absent"}
+    )
+    assert connection.send_error.call_count == 2
+    assert KEY not in hass.data
+
+    connection.user.is_admin = True
+    await ws_probe_stop(
+        hass, connection, {"id": 10, "flow_id": "flow-a", "capture_id": "absent"}
+    )
+    assert connection.send_error.call_count == 3
+    connection.send_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["establish", "notify", "write", "stop_notify", "disconnect"]
+)
+async def test_probe_unexpected_transport_failures_do_not_leak_exception_text(
+    monkeypatch, status_frame, failure
+):
+    """Observe a genuine failed stage and cleanup without changing BLE policy."""
+    hass, connection = setup_case()
+    capture, _ = await arm(hass, connection)
+    tracer = consume_probe(hass, "flow-a", ADDRESS)
+    assert tracer is not None
+    fake = ProbeClientWithStopNotify([status_frame])
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("PRIVATE-ADDRESS-OR-BACKEND")
+
+    async def establish(*_args, **_kwargs):
+        if failure == "establish":
+            await fail()
+        return fake
+
+    monkeypatch.setattr(client_module, "establish_connection", establish)
+    monkeypatch.setattr(
+        client_module.bluetooth,
+        "async_ble_device_from_address",
+        lambda *args, **kwargs: FakeDevice(),
+    )
+    if failure != "establish":
+        method = {
+            "notify": "start_notify",
+            "write": "write_gatt_char",
+            "stop_notify": "stop_notify",
+            "disconnect": "disconnect",
+        }[failure]
+        monkeypatch.setattr(fake, method, fail)
+
+    if failure in ("establish", "notify", "write"):
+        with pytest.raises(RuntimeError, match="PRIVATE"):
+            await client_module.async_probe_device(
+                hass,
+                address=ADDRESS,
+                advertised_name="ALLPOWERS R600",
+                timeout=0.1,
+                observer=tracer,
+            )
+        finish_probe(tracer, "failure", reason="transport_error")
+    else:
+        result = await client_module.async_probe_device(
+            hass,
+            address=ADDRESS,
+            advertised_name="ALLPOWERS R600",
+            timeout=0.1,
+            observer=tracer,
+        )
+        assert result.status.battery_percent == 73
+        finish_probe(tracer, "success")
+
+    events = [row["event"] for row in capture.events]
+    expected = {
+        "establish": "connect_failed",
+        "notify": "probe_notify_failed",
+        "write": "write_error",
+        "stop_notify": "probe_notify_stop_failed",
+        "disconnect": "probe_disconnect_failed",
+    }[failure]
+    assert expected in events
+    assert "PRIVATE-ADDRESS-OR-BACKEND" not in str(capture.events)
+    assert capture.snapshot()["capture_complete"] is True
+    assert capture.snapshot()["qualification_allowed"] is False
+    capture.erase()
