@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+import os
 from statistics import median
 import sys
 import tracemalloc
 from time import perf_counter_ns
+from pathlib import Path
 
+from custom_components.allpowers_ble import client as client_module
 from custom_components.allpowers_ble.client import (
     PendingOutputTransaction,
     TransactionPhase,
@@ -125,13 +128,35 @@ async def _run_case(name: str, fn) -> dict[str, object]:
 
 
 async def main() -> None:
+    source_root = Path(client_module.__file__).resolve().parents[2]
+    script_root = Path(__file__).resolve().parents[2]
+    runtime_tests = Path(make_client.__code__.co_filename).resolve()
+    if source_root != script_root or not runtime_tests.is_relative_to(source_root):
+        raise RuntimeError(
+            "benchmark source selection is inconsistent: "
+            f"script={script_root}, client={source_root}, tests={runtime_tests}"
+        )
     cases = (
         ("notification_decode", _notification_decode),
         ("gatt_write", _gatt_write),
         ("transaction_confirmation", _transaction_confirmation),
     )
     results = [await _run_case(name, fn) for name, fn in cases]
-    print(json.dumps({"python": sys.version.split()[0], "results": results}, indent=2))
+    print(
+        json.dumps(
+            {
+                "python": sys.version.split()[0],
+                "source_revision": os.environ.get(
+                    "BENCHMARK_SOURCE_REVISION", "unlabelled"
+                ),
+                "source_root": str(source_root),
+                "client_module": str(Path(client_module.__file__).resolve()),
+                "runtime_test_module": str(runtime_tests),
+                "results": results,
+            },
+            indent=2,
+        )
+    )
 
 
 asyncio.run(main())

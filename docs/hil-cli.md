@@ -59,7 +59,11 @@ Home Assistant 2026.10.4 registers the **admin-only** WebSocket command `bluetoo
 
 `manifest/get` can establish the **reported installed integration version**, but does **not** expose the installed files' exact Git SHA. The CLI records the runner checkout commit when available while marking the *installed* commit and build match as unverified (or mismatched if manifest versions differ). Firmware/hardware versions from HA may use a constrained decimal representation or hexadecimal notation such as `0xF1`; arbitrary strings are rejected. The run is always **inconclusive for HIL qualification** until later instrumentation provides route-specific trace/build evidence and physical checks.
 
-The CLI currently requires Home Assistant Core **2026.8 or later** for the registry contract. Its scanner response contract has been checked against the **2026.10.4 Home Assistant source and upstream tests**, and is covered by local mock-based regression tests. **A real HA Container 2026.10.4 smoke test has not been performed**: no live HA endpoint, login token, or attached BLE station is available to this development environment. Do not mark #228 physically validated on the basis of the source review or automated tests.
+The CLI currently requires Home Assistant Core **2026.8 or later** for the registry contract. Its scanner response contract has been checked against the **2026.10.4 Home Assistant source and upstream tests**, and is covered by local mock-based regression tests.
+
+Operator-run tests recorded in PR #236 used Home Assistant Core **2026.10.4 in a Container** with an R600 (hardware 0.3, firmware 0.2), from test checkout `a4f2887782ad10b322772d81d4cf76c184c9fb9d`. The initial config-flow `probe-trace` succeeded over both local BlueZ and an ESPHome active proxy: each report records 16 events, one status-request TX, one RX, and zero dropped events or frames. Runtime route tracing was also exercised on both transports (26 GATT frames on local BlueZ; 27 on the active proxy, including 26 RX and one TX). These are operator-run hardware observations, separate from automated simulated GATT E2E tests; they do not establish that the current PR head was physically retested.
+
+The installed full integration build SHA remains **unverified**. A reported matching `hil_probe.py` file hash identifies only that file, not the complete installed build. The manual scanner-inventory preflight has not been demonstrated on a live instance, including its non-admin behavior. Do not mark #228 physically qualified from these tests: they provide no independent RF or physical-output evidence.
 
 ### Live read-only pilot checklist (on a volunteer's HA 2026.10.4 machine)
 
@@ -303,4 +307,11 @@ metadata but does not authorize qualification.
 
 **`qualification_allowed=false` for every v1/v2 trace and every route**,
 even with `complete=true` or `mixed`. A connected backend is not independent
-RF evidence or proof that the station changed a physical output. The config-flow active-probe capture is implemented. Remaining #229 acceptance work includes real-HA end-to-end flow submission plus authenticated WebSocket/GATT evidence, operator hardware tests via local BlueZ and ESPHome active proxy, independent RF/physical-output confirmation, protocol-aware privacy review/redaction, and disabled-capture performance measurements versus `devel`.
+RF evidence or proof that the station changed a physical output. The config-flow
+active-probe capture and automated real-HA flow/WebSocket/GATT E2E are implemented.
+Operator reports document runtime route tracing and initial config-flow probes
+over both local BlueZ and ESPHome active proxy on the older checkout described
+above; the current PR head has not been physically retested. Remaining #229
+acceptance work includes independent RF/physical-output confirmation and
+protocol-aware privacy review/redaction. The disabled-tracing comparison against
+`devel` is documented separately in [the benchmark report](hil-disabled-trace-benchmark.md).

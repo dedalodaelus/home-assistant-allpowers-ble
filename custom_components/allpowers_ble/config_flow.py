@@ -397,7 +397,6 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
                             unique_id=address,
                             title=entry_title,
                             data_updates=data_updates,
-                            reason="reconfigure_successful",
                         )
                         if not reconfigure_entry.update_listeners and (
                             changed
