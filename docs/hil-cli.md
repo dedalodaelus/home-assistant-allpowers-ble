@@ -224,6 +224,36 @@ the already-created inconclusive `environment.json` and `session.json`
 untouched. Disk I/O errors cannot establish physical HIL qualification.
 
 
+### Opt-in GATT tracing of config-flow probes
+
+The `probe-trace` command uses authenticated administrator-only WebSocket
+commands to arm **one exact existing Home Assistant config flow and candidate**.
+Open the standard Bluetooth confirmation, manual or reconfigure form in HA
+before running it. The tool lists only safe ordinal choices and opaque
+short-lived candidate tokens; it never prints Bluetooth addresses or proxies.
+
+```bash
+python -m scripts.hil probe-trace --ha-url https://ha.example --non-interactive
+```
+
+A single unambiguous candidate is selected automatically. Otherwise supply
+`--flow-id` and `--candidate` (server-issued token or candidate ordinal), or
+choose interactively. Non-interactive ambiguity fails instead of guessing.
+
+The operator still presses the **ordinary form submit/confirm button in HA**.
+The CLI never submits config forms, starts a competing Bleak connection or
+sends a second GATT command. An explicitly armed probe records its actual
+connection route, status request TX, RX chunks, decoder results, failures
+and teardown; reconfiguration reusing a fresh runtime session is recorded
+as `probe_skipped` with no fabricated TX.
+
+Probe outcomes (`success`, `failure`, `cancelled`, `skipped`, `interrupted`)
+are separate from `capture_complete` and from physical HIL qualification.
+A complete failed probe is useful diagnostic evidence but yields exit 2;
+even successful private v2 GATT evidence is never physical/RF/output PASS.
+Private results use `trace.json`, `events.jsonl`, and `frames.jsonl` with
+0700 directory / 0600 file permissions; environment/session JSON remains
+inconclusive and excludes MACs, candidate tokens, flow IDs and proxy IDs.
 ### Connection-route private trace v2 (new runtime captures)
 
 New admin-armed runtime captures use **`schema_version=2`**. The CLI continues

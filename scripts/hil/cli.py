@@ -74,6 +74,14 @@ def make_parser() -> argparse.ArgumentParser:
     )
     trace_parser.add_argument("--duration", type=int, default=15)
     trace_parser.add_argument("--scenario-id", default="manual-runtime")
+    probe_parser = commands.add_parser(
+        "probe-trace",
+        parents=[common],
+        help="Admin-only capture of HA's existing config-flow GATT probe",
+    )
+    probe_parser.add_argument("--flow-id")
+    probe_parser.add_argument("--candidate")
+    probe_parser.add_argument("--scenario-id", default="manual-probe")
     return parser
 
 
@@ -349,10 +357,15 @@ def _validate_trace_result(
     capture_id: str,
     requested_route: str,
     expected_version: int | None = None,
+    expected_scope: str = "runtime_entry",
 ) -> None:
     """Fail closed on private v1/v2 evidence, before writing any raw files."""
+    is_probe = (
+        isinstance(result, dict) and result.get("capture_scope") == "config_probe"
+    )
     if (
         not isinstance(result, dict)
+        or result.get("capture_scope", "runtime_entry") != expected_scope
         or result.get("schema_version") not in (1, 2)
         or (
             expected_version is not None
@@ -375,9 +388,34 @@ def _validate_trace_result(
         or type(result.get("expired")) is not bool
         or type(result.get("complete")) is not bool
         or result.get("termination_reason")
-        not in ("requested_stop", "runtime_stopped", "expired")
+        not in (
+            ("probe_finished", "probe_skipped", "probe_interrupted", "expired")
+            if is_probe
+            else ("requested_stop", "runtime_stopped", "expired")
+        )
     ):
         raise HAAPIError("Capture metadata mismatch or final stop not acknowledged")
+    if is_probe and (
+        result.get("schema_version") != 2
+        or not isinstance(result.get("flow_id"), str)
+        or not result["flow_id"]
+        or result.get("probe_state") != "finished"
+        or result.get("probe_outcome")
+        not in ("success", "failure", "cancelled", "skipped", "interrupted")
+        or (
+            result["termination_reason"] == "probe_finished"
+            and result["probe_outcome"] not in ("success", "failure", "cancelled")
+        )
+        or (
+            result["termination_reason"] == "probe_skipped"
+            and result["probe_outcome"] != "skipped"
+        )
+        or (
+            result["termination_reason"] == "probe_interrupted"
+            and result["probe_outcome"] != "interrupted"
+        )
+    ):
+        raise HAAPIError("Invalid probe capture lifecycle metadata")
     for key in ("events", "frames"):
         if not isinstance(result.get(key), list) or not all(
             isinstance(row, dict) for row in result[key]
@@ -395,12 +433,16 @@ def _validate_trace_result(
     ):
         raise HAAPIError("Incomplete private HIL trace record count")
     expected_complete = (
-        result["termination_reason"] == "requested_stop"
+        result["termination_reason"]
+        == ("probe_finished" if is_probe else "requested_stop")
         and not result["expired"]
         and result["dropped_events"] == 0
         and result["dropped_frames"] == 0
     )
-    if result["complete"] is not expected_complete:
+    if (
+        result["complete"] is not expected_complete
+        or (is_probe and result.get("capture_complete") is not expected_complete)
+    ):
         raise HAAPIError("Contradictory HIL capture integrity fields")
     version = result["schema_version"]
     events_by_seq = _check_trace_rows(
@@ -450,6 +492,196 @@ def _validate_trace_result(
             raise HAAPIError("HIL frame metadata differs from its matching event")
 
 
+
+def _save_private_trace(output_dir: Path, result: dict[str, Any]) -> None:
+    """Write only validated private evidence, scrubbing partial failures."""
+    private_paths = (
+        output_dir / "events.jsonl",
+        output_dir / "frames.jsonl",
+        output_dir / "trace.json",
+    )
+    try:
+        for path, key in zip(private_paths[:2], ("events", "frames"), strict=True):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                for record in result[key]:
+                    stream.write(json.dumps(record, sort_keys=True) + "\n")
+        metadata = {
+            key: value for key, value in result.items() if key not in ("events", "frames")
+        }
+        fd = os.open(private_paths[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    except (OSError, TypeError, ValueError) as ex:
+        for path in private_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise HAAPIError("Private HIL trace could not be saved") from ex
+
+
+def _select_probe(listed: Any, args: argparse.Namespace) -> tuple[str, str]:
+    """Select only server-issued opaque tokens, never a BLE address."""
+    if not isinstance(listed, dict) or not isinstance(listed.get("flows"), list):
+        raise HAAPIError("Invalid probe list response")
+    flows = listed["flows"]
+    if len(flows) > 64:
+        raise HAAPIError("Too many eligible probe flows")
+    available: list[tuple[str, str, str]] = []
+    for flow in flows:
+        if (
+            not isinstance(flow, dict)
+            or not isinstance(flow.get("flow_id"), str)
+            or not isinstance(flow.get("candidates"), list)
+            or len(flow["candidates"]) > 32
+        ):
+            raise HAAPIError("Invalid eligible probe flow")
+        for candidate in flow["candidates"]:
+            if (
+                not isinstance(candidate, dict)
+                or not isinstance(candidate.get("token"), str)
+                or not isinstance(candidate.get("label"), str)
+            ):
+                raise HAAPIError("Invalid opaque probe candidate")
+            available.append(
+                (flow["flow_id"], candidate["token"], candidate["label"])
+            )
+    if args.flow_id is not None:
+        available = [item for item in available if item[0] == args.flow_id]
+    if args.candidate is not None:
+        if args.candidate.isdecimal():
+            index = int(args.candidate)
+            available = (
+                [available[index - 1]] if 1 <= index <= len(available) else []
+            )
+        else:
+            available = [item for item in available if item[1] == args.candidate]
+    if not available:
+        raise HAAPIError("No eligible config-flow probe; open a HA form first")
+    if len(available) == 1:
+        return available[0][:2]
+    if args.non_interactive:
+        raise HAAPIError("Multiple probe candidates; select a flow and candidate")
+    for index, (_, _, label) in enumerate(available, 1):
+        print(f"  [{index}] {label}")
+    choice = input("Select probe candidate number: ").strip()
+    if not choice.isdecimal() or not 1 <= int(choice) <= len(available):
+        raise HAAPIError("Invalid probe selection")
+    return available[int(choice) - 1][:2]
+
+
+def _execute_probe_trace(
+    api: HAClient, args: argparse.Namespace, environment: dict[str, Any]
+) -> int:
+    """Arm the real HA config-flow probe, never configure or connect via CLI."""
+    if re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", args.scenario_id) is None:
+        raise HAAPIError("Scenario ID must be 1-80 safe characters")
+    listed = api.websocket([{"type": "allpowers_ble/hil/probe/list"}])[0]
+    flow_id, token = _select_probe(listed, args)
+    run_id = new_run_id()
+    start = api.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/probe/arm",
+                "flow_id": flow_id,
+                "candidate_token": token,
+                "run_id": run_id,
+                "scenario_id": args.scenario_id,
+                "requested_route": args.route,
+            }
+        ]
+    )[0]
+    if (
+        not isinstance(start, dict)
+        or start.get("schema_version") != 2
+        or not isinstance(start.get("capture_id"), str)
+        or not isinstance(start.get("ttl_seconds"), int)
+    ):
+        raise HAAPIError("Invalid private probe arming response")
+    capture_id = start["capture_id"]
+    session = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "scenario_id": args.scenario_id,
+        "route": {"requested": args.route, "observed": {"verified": False, "value": None}},
+        "device": {"unavailable_reason": "config_flow_entry_not_created"},
+        "integration_build": environment["integration"],
+        "qualification_status": "inconclusive",
+        "reason": "private probe GATT observations are not physical HIL proof",
+    }
+    stop = {
+        "type": "allpowers_ble/hil/probe/stop",
+        "flow_id": flow_id,
+        "capture_id": capture_id,
+    }
+    try:
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+        output_dir = write_run(
+            args.output_root, f"{timestamp}_{run_id}", environment, session
+        )
+    except HAAPIError:
+        api.websocket([stop])
+        raise
+    print("Probe armed. Submit the ordinary matching Home Assistant form.")
+    fetch = {
+        "type": "allpowers_ble/hil/probe/fetch",
+        "flow_id": flow_id,
+        "capture_id": capture_id,
+    }
+    result: Any = None
+    try:
+        for _ in range(min(start["ttl_seconds"], 120) + 1):
+            result = api.websocket([fetch])[0]
+            if isinstance(result, dict) and result.get("closed") is True:
+                break
+            sleep(1)
+        else:
+            result = api.websocket([stop])[0]
+    except (KeyboardInterrupt, EOFError):
+        result = api.websocket([stop])[0]
+    if not isinstance(result, dict):
+        raise HAAPIError("Invalid final probe trace")
+    _validate_trace_result(
+        result,
+        run_id=run_id,
+        scenario_id=args.scenario_id,
+        capture_id=capture_id,
+        requested_route=args.route,
+        expected_version=2,
+        expected_scope="config_probe",
+    )
+    if result["flow_id"] != flow_id:
+        raise HAAPIError("Probe evidence belongs to another flow")
+    _save_private_trace(output_dir, result)
+    print("Private config-flow probe saved to:", output_dir)
+    print("Probe outcome:", result["probe_outcome"])
+    print("Observed connection route:", result["observed_route"])
+    print("Physical HIL qualification: not permitted")
+    events = {row["event"] for row in result["events"]}
+    required = {
+        "probe_started",
+        "connect_attempt",
+        "write_attempt",
+        "write_ok",
+        "notification_received",
+        "notification_decoded",
+        "probe_status_received",
+        "probe_succeeded",
+    }
+    return (
+        0
+        if (
+            result["probe_outcome"] == "success"
+            and result["capture_complete"]
+            and result["frame_count"] >= 2
+            and required.issubset(events)
+        )
+        else 2
+    )
+
+
 def execute(args: argparse.Namespace) -> int:
     """Execute read-only preflight and explicitly requested private HIL capture."""
     url, token = _credential(args)
@@ -472,6 +704,8 @@ def execute(args: argparse.Namespace) -> int:
     print(
         "HA host / adapter / proxy details: unavailable without an authorized collector"
     )
+    if args.command == "probe-trace":
+        return _execute_probe_trace(api, args, environment)
     if args.command == "doctor":
         if not devices:
             print(
@@ -612,33 +846,7 @@ def execute(args: argparse.Namespace) -> int:
             requested_route=args.route,
             expected_version=start["schema_version"],
         )
-        private_paths = (
-            output_dir / "events.jsonl",
-            output_dir / "frames.jsonl",
-            output_dir / "trace.json",
-        )
-        try:
-            for path, key in zip(private_paths[:2], ("events", "frames"), strict=True):
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    for record in result[key]:
-                        stream.write(json.dumps(record, sort_keys=True) + "\n")
-            metadata = {
-                key: value
-                for key, value in result.items()
-                if key not in ("events", "frames")
-            }
-            fd = os.open(private_paths[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(metadata, stream, indent=2, sort_keys=True)
-                stream.write("\n")
-        except (OSError, TypeError, ValueError) as ex:
-            for path in private_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise HAAPIError("Private HIL trace could not be saved") from ex
+        _save_private_trace(output_dir, result)
         print("Private HIL trace saved to:", output_dir)
         print(
             "Capture completeness:",

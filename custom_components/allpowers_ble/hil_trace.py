@@ -77,7 +77,7 @@ class Capture:
 
     def __init__(
         self,
-        entry_id: str,
+        entry_id: str | None,
         user_id: str,
         run_id: str,
         scenario_id: str,

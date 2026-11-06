@@ -59,6 +59,14 @@ class ClientObserver(Protocol):
 
     def route_connected(self, generation: int, route: ConnectedRoute) -> None: ...
 
+    def probe_record(
+        self,
+        event: str,
+        generation: int | None,
+        *,
+        reason_category: str | None = None,
+    ) -> None: ...
+
     def control_rejection(
         self, generation: int | None, kind: str, reason: str
     ) -> None: ...

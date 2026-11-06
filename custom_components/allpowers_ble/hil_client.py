@@ -130,6 +130,20 @@ class HilClientTracer:
         """Store connection-time backend proof without leaking backend objects."""
         self.capture.observe_route(generation, route)
 
+    def probe_record(
+        self,
+        event: str,
+        generation: int | None,
+        *,
+        reason_category: str | None = None,
+    ) -> None:
+        """Store safe probe-stage observations without altering BLE policy."""
+        self.capture.record(
+            event,
+            session_generation=generation,
+            reason_category=reason_category,
+        )
+
     def control_rejection(self, generation: int | None, kind: str, reason: str) -> None:
         """Keep rejection categories separate from production safety decisions."""
         self.capture.record(

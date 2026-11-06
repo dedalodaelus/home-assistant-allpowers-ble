@@ -2002,10 +2002,21 @@ async def async_probe_device(
     address: str,
     advertised_name: str,
     timeout: float,
+    observer: ClientObserver | None = None,
 ) -> ProbeResult:
-    """Connect, verify GATT characteristics, and require one valid status frame."""
+    """Use HA's existing GATT probe, with optional read-only observations."""
+    slot = ObserverSlot(observer) if observer is not None else None
+    generation = 1
     normalized_address = address.upper()
     support = identify_model(advertised_name)
+    if slot is not None:
+        slot.emit(
+            "connection",
+            "model_profile_selected",
+            generation,
+            profile=support.profile,
+            classification=support.classification,
+        )
     if not support.supported:
         raise UnsupportedDeviceError(support.reason or "Unsupported model")
 
@@ -2014,8 +2025,18 @@ async def async_probe_device(
             hass, normalized_address, connectable=True
         )
 
+    if slot is not None:
+        slot.emit("connection", "connect_attempt", generation)
     device = fresh_device()
     if device is None:
+        if slot is not None:
+            slot.emit(
+                "connection",
+                "connect_failed",
+                generation,
+                stage="device_selection",
+                error_type="DeviceNotFoundError",
+            )
         raise DeviceNotFoundError(
             f"No connectable Bluetooth adapter or proxy can reach {normalized_address}"
         )
@@ -2039,10 +2060,24 @@ async def async_probe_device(
                 ble_device_callback=fresh_device_for_retry,
                 use_services_cache=True,
             )
-    except TimeoutError as ex:
-        raise ProbeConnectionTimeoutError(
-            f"Probe connection timed out for {normalized_address}"
-        ) from ex
+    except BaseException as ex:
+        if slot is not None:
+            slot.emit(
+                "connection",
+                "connect_failed",
+                generation,
+                stage="gatt_connection",
+                error_type=type(ex).__name__,
+            )
+        if isinstance(ex, TimeoutError):
+            raise ProbeConnectionTimeoutError(
+                f"Probe connection timed out for {normalized_address}"
+            ) from ex
+        raise
+
+    if slot is not None:
+        slot.emit("route_connected", generation, connected_route(client))
+        slot.emit("connection", "connected", generation)
 
     decoder = NotificationStreamDecoder()
     status: StatusData | None = None
@@ -2057,12 +2092,31 @@ async def async_probe_device(
     ) -> None:
         nonlocal status, settings
         del characteristic
-        for packet in decoder.feed(data):
+        if slot is not None:
+            slot.emit("notification_received", generation, bytes(data))
+        discarded_before = decoder.discarded_frames
+        bytes_before = decoder.discarded_bytes
+        packets = decoder.feed(data)
+        if slot is not None:
+            slot.emit(
+                "notification_decoded",
+                generation,
+                packet_types=tuple(type(packet).__name__ for packet in packets),
+                profile=support.profile,
+                hardware_revision=None,
+                discarded_frames=decoder.discarded_frames - discarded_before,
+                discarded_bytes=decoder.discarded_bytes - bytes_before,
+            )
+        for packet in packets:
             if isinstance(packet, StatusData):
                 status = packet
+                if slot is not None:
+                    slot.emit("probe_record", "probe_status_received", generation)
                 status_event.set()
             elif isinstance(packet, SettingsData):
                 settings = packet
+                if slot is not None:
+                    slot.emit("probe_record", "probe_settings_received", generation)
 
     try:
         try:
@@ -2070,41 +2124,89 @@ async def async_probe_device(
                 client
             )
         except UnsupportedDeviceError as ex:
+            if slot is not None:
+                slot.emit(
+                    "probe_record",
+                    "probe_gatt_rejected",
+                    generation,
+                    reason_category="missing_characteristics",
+                )
             raise ProbeGattValidationError(str(ex)) from ex
+        if slot is not None:
+            slot.emit("probe_record", "probe_gatt_validated", generation)
 
         try:
             async with asyncio.timeout(remaining("notify")):
                 await client.start_notify(notify_characteristic, notification_handler)
             notify_started = True
-        except TimeoutError as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe notification setup timed out for {normalized_address}"
-            ) from ex
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe notification setup failed for {normalized_address}: {ex}"
-            ) from ex
+        except BaseException as ex:
+            if slot is not None:
+                slot.emit(
+                    "probe_record",
+                    "probe_notify_failed",
+                    generation,
+                    reason_category=(
+                        "timeout" if isinstance(ex, TimeoutError) else "error"
+                    ),
+                )
+            if isinstance(ex, TimeoutError):
+                raise ProbeNotificationSetupError(
+                    f"Probe notification setup timed out for {normalized_address}"
+                ) from ex
+            if isinstance(ex, BLEAK_RETRY_EXCEPTIONS):
+                raise ProbeNotificationSetupError(
+                    f"Probe notification setup failed for {normalized_address}: {ex}"
+                ) from ex
+            raise
+        if slot is not None:
+            slot.emit("probe_record", "probe_notify_started", generation)
 
+        frame = encode_status_request()
+        with_response = _write_with_response(write_characteristic)
+        if slot is not None:
+            slot.emit(
+                "write",
+                "write_attempt",
+                generation,
+                frame=frame,
+                write_with_response=with_response,
+            )
         try:
             async with asyncio.timeout(remaining("status_request")):
                 await client.write_gatt_char(
                     write_characteristic,
-                    encode_status_request(),
-                    response=_write_with_response(write_characteristic),
+                    frame,
+                    response=with_response,
                 )
-        except TimeoutError as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe status request timed out for {normalized_address}"
-            ) from ex
-        except BLEAK_RETRY_EXCEPTIONS as ex:
-            raise ProbeNotificationSetupError(
-                f"Probe status request failed for {normalized_address}: {ex}"
-            ) from ex
+        except BaseException as ex:
+            if slot is not None:
+                slot.emit(
+                    "write",
+                    "write_error",
+                    generation,
+                    error_type=type(ex).__name__,
+                    reason_category=(
+                        "timeout" if isinstance(ex, TimeoutError) else "write_failure"
+                    ),
+                )
+            if isinstance(ex, TimeoutError):
+                raise ProbeNotificationSetupError(
+                    f"Probe status request timed out for {normalized_address}"
+                ) from ex
+            if isinstance(ex, BLEAK_RETRY_EXCEPTIONS):
+                raise ProbeNotificationSetupError(
+                    f"Probe status request failed for {normalized_address}: {ex}"
+                ) from ex
+            raise
+        if slot is not None:
+            slot.emit("write", "write_ok", generation)
 
         try:
             async with asyncio.timeout(remaining("status")):
                 await status_event.wait()
         except TimeoutError as ex:
+            if slot is not None:
+                slot.emit("probe_record", "probe_status_timeout", generation)
             raise ProbeStatusTimeoutError(
                 f"Probe status timed out for {normalized_address}"
             ) from ex
@@ -2130,7 +2232,15 @@ async def async_probe_device(
                         if callable(stop_notify):
                             async with asyncio.timeout(WRITE_TIMEOUT):
                                 await stop_notify(notify_characteristic)
+                            if slot is not None:
+                                slot.emit("probe_record", "probe_notify_stopped", generation)
                     except Exception:
+                        if slot is not None:
+                            slot.emit(
+                                "probe_record",
+                                "probe_notify_stop_failed",
+                                generation,
+                            )
                         _LOGGER.debug(
                             "Probe notification cleanup failed for %s",
                             normalized_address,
@@ -2140,7 +2250,20 @@ async def async_probe_device(
                 try:
                     async with asyncio.timeout(WRITE_TIMEOUT):
                         await client.disconnect()
+                    if slot is not None:
+                        slot.emit(
+                            "connection",
+                            "disconnected",
+                            generation,
+                            stage="probe_cleanup",
+                        )
                 except Exception:
+                    if slot is not None:
+                        slot.emit(
+                            "probe_record",
+                            "probe_disconnect_failed",
+                            generation,
+                        )
                     _LOGGER.debug(
                         "Probe disconnect failed for %s",
                         normalized_address,
