@@ -769,3 +769,33 @@ async def test_probe_unexpected_transport_failures_do_not_leak_exception_text(
     assert capture.snapshot()["capture_complete"] is True
     assert capture.snapshot()["qualification_allowed"] is False
     capture.erase()
+
+
+@pytest.mark.asyncio
+async def test_probe_arm_replaces_closed_entryless_capture_without_runtime_detach():
+    """A stale entryless probe is erased without looking up a runtime entry."""
+    hass, connection = setup_case()
+    old, _ = await arm(hass, connection)
+    old.finish("failure", reason="cannot_connect")
+    store = hass.data[KEY]
+    assert old.entry_id is None
+    store.active = old
+    store.sealed.pop(old.capture_id)
+    register_flow_candidates(hass, "flow-b", "reconfigure", [ADDRESS])
+    token = next(iter(hass.data[hil_probe.REGISTRY_KEY]["flow-b"].tokens))
+    await ws_probe_arm(
+        hass,
+        connection,
+        {
+            "id": 8,
+            "flow_id": "flow-b",
+            "candidate_token": token,
+            "run_id": "run12345",
+            "scenario_id": "probe",
+            "requested_route": "auto",
+        },
+    )
+    assert old.termination_reason == "erased"
+    assert isinstance(store.active, ProbeCapture)
+    assert store.active.flow_id == "flow-b"
+    store.active.erase()
