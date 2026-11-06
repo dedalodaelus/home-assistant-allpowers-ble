@@ -1,5 +1,16 @@
 # Compatibility
 
+## Home Assistant version
+
+The integration requires Home Assistant Core **2026.10.4 or newer**. This is
+the pinned release used by the repository's real Home Assistant compatibility
+tests (`requirements_test.txt`). Earlier Core releases are not part of the
+integration's verified compatibility baseline.
+
+The read-only HIL preflight CLI has a separate **2026.8+** requirement for its
+remote registry contract; see the [HIL CLI guide](hil-cli.md). That tool-specific
+minimum does not lower the integration requirement.
+
 ## Support levels
 
 The repository distinguishes three runtime code-profile levels:

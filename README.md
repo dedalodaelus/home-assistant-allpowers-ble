@@ -1,6 +1,6 @@
 # ALLPOWERS BLE for Home Assistant
 
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7%2B-41BDF5.svg)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.10.4%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/LICENSE)
@@ -38,7 +38,8 @@ matrix](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/
 
 ## Requirements & installation
 
-- Home Assistant **2026.7.0 or newer**.
+- Home Assistant **2026.10.4 or newer**. This matches the pinned release used by
+  the integration's real Home Assistant compatibility tests.
 - A connectable local Bluetooth adapter or an **active** ESPHome Bluetooth Proxy.
   Passive-only proxies cannot maintain the required GATT connection.
 - Device powered on and within reliable BLE range.

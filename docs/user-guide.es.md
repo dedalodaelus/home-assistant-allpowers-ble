@@ -38,7 +38,8 @@ Para cualificar hardware real, sigue la [guía de cualificación HIL](hil-qualif
 
 ## Requisitos
 
-- Home Assistant **2026.7.0 o posterior**.
+- Home Assistant **2026.10.4 o posterior**. Es la versión fijada para las
+  pruebas de compatibilidad de la integración con Home Assistant real.
 - HACS para el método de instalación recomendado.
 - Una ruta Bluetooth conectable:
   - adaptador Bluetooth disponible para Home Assistant, o
@@ -372,4 +373,3 @@ Las reconexiones transitorias no crean Repairs.
 - [Protocolo](protocol.md) y [arquitectura](architecture/README.md).
 - [Flujo de desarrollo](development.md), [estrategia de calidad](quality.md) y [hoja de ruta](roadmap.md).
 - [Contribuir](../CONTRIBUTING.md), [política de seguridad](../SECURITY.md) y [licencia MIT](../LICENSE).
-

@@ -39,7 +39,8 @@ For real hardware qualification workflow, see
 
 ## Requirements
 
-- Home Assistant **2026.7.0 or newer**.
+- Home Assistant **2026.10.4 or newer**. This is the pinned release used by the
+  integration's real Home Assistant compatibility tests.
 - HACS for the recommended installation method.
 - A connectable Bluetooth route:
   - a Bluetooth adapter available to Home Assistant, or
@@ -383,4 +384,3 @@ Transient reconnects do not create Repairs.
 - [Protocol](protocol.md) and [architecture](architecture/README.md), including the system diagram and trust boundaries.
 - [Development workflow](development.md), [quality strategy](quality.md), and [roadmap](roadmap.md).
 - [Contributing](../CONTRIBUTING.md), [security policy](../SECURITY.md), and [MIT license](../LICENSE).
-

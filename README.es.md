@@ -1,6 +1,6 @@
 # ALLPOWERS BLE para Home Assistant
 
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7%2B-41BDF5.svg)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.10.4%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
 [![Licencia: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/LICENSE)
@@ -40,7 +40,8 @@ completa](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/deve
 
 ## Requisitos e instalación
 
-- Home Assistant **2026.7.0 o posterior**.
+- Home Assistant **2026.10.4 o posterior**. Coincide con la versión fijada
+  para las pruebas de compatibilidad de la integración con Home Assistant real.
 - Un adaptador Bluetooth local conectable o un ESPHome Bluetooth Proxy **activo**.
   Un proxy pasivo no mantiene la conexión GATT necesaria.
 - Estación encendida y dentro de un alcance BLE fiable.
