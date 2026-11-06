@@ -8,8 +8,12 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.auth.const import GROUP_ID_ADMIN
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
+from custom_components.allpowers_ble.hil_capabilities import (
+    async_register as async_register_capabilities,
+)
 from custom_components.allpowers_ble.hil_trace import (
     KEY,
     async_register,
@@ -73,6 +77,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     denied = await ws.receive_json()
     assert denied["success"] is False
     assert client.hil_capture is None
+
     hass_admin_user.groups = saved_groups
 
     await ws.send_json_auto_id(request)
@@ -158,6 +163,102 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
     clear_entry_capture(hass, entry.entry_id)
     assert KEY not in hass.data
     assert second_capture.frames == []
+
+
+@pytest.mark.asyncio
+async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
+    hass: HomeAssistant,
+    hass_ws_client,
+    hass_admin_user,
+) -> None:
+    """The read-only capability endpoint rejects unsafe targets and private data."""
+    await async_register_capabilities(hass)
+    settings = SimpleNamespace(
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
+        firmware_version="0.2",
+        raw_firmware_version=0x02,
+    )
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            model_identity="R600",
+            identity_conflicted=False,
+            session_hardware_version="0.3",
+            session_raw_hardware_version=0x03,
+            settings=settings,
+        ),
+        settings_are_fresh=True,
+        status_is_fresh=True,
+        connected=True,
+    )
+    client = SimpleNamespace(
+        options=SimpleNamespace(enable_car_charger=False),
+        active_session_generation=7,
+    )
+    entry = MockConfigEntry(
+        domain="allpowers_ble", data={}, state=ConfigEntryState.LOADED
+    )
+    entry.add_to_hass(hass)
+    entry.runtime_data = SimpleNamespace(coordinator=coordinator, client=client)
+    ws = await hass_ws_client()
+    request = {
+        "type": "allpowers_ble/hil/capabilities",
+        "entry_id": entry.entry_id,
+    }
+
+    saved_groups = hass_admin_user.groups
+    hass_admin_user.groups = []
+    await ws.send_json_auto_id(request)
+    denied = await ws.receive_json()
+    assert denied["success"] is False
+    assert denied["error"]["code"] == "unauthorized"
+    hass_admin_user.groups = saved_groups
+
+    await ws.send_json_auto_id({**request, "entry_id": "unknown-entry"})
+    wrong_entry = await ws.receive_json()
+    assert wrong_entry["success"] is False
+    assert wrong_entry["error"]["code"] == "not_found"
+
+    unloaded_entry = MockConfigEntry(
+        domain="allpowers_ble", data={}, state=ConfigEntryState.NOT_LOADED
+    )
+    unloaded_entry.add_to_hass(hass)
+    unloaded_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, client=client
+    )
+    await ws.send_json_auto_id({**request, "entry_id": unloaded_entry.entry_id})
+    unloaded = await ws.receive_json()
+    assert unloaded["success"] is False
+    assert unloaded["error"]["code"] == "not_ready"
+
+    await ws.send_json_auto_id(request)
+    response = await ws.receive_json()
+    assert response["success"] is True
+    result = response["result"]
+    assert result == {
+        "schema_version": 1,
+        "model": "R600",
+        "profile": "r600-hw-0.3",
+        "classification": "verified",
+        "verified": True,
+        "identity_conflicted": False,
+        "hardware_revision": "0.3",
+        "raw_hardware_revision": 0x03,
+        "firmware_revision": "0.2",
+        "raw_firmware_revision": 0x02,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 7,
+    }
+    assert entry.entry_id not in str(result)
 
 
 @pytest.mark.asyncio

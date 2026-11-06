@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import Any
 
@@ -31,6 +31,15 @@ SENSOR_KEYS = (
     "firmware_version",
 )
 BINARY_KEYS = ("connected", "telemetry_available")
+CONTROL_DOMAINS = {
+    "ac_output": "switch",
+    "dc_output": "switch",
+    "light": "switch",
+    "eco_mode": "switch",
+    "car_charger": "switch",
+    "work_mode": "select",
+    "eco_timeout": "select",
+}
 
 
 @dataclass(slots=True)
@@ -43,6 +52,8 @@ class Device:
     firmware: str | None
     state_entities: dict[str, str]
     entry_state: str | None = None
+    control_entities: dict[str, str] = field(default_factory=dict)
+    config_entry_id: str | None = None
 
 
 def safe_model(value: Any) -> str:
@@ -112,6 +123,35 @@ def _entry_state(device: dict[str, Any], entries: list[Any] | None) -> str | Non
     return state if isinstance(state, str) and state in CONFIG_ENTRY_STATES else None
 
 
+def _linked_entry_ids(device: dict[str, Any]) -> set[str]:
+    """Return transient config-entry links from one validated registry device."""
+    linked: set[str] = set()
+    main_id = device.get("config_entry_id")
+    if isinstance(main_id, str):
+        linked.add(main_id)
+    older = device.get("config_entries")
+    if isinstance(older, list):
+        linked.update(value for value in older if isinstance(value, str))
+    return linked
+
+
+def _loaded_entry_id(device: dict[str, Any], entries: list[Any] | None) -> str | None:
+    """Return one loaded ALLPOWERS config-entry ID for a transient HIL request."""
+    if entries is None:
+        return None
+    matches = [
+        value
+        for value in entries
+        if isinstance(value, dict)
+        and value.get("domain") == DOMAIN
+        and value.get("state") == "loaded"
+        and value.get("disabled_by") is None
+        and isinstance(value.get("entry_id"), str)
+        and value["entry_id"] in _linked_entry_ids(device)
+    ]
+    return matches[0]["entry_id"] if len(matches) == 1 else None
+
+
 def _entity_key(entry: dict[str, Any]) -> str | None:
     """Resolve based on platform and integration-owned unique-id suffix."""
     unique_id = entry.get("unique_id")
@@ -121,6 +161,18 @@ def _entity_key(entry: dict[str, Any]) -> str | None:
     for key in SENSOR_KEYS + BINARY_KEYS:
         prefix = "sensor." if key in SENSOR_KEYS else "binary_sensor."
         if unique_id.endswith("_" + key) and entity_id.startswith(prefix):
+            return key
+    return None
+
+
+def _control_key(entry: dict[str, Any]) -> str | None:
+    """Resolve only integration-owned control suffixes on their fixed domain."""
+    unique_id = entry.get("unique_id")
+    entity_id = entry.get("entity_id")
+    if not isinstance(unique_id, str) or not isinstance(entity_id, str):
+        return None
+    for key, domain in CONTROL_DOMAINS.items():
+        if unique_id.endswith("_" + key) and entity_id.startswith(domain + "."):
             return key
     return None
 
@@ -163,7 +215,9 @@ def find_devices(
         if entry_ids and not _matches_entry(raw_device, entry_ids):
             continue
         mapping: dict[str, str] = {}
+        control_mapping: dict[str, str] = {}
         ambiguous: set[str] = set()
+        ambiguous_controls: set[str] = set()
         for entity in platforms.get(device_id, []):
             if entity.get("disabled_by") is not None:
                 continue
@@ -173,8 +227,28 @@ def find_devices(
                 if key in mapping:
                     ambiguous.add(key)
                 mapping[key] = entity_id
+            control_key = _control_key(entity)
+            expected_domain = CONTROL_DOMAINS.get(control_key or "")
+            if (
+                control_key is not None
+                and isinstance(entity_id, str)
+                and entity_id.startswith(expected_domain + ".")
+            ):
+                config_entry_id = entity.get("config_entry_id")
+                linked_entries = _linked_entry_ids(raw_device)
+                if (
+                    config_entry_id is not None
+                    and linked_entries
+                    and config_entry_id not in linked_entries
+                ):
+                    continue
+                if control_key in control_mapping:
+                    ambiguous_controls.add(control_key)
+                control_mapping[control_key] = entity_id
         for key in ambiguous:
             mapping.pop(key, None)
+        for key in ambiguous_controls:
+            control_mapping.pop(key, None)
         results.append(
             Device(
                 device_id=device_id,
@@ -183,6 +257,8 @@ def find_devices(
                 firmware=safe_version(raw_device.get("sw_version")),
                 state_entities=mapping,
                 entry_state=_entry_state(raw_device, entries),
+                control_entities=control_mapping,
+                config_entry_id=_loaded_entry_id(raw_device, entries),
             )
         )
     return sorted(

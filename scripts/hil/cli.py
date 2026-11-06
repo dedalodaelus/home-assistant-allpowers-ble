@@ -23,6 +23,7 @@ from .environment import (
     evaluate_preflight,
     new_run_id,
     read_only_sample,
+    unknown,
 )
 from .storage import write_run
 from .runner import plan as plan_scenarios, plan_as_dict
@@ -122,6 +123,55 @@ def _discovery(
     check_ha_version(config.get("version"))
     entities, devices, manifest, entries = api.discovery()
     return config, manifest, find_devices(entities, devices, entries)
+
+
+def _scenario_controls(
+    api: HAClient,
+    device: Device,
+    capabilities: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Record only safe control values and fail-closed eligibility decisions."""
+    settings_controls = {"eco_mode", "car_charger", "work_mode", "eco_timeout"}
+    result: dict[str, Any] = {}
+    for key in (
+        "ac_output",
+        "dc_output",
+        "light",
+        "eco_mode",
+        "car_charger",
+        "work_mode",
+        "eco_timeout",
+    ):
+        entity_id = device.control_entities.get(key)
+        if entity_id is None:
+            observed = {"available": False, "state": None, "options": []}
+        else:
+            try:
+                observed = api.control_state(key, entity_id)
+            except HAAPIError:
+                observed = {"available": False, "state": None, "options": []}
+        facts = capabilities or {}
+        capability_flags = facts.get("capabilities", {})
+        settings_key = key in settings_controls
+        control_capable = capability_flags.get(
+            "write_settings_controls" if settings_key else "write_output_controls",
+            False,
+        )
+        freshness = facts.get("settings_fresh" if settings_key else "status_fresh")
+        if key == "car_charger":
+            control_capable = control_capable and capability_flags.get(
+                "car_charger_enabled", False
+            )
+        result[key] = {
+            **observed,
+            "eligible": bool(
+                facts.get("connected") is True
+                and freshness is True
+                and control_capable is True
+                and observed["available"] is True
+            ),
+        }
+    return result
 
 
 def _device_list(devices: list[Device]) -> None:
@@ -833,6 +883,18 @@ def execute(args: argparse.Namespace) -> int:
         environment=environment,
         sample=sample,
     )
+    if args.command == "run" and args.suite == "read-only":
+        capabilities: dict[str, Any] | None = None
+        unavailable_reason = "no unique loaded integration entry found"
+        if selected.config_entry_id is not None:
+            try:
+                capabilities = api.hil_capabilities(selected.config_entry_id)
+            except HAAPIError:
+                unavailable_reason = "admin capability snapshot unavailable"
+        session["runtime_capabilities"] = (
+            capabilities if capabilities is not None else unknown(unavailable_reason)
+        )
+        session["controls"] = _scenario_controls(api, selected, capabilities)
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     output_dir = write_run(
         args.output_root, f"{timestamp}_{run_id}", environment, session

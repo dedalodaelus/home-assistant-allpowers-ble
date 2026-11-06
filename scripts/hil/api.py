@@ -14,6 +14,19 @@ from urllib import error, parse, request
 
 MAX_JSON_BYTES = 16 * 1024 * 1024
 API_TIMEOUT = 12.0
+_CONTROL_DOMAINS = {
+    "ac_output": "switch",
+    "dc_output": "switch",
+    "light": "switch",
+    "eco_mode": "switch",
+    "car_charger": "switch",
+    "work_mode": "select",
+    "eco_timeout": "select",
+}
+_CONTROL_OPTIONS = {
+    "work_mode": {"mute", "standard", "fast"},
+    "eco_timeout": {"one_hour", "two_hours", "four_hours", "six_hours"},
+}
 
 
 class HAAPIError(Exception):
@@ -128,6 +141,134 @@ class HAClient:
                 return None
             raise
         return _json_object(data, "entity state")
+
+    def control_state(self, key: str, entity_id: str) -> dict[str, Any]:
+        """Read one discovered integration control and return curated state only."""
+        domain = _CONTROL_DOMAINS.get(key)
+        if (
+            domain is None
+            or not isinstance(entity_id, str)
+            or not entity_id.startswith(domain + ".")
+        ):
+            raise HAAPIError("Invalid discovered control entity")
+        payload = self.entity_state(entity_id)
+        if payload is None:
+            return {"available": False, "state": None, "options": []}
+        state = payload.get("state")
+        if domain == "switch":
+            available = isinstance(state, str) and state in {"on", "off"}
+            return {
+                "available": available,
+                "state": state if available else None,
+                "options": [],
+            }
+        attributes = payload.get("attributes")
+        options = attributes.get("options") if isinstance(attributes, dict) else None
+        allowed = _CONTROL_OPTIONS[key]
+        safe_options = (
+            sorted(option for option in options if option in allowed)
+            if isinstance(options, list)
+            and all(isinstance(option, str) for option in options)
+            else []
+        )
+        available = isinstance(state, str) and state in safe_options
+        return {
+            "available": available,
+            "state": state if available else None,
+            "options": safe_options,
+        }
+
+    def hil_capabilities(self, entry_id: str) -> dict[str, Any]:
+        """Fetch and strictly normalize the entry-scoped HIL capability snapshot."""
+        if (
+            not isinstance(entry_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", entry_id) is None
+        ):
+            raise HAAPIError("Invalid selected integration entry")
+        result = self.websocket(
+            [{"type": "allpowers_ble/hil/capabilities", "entry_id": entry_id}]
+        )[0]
+        classifications = {
+            "verified",
+            "experimental_read_only",
+            "rejected",
+            "identity_conflict",
+        }
+        required_booleans = (
+            "verified",
+            "identity_conflicted",
+            "connected",
+            "status_fresh",
+            "settings_fresh",
+        )
+        if (
+            not isinstance(result, dict)
+            or type(result.get("schema_version")) is not int
+            or result.get("schema_version") != 1
+            or result.get("model") is None
+            or not isinstance(result.get("profile"), str)
+            or re.fullmatch(r"[a-z0-9.-]{1,80}", result["profile"]) is None
+            or not isinstance(result.get("classification"), str)
+            or result["classification"] not in classifications
+            or any(type(result.get(key)) is not bool for key in required_booleans)
+        ):
+            raise HAAPIError("Malformed HIL capability snapshot")
+        model = result["model"]
+        if not isinstance(model, str) or model not in {
+            "R600",
+            "VOLIX P1800",
+            "S500",
+            "S700",
+            "BLE power station",
+        }:
+            raise HAAPIError("Malformed HIL model identity")
+        capabilities = result.get("capabilities")
+        capability_keys = {
+            "read_telemetry",
+            "write_output_controls",
+            "write_settings_controls",
+            "write_settings_keepalive",
+            "car_charger_enabled",
+        }
+        if (
+            not isinstance(capabilities, dict)
+            or set(capabilities) != capability_keys
+            or any(type(value) is not bool for value in capabilities.values())
+        ):
+            raise HAAPIError("Malformed HIL capability flags")
+        normalized: dict[str, Any] = {
+            key: result[key]
+            for key in (
+                "schema_version",
+                "model",
+                "profile",
+                "classification",
+                "verified",
+                "identity_conflicted",
+                "connected",
+                "status_fresh",
+                "settings_fresh",
+            )
+        }
+        for key in ("hardware_revision", "firmware_revision"):
+            value = result.get(key)
+            if value is not None and (
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,3}", value) is None
+            ):
+                raise HAAPIError("Malformed HIL version metadata")
+            normalized[key] = value
+        for key in ("raw_hardware_revision", "raw_firmware_revision"):
+            value = result.get(key)
+            if value is not None and (type(value) is not int or not 0 <= value <= 255):
+                raise HAAPIError("Malformed HIL raw version metadata")
+            normalized[key] = value
+        generation = result.get("session_generation")
+        if generation is not None and (type(generation) is not int or generation < 1):
+            raise HAAPIError("Malformed HIL session generation")
+        normalized["session_generation"] = generation
+        normalized["capabilities"] = dict(capabilities)
+        return normalized
 
     def websocket(
         self, commands: list[dict[str, Any]], *, scanner_snapshot: bool = False

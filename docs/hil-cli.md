@@ -104,6 +104,14 @@ suites are never implicitly enabled; an empty suite reports as blocked until
 its declarations and executor are implemented. The ordinary `run` command
 remains the #228 read-only snapshot. Checkpoint resume is not available yet.
 
+`run --suite read-only` also requests an admin-only runtime capability snapshot
+for the selected loaded entry. Without admin access, capability evidence is
+recorded as unavailable and write eligibility stays false. Control entities
+are matched by integration ownership, device, platform and unique-ID suffix;
+disabled, ambiguous, missing or unavailable entities are ineligible. The
+snapshot stores only allowlisted states and options, never HA entity or entry
+IDs. This does not execute controls or establish physical qualification.
+
 ```bash
 python -m pytest tests/test_hil_cli.py
 ruff format --check scripts tests

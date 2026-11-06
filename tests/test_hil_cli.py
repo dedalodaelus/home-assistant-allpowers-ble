@@ -108,6 +108,36 @@ class FakeHA:
         self.calls.append(("ws", "registry"))
         return self.entities, self.devices, {"version": "0.3.0"}, self.entries
 
+    def hil_capabilities(self, entry_id):
+        self.calls.append(("ws", "hil_capabilities", entry_id))
+        return {
+            "schema_version": 1,
+            "model": "R600",
+            "profile": "r600-hw-0.3",
+            "classification": "verified",
+            "verified": True,
+            "identity_conflicted": False,
+            "hardware_revision": "0.3",
+            "raw_hardware_revision": 3,
+            "firmware_revision": "0.2",
+            "raw_firmware_revision": 2,
+            "capabilities": {
+                "read_telemetry": True,
+                "write_output_controls": True,
+                "write_settings_controls": True,
+                "write_settings_keepalive": True,
+                "car_charger_enabled": False,
+            },
+            "connected": True,
+            "status_fresh": True,
+            "settings_fresh": True,
+            "session_generation": 3,
+        }
+
+    def control_state(self, key, entity_id):
+        self.calls.append(("control", key, entity_id))
+        return {"available": True, "state": "off", "options": []}
+
     def entity_state(self, entity_id):
         self.calls.append(("get", entity_id))
         if entity_id in self.state_overrides:
@@ -172,6 +202,40 @@ def test_registry_selects_by_integration_owner_not_vendor_name(allpowers_registr
     assert choices[0].hardware == "0.3"
     assert choices[0].state_entities["battery"] == "sensor.my_name_battery"
     assert discovery.choose_device(choices, None, non_interactive=True) is choices[0]
+
+
+def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    """Explicit suite reads current metadata but never persists HA identifiers."""
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / "scenario"
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--suite",
+                "read-only",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 0
+    )
+
+    (run_dir,) = tuple(output_root.iterdir())
+    report = json.loads((run_dir / "session.json").read_text())
+    assert report["runtime_capabilities"]["profile"] == "r600-hw-0.3"
+    assert report["controls"]["car_charger"]["eligible"] is False
+    assert "secret-entry-1" not in json.dumps(report)
+    assert "AA:BB:CC:DD:EE:FF" not in json.dumps(report)
+    assert ("ws", "hil_capabilities", "secret-entry-1") in fake.calls
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
@@ -1588,3 +1652,210 @@ def test_cli_route_text_distinguishes_preflight_and_connected_trace(
         assert trace["qualification_allowed"] is False
     else:
         assert "Observed connection route:" not in output
+
+
+def test_discovery_maps_only_unambiguous_integration_control_entities():
+    """Renamed controls resolve by owner/domain/key and ambiguous keys disappear."""
+    entities = [
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.renamed_ac",
+            "unique_id": "registry_ac_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.second_ac",
+            "unique_id": "registry_ac_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.dc_power",
+            "unique_id": "registry_dc_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.car_charger",
+            "unique_id": "registry_car_charger",
+            "config_entry_id": "entry-1",
+            "disabled_by": "user",
+        },
+        {
+            "device_id": "device-1",
+            "platform": "foreign_integration",
+            "entity_id": "select.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "sensor.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "other-device",
+            "platform": "allpowers_ble",
+            "entity_id": "select.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+    ]
+    devices = [
+        {
+            "id": "device-1",
+            "config_entry_id": "entry-1",
+            "identifiers": [["allpowers_ble", "private-registry-id"]],
+            "model": "R600",
+        }
+    ]
+    entries = [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}]
+
+    (device,) = discovery.find_devices(entities, devices, entries)
+
+    assert device.control_entities == {"dc_output": "switch.dc_power"}
+    assert device.config_entry_id == "entry-1"
+
+
+def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatch):
+    """Only current values and select choices defined by the integration survive."""
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    payloads = {
+        "select.mode": {
+            "state": "standard",
+            "attributes": {"options": ["mute", "standard", "fast", "unsafe"]},
+        },
+        "switch.offline": {"state": "unavailable", "attributes": {}},
+    }
+    monkeypatch.setattr(client, "entity_state", payloads.__getitem__)
+
+    assert client.control_state("work_mode", "select.mode") == {
+        "available": True,
+        "state": "standard",
+        "options": ["fast", "mute", "standard"],
+    }
+    assert client.control_state("ac_output", "switch.offline") == {
+        "available": False,
+        "state": None,
+        "options": [],
+    }
+
+
+def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        control_entities={
+            "ac_output": "switch.renamed_ac",
+            "eco_mode": "switch.renamed_eco",
+            "car_charger": "switch.renamed_car",
+        },
+    )
+
+    class Controls:
+        @staticmethod
+        def control_state(key, entity_id):
+            return {"available": True, "state": "off", "options": []}
+
+    capabilities = {
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": False,
+        "capabilities": {
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "car_charger_enabled": False,
+        },
+    }
+
+    result = cli._scenario_controls(Controls(), device, capabilities)
+
+    assert result["ac_output"]["eligible"] is True
+    assert result["eco_mode"]["eligible"] is False
+    assert result["car_charger"]["eligible"] is False
+    assert result["dc_output"]["available"] is False
+
+
+def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypatch):
+    """Normalize the admin-only reply without retaining IDs or unknown fields."""
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    response = {
+        "schema_version": 1,
+        "model": "R600",
+        "profile": "r600-hw-0.3",
+        "classification": "verified",
+        "verified": True,
+        "identity_conflicted": False,
+        "hardware_revision": "0.3",
+        "raw_hardware_revision": 3,
+        "firmware_revision": "0.2",
+        "raw_firmware_revision": 2,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 4,
+        "entry_id": "private-entry",
+        "raw_address": "AA:BB:CC:DD:EE:FF",
+    }
+    calls = []
+    monkeypatch.setattr(
+        client, "websocket", lambda commands: calls.append(commands) or [response]
+    )
+
+    normalized = client.hil_capabilities("entry-123")
+
+    assert calls == [
+        [{"type": "allpowers_ble/hil/capabilities", "entry_id": "entry-123"}]
+    ]
+    assert normalized["model"] == "R600"
+    assert normalized["session_generation"] == 4
+    assert "entry_id" not in normalized
+    assert "raw_address" not in normalized
+
+
+def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [
+            {
+                "schema_version": 1,
+                "model": "R600 AA:BB:CC:DD:EE:FF",
+                "profile": "r600-hw-0.3",
+                "classification": "verified",
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "capabilities": {},
+            }
+        ],
+    )
+
+    with pytest.raises(api.HAAPIError):
+        client.hil_capabilities("entry-123")
