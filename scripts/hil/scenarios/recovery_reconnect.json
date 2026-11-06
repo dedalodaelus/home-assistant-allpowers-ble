@@ -1,0 +1,40 @@
+{
+  "id": "recovery_reconnect",
+  "schema_version": 1,
+  "suite": "recovery",
+  "title": "Observe a manually initiated reconnect or recovery",
+  "mode": "manual",
+  "steps": [
+    {
+      "id": "baseline",
+      "instruction": "Record the live session generation and fresh status before the operator action.",
+      "timeout_seconds": 30,
+      "action": "observe",
+      "target": null,
+      "expected": "verified connected baseline"
+    },
+    {
+      "id": "operator_action",
+      "instruction": "The operator performs one selected route interruption, vendor-app contention, or HA reload/upgrade; the runner does not initiate it.",
+      "timeout_seconds": 300,
+      "action": "manual",
+      "target": null,
+      "expected": "operator-selected recovery action"
+    },
+    {
+      "id": "recovered_session",
+      "instruction": "Observe a new connected session generation with fresh status after the operator action.",
+      "timeout_seconds": 300,
+      "action": "observe",
+      "target": null,
+      "expected": "new session generation and fresh status"
+    }
+  ],
+  "required_evidence": [
+    "verified_runtime_capabilities",
+    "new_session_generation",
+    "fresh_status",
+    "operator_observation",
+    "connected_route_trace"
+  ]
+}

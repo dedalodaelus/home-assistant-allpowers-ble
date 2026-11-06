@@ -111,6 +111,23 @@ def correlate_transaction(
     return None
 
 
+def recovery_verdict(
+    *,
+    telemetry_matches: bool,
+    physical_outcome: str | None,
+    route_verified: bool,
+    trace_complete: bool,
+) -> str:
+    """Evaluate read-only recovery evidence without requiring a write transaction."""
+    if physical_outcome == "no":
+        return "fail"
+    if not telemetry_matches or physical_outcome != "yes":
+        return "inconclusive"
+    if not route_verified or not trace_complete:
+        return "inconclusive"
+    return "pass"
+
+
 def plan_as_dict(item: PlannedScenario) -> dict[str, Any]:
     """Return a safe, concise plan entry suitable for terminal output."""
     return {

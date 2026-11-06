@@ -1,4 +1,4 @@
-# Guided HIL CLI: read-only preflight and opt-in private GATT trace
+# Guided HIL CLI: preflight, private traces and scenarios
 
 The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. The private trace v2 identifies the established local BlueZ adapter or ESPHome active proxy only when the connected backend exposes sufficient evidence; otherwise its route is unverified. The separately authorized `probe-trace` command also captures Home Assistant's existing config-flow GATT probe, including flows without a config entry. Neither capture mode provides independent RF evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
 
@@ -100,9 +100,8 @@ python -m scripts.hil run --suite all --dry-run
 ```
 
 `all` currently selects only read-only scenarios. Write, recovery and soak
-suites are never implicitly enabled; an empty suite reports as blocked until
-its declarations and executor are implemented. The ordinary `run` command
-remains the #228 read-only snapshot. Checkpoint resume is not available yet.
+suites are never implicitly enabled. The ordinary `run` command remains the
+#228 read-only snapshot. Checkpoint resume is not available yet.
 
 `run --suite read-only` also requests an admin-only runtime capability snapshot
 for the selected loaded entry. Without admin access, capability evidence is
@@ -111,6 +110,30 @@ are matched by integration ownership, device, platform and unique-ID suffix;
 disabled, ambiguous, missing or unavailable entities are ineligible. The
 snapshot stores only allowlisted states and options, never HA entity or entry
 IDs. This does not execute controls or establish physical qualification.
+
+The `outputs` suite currently offers an attended AC on/off cycle. It checks the
+active profile and state before each write, requires separate numeric consent,
+records short private traces and asks for the physical result. Run only with a
+safe noncritical load and no hazardous equipment connected. An ambiguous write
+is never retried; inspect and restore the station manually if a step stops
+early. This has not been piloted on hardware.
+
+The `recovery` suite is a guided observation. It asks the operator to choose
+and perform a route interruption/restoration, vendor-app contention, or HA
+reload/upgrade; the CLI does not initiate any of those actions. It then waits
+up to five minutes for a fresh connected session with a changed generation or
+an observed disconnect, captures a short route trace, and asks for a numeric
+physical outcome. Missing route proof, incomplete trace, or missing recovery
+confirmation remains inconclusive. The evidence is not build-level HIL
+qualification.
+
+```bash
+python -m scripts.hil --device 1 run --suite recovery
+python -m scripts.hil --device 1 run --suite outputs
+```
+
+Each guided run writes private `scenarios.json` and `checkpoint.json` files
+after steps. Resume is not implemented; the checkpoints are evidence only.
 
 ```bash
 python -m pytest tests/test_hil_cli.py

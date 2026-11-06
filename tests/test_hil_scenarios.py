@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.hil.runner import plan, verdict
+from scripts.hil.runner import plan, recovery_verdict, verdict
 from scripts.hil.scenarios import _validate, load_scenarios
 
 
@@ -16,6 +16,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
     assert [scenario.id for scenario in scenarios] == [
         "output_ac_cycle",
         "read_only_snapshot",
+        "recovery_reconnect",
     ]
     assert all(
         1 <= step["timeout_seconds"] <= 86400
@@ -130,6 +131,36 @@ def test_complete_step_evidence_can_pass_with_explicit_confirmation() -> None:
             physical_outcome="yes",
         )
         == "pass"
+    )
+
+
+def test_recovery_needs_new_telemetry_route_trace_and_operator_confirmation() -> None:
+    assert (
+        recovery_verdict(
+            telemetry_matches=True,
+            physical_outcome="yes",
+            route_verified=True,
+            trace_complete=True,
+        )
+        == "pass"
+    )
+    assert (
+        recovery_verdict(
+            telemetry_matches=True,
+            physical_outcome="yes",
+            route_verified=False,
+            trace_complete=True,
+        )
+        == "inconclusive"
+    )
+    assert (
+        recovery_verdict(
+            telemetry_matches=True,
+            physical_outcome="no",
+            route_verified=True,
+            trace_complete=True,
+        )
+        == "fail"
     )
 
 

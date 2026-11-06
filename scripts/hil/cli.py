@@ -26,7 +26,13 @@ from .environment import (
     unknown,
 )
 from .storage import write_run, write_scenario_progress
-from .runner import correlate_transaction, plan as plan_scenarios, plan_as_dict, verdict
+from .runner import (
+    correlate_transaction,
+    plan as plan_scenarios,
+    plan_as_dict,
+    recovery_verdict,
+    verdict,
+)
 from .scenarios import SUITES, load_scenarios
 
 
@@ -972,6 +978,276 @@ def _execute_output_suite(
     )
 
 
+def _execute_recovery_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+) -> int:
+    """Guide a human recovery action and observe a new, fresh runtime session."""
+    scenario = next(
+        item for item in load_scenarios() if item.id == "recovery_reconnect"
+    )
+    entry_id = device.config_entry_id
+    steps: list[dict[str, Any]] = []
+    run_started = monotonic()
+
+    def checkpoint() -> None:
+        write_scenario_progress(output_dir, run_id, steps)
+
+    def prompt(question: str) -> str:
+        try:
+            return input(question).strip()
+        except (KeyboardInterrupt, EOFError) as ex:
+            steps.append({"step_id": "interrupted", "outcome": "inconclusive"})
+            checkpoint()
+            raise HAAPIError(
+                "Recovery run interrupted; private checkpoint saved"
+            ) from ex
+
+    if args.non_interactive or entry_id is None or device.entry_state != "loaded":
+        steps.append(
+            {
+                "step_id": "baseline",
+                "outcome": "not_applicable",
+                "reason": "interactive recovery and a loaded entry are required",
+            }
+        )
+        checkpoint()
+        print("Recovery suite requires an interactive operator and loaded entry")
+        return 2
+
+    try:
+        baseline = api.hil_capabilities(entry_id)
+    except HAAPIError:
+        steps.append(
+            {
+                "step_id": "baseline",
+                "outcome": "inconclusive",
+                "reason": "runtime capability snapshot unavailable",
+            }
+        )
+        checkpoint()
+        return 2
+    if (
+        baseline["verified"] is not True
+        or baseline["identity_conflicted"]
+        or baseline["connected"] is not True
+        or baseline["status_fresh"] is not True
+        or type(baseline["session_generation"]) is not int
+    ):
+        steps.append(
+            {
+                "step_id": "baseline",
+                "outcome": "not_applicable",
+                "reason": "verified connected fresh baseline is unavailable",
+            }
+        )
+        checkpoint()
+        print("Recovery suite blocked: no verified, connected, fresh baseline")
+        return 2
+    generation = baseline["session_generation"]
+    steps.append(
+        {
+            "step_id": "baseline",
+            "outcome": "pass",
+            "session_generation": generation,
+            "connected": True,
+            "status_fresh": True,
+            "utc": datetime.now(UTC).isoformat(),
+            "elapsed_ms": int((monotonic() - run_started) * 1000),
+        }
+    )
+    checkpoint()
+
+    print("Select the manual recovery action you will perform:")
+    print("  1. Interrupt and restore the selected BLE route")
+    print("  2. Use vendor-app contention, then close the app")
+    print("  3. Reload or upgrade Home Assistant / the integration")
+    choice = prompt("Action [1-3], or 0 to skip: ")
+    action = {
+        "1": "route interruption and restoration",
+        "2": "vendor-app contention",
+        "3": "Home Assistant or integration reload/upgrade",
+    }.get(choice)
+    if action is None:
+        steps.append(
+            {
+                "step_id": "operator_action",
+                "outcome": "skipped",
+                "reason": "operator declined or selected no action",
+            }
+        )
+        checkpoint()
+        return 2
+    print("The runner will not perform this action. Keep the station attended.")
+    if prompt("Type 1 after you have completed the selected action: ") != "1":
+        steps.append(
+            {
+                "step_id": "operator_action",
+                "outcome": "skipped",
+                "action": action,
+                "reason": "operator did not confirm completion",
+            }
+        )
+        checkpoint()
+        return 2
+    action_step: dict[str, Any] = {
+        "step_id": "operator_action",
+        "outcome": "pass",
+        "action": action,
+        "operator_confirmed": True,
+        "utc": datetime.now(UTC).isoformat(),
+        "elapsed_ms": int((monotonic() - run_started) * 1000),
+    }
+    steps.append(action_step)
+    checkpoint()
+
+    deadline = monotonic() + scenario.steps[2]["timeout_seconds"]
+    saw_disconnect = False
+    recovered: dict[str, Any] | None = None
+    try:
+        while monotonic() < deadline:
+            try:
+                current = api.hil_capabilities(entry_id)
+            except HAAPIError:
+                saw_disconnect = True
+                sleep(2)
+                continue
+            if current["connected"] is not True:
+                saw_disconnect = True
+            if (
+                current["verified"] is True
+                and not current["identity_conflicted"]
+                and current["connected"] is True
+                and current["status_fresh"] is True
+                and type(current["session_generation"]) is int
+                and (current["session_generation"] != generation or saw_disconnect)
+            ):
+                recovered = current
+                break
+            sleep(2)
+    except KeyboardInterrupt:
+        steps.append(
+            {
+                "step_id": "recovered_session",
+                "outcome": "inconclusive",
+                "reason": "operator interrupted recovery observation",
+            }
+        )
+        checkpoint()
+        print("Recovery observation interrupted; private checkpoint saved")
+        return 2
+
+    observation: dict[str, Any] = {
+        "step_id": "recovered_session",
+        "outcome": "inconclusive",
+        "utc": datetime.now(UTC).isoformat(),
+        "elapsed_ms": int((monotonic() - run_started) * 1000),
+        "session_generation_before": generation,
+        "disconnect_observed": saw_disconnect,
+    }
+    steps.append(observation)
+    trace: dict[str, Any] | None = None
+    if recovered is not None:
+        observation.update(
+            {
+                "session_generation_after": recovered["session_generation"],
+                "connected": True,
+                "status_fresh": True,
+            }
+        )
+        try:
+            start = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/start",
+                        "entry_id": entry_id,
+                        "run_id": run_id,
+                        "scenario_id": scenario.id,
+                        "requested_route": args.route,
+                    }
+                ]
+            )[0]
+            if (
+                isinstance(start, dict)
+                and start.get("schema_version") == 2
+                and isinstance(start.get("capture_id"), str)
+            ):
+                capture_id = start["capture_id"]
+                try:
+                    sleep(2)
+                finally:
+                    try:
+                        trace = api.websocket(
+                            [
+                                {
+                                    "type": "allpowers_ble/hil/stop",
+                                    "entry_id": entry_id,
+                                    "capture_id": capture_id,
+                                }
+                            ]
+                        )[0]
+                    except HAAPIError:
+                        trace = api.websocket(
+                            [
+                                {
+                                    "type": "allpowers_ble/hil/fetch",
+                                    "entry_id": entry_id,
+                                    "capture_id": capture_id,
+                                }
+                            ]
+                        )[0]
+                _validate_trace_result(
+                    trace,
+                    run_id=run_id,
+                    scenario_id=scenario.id,
+                    capture_id=capture_id,
+                    requested_route=args.route,
+                    expected_version=2,
+                )
+                trace_dir = output_dir / "traces" / "recovery_route"
+                trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+                trace_dir.mkdir(mode=0o700, exist_ok=False)
+                _save_private_trace(trace_dir, trace)
+                observation["trace"] = "traces/recovery_route"
+                observation["route"] = trace.get("observed_route")
+                observation["trace_complete"] = trace.get("complete") is True
+        except KeyboardInterrupt:
+            observation["reason"] = "operator interrupted the bounded route capture"
+            checkpoint()
+            print("Route capture interrupted; private checkpoint saved")
+            return 2
+        except HAAPIError, OSError:
+            observation["trace"] = "unavailable"
+
+    print(
+        "Physical recovery outcome: 1=recovered, 2=not recovered, 3=unable to observe"
+    )
+    physical = prompt("Outcome [1-3]: ")
+    physical_outcome = {"1": "yes", "2": "no", "3": "unable_to_observe"}.get(physical)
+    observation["physical_outcome"] = physical_outcome
+    observation["route_verified"] = bool(
+        trace is not None
+        and trace.get("observed_route") in {"local_adapter", "active_proxy"}
+    )
+    observation["outcome"] = recovery_verdict(
+        telemetry_matches=recovered is not None,
+        physical_outcome=physical_outcome,
+        route_verified=observation["route_verified"],
+        trace_complete=bool(trace is not None and trace.get("complete") is True),
+    )
+    observation["limitation"] = (
+        "route recovery is observed after the human action; no causal actor is proven; "
+        "scenario evidence does not grant build-level HIL qualification"
+    )
+    checkpoint()
+    print("Recovery observation:", observation["outcome"])
+    print("Scenario checkpoint saved to:", output_dir)
+    return 0 if observation["outcome"] == "pass" else 2
+
+
 def execute(args: argparse.Namespace) -> int:
     """Execute read-only preflight and explicitly requested private HIL capture."""
     if args.command == "run":
@@ -995,12 +1271,12 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"{status}: {entry['id']} [{entry['suite']}] — {entry['reason']}")
                 print("  requested actions:", ", ".join(entry["requested_effects"]))
             return 0
-        if args.suite not in (None, "read-only", "outputs"):
+        if args.suite not in (None, "read-only", "outputs", "recovery"):
             raise HAAPIError(
                 "This suite is declarative but execution is not implemented yet; use --dry-run"
             )
-        if args.suite == "outputs" and args.non_interactive:
-            raise HAAPIError("Output scenarios require interactive authorization")
+        if args.suite in {"outputs", "recovery"} and args.non_interactive:
+            raise HAAPIError(f"The {args.suite} suite requires interactive operation")
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)
@@ -1128,6 +1404,8 @@ def execute(args: argparse.Namespace) -> int:
         return _execute_output_suite(
             api, args, selected, environment, output_dir, run_id
         )
+    if args.command == "run" and args.suite == "recovery":
+        return _execute_recovery_suite(api, args, selected, output_dir, run_id)
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")

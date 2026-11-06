@@ -1798,6 +1798,77 @@ def test_call_control_rejects_unallowlisted_actions(key, entity_id, value):
         client.call_control(key, entity_id, value)
 
 
+def test_recovery_suite_only_observes_operator_action_and_new_route(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class RecoveryHA:
+        def __init__(self):
+            self.generations = iter((4, 5))
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            generation = next(self.generations)
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": generation,
+            }
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-safe"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                }
+            ]
+
+    api_fake = RecoveryHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "run"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "run-safe",
+    )
+
+    assert result == 0
+    assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
+    assert api_fake.commands[1]["type"] == "allpowers_ble/hil/stop"
+    assert all(
+        command["type"] not in {"call_service", "allpowers_ble/command"}
+        for command in api_fake.commands
+    )
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    assert stored["steps"][-1]["outcome"] == "pass"
+
+
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
     device = discovery.Device(
         device_id="private-device",
