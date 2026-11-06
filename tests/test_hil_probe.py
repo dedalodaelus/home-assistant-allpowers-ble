@@ -478,7 +478,15 @@ async def test_probe_failures_keep_typed_private_evidence(
             del args, kwargs
             raise FakeBleakError("PRIVATE-NOTIFY")
         fake.start_notify = broken_notify
-    with pytest.raises(Exception):
+    with pytest.raises(
+        (
+            client_module.DeviceNotFoundError,
+            client_module.ProbeConnectionTimeoutError,
+            client_module.ProbeGattValidationError,
+            client_module.ProbeNotificationSetupError,
+            client_module.ProbeStatusTimeoutError,
+        )
+    ):
         await client_module.async_probe_device(
             hass, address=ADDRESS, advertised_name="ALLPOWERS R600",
             timeout=0.05, observer=tracer,
