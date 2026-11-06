@@ -67,6 +67,7 @@ from .const import (
     SERVICE_UUID,
 )
 from .hil_probe import (
+    clear_flow,
     consume_probe,
     finish_probe,
     register_flow_candidates,
@@ -97,6 +98,11 @@ class AllpowersConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._probe_error: str | None = None
+
+    @callback
+    def async_remove(self) -> None:
+        """Scrub candidate and unsubmitted capture state when HA removes flow."""
+        clear_flow(self.hass, getattr(self, "flow_id", None))
 
     @staticmethod
     @callback

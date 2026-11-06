@@ -65,6 +65,7 @@ class ClientObserver(Protocol):
         generation: int | None,
         *,
         reason_category: str | None = None,
+        transaction_id: str | None = None,
     ) -> None: ...
 
     def control_rejection(
@@ -79,7 +80,13 @@ class ClientObserver(Protocol):
         reason: str | None = None,
     ) -> None: ...
 
-    def notification_received(self, generation: int | None, data: bytes) -> None: ...
+    def notification_received(
+        self,
+        generation: int | None,
+        data: bytes,
+        *,
+        transaction_id: str | None = None,
+    ) -> None: ...
 
     def notification_decoded(
         self,
@@ -90,6 +97,7 @@ class ClientObserver(Protocol):
         hardware_revision: str | None,
         discarded_frames: int,
         discarded_bytes: int,
+        transaction_id: str | None = None,
     ) -> None: ...
 
     def write(

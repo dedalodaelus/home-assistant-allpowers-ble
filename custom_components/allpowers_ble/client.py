@@ -2085,6 +2085,7 @@ async def async_probe_device(
     status_event = asyncio.Event()
     notify_characteristic: BleakGATTCharacteristic | None = None
     notify_started = False
+    probe_transaction_id: str | None = None
 
     def notification_handler(
         characteristic: BleakGATTCharacteristic,
@@ -2093,7 +2094,12 @@ async def async_probe_device(
         nonlocal status, settings
         del characteristic
         if slot is not None:
-            slot.emit("notification_received", generation, bytes(data))
+            slot.emit(
+                "notification_received",
+                generation,
+                bytes(data),
+                transaction_id=probe_transaction_id,
+            )
         discarded_before = decoder.discarded_frames
         bytes_before = decoder.discarded_bytes
         packets = decoder.feed(data)
@@ -2106,12 +2112,18 @@ async def async_probe_device(
                 hardware_revision=None,
                 discarded_frames=decoder.discarded_frames - discarded_before,
                 discarded_bytes=decoder.discarded_bytes - bytes_before,
+                transaction_id=probe_transaction_id,
             )
         for packet in packets:
             if isinstance(packet, StatusData):
                 status = packet
                 if slot is not None:
-                    slot.emit("probe_record", "probe_status_received", generation)
+                    slot.emit(
+                        "probe_record",
+                        "probe_status_received",
+                        generation,
+                        transaction_id=probe_transaction_id,
+                    )
                 status_event.set()
             elif isinstance(packet, SettingsData):
                 settings = packet
@@ -2164,10 +2176,13 @@ async def async_probe_device(
         frame = encode_status_request()
         with_response = _write_with_response(write_characteristic)
         if slot is not None:
+            probe_transaction_id = slot.transaction_id()
+        if slot is not None:
             slot.emit(
                 "write",
                 "write_attempt",
                 generation,
+                transaction_id=probe_transaction_id,
                 frame=frame,
                 write_with_response=with_response,
             )
@@ -2184,6 +2199,7 @@ async def async_probe_device(
                     "write",
                     "write_error",
                     generation,
+                    transaction_id=probe_transaction_id,
                     error_type=type(ex).__name__,
                     reason_category=(
                         "timeout" if isinstance(ex, TimeoutError) else "write_failure"
@@ -2199,7 +2215,12 @@ async def async_probe_device(
                 ) from ex
             raise
         if slot is not None:
-            slot.emit("write", "write_ok", generation)
+            slot.emit(
+                "write",
+                "write_ok",
+                generation,
+                transaction_id=probe_transaction_id,
+            )
 
         try:
             async with asyncio.timeout(remaining("status")):

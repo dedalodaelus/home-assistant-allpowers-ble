@@ -160,6 +160,24 @@ def register_flow_candidates(
     )
 
 
+def clear_flow(hass: HomeAssistant, flow_id: str | None) -> None:
+    """Erase an unsubmitted arm when Home Assistant removes its flow."""
+    if not isinstance(flow_id, str):
+        return
+    records = hass.data.get(REGISTRY_KEY)
+    if isinstance(records, dict):
+        records.pop(flow_id, None)
+        if not records:
+            hass.data.pop(REGISTRY_KEY, None)
+    store = hass.data.get(KEY)
+    if (
+        isinstance(store, CaptureStore)
+        and isinstance(store.active, ProbeCapture)
+        and store.active.flow_id == flow_id
+    ):
+        _forget(hass, store, store.active)
+
+
 def _active_flow(hass: HomeAssistant, flow_id: str) -> dict[str, Any] | None:
     """Verify the public FlowManager API, not private handler internals."""
     try:

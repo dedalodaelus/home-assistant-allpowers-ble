@@ -18,6 +18,7 @@ from custom_components.allpowers_ble.hil_trace import (
 from custom_components.allpowers_ble.hil_probe import (
     FlowCandidates,
     ProbeCapture,
+    clear_flow,
     consume_probe,
     finish_probe,
     register_flow_candidates,
@@ -135,6 +136,27 @@ async def test_flow_registry_expires_without_clearing_a_later_flow():
     new = hass.data[hil_probe.REGISTRY_KEY]["flow-a"]
     assert new is not record
     assert hil_probe._registry(hass)["flow-a"] is new
+
+
+@pytest.mark.asyncio
+async def test_clear_flow_erases_only_its_arm_and_candidates():
+    hass, connection = setup_case()
+    clear_flow(hass, None)
+    clear_flow(hass, "missing-flow")
+    flow = config_flow.AllpowersConfigFlow()
+    flow.hass = hass
+    flow.async_remove()
+    capture, _ = await arm(hass, connection)
+    register_flow_candidates(hass, "flow-b", "user", [ADDRESS])
+
+    clear_flow(hass, "flow-a")
+
+    assert hass.data[hil_probe.REGISTRY_KEY].keys() == {"flow-b"}
+    assert KEY not in hass.data
+    assert capture.termination_reason == "erased"
+
+    clear_flow(hass, "flow-b")
+    assert hil_probe.REGISTRY_KEY not in hass.data
 
 
 @pytest.mark.asyncio

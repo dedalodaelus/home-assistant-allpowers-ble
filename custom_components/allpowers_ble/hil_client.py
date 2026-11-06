@@ -6,7 +6,7 @@ connection, decides transaction outcomes, or changes runtime pending state.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .client_observer import TransactionObservation
 from .const import NOTIFY_UUID, WRITE_UUID
@@ -14,6 +14,11 @@ from .route_attribution import ConnectedRoute
 
 if TYPE_CHECKING:
     from .hil_trace import Capture
+
+
+def _correlation_fields(transaction_id: str | None) -> dict[str, Any]:
+    """Keep absent correlation out of the established event schema."""
+    return {"transaction_id": transaction_id} if transaction_id else {}
 
 
 # Preserve the trace-only name for existing unit contracts.
@@ -136,12 +141,14 @@ class HilClientTracer:
         generation: int | None,
         *,
         reason_category: str | None = None,
+        transaction_id: str | None = None,
     ) -> None:
         """Store safe probe-stage observations without altering BLE policy."""
         self.capture.record(
             event,
             session_generation=generation,
             reason_category=reason_category,
+            **_correlation_fields(transaction_id),
         )
 
     def control_rejection(self, generation: int | None, kind: str, reason: str) -> None:
@@ -194,7 +201,13 @@ class HilClientTracer:
             )
             self.transaction(event, transaction, reason=reason)
 
-    def notification_received(self, generation: int | None, data: bytes) -> None:
+    def notification_received(
+        self,
+        generation: int | None,
+        data: bytes,
+        *,
+        transaction_id: str | None = None,
+    ) -> None:
         """Retain raw RX solely in the bounded private capture."""
         self.capture.record(
             "notification_received",
@@ -202,6 +215,7 @@ class HilClientTracer:
             frame=data,
             characteristic_uuid=NOTIFY_UUID,
             session_generation=generation,
+            **_correlation_fields(transaction_id),
         )
 
     def notification_decoded(
@@ -213,6 +227,7 @@ class HilClientTracer:
         hardware_revision: str | None,
         discarded_frames: int,
         discarded_bytes: int,
+        transaction_id: str | None = None,
     ) -> None:
         """Describe validated decoder results, not guesses about raw chunks."""
         self.capture.record(
@@ -225,6 +240,7 @@ class HilClientTracer:
             session_hardware_revision=hardware_revision,
             discarded_frames=discarded_frames,
             discarded_bytes=discarded_bytes,
+            **_correlation_fields(transaction_id),
         )
 
     def write(
