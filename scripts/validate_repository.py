@@ -25,6 +25,8 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/release.yml",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
+    "docs/user-guide.md",
+    "docs/user-guide.es.md",
     "LICENSE",
     "README.md",
     "SECURITY.md",
@@ -53,20 +55,38 @@ IGNORED_DIRS = {
     ".venv",
     "dist",
 }
-README_REQUIRED_HEADINGS = {
+REQUIRED_MARKDOWN_HEADINGS = {
     "README.md": {
-        "## Safety model",
-        "## Conservative automation examples",
-        "## Removal and recovery",
-        "## BLE trust boundary",
-        "## Project status",
+        "## Features",
+        "## Compatibility",
+        "## Requirements & installation",
+        "## Safety & limitations",
+        "## Documentation & support",
     },
     "README.es.md": {
-        "## Seguridad de las escrituras",
-        "## Ejemplos de automatización conservadora",
-        "## Retirada y recuperación",
+        "## Funciones",
+        "## Compatibilidad",
+        "## Requisitos e instalación",
+        "## Seguridad y limitaciones",
+        "## Documentación y soporte",
+    },
+    "docs/user-guide.md": {
+        "## Compatibility",
+        "## BLE trust boundary",
+        "## Entities",
+        "## Safety model",
+        "## Runtime options",
+        "## Reconfigure entry data",
+        "## Home Assistant Repairs",
+    },
+    "docs/user-guide.es.md": {
+        "## Compatibilidad",
         "## Límite de confianza BLE",
-        "## Estado del proyecto",
+        "## Entidades",
+        "## Seguridad de las escrituras",
+        "## Opciones",
+        "## Reconfiguración de la entrada",
+        "## Repairs de Home Assistant",
     },
 }
 MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
@@ -291,8 +311,8 @@ def validate_clean_tree(errors: list[str]) -> None:
 
 
 def validate_markdown_links_and_headings(errors: list[str]) -> None:
-    """Validate required README headings and local markdown links/fragments."""
-    for relative, required_headings in README_REQUIRED_HEADINGS.items():
+    """Validate required documentation headings and local links/fragments."""
+    for relative, required_headings in REQUIRED_MARKDOWN_HEADINGS.items():
         path = ROOT / relative
         if not path.is_file():
             errors.append(f"missing required README file: {relative}")
@@ -309,7 +329,7 @@ def validate_markdown_links_and_headings(errors: list[str]) -> None:
                 errors.append(f"{relative} missing required heading: {heading}")
 
     checked_files: dict[Path, set[str]] = {}
-    markdown_files = [ROOT / "README.md", ROOT / "README.es.md"]
+    markdown_files = [ROOT / relative for relative in REQUIRED_MARKDOWN_HEADINGS]
 
     for source in markdown_files:
         if not source.is_file():
@@ -337,7 +357,9 @@ def validate_markdown_links_and_headings(errors: list[str]) -> None:
                 fragment = link_path[1:] + (f"-{fragment}" if fragment else "")
                 link_path = ""
 
-            resolved = source if not link_path else (ROOT / link_path).resolve()
+            resolved = (
+                source if not link_path else (source.parent / link_path).resolve()
+            )
             if not resolved.is_file():
                 errors.append(
                     f"broken local markdown link in {source.relative_to(ROOT)}: {target}"

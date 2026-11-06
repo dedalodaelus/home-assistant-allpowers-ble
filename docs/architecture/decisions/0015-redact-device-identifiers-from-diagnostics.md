@@ -66,7 +66,7 @@ current diagnostic requirement.
 ## Evidence
 
 - [`diagnostics.py`](../../../custom_components/allpowers_ble/diagnostics.py)
-- [README diagnostics section](../../../README.md#diagnostics-and-logging)
+- [User guide: diagnostics and logging](../../user-guide.md#diagnostics-and-logging)
 - [Quality strategy](../../quality.md)
 
 ## Fitness functions

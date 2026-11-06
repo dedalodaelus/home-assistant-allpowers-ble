@@ -3,475 +3,99 @@
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://www.hacs.xyz/)
 [![CI](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml/badge.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](docs/quality.md)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/LICENSE)
 
-[Español](README.es.md)
+[Español](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/README.es.md)
 
-<p align="center">
-  <img
-    src="docs/assets/branding/readme-banner.png"
-    alt="ALLPOWERS BLE community integration for Home Assistant"
-    width="720"
-  >
-</p>
+<p align="center"><img src="https://raw.githubusercontent.com/dedalodaelus/home-assistant-allpowers-ble/devel/docs/assets/branding/readme-banner.png" alt="ALLPOWERS BLE community integration for Home Assistant" width="560"></p>
 
-A local Home Assistant custom integration for compatible ALLPOWERS portable power
-stations. It connects through Home Assistant's Bluetooth stack, so the same
-integration works with a local Bluetooth adapter or a connectable ESPHome
-Bluetooth Proxy.
+Connect compatible ALLPOWERS power stations to Home Assistant over local
+Bluetooth, using a local adapter or an **active** ESPHome Bluetooth Proxy.
+Home Assistant selects and refreshes the BLE route when a reconnect is needed.
+No vendor cloud or device-side ESPHome component is required.
 
-There is no vendor cloud, no direct BlueZ access, and no ESPHome component is
-required on the power station side.
+## Features
 
-> [!IMPORTANT]
-> The code recognizes canonical **ALLPOWERS R600** and **VOLIX P1800** identities
-> with hardware revision `0.3` (`raw_hardware_version=0x03`). Broad discovery
-> matches do not establish identity. Code-profile classification is separate
-> from physical HIL qualification; the single reported VOLIX unit used firmware
-> `0xF1`, and full qualification remains pending.
-
-## Highlights
-
-- Automatic Bluetooth discovery and UI-only configuration.
-- Local operation through Home Assistant Bluetooth and ESPHome Bluetooth Proxy.
-- Multiple power stations, one config entry and BLE connection manager per device.
-- Battery, power, remaining-time, output, settings, version, RSSI, and health entities.
-- Safe write gating from fresh snapshots; settings writes preserve unknown bits and output writes preserve verified output states.
-- Reconnection with a fresh Home Assistant-selected adapter/proxy route.
-- Incremental parser for fragmented, concatenated, and noisy BLE notifications.
-- Config-entry and device diagnostics with address redaction.
-- English and Spanish translations.
-- HACS release ZIP, semantic versioning, automated releases, tests, coverage,
-  Ruff, Mypy, Pylint, Hassfest, HACS validation, CodeQL, and Dependabot.
+- Automatic discovery and UI-based setup; supports multiple stations.
+- Battery, power, remaining-time, output, settings, version, signal, and health
+  entities.
+- Local status polling with push notifications, reconnection, and route recovery.
+- Freshness-gated controls that preserve documented output states and unrelated
+  settings bits.
+- Redacted diagnostics and Home Assistant Repairs for persistent actionable problems.
 
 ## Compatibility
 
-| Model / advertisement | Status | Notes |
-|---|---:|---|
-| Canonical R600 identity recognized by the integration with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Primary development and protocol target; physical qualification remains pending. |
-| R600 discovery candidate with an unrecognized identity (for example, `R6000` or `AP R1500`) | Experimental read-only | Broad discovery matching alone does not grant verified identity or writable capabilities. |
-| Canonical VOLIX P1800 identity with revision signature (`hardware_version=0.3`, `raw_hardware_version=0x03`) | Verified code profile; HIL pending | Uses the R600 protocol profile. PR #183 reports one unit on firmware `0xF1`; other firmware is not physically qualified, but firmware is not a runtime allowlist. |
-| VOLIX P1800 discovery candidate with unrecognized identity or revision | Experimental read-only | Discovery matching alone does not grant verified identity or writable capabilities. |
-| AP S300 and similar `AP S*` units | Experimental read-only | Accepted only after an active GATT and protocol probe. Telemetry entities are exposed, but writable controls remain disabled. |
-| AP S500 / AP S700 V2 family | Rejected | Known to use a different protocol revision. |
-| Generic `ALLPOWERS*` or FFF0 advertisement | Experimental read-only | Setup proceeds only after protocol validation. Telemetry is exposed, but writable controls remain disabled. |
+| Model/profile | Status |
+|---|---|
+| Canonical R600 and VOLIX P1800 with hardware revision `0.3` (`0x03`) | Recognized code profiles; physical HIL qualification pending |
+| Broad or unknown identities, including `AP S*` candidates | Experimental, read-only after active protocol probe |
+| AP S500 / AP S700 V2 | Rejected: different protocol revision |
 
-See [Compatibility](docs/compatibility.md) before reporting another model as
-supported.
+Code-profile recognition does not mean hardware qualification. Unknown candidates
+stay read-only; rejected models remain rejected. See the [full compatibility
+matrix](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/compatibility.md).
 
-For real hardware qualification workflow, see
-[HIL qualification runbook](docs/hil-qualification.md).
-
-## Requirements
+## Requirements & installation
 
 - Home Assistant **2026.7.0 or newer**.
-- HACS for the recommended installation method.
-- A connectable Bluetooth route:
-  - a Bluetooth adapter available to Home Assistant, or
-  - an ESPHome Bluetooth Proxy with active connections enabled.
-- The ALLPOWERS device powered on and within reliable BLE range.
+- A connectable local Bluetooth adapter or an **active** ESPHome Bluetooth Proxy.
+  Passive-only proxies cannot maintain the required GATT connection.
+- Device powered on and within reliable BLE range.
 
-A passive-only proxy can advertise a device but cannot maintain the GATT connection
-required by this integration.
+Recommended HACS installation:
 
-## Installation
-
-### HACS custom repository
-
-1. Open **HACS** in Home Assistant.
-2. Open the menu and select **Custom repositories**.
-3. Add `https://github.com/dedalodaelus/home-assistant-allpowers-ble` as an
+1. Open **HACS → Integrations → ⋮ → Custom repositories**.
+2. Add `https://github.com/dedalodaelus/home-assistant-allpowers-ble` as an
    **Integration** repository.
-4. Install **ALLPOWERS BLE**.
-5. Restart Home Assistant.
-6. Open **Settings → Devices & services**. Accept the discovered device, or select
+3. Install **ALLPOWERS BLE**, then restart Home Assistant.
+4. Open **Settings → Devices & services** and accept discovery, or select
    **Add integration → ALLPOWERS BLE**.
 
-### Manual installation
-
-Copy the integration directory into the Home Assistant configuration directory:
+For manual installation, copy only this directory into the Home Assistant
+configuration directory, then restart:
 
 ```text
 custom_components/allpowers_ble/
 ```
 
-Restart Home Assistant, then add **ALLPOWERS BLE** from **Devices & services**.
-Do not copy the whole source repository into `custom_components`.
-
-## Bluetooth Proxy
-
-A typical ESPHome proxy configuration is:
-
-```yaml
-esp32_ble_tracker:
-
-bluetooth_proxy:
-  active: true
-```
-
-Home Assistant chooses the best currently available connectable route. The
-integration resolves that route again before each reconnection rather than pinning
-it permanently to one proxy.
-
-## BLE trust boundary
-
-This integration assumes a trusted local Home Assistant environment:
-
-- write commands are accepted only from Home Assistant users who can control entities;
-- capability checks use an observed BLE model identity stored separately from the editable display name and entry title; placeholders and synthetic reconfigure entries cannot establish or replace it;
-- legacy entries migrate only recognizable model-family names, but their history cannot prove that a family-looking display name was never edited; writes still require matching hardware-revision settings received in the current GATT session;
-- a later contradictory model-family observation is persisted as a conservative downgrade rather than being forgotten across restarts;
-- BLE proximity limits command reach, but nearby radio access is still part of the risk model;
-- ESPHome proxies are transport relays and must be managed like trusted local infrastructure;
-- there is no cloud credential boundary to rotate if local access is compromised.
-
-Do not treat this integration as a hard safety interlock for unattended critical loads.
-
-## Entities
-
-Entities become unavailable when the underlying data is stale. This prevents a
-connected-but-silent BLE session from presenting old values as current or using
-old state to construct a write.
-
-| Platform | Entities |
-|---|---|
-| Sensor | Battery, input power, output power, remaining time, RSSI, hardware version, firmware version, reconnects, protocol errors, watchdog resets |
-| Binary sensor | Connected, telemetry available, settings available, input active, output active, AC output, DC output, light output |
-| Switch | AC output, DC output, light, ECO mode, experimental car charger |
-| Select | Work mode, ECO shutdown time |
-| Button | Refresh status, reconnect, send settings keepalive |
-| Number | Status request interval, settings keepalive interval |
-
-Diagnostic and advanced tuning entities are disabled by default where appropriate.
-The car-charger control is unavailable until it is explicitly enabled in the
-integration options. Experimental profiles are telemetry-only and do not create
-write entities.
-Diagnostic counters are session-scoped values and intentionally do not expose a
-long-term statistics state class.
-
-## Safety model
-
-The vendor protocol combines several controls into single bit fields. Sending only
-the bit that changed can unintentionally alter another output. This integration
-therefore applies the following invariants:
-
-1. AC, DC, and light changes require a fresh status snapshot and emit one combined
-   command preserving the other output states.
-   Preservation is guaranteed for documented output states only; undocumented
-   output-command semantics are not claimed safe.
-2. ECO, work mode, car charger, and ECO timeout changes require a fresh settings
-   snapshot and preserve every unrelated raw flag bit.
-3. Each write publishes a versioned transaction before awaiting GATT. A newer,
-   matching notification from the same session is required before another write
-   in that control group. Dependent commands are rejected, not queued, while
-   confirmation is pending; requested targets never become write snapshots.
-4. Pending transactions and freshness are invalidated on every disconnect and
-   new GATT session.
-5. The BLE client enforces revision-aware write capabilities at the transport
-   boundary for output, settings, and settings keepalive commands.
-6. Writes are rejected rather than guessed when the required snapshot is missing,
-   stale, disconnected, or unauthorized for the active profile.
-
-Any future write-safety guarantee must be supported by captured evidence from the
-target hardware revision and a matching regression test.
-
-Service completion means transport submission, not physical confirmation. Entity
-state changes only from device telemetry. A matching notification establishes
-observed convergence, not command causality: the protocol has no transaction ID.
-Notifications received during the GATT await are tracked, but a failed or canceled
-write still leaves the group blocked until a new safe snapshot is received.
-Confirmation timeout also requires a new snapshot, not reuse of cached state.
-
-Sequential automations must wait for matching device state before changing another
-output or setting. Settings keepalive never re-sends a pending user target: manual
-keepalive is rejected while pending. Automatic maintenance renews the BLE session
-if settings are still unsafe at the next keepalive interval, rather than waiting
-indefinitely for a status request to produce settings. The new session must receive
-fresh `0x03` before any settings write; cached targets are never replayed.
-If the device supplies only `0x01` across new sessions, settings controls stay
-unavailable and session recovery remains bounded by the keepalive interval.
-This cannot guarantee prevention of the physical inactivity cutoff. Settings
-`0x03` response timing remains unqualified on physical R600 hardware; simulation
-tests do not demonstrate a physical safety fix.
-
-Commands already matching a fresh, validated snapshot are no-ops: no frame or
-transaction is created. All guards still apply, including pending or ambiguous
-transactions. Explicit settings keepalive intentionally remains a write.
-
-See [Architecture](docs/architecture/README.md) and [Protocol](docs/protocol.md).
-
-## Conservative automation examples
-
-Use automations that fail safe when telemetry is stale or unavailable, and avoid
-autonomous control of critical loads.
-
-Example 1: notify when telemetry drops instead of forcing output writes.
-
-```yaml
-automation:
-   - alias: allpowers_telemetry_unavailable
-      triggers:
-         - trigger: state
-            entity_id: binary_sensor.allpowers_telemetry_available
-            to: "off"
-            for: "00:01:00"
-      actions:
-         - action: persistent_notification.create
-            data:
-               title: ALLPOWERS telemetry unavailable
-               message: Check BLE route, proxy availability, and station power state.
-```
-
-Example 2: gate a non-critical AC enable action behind explicit conditions.
-
-```yaml
-automation:
-   - alias: allpowers_enable_ac_non_critical
-      triggers:
-         - trigger: state
-            entity_id: binary_sensor.allpowers_connected
-            to: "on"
-      conditions:
-         - condition: state
-            entity_id: binary_sensor.allpowers_telemetry_available
-            state: "on"
-         - condition: numeric_state
-            entity_id: sensor.allpowers_battery
-            above: 40
-      actions:
-         - action: switch.turn_on
-            target:
-               entity_id: switch.allpowers_ac_output
-```
-
-Always test automations manually with non-critical loads before enabling them.
-
-## Removal and recovery
-
-To remove the integration cleanly:
-
-1. Disable or remove automations that reference ALLPOWERS entities.
-2. Remove the ALLPOWERS BLE config entry from Home Assistant Devices and services.
-3. If installed with HACS, uninstall ALLPOWERS BLE in HACS and restart Home Assistant.
-4. If installed manually, delete `custom_components/allpowers_ble` and restart.
-5. Confirm that entity and device records are gone; remove orphaned helpers if present.
-
-If you plan to reinstall, keep a sanitized diagnostics export before removal so
-route and model-detection history can be compared after recovery.
-
-## Communication contract and IoT class
-
-The manifest declares `iot_class: local_polling` because normal operation depends
-on periodic local status requests while still consuming push notifications.
-
-- Polling path: the client sends a status-request frame every configured
-   `status_interval`.
-- Push path: status and settings notifications can arrive at any time and update
-   entity state without waiting for the next request.
-- Recovery path: watchdog and reconnect traffic exists only to recover transport
-   health, not to increase normal polling cadence.
-
-The rationale and evidence baseline for this classification is tracked in issue
-#55 and architecture decision 0003.
-
-Every periodic operation has an explicit trigger and lower bound:
-
-| Periodic operation | Trigger | Default | Lower bound |
-|---|---|---:|---:|
-| Status request | Connected session and no request in interval | 20 s | 10 s |
-| Settings keepalive (optional) | Enabled and no keepalive in interval (plus one initial send after fresh settings) | 540 s | 60 s |
-| Reconnect backoff retry | Connection failure or disconnect | 1 s initial, capped at 60 s | 0 s jitter floor, 5 s configurable cap minimum |
-| Telemetry watchdog reconnect | No fresh status telemetry in watchdog window | 45 s | Must be greater than stale timeout |
-| Transport watchdog reconnect | No BLE packet in watchdog window | 45 s | Must be greater than stale timeout |
-
-Aggressive intervals can overload local adapters or Bluetooth Proxy connection
-capacity, especially with multiple devices. Keep defaults unless you have a
-measured reason to tune them.
-
-## Runtime options
-
-Defaults are deliberately conservative and match observed R600 behavior.
-
-| Option | Default | Valid range / behavior |
-|---|---:|---|
-| Status request interval | 20 s | 10–120 s |
-| Telemetry stale timeout | 30 s | Must exceed the status interval |
-| Telemetry and transport watchdog timeout | 45 s | Must exceed the stale timeout |
-| Maximum reconnect delay | 60 s | 5–300 s |
-| Settings stale timeout | 600 s | 60–3600 s |
-| Settings keepalive | Off | Experimental; disabled unless explicitly enabled |
-| Settings keepalive interval | 540 s | 60–540 s; settings timeout must be longer |
-| Car charger control | Off | Experimental; exposes no writable control until enabled |
-
-Options are applied live, including changes saved during initialization, without
-restarting the Bluetooth client. A full integration reload is not required.
-
-## Reconfigure entry data
-
-Use **Settings -> Devices & services -> ALLPOWERS BLE -> Reconfigure** when you
-need to update entry-level setup data without removing the integration entry.
-
-Unsuccessful startup shuts down the BLE client before handing the failure back
-to Core, including unexpected errors and cancellation. Partially initialized
-platforms are unloaded and failed runtime data is removed before a retry.
-If partial-platform cleanup fails, further setup attempts are blocked for that
-entry until Home Assistant restarts; an integration reload is not sufficient.
-
-- Supported reconfigure fields: Bluetooth address and display name.
-- Changing the address requires an explicit physical-device choice:
-  - **Same physical device:** migrate registry identities while preserving entity
-    IDs, the device ID, names, areas, and other user customizations. After the first
-    address change, a stable opaque registry identity is independent of Bluetooth.
-  - **Replacement device:** remove the entity and device records owned by this
-    entry and create fresh identities. Automations and dashboards are not
-    transferred automatically. Returning to a previously used address does not
-    restore the replaced device's customizations or default entity IDs. New
-    default entity IDs include a persistent generation prefix; existing migrated
-    or customized IDs are not renamed.
-- If a replacement fails before touching the source registries, returning to the
-  registered source address with **Same physical device** cancels the pending
-  replacement and preserves the original records and references.
-- A pending transition can be recovered at its current target address: choose
-  **Same physical device** to retry migration or **Replacement device** to discard
-  this entry's old records. Already migrated records are recognized on retry.
-- Physical identity cannot be verified by the BLE protocol; choose the relationship
-  yourself. Registry transitions occur only after valid startup telemetry and
-  never modify records belonging to other config entries. Registry collisions
-  reject conflicting same-device migration before it starts. If an unexpected
-  registry update fails mid-migration, the pending transition remains retryable;
-  no source records are deleted by same-device migration.
-- Reconfigure performs an active probe before applying changes.
-- If Core reports `FAILED_UNLOAD`, restart Home Assistant rather than reloading.
-  Reconfiguration is blocked and saved options remain pending until restart.
-  Repairs and diagnostics expose the requirement; registry identities are kept.
-  During `UNLOAD_IN_PROGRESS`, updates also stay pending and reconfiguration is
-  blocked. Core cleanup failures are reported even after listeners are removed;
-  deleting the entry removes its persistent unload Repair.
-  See [unload recovery](docs/troubleshooting.md#integration-unload-failed).
-- Duplicate targets are rejected to preserve one-entry-per-device behavior.
-- If you cancel the flow, no entry data is changed.
-- Changed setup data triggers one reload; unchanged reconfiguration does not.
-  An unchanged reconfiguration retries setup immediately when the entry is in
-  `SETUP_RETRY` or `SETUP_ERROR`, but does not start an explicitly unloaded entry.
-- Setup reconciles data changes received during initialization. If the obsolete
-  Bluetooth client times out, the new configuration is initialized in the same
-  setup attempt instead of waiting for Home Assistant's retry timer.
-
-Use **Options** for runtime tuning (`status_interval`, watchdog and keepalive
-settings). Do not use reconfigure for those option values.
-
-## Diagnostics and logging
-
-Download diagnostics from the integration or device page in Home Assistant. The
-payload includes:
-
-- connection attempts, successful connections, disconnects, and reconnects;
-- notification, valid-packet, parser-discard, protocol-error, write-error, and watchdog counters
-   (total, telemetry, and transport);
-- last connection, disconnection, packet, and error information;
-- current cached protocol state and freshness metadata;
-- active options and model-support classification.
-
-Bluetooth identifiers are redacted recursively across structured fields and
-nested strings. Device-provided names and user entry names are replaced with a
-stable redaction marker in diagnostics payloads. The `last_error` field keeps an
-error category with sanitized detail and is reported in diagnostics payloads.
-No cloud credentials exist.
-
-For temporary debug logging:
-
-```yaml
-logger:
-  logs:
-    custom_components.allpowers_ble: debug
-    bleak_retry_connector: debug
-```
-
-Remove verbose logging after collecting the relevant failure because Bluetooth
-logs can be large. See [Troubleshooting](docs/troubleshooting.md).
-
-## Home Assistant Repairs
-
-The integration creates Repairs only for persistent actionable conditions and
-dismisses them automatically on recovery:
-
-- `persistent_no_route` after repeated no-route failures.
-- `repeated_watchdog_resets` after repeated watchdog reconnects.
-- `invalid_migrated_options` when legacy options cannot be migrated safely.
-
-Transient reconnects do not create Repairs.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    HA[Home Assistant entities] --> CO[Push coordinator]
-    CO --> CL[ALLPOWERS BLE client]
-    CL --> BT[Home Assistant Bluetooth]
-    BT --> AD[Local adapter]
-    BT --> PX[ESPHome Bluetooth Proxy]
-    CL --> PR[Pure protocol codec]
-    PR --> MD[Immutable protocol models]
-```
-
-The protocol package imports no Home Assistant module. It can be tested and reused
-independently from transport and entity code.
-
-## Development
-
-Python 3.14.2 or newer is required by the targeted Home Assistant release.
-
-```bash
-python3.14 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements_test.txt
-pre-commit install
-make all
-```
-
-Build the HACS release asset with:
-
-```bash
-python scripts/build_release.py --clean
-```
-
-The generated `dist/allpowers_ble.zip` contains `manifest.json`, `__init__.py`, and
-the rest of the integration at the archive root. This is the layout expected by
-HACS when `zip_release` is enabled.
-
-More information:
-
-- [Development guide](docs/development.md)
-- [Adding models](docs/adding-models.md)
-- [Quality and test strategy](docs/quality.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-
-## Support and reporting
-
-- Report bugs and model compatibility through the public issue forms:
-   [GitHub Issues](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose)
-- Report vulnerabilities privately through
-   [GitHub Security Advisories](https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new)
-
-## Project status
-
-This is a community custom integration. It follows current Home Assistant patterns
-and quality-scale practices, but it is not part of Home Assistant Core and has not
-been reviewed or supported by the Home Assistant project.
-
-Releases are promoted through reviewed pull requests from `devel` to `main` with
-CI validation, repository validation, and safety-documentation updates before
-publication. Urgent production fixes may target `main` only from `hotfix/*`
-branches cut from `main`, and then must be propagated back to `devel`.
-Quality goals describe current evidence and tests, not a formal Home Assistant
-certification program. Version 1.0 readiness criteria are tracked in
-`docs/quality.md` and reviewed on every stable promotion.
-
-Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Home Assistant selects an available Bluetooth route. After a disconnect, the
+integration resolves the route again and can reconnect through another available
+adapter or active proxy.
+
+## Safety & limitations
+
+> **Warning:** Do not use this integration as a hard safety interlock for
+> unattended critical loads. A successful service call means the command was
+> submitted over BLE, not physically confirmed. Entity state changes only from
+> device telemetry, and telemetry can become stale or unavailable.
+
+Writes require fresh same-session snapshots and verified capabilities.
+Experimental profiles are read-only. A matching notification shows observed
+convergence but cannot prove command causality; the protocol has no transaction
+ID. Physical HIL qualification remains pending for the recognized profiles. Review
+the [full safety
+model](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/user-guide.md#safety-model)
+before enabling controls or automations.
+
+## Documentation & support
+
+- [Full user
+  guide](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/user-guide.md)
+  · [Guía de usuario en
+  español](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/user-guide.es.md)
+- [Compatibility](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/compatibility.md)
+  ·
+  [Troubleshooting](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/troubleshooting.md)
+- [Architecture](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/architecture/README.md)
+  ·
+  [Protocol](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/protocol.md)
+  ·
+  [Development](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/docs/development.md)
+- [Report a bug or compatibility
+  issue](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new/choose)
+  · [Report a
+  vulnerability](https://github.com/dedalodaelus/home-assistant-allpowers-ble/security/advisories/new)
+- Community-maintained custom integration; not part of or supported by Home
+  Assistant Core. [MIT
+  License](https://github.com/dedalodaelus/home-assistant-allpowers-ble/blob/devel/LICENSE).
