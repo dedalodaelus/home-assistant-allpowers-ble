@@ -1,6 +1,6 @@
 # Guided HIL CLI: read-only preflight and opt-in private GATT trace
 
-The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. The private trace v2 identifies the established local BlueZ adapter or ESPHome active proxy only when the connected backend exposes sufficient evidence; otherwise its route is unverified. None of these commands provide independent RF capture, active config-flow probe evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
+The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. The private trace v2 identifies the established local BlueZ adapter or ESPHome active proxy only when the connected backend exposes sufficient evidence; otherwise its route is unverified. The separately authorized `probe-trace` command also captures Home Assistant's existing config-flow GATT probe, including flows without a config entry. Neither capture mode provides independent RF evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
 
 ## Installation
 
@@ -118,7 +118,7 @@ most 256 bytes. Dropped counters and expiry make evidence incomplete. Raw packet
 publish `frames.jsonl` without a separate protocol-aware privacy review.**
 
 The trace records *GATT API observations*, not independent RF data or
-physical output measurements. A trace v2 route can be `local_adapter`, `active_proxy`, `mixed` or `unverified`, based exclusively on the actually connected backend. Config-flow active probes and independent RF/physical evidence are not available yet; these artifacts are not physical HIL qualification.
+physical output measurements. A trace v2 route can be `local_adapter`, `active_proxy`, `mixed` or `unverified`, based exclusively on the actually connected backend. An explicitly armed config-flow active probe can also be captured at the GATT/API layer with `probe-trace`. Independent RF and physical-output evidence remain unavailable; neither runtime nor probe captures establish physical HIL qualification.
 
 Trace acquisition defaults to 15 seconds and is limited to 30 seconds per
 scenario (`--scenario-id safe-label`). Run separate scenarios instead of
@@ -303,6 +303,4 @@ metadata but does not authorize qualification.
 
 **`qualification_allowed=false` for every v1/v2 trace and every route**,
 even with `complete=true` or `mixed`. A connected backend is not independent
-RF evidence or proof that the station changed a physical output. The
-config-flow active-probe task and authorized hardware measurements on both
-routes remain separate work under #229.
+RF evidence or proof that the station changed a physical output. The config-flow active-probe capture is implemented. Remaining #229 acceptance work includes real-HA end-to-end flow submission plus authenticated WebSocket/GATT evidence, operator hardware tests via local BlueZ and ESPHome active proxy, independent RF/physical-output confirmation, protocol-aware privacy review/redaction, and disabled-capture performance measurements versus `devel`.
