@@ -37,10 +37,11 @@ class Scenario:
     mode: str
     steps: tuple[dict[str, Any], ...]
     required_evidence: tuple[str, ...]
+    parameters: dict[str, Any]
 
 
 def _validate(raw: Any) -> Scenario:
-    if not isinstance(raw, dict) or set(raw) != {
+    required_fields = {
         "id",
         "schema_version",
         "suite",
@@ -48,7 +49,11 @@ def _validate(raw: Any) -> Scenario:
         "mode",
         "steps",
         "required_evidence",
-    }:
+    }
+    if not isinstance(raw, dict) or set(raw) not in (
+        required_fields,
+        required_fields | {"parameters"},
+    ):
         raise ValueError("Invalid scenario fields")
     if (
         type(raw["schema_version"]) is not int
@@ -127,6 +132,42 @@ def _validate(raw: Any) -> Scenario:
         isinstance(item, str) for item in evidence
     ):
         raise ValueError("Invalid required evidence")
+    parameters = raw.get("parameters", {})
+    if raw["suite"] == "soak-24h":
+        expected_parameters = {
+            "duration_seconds",
+            "sample_interval_seconds",
+            "max_gap_seconds",
+            "trace_interval_seconds",
+            "trace_window_seconds",
+            "max_bytes",
+            "minimum_samples",
+        }
+        if (
+            raw["mode"] != "soak"
+            or not isinstance(parameters, dict)
+            or set(parameters) != expected_parameters
+            or parameters.get("duration_seconds") != 86400
+            or type(parameters.get("sample_interval_seconds")) is not int
+            or not 60 <= parameters["sample_interval_seconds"] <= 1800
+            or type(parameters.get("max_gap_seconds")) is not int
+            or not parameters["sample_interval_seconds"]
+            < parameters["max_gap_seconds"]
+            <= 3600
+            or type(parameters.get("trace_interval_seconds")) is not int
+            or not 300 <= parameters["trace_interval_seconds"] <= 7200
+            or type(parameters.get("trace_window_seconds")) is not int
+            or not 1 <= parameters["trace_window_seconds"] <= 30
+            or type(parameters.get("max_bytes")) is not int
+            or not 1_048_576 <= parameters["max_bytes"] <= 104_857_600
+            or type(parameters.get("minimum_samples")) is not int
+            or parameters["minimum_samples"]
+            != parameters["duration_seconds"] // parameters["sample_interval_seconds"]
+            + 1
+        ):
+            raise ValueError("Invalid bounded soak parameters")
+    elif "parameters" in raw:
+        raise ValueError("Only the soak scenario may declare runner parameters")
     return Scenario(
         raw["id"],
         raw["schema_version"],
@@ -135,6 +176,7 @@ def _validate(raw: Any) -> Scenario:
         raw["mode"],
         tuple(dict(step) for step in raw["steps"]),
         tuple(evidence),
+        dict(parameters),
     )
 
 

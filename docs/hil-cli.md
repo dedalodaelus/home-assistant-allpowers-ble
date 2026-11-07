@@ -101,11 +101,16 @@ python -m scripts.hil run --suite all --dry-run
 
 `all` currently selects only read-only scenarios. Write, recovery and soak
 suites are never implicitly enabled. The ordinary `run` command remains the
-#228 read-only snapshot. The recovery suite can resume a private schema v2
-checkpoint for the same selected device. Resume continues observation only;
-it never repeats the operator action or replays an output write. Output
-checkpoints are not resumable because an interrupted service call may be
-ambiguous.
+#228 read-only snapshot. Run the bounded 24-hour observer explicitly with
+`python -m scripts.hil --non-interactive --device 1 run --suite soak-24h`.
+It samples every five minutes, allows at most a ten-minute observation gap,
+collects an hourly 15-second route trace, and caps private run data at 10 MiB.
+Only a full uninterrupted 24-hour segment can pass; a process restart starts a
+new segment and records the missing time as a discontinuity. Recovery and soak
+can resume a private schema v2 checkpoint for the same selected device. Resume
+continues observation only; it never repeats an operator action or replays an
+output write. Output checkpoints are not resumable because an interrupted
+service call may be ambiguous.
 
 `run --suite read-only` also requests an admin-only runtime capability snapshot
 for the selected loaded entry. Without admin access, capability evidence is

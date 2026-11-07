@@ -202,8 +202,12 @@ operator perform a route interruption/restoration, vendor-app contention, or
 HA reload/upgrade while the CLI observes reconnection and current route
 evidence. Neither write nor recovery scenarios have been piloted on hardware;
 missing route or physical evidence remains inconclusive. Checkpoint resume is
-available for an interrupted recovery observation on the same fingerprinted
-device; it never repeats the manual action. Output checkpoint resume is refused
-because an interrupted write can be ambiguous. Automated safe restoration,
-transaction-safety suite execution, and the 24-hour soak executor remain
+available for interrupted recovery and soak observation on the same
+fingerprinted device. Resume starts a new soak segment and records a
+restart discontinuity; it never repeats the manual action. Output checkpoint
+resume is refused because an interrupted write can be ambiguous. A bounded
+24-hour soak collector is implemented with periodic telemetry, route traces,
+gap detection, private storage limits, and restart-aware checkpoints. The
+collector has offline simulation coverage, but no hardware soak has been run.
+Automated safe restoration and transaction-safety suite execution remain
 outstanding. No build-level physical qualification is claimed.

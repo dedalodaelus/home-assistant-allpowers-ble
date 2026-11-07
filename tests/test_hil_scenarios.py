@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.hil.runner import plan, recovery_verdict, verdict
+from scripts.hil.runner import plan, recovery_verdict, soak_verdict, verdict
 from scripts.hil.scenarios import _validate, load_scenarios
 
 
@@ -17,6 +17,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
         "output_ac_cycle",
         "read_only_snapshot",
         "recovery_reconnect",
+        "soak_24h_observation",
     ]
     assert all(
         1 <= step["timeout_seconds"] <= 86400
@@ -162,6 +163,24 @@ def test_recovery_needs_new_telemetry_route_trace_and_operator_confirmation() ->
         )
         == "fail"
     )
+
+
+def test_soak_verdict_requires_full_duration_samples_and_complete_traces() -> None:
+    evidence = {
+        "measured_seconds": 86400,
+        "sample_count": 289,
+        "minimum_samples": 289,
+        "maximum_gap_seconds": 300,
+        "allowed_gap_seconds": 600,
+        "trace_count": 24,
+        "minimum_traces": 24,
+        "dropped_traces": 0,
+    }
+    assert soak_verdict(**evidence) == "pass"
+    assert soak_verdict(**{**evidence, "measured_seconds": 86399}) == "inconclusive"
+    assert soak_verdict(**{**evidence, "maximum_gap_seconds": 601}) == "inconclusive"
+    assert soak_verdict(**{**evidence, "dropped_traces": 1}) == "inconclusive"
+    assert soak_verdict(**{**evidence, "interrupted": True}) == "inconclusive"
 
 
 def test_transaction_correlation_requires_submitted_then_confirmed_same_session():

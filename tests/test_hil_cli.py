@@ -764,7 +764,7 @@ def test_output_suite_checkpoint_cannot_be_resumed():
         ["run", "--suite", "outputs", "--resume", "/tmp/not-read"]
     )
 
-    with pytest.raises(api.HAAPIError, match="Only an interactive recovery"):
+    with pytest.raises(api.HAAPIError, match="scenario cannot be resumed"):
         cli.execute(args)
 
 
@@ -2032,6 +2032,119 @@ def test_device_fingerprint_is_run_and_server_scoped():
     assert same != cli._device_fingerprint(
         "0123456789abcdef", device, "https://other.example"
     )
+
+
+def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+    import os
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class FakeClock:
+        value = 10_000.0
+
+        def monotonic(self):
+            return self.value
+
+        def sleep(self, seconds):
+            self.value += seconds
+
+    class FakeDateTime:
+        @staticmethod
+        def now(tz=UTC):
+            base = datetime(2026, 1, 1, tzinfo=tz)
+            return base + timedelta(seconds=clock.value - 10_000.0)
+
+    class SoakHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.capture = 0
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+            }
+
+        def websocket(self, commands):
+            command = commands[0]
+            self.commands.append(command["type"])
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": f"capture-{self.capture}",
+                        "ttl_seconds": 30,
+                    }
+                ]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                }
+            ]
+
+    clock = FakeClock()
+    api_fake = SoakHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "soak"
+    output_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(cli, "monotonic", clock.monotonic)
+    monkeypatch.setattr(cli, "sleep", clock.sleep)
+    monkeypatch.setattr(cli, "datetime", FakeDateTime)
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_: {"battery": 89})
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+
+    def save_trace(trace_dir, trace):
+        fd = os.open(
+            trace_dir / "trace.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"observed_route": trace["observed_route"]}, stream)
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+
+    result = cli._execute_soak_suite(
+        api_fake,
+        SimpleNamespace(route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    assert result == 0
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    segment = checkpoint["steps"][-1]
+    assert segment["outcome"] == "pass"
+    assert segment["measured_seconds"] >= 86400
+    assert segment["sample_count"] == 289
+    assert segment["trace_count"] >= 24
+    assert len(api_fake.commands) == 48
+    assert all(
+        command in {"allpowers_ble/hil/start", "allpowers_ble/hil/stop"}
+        for command in api_fake.commands
+    )
+    assert (output_dir / "soak_samples_001.jsonl").exists()
 
 
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
