@@ -110,6 +110,22 @@ async def test_noop_confirmed_control_does_not_block_real_change(control: str) -
     assert len(fake.writes) == 1
 
 
+def test_client_exposes_session_generation_and_pending_transaction_state() -> None:
+    client, _ = _connected_client()
+    assert client.active_session_generation == 1
+    assert client.has_pending_transaction is False
+    assert client._settings is not None
+
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=0,
+        target=client._settings,
+        sent_monotonic=0,
+        confirm_deadline_monotonic=1,
+    )
+    assert client.has_pending_transaction is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("group", ["output", "settings"])
 @pytest.mark.parametrize("write_error", [False, True])
