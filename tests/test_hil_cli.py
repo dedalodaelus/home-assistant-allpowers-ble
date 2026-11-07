@@ -1964,6 +1964,60 @@ def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("key", "entity_id", "value", "domain", "service", "service_data"),
+    [
+        (key, f"switch.station_{key}", value, "switch", service, None)
+        for key in ("ac_output", "dc_output", "light", "eco_mode", "car_charger")
+        for value, service in (("on", "turn_on"), ("off", "turn_off"))
+    ]
+    + [
+        (
+            "work_mode",
+            "select.station_mode",
+            option,
+            "select",
+            "select_option",
+            {"option": option},
+        )
+        for option in ("mute", "standard", "fast")
+    ]
+    + [
+        (
+            "eco_timeout",
+            "select.station_timeout",
+            option,
+            "select",
+            "select_option",
+            {"option": option},
+        )
+        for option in ("one_hour", "two_hours", "four_hours", "six_hours")
+    ],
+)
+def test_call_control_maps_supported_controls_to_narrow_services(
+    monkeypatch, key, entity_id, value, domain, service, service_data
+):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+
+    def websocket(rows):
+        commands.extend(rows)
+        return [{"context": {}}]
+
+    monkeypatch.setattr(client, "websocket", websocket)
+    client.call_control(key, entity_id, value)
+
+    expected = {
+        "type": "call_service",
+        "domain": domain,
+        "service": service,
+        "target": {"entity_id": entity_id},
+    }
+    if service_data is not None:
+        expected["service_data"] = service_data
+    assert commands == [expected]
+
+
+@pytest.mark.parametrize(
     ("key", "entity_id", "value"),
     [
         ("ac_output", "switch.station_ac", "toggle"),
