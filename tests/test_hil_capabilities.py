@@ -48,13 +48,13 @@ def _entry(
 
 
 @pytest.mark.asyncio
-async def test_capability_endpoint_denies_non_admin_unknown_and_unready_entries() -> None:
+async def test_capability_endpoint_denies_non_admin_unknown_and_unready_entries() -> (
+    None
+):
     loaded = _entry()
     wrong_domain = _entry(domain="other")
     unloaded = _entry(state=ConfigEntryState.NOT_LOADED, runtime_data=object())
-    hass = SimpleNamespace(
-        config_entries=_Entries(loaded, wrong_domain, unloaded)
-    )
+    hass = SimpleNamespace(config_entries=_Entries(loaded, wrong_domain, unloaded))
     msg = {"id": 9, "entry_id": "private-entry"}
 
     cases = (
@@ -102,9 +102,7 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     hass = SimpleNamespace(config_entries=_Entries(entry))
     connection = _Connection()
 
-    await ws_capabilities(
-        hass, connection, {"id": 12, "entry_id": "private-entry"}
-    )
+    await ws_capabilities(hass, connection, {"id": 12, "entry_id": "private-entry"})
 
     assert connection.errors == []
     assert connection.results[0][0] == 12
@@ -148,9 +146,7 @@ async def test_capability_endpoint_filters_invalid_or_stale_revisions() -> None:
     hass = SimpleNamespace(config_entries=_Entries(entry))
     connection = _Connection()
 
-    await ws_capabilities(
-        hass, connection, {"id": 13, "entry_id": "private-entry"}
-    )
+    await ws_capabilities(hass, connection, {"id": 13, "entry_id": "private-entry"})
 
     result = connection.results[0][1]
     assert result["hardware_revision"] is None
@@ -159,4 +155,3 @@ async def test_capability_endpoint_filters_invalid_or_stale_revisions() -> None:
     assert result["raw_firmware_revision"] is None
     assert result["session_generation"] is None
     assert result["settings_fresh"] is False
-
