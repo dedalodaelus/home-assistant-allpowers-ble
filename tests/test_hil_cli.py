@@ -2810,9 +2810,25 @@ def test_soak_requires_a_verified_normalized_telemetry_value():
         {"battery": {"value": None, "source": "unavailable", "verified": False}}
     )
     assert not cli._has_verified_telemetry({"battery": 89})
+    non_measurements = {
+        key: {"value": value, "source": "ha_rest_entity_state", "verified": True}
+        for key, value in {
+            "connected": "on",
+            "telemetry_available": "on",
+            "hardware_version": "0.3",
+            "firmware_version": "0.2",
+        }.items()
+    }
+    assert not cli._has_verified_telemetry(non_measurements)
+    assert not cli._has_verified_telemetry(
+        {"battery": {"value": True, "source": "ha_rest_entity_state", "verified": True}}
+    )
 
 
-def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", ["changed_state", "capabilities", "control_state"])
+def test_output_suite_rechecks_pre_state_after_authorization(
+    monkeypatch, tmp_path, failure
+):
     from types import SimpleNamespace
 
     device = discovery.Device(
@@ -2831,8 +2847,13 @@ def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_pa
         state = "off"
         actions = []
         commands = []
+        capability_calls = 0
+        control_calls = 0
 
         def hil_capabilities(self, _entry):
+            self.capability_calls += 1
+            if failure == "capabilities" and self.capability_calls > 1:
+                raise cli.HAAPIError("capability snapshot unavailable")
             return {
                 "verified": True,
                 "identity_conflicted": False,
@@ -2844,6 +2865,9 @@ def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_pa
             }
 
         def control_state(self, _key, _entity):
+            self.control_calls += 1
+            if failure == "control_state" and self.control_calls > 1:
+                raise cli.HAAPIError("control state unavailable")
             return {"available": True, "state": self.state}
 
         def call_control(self, *_args):
@@ -2861,7 +2885,8 @@ def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_pa
     output_dir.mkdir(mode=0o700)
 
     def authorize(_prompt):
-        api.state = "on"  # Simulate another HA actor changing it at the prompt.
+        if failure == "changed_state":
+            api.state = "on"  # Simulate another HA actor changing it at the prompt.
         return "1"
 
     monkeypatch.setattr(cli, "input", authorize, raising=False)
@@ -2881,7 +2906,73 @@ def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_pa
     assert api.actions == []
     assert api.commands == ["allpowers_ble/hil/start", "allpowers_ble/hil/stop"]
     assert checkpoint["steps"][0]["outcome"] == "inconclusive"
-    assert "pre-write recheck failed" in checkpoint["steps"][0]["reason"]
+    assert "pre-write recheck" in checkpoint["steps"][0]["reason"]
+
+
+def test_soak_without_numeric_measurements_cannot_start_a_passing_segment(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+
+    class SoakHA:
+        origin = "https://ha.example.test"
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+            }
+
+    def interrupt_sleep(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(cli, "sleep", interrupt_sleep)
+    monkeypatch.setattr(
+        cli,
+        "read_only_sample",
+        lambda *_: {
+            key: {"value": value, "source": "ha_rest_entity_state", "verified": True}
+            for key, value in {
+                "connected": "on",
+                "telemetry_available": "on",
+                "hardware_version": "0.3",
+                "firmware_version": "0.2",
+            }.items()
+        },
+    )
+    output_dir = tmp_path / "soak-non-measurements"
+    output_dir.mkdir(mode=0o700)
+
+    result = cli._execute_soak_suite(
+        SoakHA(),
+        SimpleNamespace(route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    sample_lines = (output_dir / "soak_samples_001.jsonl").read_text().splitlines()
+    assert result == 2
+    assert checkpoint["steps"] == []
+    assert json.loads(sample_lines[-1])["event"] == "sample_gap"
 
 
 def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):

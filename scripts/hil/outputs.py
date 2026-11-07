@@ -11,6 +11,23 @@ from .discovery import Device
 from .suite_runtime import SuiteServices
 
 
+def _stop_capture(api: HAClient, entry_id: str, capture_id: str) -> bool:
+    """Stop a trace after a pre-write abort; report cleanup failure to evidence."""
+    try:
+        api.websocket(
+            [
+                {
+                    "type": "allpowers_ble/hil/stop",
+                    "entry_id": entry_id,
+                    "capture_id": capture_id,
+                }
+            ]
+        )
+    except HAAPIError:
+        return False
+    return True
+
+
 def _execute_output_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -141,8 +158,16 @@ def _execute_output_suite(
             capture_id = capture["capture_id"]
             # Authorization can sit at the prompt while HA state changes. Once
             # tracing is armed, repeat every live precondition at the write boundary.
-            recheck_caps = api.hil_capabilities(entry_id)
-            recheck_state = api.control_state(key, entity_id)
+            try:
+                recheck_caps = api.hil_capabilities(entry_id)
+                recheck_state = api.control_state(key, entity_id)
+            except HAAPIError:
+                row["reason"] = "live pre-write recheck unavailable after authorization"
+                if not _stop_capture(api, entry_id, capture_id):
+                    row["trace_stop_failed"] = True
+                checkpoint()
+                print("Step stopped: live pre-write evidence unavailable")
+                break
             if (
                 recheck_caps.get("verified") is not True
                 or recheck_caps.get("identity_conflicted")
@@ -160,17 +185,7 @@ def _execute_output_suite(
                 or recheck_state.get("state") != state["state"]
             ):
                 row["reason"] = "live pre-write recheck failed after authorization"
-                try:
-                    api.websocket(
-                        [
-                            {
-                                "type": "allpowers_ble/hil/stop",
-                                "entry_id": entry_id,
-                                "capture_id": capture_id,
-                            }
-                        ]
-                    )
-                except HAAPIError:
+                if not _stop_capture(api, entry_id, capture_id):
                     row["trace_stop_failed"] = True
                 checkpoint()
                 print("Step stopped: live pre-write state changed")

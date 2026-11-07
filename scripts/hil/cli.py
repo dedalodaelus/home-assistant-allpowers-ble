@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import hmac
 import json  # noqa: F401 - shared module object used by trace.py and CLI tests
+import math
 import os
 import re
 from time import monotonic, sleep
@@ -217,13 +218,16 @@ def _device_fingerprint(
 
 
 def _has_verified_telemetry(snapshot: Any) -> bool:
-    """Require at least one safely normalized HA measurement in a sample."""
+    """Require at least one finite numeric physical measurement per sample."""
+    measurement_keys = {"battery", "input_power", "output_power", "remaining_time"}
     return isinstance(snapshot, dict) and any(
-        isinstance(value, dict)
-        and value.get("verified") is True
-        and value.get("source") == "ha_rest_entity_state"
-        and value.get("value") is not None
-        for value in snapshot.values()
+        isinstance(record, dict)
+        and record.get("verified") is True
+        and record.get("source") == "ha_rest_entity_state"
+        and type(record.get("value")) in (int, float)
+        and math.isfinite(record["value"])
+        for key, record in snapshot.items()
+        if key in measurement_keys
     )
 
 
