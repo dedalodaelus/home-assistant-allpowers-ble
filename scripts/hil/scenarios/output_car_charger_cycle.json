@@ -1,0 +1,33 @@
+{
+  "id": "output_car_charger_cycle",
+  "schema_version": 1,
+  "suite": "outputs",
+  "title": "Turn the optional car charger on and restore its initial off state",
+  "mode": "interactive_write",
+  "steps": [
+    {
+      "id": "car_charger_on",
+      "instruction": "Enable the optional car charger only when its integration opt-in is active and the station is attended.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "car_charger",
+      "expected": "on"
+    },
+    {
+      "id": "car_charger_off",
+      "instruction": "Disable the optional car charger and confirm its initial state is restored.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "car_charger",
+      "expected": "off"
+    }
+  ],
+  "required_evidence": [
+    "fresh_settings_pre_and_post_state",
+    "integration_car_charger_opt_in",
+    "ha_service_acknowledgement",
+    "same_session_settings_transaction_confirmation",
+    "verified_connected_route",
+    "physical_observation"
+  ]
+}

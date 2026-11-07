@@ -15,6 +15,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
     scenarios = load_scenarios()
     assert [scenario.id for scenario in scenarios] == [
         "output_ac_cycle",
+        "output_car_charger_cycle",
         "output_dc_cycle",
         "output_light_cycle",
         "read_only_snapshot",
@@ -81,6 +82,7 @@ def test_write_plan_stays_blocked_until_live_preflight() -> None:
     planned = plan("outputs")
     assert [item.scenario.id for item in planned] == [
         "output_ac_cycle",
+        "output_car_charger_cycle",
         "output_dc_cycle",
         "output_light_cycle",
     ]

@@ -773,6 +773,7 @@ def test_output_suite_checkpoint_cannot_be_resumed():
     [
         ("outputs", "output_dc_cycle", "switch"),
         ("outputs", "output_light_cycle", "switch"),
+        ("outputs", "output_car_charger_cycle", "switch"),
         ("settings", "settings_work_mode", "select"),
         ("settings", "settings_eco_timeout", "select"),
     ],
@@ -796,6 +797,7 @@ def test_scenario_selection_is_a_side_effect_free_dry_run(
     ("scenario_id", "control_key"),
     [
         ("output_ac_cycle", "ac_output"),
+        ("output_car_charger_cycle", "car_charger"),
         ("output_dc_cycle", "dc_output"),
         ("output_light_cycle", "light"),
     ],
@@ -823,8 +825,13 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
                 "connected": True,
                 "pending_transaction": self.pending,
                 "status_fresh": True,
+                "settings_fresh": True,
                 "session_generation": 7,
-                "capabilities": {"write_output_controls": True},
+                "capabilities": {
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "car_charger_enabled": True,
+                },
             }
 
         def control_state(self, key, entity_id):
@@ -921,6 +928,81 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
         assert api_fake.actions == ["on", "off"]
         assert cleanup["service_attempted"] is True
         assert cleanup.get("cleanup_attempted") is not True
+
+
+def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class DisabledCarChargerHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+            self.trace_starts = 0
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 3,
+                "capabilities": {
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "car_charger_enabled": False,
+                },
+            }
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": "off"}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                self.trace_starts += 1
+            raise AssertionError("a disabled car charger must not start a trace")
+
+    output_dir = tmp_path / "car-disabled"
+    output_dir.mkdir(mode=0o700)
+    api_fake = DisabledCarChargerHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"car_charger": "switch.private_car_charger"},
+        config_entry_id="entry-safe",
+    )
+
+    result = cli._execute_output_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            scenario_id="output_car_charger_cycle",
+        ),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert api_fake.actions == []
+    assert api_fake.trace_starts == 0
+    assert checkpoint["steps"][0]["reason"] == (
+        "live capability or expected pre-state check failed"
+    )
 
 
 @pytest.mark.parametrize(

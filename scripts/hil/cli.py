@@ -821,6 +821,11 @@ def _execute_output_suite(
     print("Device:", device.model)
     for index, declaration in enumerate(scenario.steps, start=1):
         key, desired = declaration["target"], declaration["expected"]
+        settings_control = key in {"eco_mode", "car_charger"}
+        freshness_key = "settings_fresh" if settings_control else "status_fresh"
+        capability_key = (
+            "write_settings_controls" if settings_control else "write_output_controls"
+        )
         entity_id = device.control_entities.get(key)
         row: dict[str, Any] = {
             "step_id": declaration["id"],
@@ -840,9 +845,13 @@ def _execute_output_suite(
                 or caps["identity_conflicted"]
                 or caps["connected"] is not True
                 or caps["pending_transaction"]
-                or caps["status_fresh"] is not True
+                or caps[freshness_key] is not True
                 or type(generation) is not int
-                or caps["capabilities"]["write_output_controls"] is not True
+                or caps["capabilities"][capability_key] is not True
+                or (
+                    key == "car_charger"
+                    and caps["capabilities"]["car_charger_enabled"] is not True
+                )
                 or not state.get("available")
                 or state.get("state") != ("off" if desired == "on" else "on")
             ):
@@ -913,7 +922,7 @@ def _execute_output_suite(
                     ):
                         break
                     if (
-                        observed_caps.get("status_fresh") is True
+                        observed_caps.get(freshness_key) is True
                         and post.get("available") is True
                         and post.get("state") == desired
                     ):
@@ -950,7 +959,9 @@ def _execute_output_suite(
             _save_private_trace(trace_dir, trace)
             row["trace"] = f"traces/{declaration['id']}"
             tx = correlate_transaction(
-                trace, expected_generation=generation, kind="output"
+                trace,
+                expected_generation=generation,
+                kind="settings" if settings_control else "output",
             )
             row["transaction"] = tx
             after_caps = observed_caps or api.hil_capabilities(entry_id)
@@ -966,7 +977,7 @@ def _execute_output_suite(
             }
             telemetry_matches = (
                 after_caps.get("session_generation") == generation
-                and after_caps.get("status_fresh") is True
+                and after_caps.get(freshness_key) is True
                 and post.get("available") is True
                 and post.get("state") == desired
             )
@@ -1012,6 +1023,15 @@ def _execute_output_suite(
         restore_expected = scenario.steps[-1]["expected"]
         restore_entity = device.control_entities.get(restore_key)
         restore_pre_state = "off" if restore_expected == "on" else "on"
+        restore_is_settings = restore_key in {"eco_mode", "car_charger"}
+        restore_freshness_key = (
+            "settings_fresh" if restore_is_settings else "status_fresh"
+        )
+        restore_capability_key = (
+            "write_settings_controls"
+            if restore_is_settings
+            else "write_output_controls"
+        )
         if (
             cleanup.get("step_id") == restore_step_id
             and cleanup.get("authorized") is True
@@ -1021,7 +1041,7 @@ def _execute_output_suite(
             cleanup.update(
                 {
                     "cleanup_attempted": True,
-                    "cleanup_target": "off",
+                    "cleanup_target": restore_expected,
                     "outcome": "inconclusive",
                 }
             )
@@ -1033,12 +1053,19 @@ def _execute_output_suite(
                     current_caps.get("verified") is not True
                     or current_caps.get("identity_conflicted") is not False
                     or current_caps.get("connected") is not True
-                    or current_caps.get("status_fresh") is not True
+                    or current_caps.get(restore_freshness_key) is not True
                     or current_caps.get("pending_transaction") is not False
                     or current_caps.get("session_generation")
                     != cleanup.get("session_generation")
-                    or current_caps.get("capabilities", {}).get("write_output_controls")
+                    or current_caps.get("capabilities", {}).get(restore_capability_key)
                     is not True
+                    or (
+                        restore_key == "car_charger"
+                        and current_caps.get("capabilities", {}).get(
+                            "car_charger_enabled"
+                        )
+                        is not True
+                    )
                     or current_state.get("available") is not True
                     or current_state.get("state") != restore_pre_state
                 ):
@@ -1105,7 +1132,7 @@ def _execute_output_suite(
                                 ):
                                     break
                                 if (
-                                    restore_caps.get("status_fresh") is True
+                                    restore_caps.get(restore_freshness_key) is True
                                     and restored.get("available") is True
                                     and restored.get("state") == restore_expected
                                 ):
@@ -1136,7 +1163,7 @@ def _execute_output_suite(
                         restore_tx = correlate_transaction(
                             restore_trace,
                             expected_generation=cleanup["session_generation"],
-                            kind="output",
+                            kind="settings" if restore_is_settings else "output",
                         )
                         physical_restore = input(
                             f"Restoration physical outcome: 1={restore_expected}, "
@@ -1161,7 +1188,7 @@ def _execute_output_suite(
                                 restore_caps is not None
                                 and restore_caps.get("session_generation")
                                 == cleanup.get("session_generation")
-                                and restore_caps.get("status_fresh") is True
+                                and restore_caps.get(restore_freshness_key) is True
                                 and restored.get("available") is True
                                 and restored.get("state") == restore_expected
                             ),

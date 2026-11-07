@@ -121,11 +121,14 @@ snapshot stores only allowlisted states and options, never HA entity or entry
 IDs. This does not execute controls or establish physical qualification.
 
 The `outputs` suite offers separately selectable AC, DC and station-light
-on/off cycles. AC remains the default; choose another declared scenario with
-`--scenario-id output_dc_cycle` or `--scenario-id output_light_cycle`. Each
-scenario checks the active profile and state before each write, requires
-separate numeric consent, records short private traces and asks for the
-physical result. Run only with a safe noncritical load and no hazardous
+on/off cycles, plus the optional car charger when its integration opt-in is
+enabled. AC remains the default; choose another declared scenario with
+`--scenario-id output_dc_cycle`, `--scenario-id output_light_cycle`, or
+`--scenario-id output_car_charger_cycle`. The car charger also requires fresh
+settings evidence and its explicit integration capability flag. Each scenario
+checks the active profile and state before each write, requires separate
+numeric consent, records short private traces and asks for the physical
+result. Run only with a safe noncritical load and no hazardous
 equipment connected. If the operator authorized the final off step but trace
 setup failed before its service call, the runner rechecks the same fresh
 session and may perform one traced restoration. An attempted or ambiguous
@@ -154,6 +157,7 @@ python -m scripts.hil --device 1 run --suite recovery
 python -m scripts.hil --device 1 run --suite outputs
 python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
 python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_car_charger_cycle
 python -m scripts.hil --device 1 run --suite settings --scenario-id settings_work_mode
 python -m scripts.hil --device 1 run --suite settings --scenario-id settings_eco_timeout
 ```
