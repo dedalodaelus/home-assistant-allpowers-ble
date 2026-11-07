@@ -120,15 +120,18 @@ disabled, ambiguous, missing or unavailable entities are ineligible. The
 snapshot stores only allowlisted states and options, never HA entity or entry
 IDs. This does not execute controls or establish physical qualification.
 
-The `outputs` suite currently offers an attended AC on/off cycle. It checks the
-active profile and state before each write, requires separate numeric consent,
-records short private traces and asks for the physical result. Run only with a
-safe noncritical load and no hazardous equipment connected. If the operator
-authorized the AC-off step but trace setup failed before its service call, the
-runner rechecks the same fresh session and may perform one traced restoration.
-An attempted or ambiguous write is never retried; in that case inspect and
-restore the station manually. A restoration does not turn an incomplete run
-into a pass. This has not been piloted on hardware.
+The `outputs` suite offers separately selectable AC, DC and station-light
+on/off cycles. AC remains the default; choose another declared scenario with
+`--scenario-id output_dc_cycle` or `--scenario-id output_light_cycle`. Each
+scenario checks the active profile and state before each write, requires
+separate numeric consent, records short private traces and asks for the
+physical result. Run only with a safe noncritical load and no hazardous
+equipment connected. If the operator authorized the final off step but trace
+setup failed before its service call, the runner rechecks the same fresh
+session and may perform one traced restoration. An attempted or ambiguous
+write is never retried; in that case inspect and restore the station manually.
+A restoration does not turn an incomplete run into a pass. These scenarios
+have not been piloted on hardware.
 
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA
@@ -142,6 +145,8 @@ qualification.
 ```bash
 python -m scripts.hil --device 1 run --suite recovery
 python -m scripts.hil --device 1 run --suite outputs
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
 ```
 
 Each guided run writes private `scenarios.json` and `checkpoint.json` files

@@ -91,6 +91,10 @@ def make_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--suite", choices=(*SUITES, "all"))
     run_parser.add_argument(
+        "--scenario-id",
+        help="Select one declared scenario (currently supported for outputs)",
+    )
+    run_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print scenario eligibility without contacting Home Assistant",
@@ -781,7 +785,17 @@ def _execute_output_suite(
     run_id: str,
 ) -> int:
     """Run the bounded AC cycle, requiring separate consent for each write."""
-    scenario = next(item for item in load_scenarios() if item.id == "output_ac_cycle")
+    requested_scenario = getattr(args, "scenario_id", None) or "output_ac_cycle"
+    scenario = next(
+        (
+            item
+            for item in load_scenarios()
+            if item.id == requested_scenario and item.suite == "outputs"
+        ),
+        None,
+    )
+    if scenario is None:
+        raise HAAPIError("Unknown output scenario")
     entry_id = device.config_entry_id
     steps: list[dict[str, Any]] = []
     fingerprint = _device_fingerprint(run_id, device, api.origin)
@@ -837,8 +851,10 @@ def _execute_output_suite(
                 print("Step", index, "blocked by live preflight")
                 break
             print(f"Step {index}: {key} {state['state']} → {desired}")
+            control_label = key.replace("_", " ")
             print(
-                "Confirm only if the station is attended and the AC output is safe to change."
+                f"Confirm only if the station is attended and {control_label} "
+                "is safe to change."
             )
             if input("Type 1 to authorize this single action: ").strip() != "1":
                 row["outcome"] = "skipped"
@@ -991,8 +1007,13 @@ def _execute_output_suite(
     # checks. Never use this path after an ambiguous service call.
     if len(steps) == 2 and steps[0].get("outcome") == "pass":
         cleanup = steps[1]
+        restore_key = scenario.steps[-1]["target"]
+        restore_step_id = scenario.steps[-1]["id"]
+        restore_expected = scenario.steps[-1]["expected"]
+        restore_entity = device.control_entities.get(restore_key)
+        restore_pre_state = "off" if restore_expected == "on" else "on"
         if (
-            cleanup.get("step_id") == "ac_off"
+            cleanup.get("step_id") == restore_step_id
             and cleanup.get("authorized") is True
             and cleanup.get("prewrite_trace_failed") is True
             and cleanup.get("service_attempted") is not True
@@ -1007,9 +1028,7 @@ def _execute_output_suite(
             checkpoint()
             try:
                 current_caps = api.hil_capabilities(entry_id)
-                current_state = api.control_state(
-                    "ac_output", device.control_entities.get("ac_output")
-                )
+                current_state = api.control_state(restore_key, restore_entity)
                 if (
                     current_caps.get("verified") is not True
                     or current_caps.get("identity_conflicted") is not False
@@ -1021,11 +1040,11 @@ def _execute_output_suite(
                     or current_caps.get("capabilities", {}).get("write_output_controls")
                     is not True
                     or current_state.get("available") is not True
-                    or current_state.get("state") != "on"
+                    or current_state.get("state") != restore_pre_state
                 ):
                     cleanup["cleanup_reason"] = (
-                        "fresh same-session telemetry did not prove AC was on "
-                        "and safe to restore"
+                        "fresh same-session telemetry did not prove the "
+                        "control state and safe restoration"
                     )
                 else:
                     restore_capture = api.websocket(
@@ -1059,9 +1078,9 @@ def _execute_output_suite(
                             cleanup["cleanup_service_attempted"] = True
                             checkpoint()
                             api.call_control(
-                                "ac_output",
-                                device.control_entities["ac_output"],
-                                "off",
+                                restore_key,
+                                restore_entity,
+                                restore_expected,
                             )
                             restore_action_submitted = True
                         except HAAPIError:
@@ -1074,8 +1093,8 @@ def _execute_output_suite(
                                 try:
                                     restore_caps = api.hil_capabilities(entry_id)
                                     restored = api.control_state(
-                                        "ac_output",
-                                        device.control_entities["ac_output"],
+                                        restore_key,
+                                        restore_entity,
                                     )
                                 except HAAPIError:
                                     break
@@ -1088,7 +1107,7 @@ def _execute_output_suite(
                                 if (
                                     restore_caps.get("status_fresh") is True
                                     and restored.get("available") is True
-                                    and restored.get("state") == "off"
+                                    and restored.get("state") == restore_expected
                                 ):
                                     break
                                 sleep(min(1, max(0, restore_deadline - monotonic())))
@@ -1109,7 +1128,8 @@ def _execute_output_suite(
                             requested_route=args.route,
                             expected_version=2,
                         )
-                        trace_dir = output_dir / "traces" / "ac_off_cleanup"
+                        trace_name = f"{restore_key}_cleanup"
+                        trace_dir = output_dir / "traces" / trace_name
                         trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
                         trace_dir.mkdir(mode=0o700, exist_ok=False)
                         _save_private_trace(trace_dir, restore_trace)
@@ -1119,8 +1139,8 @@ def _execute_output_suite(
                             kind="output",
                         )
                         physical_restore = input(
-                            "Restoration physical outcome: "
-                            "1=off, 2=still on, 3=unable to observe: "
+                            f"Restoration physical outcome: 1={restore_expected}, "
+                            f"2=not {restore_expected}, 3=unable to observe: "
                         ).strip()
                         physical_restore_outcome = {
                             "1": "yes",
@@ -1129,7 +1149,7 @@ def _execute_output_suite(
                         }.get(physical_restore)
                         cleanup.update(
                             {
-                                "cleanup_trace": "traces/ac_off_cleanup",
+                                "cleanup_trace": f"traces/{trace_name}",
                                 "cleanup_post_state": restored.get("state"),
                                 "cleanup_transaction": restore_tx,
                                 "cleanup_physical_outcome": physical_restore_outcome,
@@ -1143,7 +1163,7 @@ def _execute_output_suite(
                                 == cleanup.get("session_generation")
                                 and restore_caps.get("status_fresh") is True
                                 and restored.get("available") is True
-                                and restored.get("state") == "off"
+                                and restored.get("state") == restore_expected
                             ),
                             telemetry_contradictory=(
                                 restored.get("available") is True
@@ -1172,7 +1192,7 @@ def _execute_output_suite(
     ):
         if not restoration_passed:
             print(
-                "Check the AC output physically and restore the intended state manually if needed."
+                "Check the output physically and restore its intended state manually if needed."
             )
     print("Private scenario results saved to:", output_dir)
     return (
@@ -2065,9 +2085,23 @@ def execute(args: argparse.Namespace) -> int:
             or args.list_suites
         ):
             raise HAAPIError("This scenario cannot be resumed")
+        if args.scenario_id is not None:
+            if args.suite != "outputs":
+                raise HAAPIError(
+                    "--scenario-id is currently supported only for outputs"
+                )
+            if not any(
+                item.id == args.scenario_id and item.suite == "outputs"
+                for item in load_scenarios()
+            ):
+                raise HAAPIError("Unknown output scenario")
         if args.dry_run:
             suite = args.suite or "read-only"
             planned = plan_scenarios(suite, non_interactive=args.non_interactive)
+            if args.scenario_id is not None:
+                planned = tuple(
+                    item for item in planned if item.scenario.id == args.scenario_id
+                )
             if not planned:
                 print(
                     f"blocked: {suite} — no runnable scenario declarations are available yet"

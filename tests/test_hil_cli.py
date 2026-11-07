@@ -768,9 +768,30 @@ def test_output_suite_checkpoint_cannot_be_resumed():
         cli.execute(args)
 
 
+@pytest.mark.parametrize("scenario_id", ["output_dc_cycle", "output_light_cycle"])
+def test_output_scenario_selection_is_a_side_effect_free_dry_run(scenario_id, capsys):
+    args = cli.make_parser().parse_args(
+        ["run", "--suite", "outputs", "--scenario-id", scenario_id, "--dry-run"]
+    )
+
+    assert cli.execute(args) == 0
+    output = capsys.readouterr().out
+    assert f"{scenario_id} [outputs]" in output
+    assert "ac_on [outputs]" not in output
+    assert "requested actions: switch" in output
+
+
 @pytest.mark.parametrize("failure_mode", ["safe", "pending", "ambiguous"])
-def test_output_suite_restores_only_after_authorized_unsubmitted_ac_off(
-    monkeypatch, tmp_path, failure_mode
+@pytest.mark.parametrize(
+    ("scenario_id", "control_key"),
+    [
+        ("output_ac_cycle", "ac_output"),
+        ("output_dc_cycle", "dc_output"),
+        ("output_light_cycle", "light"),
+    ],
+)
+def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
+    monkeypatch, tmp_path, failure_mode, scenario_id, control_key
 ):
     from types import SimpleNamespace
 
@@ -839,7 +860,7 @@ def test_output_suite_restores_only_after_authorized_unsubmitted_ac_off(
         firmware="0.2",
         state_entities={},
         entry_state="loaded",
-        control_entities={"ac_output": "switch.private_ac"},
+        control_entities={control_key: f"switch.private_{control_key}"},
         config_entry_id="entry-safe",
     )
     inputs = iter(("1", "1", "1", "3" if failure_mode == "ambiguous" else "1"))
@@ -862,7 +883,7 @@ def test_output_suite_restores_only_after_authorized_unsubmitted_ac_off(
     monkeypatch.setattr(cli, "_save_private_trace", save_trace)
     result = cli._execute_output_suite(
         api_fake,
-        SimpleNamespace(non_interactive=False, route="auto"),
+        SimpleNamespace(non_interactive=False, route="auto", scenario_id=scenario_id),
         device,
         {},
         output_dir,
@@ -879,7 +900,7 @@ def test_output_suite_restores_only_after_authorized_unsubmitted_ac_off(
         assert cleanup["cleanup_service_attempted"] is True
         assert cleanup["cleanup_outcome"] == "pass"
         assert cleanup["cleanup_post_state"] == "off"
-        assert cleanup["cleanup_trace"] == "traces/ac_off_cleanup"
+        assert cleanup["cleanup_trace"] == f"traces/{control_key}_cleanup"
     elif failure_mode == "pending":
         assert cleanup.get("service_attempted") is not True
         assert cleanup["cleanup_attempted"] is True

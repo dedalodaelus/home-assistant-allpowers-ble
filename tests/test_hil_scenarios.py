@@ -15,6 +15,8 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
     scenarios = load_scenarios()
     assert [scenario.id for scenario in scenarios] == [
         "output_ac_cycle",
+        "output_dc_cycle",
+        "output_light_cycle",
         "read_only_snapshot",
         "recovery_reconnect",
         "soak_24h_observation",
@@ -75,9 +77,13 @@ def test_all_plan_never_implicitly_enables_writes() -> None:
 
 def test_write_plan_stays_blocked_until_live_preflight() -> None:
     planned = plan("outputs")
-    assert len(planned) == 1
-    assert planned[0].eligible is False
-    assert "live capability" in planned[0].reason
+    assert [item.scenario.id for item in planned] == [
+        "output_ac_cycle",
+        "output_dc_cycle",
+        "output_light_cycle",
+    ]
+    assert all(item.eligible is False for item in planned)
+    assert all("live capability" in item.reason for item in planned)
 
 
 @pytest.mark.parametrize(
