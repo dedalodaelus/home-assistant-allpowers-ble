@@ -197,8 +197,9 @@ revision and routes, including whether reconnect reacquires settings.
 
 The CLI exposes `run --list-suites` and side-effect-free dry-run planning.
 Read-only collection is available, as are attended AC, DC and station-light
-on/off scenarios, the opt-in gated car-charger cycle, and work-mode/ECO-timeout
-setting checks with per-action authorization and private trace evidence. A
+on/off scenarios, the opt-in gated car-charger cycle, and ECO-mode, work-mode
+and ECO-timeout setting checks with per-action authorization and private trace
+evidence. A
 recovery guide lets the operator perform a route interruption/restoration,
 vendor-app contention, or HA reload/upgrade while the CLI observes
 reconnection and current route evidence. No write, settings, or recovery

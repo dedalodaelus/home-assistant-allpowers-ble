@@ -136,10 +136,10 @@ write is never retried; in that case inspect and restore the station manually.
 A restoration does not turn an incomplete run into a pass. These scenarios
 have not been piloted on hardware.
 
-The `settings` suite currently provides selectable work-mode and ECO-timeout
-checks. Each change is restricted to a declared option exposed by HA, requires
+The `settings` suite currently provides ECO-mode, work-mode and ECO-timeout
+checks. Each change is restricted to a declared value exposed by HA, requires
 fresh settings and a separate authorization, and is followed by a separately
-authorized attempt to restore the original option. Missing confirmation or
+authorized attempt to restore the original value. Missing confirmation or
 route evidence remains inconclusive; restoration is never retried after an
 ambiguous service call. Settings checks have not been piloted on hardware.
 
