@@ -7,6 +7,8 @@ from typing import Any
 
 from .scenarios import Scenario, load_scenarios
 
+_VERIFIED_ROUTES = {"local_adapter", "active_proxy"}
+
 
 @dataclass(frozen=True)
 class PlannedScenario:
@@ -84,31 +86,75 @@ def correlate_transaction(
         and isinstance(event.get("transaction_id"), str)
         and isinstance(event.get("seq"), int)
     ]
-    for event in reversed(submitted):
-        transaction_id = event["transaction_id"]
-        confirmation = next(
-            (
-                item
-                for item in events
-                if isinstance(item, dict)
-                and item.get("event") == "transaction_confirmed"
-                and item.get("transaction_id") == transaction_id
-                and item.get("session_generation") == expected_generation
-                and item.get("reason") == "matching_validated_telemetry"
-                and isinstance(item.get("seq"), int)
-                and item["seq"] > event["seq"]
-            ),
-            None,
-        )
-        if confirmation is not None:
-            return {
-                "transaction_id": transaction_id,
-                "submitted_seq": event["seq"],
-                "confirmed_seq": confirmation["seq"],
-                "session_generation": expected_generation,
-                "kind": kind,
-            }
-    return None
+    if len(submitted) != 1:
+        return None
+    event = submitted[0]
+    transaction_id = event["transaction_id"]
+    expected_command = "output_control" if kind == "output" else "settings_control"
+    frames = trace.get("frames")
+    if not isinstance(frames, list):
+        return None
+    control_frames = [
+        frame
+        for frame in frames
+        if isinstance(frame, dict)
+        and frame.get("direction") == "tx"
+        and frame.get("command_type") == expected_command
+        and frame.get("session_generation") == expected_generation
+    ]
+    matching_frames = [
+        frame
+        for frame in control_frames
+        if frame.get("event") == "write_attempt"
+        and frame.get("transaction_id") == transaction_id
+        and isinstance(frame.get("seq"), int)
+        and frame["seq"] < event["seq"]
+    ]
+    if len(control_frames) != 1 or len(matching_frames) != 1:
+        return None
+    matching_write_events = [
+        item
+        for item in events
+        if isinstance(item, dict)
+        and item.get("event") == "write_attempt"
+        and item.get("transaction_id") == transaction_id
+        and item.get("session_generation") == expected_generation
+        and item.get("seq") == matching_frames[0].get("seq")
+    ]
+    if len(matching_write_events) != 1:
+        return None
+    confirmation = next(
+        (
+            item
+            for item in events
+            if isinstance(item, dict)
+            and item.get("event") == "transaction_confirmed"
+            and item.get("transaction_id") == transaction_id
+            and item.get("session_generation") == expected_generation
+            and item.get("reason") == "matching_validated_telemetry"
+            and isinstance(item.get("seq"), int)
+            and item["seq"] > event["seq"]
+        ),
+        None,
+    )
+    if confirmation is None:
+        return None
+    return {
+        "transaction_id": transaction_id,
+        "submitted_seq": event["seq"],
+        "confirmed_seq": confirmation["seq"],
+        "session_generation": expected_generation,
+        "kind": kind,
+        "write_seq": matching_frames[0]["seq"],
+        "command_type": expected_command,
+    }
+
+
+def route_matches_request(requested: str, observed: Any) -> bool:
+    """Require explicit route lanes to match the connected backend evidence."""
+    if requested == "auto":
+        return observed in _VERIFIED_ROUTES
+    return requested in _VERIFIED_ROUTES and observed == requested
 
 
 def recovery_verdict(

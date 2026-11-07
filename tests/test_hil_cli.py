@@ -1052,7 +1052,21 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
             }
 
         def control_state(self, key, entity_id):
-            return {"available": True, "state": self.state, "options": options}
+            del key, entity_id
+            return (
+                api.HAClient.control_state(
+                    self, control_key, f"switch.private_{control_key}"
+                )
+                if control_key == "eco_mode"
+                else api.HAClient.control_state(
+                    self, control_key, f"select.private_{control_key}"
+                )
+            )
+
+        def entity_state(self, entity_id):
+            del entity_id
+            attributes = {"options": options} if control_key != "eco_mode" else {}
+            return {"state": self.state, "attributes": attributes}
 
         def call_control(self, key, entity_id, value):
             self.actions.append((key, value))
@@ -1123,6 +1137,205 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
     ]
     assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
     assert api_fake.state == initial
+
+
+@pytest.mark.parametrize("include_control_frame", [True, False])
+@pytest.mark.parametrize("requested_route", ["auto", "active_proxy"])
+def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
+    monkeypatch, tmp_path, include_control_frame, requested_route
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from custom_components.allpowers_ble.protocol import SettingsData, WorkMode
+    from custom_components.allpowers_ble.protocol import encode_settings_control
+    from scripts.hil.discovery import Device
+
+    class TracedSettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.capture = 0
+            self.actions = []
+            self.requested_route = requested_route
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def entity_state(self, entity_id):
+            assert entity_id == "switch.private_eco_mode"
+            return {"state": self.state}
+
+        def control_state(self, key, entity_id):
+            return api.HAClient.control_state(self, key, entity_id)
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [{"schema_version": 2, "capture_id": f"eco-{self.capture}"}]
+            return [self.trace(command["capture_id"])]
+
+        def trace(self, capture_id):
+            utc = datetime.now(UTC).isoformat()
+            transaction_id = f"tx-eco-{self.capture}"
+            common = {
+                "schema_version": 2,
+                "utc": utc,
+                "run_id": "0123456789abcdef",
+                "scenario_id": "settings_eco_mode",
+                "session_generation": 9,
+                "layer": "gatt_api",
+                "observed_route": "local_adapter",
+            }
+            route_event = {
+                **common,
+                "seq": 1,
+                "elapsed_ms": 0,
+                "event": "route_observed",
+                "backend_kind": "bluez",
+                "evidence": "bluez_device_path",
+            }
+            frame = encode_settings_control(
+                SettingsData(
+                    eco_enabled=self.state == "on",
+                    work_mode=WorkMode.MUTE,
+                    car_charger_enabled=False,
+                    eco_timeout_hours=2,
+                    hardware_version="0.3",
+                    firmware_version="1.1",
+                    raw_flags=0xA1 if self.state == "on" else 0xA0,
+                    raw_hardware_version=3,
+                    raw_firmware_version=0x11,
+                )
+            )
+            write_event = {
+                **common,
+                "seq": 2,
+                "elapsed_ms": 1,
+                "event": "write_attempt",
+                "transaction_id": transaction_id,
+                "direction": "tx",
+            }
+            events = [
+                route_event,
+                write_event,
+                {
+                    **common,
+                    "seq": 3,
+                    "elapsed_ms": 2,
+                    "event": "transaction_submitted",
+                    "transaction_id": transaction_id,
+                    "transaction_kind": "settings",
+                },
+                {
+                    **common,
+                    "seq": 4,
+                    "elapsed_ms": 3,
+                    "event": "transaction_confirmed",
+                    "transaction_id": transaction_id,
+                    "reason": "matching_validated_telemetry",
+                },
+            ]
+            frames = (
+                [
+                    {
+                        **write_event,
+                        "hex": frame.hex(),
+                        "command_type": "settings_control",
+                        "frame_validation": "validated_tx",
+                    }
+                ]
+                if include_control_frame
+                else []
+            )
+            return {
+                "schema_version": 2,
+                "capture_scope": "runtime_entry",
+                "capture_id": capture_id,
+                "run_id": "0123456789abcdef",
+                "scenario_id": "settings_eco_mode",
+                "requested_route": self.requested_route,
+                "observed_route": "local_adapter",
+                "capture_layer": "gatt_api_not_rf",
+                "private_raw_bytes": True,
+                "qualification_allowed": False,
+                "closed": True,
+                "termination_reason": "requested_stop",
+                "expired": False,
+                "complete": True,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "events": events,
+                "frames": frames,
+                "event_count": len(events),
+                "frame_count": len(frames),
+                "has_gatt_frames": bool(frames),
+                "route_observations": [
+                    {
+                        "session_generation": 9,
+                        "seq": 1,
+                        "utc": utc,
+                        "elapsed_ms": 0,
+                        "observed_route": "local_adapter",
+                        "backend_kind": "bluez",
+                        "evidence": "bluez_device_path",
+                        "adapter_id": "hci0",
+                    }
+                ],
+            }
+
+    api_fake = TracedSettingsHA()
+    output_dir = tmp_path / f"real-trace-{include_control_frame}"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    answers = iter(("1", "1", "1", "1"))
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(answers), raising=False)
+
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route=requested_route,
+            scenario_id="settings_eco_mode",
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    if include_control_frame and requested_route == "auto":
+        assert result == 0
+        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+    else:
+        assert result == 2
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
 
 
 @pytest.mark.parametrize(
@@ -2411,6 +2624,72 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
+
+
+def test_recovery_transient_api_failure_does_not_prove_new_ble_session(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class TransientFailureHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.calls = 0
+            self.trace_starts = 0
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            if self.calls == 2:
+                raise cli.HAAPIError("transient websocket failure")
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                self.trace_starts += 1
+                return [{"schema_version": 2, "capture_id": "unexpected"}]
+            raise AssertionError("same-generation API recovery must not capture")
+
+    api_fake = TransientFailureHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "transient-recovery"
+    output_dir.mkdir(mode=0o700)
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(cli, "sleep", advance)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "run-transient",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    assert result == 2
+    assert api_fake.trace_starts == 0
+    assert stored["steps"][-1]["outcome"] == "inconclusive"
+    assert stored["steps"][-1]["disconnect_observed"] is False
 
 
 def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(

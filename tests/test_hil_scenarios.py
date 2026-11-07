@@ -208,30 +208,110 @@ def test_soak_verdict_requires_full_duration_samples_and_complete_traces() -> No
 def test_transaction_correlation_requires_submitted_then_confirmed_same_session():
     from scripts.hil.runner import correlate_transaction
 
+    write_event = {
+        "seq": 2,
+        "event": "write_attempt",
+        "session_generation": 8,
+        "transaction_id": "tx-safe-1",
+    }
     trace = {
         "events": [
+            write_event,
             {
-                "seq": 4,
+                "seq": 3,
                 "event": "transaction_submitted",
                 "session_generation": 8,
                 "transaction_id": "tx-safe-1",
                 "transaction_kind": "output",
             },
             {
-                "seq": 5,
+                "seq": 4,
                 "event": "transaction_confirmed",
                 "session_generation": 9,
                 "transaction_id": "tx-safe-1",
                 "reason": "matching_validated_telemetry",
             },
-        ]
+        ],
+        "frames": [
+            {
+                **write_event,
+                "direction": "tx",
+                "command_type": "output_control",
+            }
+        ],
     }
     assert correlate_transaction(trace, expected_generation=8, kind="output") is None
-    trace["events"][1]["session_generation"] = 8
+    trace["events"][2]["session_generation"] = 8
     assert correlate_transaction(trace, expected_generation=8, kind="output") == {
         "transaction_id": "tx-safe-1",
-        "submitted_seq": 4,
-        "confirmed_seq": 5,
+        "submitted_seq": 3,
+        "confirmed_seq": 4,
         "session_generation": 8,
         "kind": "output",
+        "write_seq": 2,
+        "command_type": "output_control",
     }
+
+
+def test_transaction_correlation_rejects_missing_or_competing_control_frames():
+    from scripts.hil.runner import correlate_transaction
+
+    write = {
+        "seq": 1,
+        "event": "write_attempt",
+        "session_generation": 8,
+        "transaction_id": "tx-safe-1",
+    }
+    trace = {
+        "events": [
+            write,
+            {
+                "seq": 2,
+                "event": "transaction_submitted",
+                "session_generation": 8,
+                "transaction_id": "tx-safe-1",
+                "transaction_kind": "output",
+            },
+            {
+                "seq": 3,
+                "event": "transaction_confirmed",
+                "session_generation": 8,
+                "transaction_id": "tx-safe-1",
+                "reason": "matching_validated_telemetry",
+            },
+        ],
+        "frames": [],
+    }
+    assert correlate_transaction(trace, expected_generation=8, kind="output") is None
+
+    trace["frames"] = [{**write, "direction": "tx", "command_type": "settings_control"}]
+    assert correlate_transaction(trace, expected_generation=8, kind="output") is None
+
+    trace["frames"].append(
+        {
+            "seq": 4,
+            "event": "write_attempt",
+            "session_generation": 8,
+            "transaction_id": "other-transaction",
+            "direction": "tx",
+            "command_type": "output_control",
+        }
+    )
+    assert correlate_transaction(trace, expected_generation=8, kind="output") is None
+
+
+@pytest.mark.parametrize(
+    ("requested", "observed", "allowed"),
+    [
+        ("auto", "local_adapter", True),
+        ("auto", "active_proxy", True),
+        ("auto", "mixed", False),
+        ("active_proxy", "active_proxy", True),
+        ("active_proxy", "local_adapter", False),
+        ("local_adapter", "unverified", False),
+    ],
+)
+def test_route_eligibility_respects_requested_lane(requested, observed, allowed):
+    from scripts.hil.runner import route_matches_request
+
+    assert route_matches_request(requested, observed) is allowed

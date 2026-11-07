@@ -39,10 +39,22 @@ from .runner import (
     plan as plan_scenarios,
     plan_as_dict,
     recovery_verdict,
+    route_matches_request,
     soak_verdict,
     verdict,
 )
 from .scenarios import SUITES, load_scenarios
+
+_SWITCH_CONTROLS = {"ac_output", "dc_output", "light", "eco_mode", "car_charger"}
+
+
+def _control_value_available(key: str, state: dict[str, Any], expected: str) -> bool:
+    """Validate switch values or a select's server-advertised options."""
+    current = state.get("state")
+    if key in _SWITCH_CONTROLS:
+        return current in {"on", "off"} and expected in {"on", "off"}
+    options = state.get("options")
+    return isinstance(options, list) and current in options and expected in options
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -971,10 +983,9 @@ def _execute_output_suite(
             physical_outcome = {"1": "yes", "2": "no", "3": "unable_to_observe"}.get(
                 physical
             )
-            route_verified = trace.get("observed_route") in {
-                "local_adapter",
-                "active_proxy",
-            }
+            route_verified = route_matches_request(
+                args.route, trace.get("observed_route")
+            )
             telemetry_matches = (
                 after_caps.get("session_generation") == generation
                 and after_caps.get(freshness_key) is True
@@ -1197,8 +1208,9 @@ def _execute_output_suite(
                                 and restored.get("state") not in {"off", "on"}
                             ),
                             physical_outcome=physical_restore_outcome,
-                            route_verified=restore_trace.get("observed_route")
-                            in {"local_adapter", "active_proxy"},
+                            route_verified=route_matches_request(
+                                args.route, restore_trace.get("observed_route")
+                            ),
                             trace_complete=restore_trace.get("complete") is True,
                             action_submitted=restore_action_submitted,
                             transaction_confirmed=restore_tx is not None,
@@ -1276,7 +1288,7 @@ def _execute_settings_write(
         or caps.get("capabilities", {}).get("write_settings_controls") is not True
         or current.get("available") is not True
         or current.get("state") != expected_pre_state
-        or target not in current.get("options", [])
+        or not _control_value_available(key, current, target)
     ):
         row["reason"] = "fresh same-session settings preflight failed"
         row["ended_utc"] = datetime.now(UTC).isoformat()
@@ -1420,7 +1432,7 @@ def _execute_settings_write(
         on_update(row)
         return row
     physical_outcome = {"1": "yes", "2": "no", "3": "unable_to_observe"}.get(physical)
-    route_verified = trace.get("observed_route") in {"local_adapter", "active_proxy"}
+    route_verified = route_matches_request(args.route, trace.get("observed_route"))
     row.update(
         {
             "trace": f"traces/{trace_name}",
@@ -1513,8 +1525,7 @@ def _execute_settings_suite(
         or caps.get("capabilities", {}).get("write_settings_controls") is not True
         or type(caps.get("session_generation")) is not int
         or state.get("available") is not True
-        or state.get("state") not in state.get("options", [])
-        or target not in state.get("options", [])
+        or not _control_value_available(key, state, target)
     ):
         steps.append(
             {
@@ -1813,7 +1824,6 @@ def _execute_recovery_suite(
             try:
                 current = api.hil_capabilities(entry_id)
             except HAAPIError:
-                saw_disconnect = True
                 sleep(2)
                 continue
             if current["connected"] is not True:
@@ -1824,7 +1834,7 @@ def _execute_recovery_suite(
                 and current["connected"] is True
                 and current["status_fresh"] is True
                 and type(current["session_generation"]) is int
-                and (current["session_generation"] != generation or saw_disconnect)
+                and current["session_generation"] != generation
             ):
                 recovered = current
                 break
@@ -1939,7 +1949,7 @@ def _execute_recovery_suite(
     observation["physical_outcome"] = physical_outcome
     observation["route_verified"] = bool(
         trace is not None
-        and trace.get("observed_route") in {"local_adapter", "active_proxy"}
+        and route_matches_request(args.route, trace.get("observed_route"))
     )
     observation["outcome"] = recovery_verdict(
         telemetry_matches=recovered is not None,
@@ -2342,7 +2352,7 @@ def _execute_soak_suite(
                     )
                     trace_ok = bool(
                         trace["complete"] is True
-                        and trace["observed_route"] in {"local_adapter", "active_proxy"}
+                        and route_matches_request(args.route, trace["observed_route"])
                     )
                     trace_reason = (
                         "trace complete" if trace_ok else "route or trace incomplete"
