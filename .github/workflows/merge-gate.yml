@@ -133,6 +133,106 @@ jobs:
               return;
             }
 
+            // Recheck release metadata against this PR event's immutable revisions.
+            // This remains on the existing pull_request gate and applies to drafts too.
+            if (baseRef === "main" && headRef === "devel") {
+              const changedPaths = new Set();
+              for (const file of files) {
+                changedPaths.add(file.filename);
+                if (file.previous_filename) changedPaths.add(file.previous_filename);
+              }
+              const protectedPaths = ["CHANGELOG.md", ".release-please-manifest.json"];
+              const changedProtected = protectedPaths.filter((path) => changedPaths.has(path));
+              if (changedProtected.length) {
+                core.setFailed(`Promotion changes Release Please managed files: ${changedProtected.join(", ")}.`);
+                return;
+              }
+
+              const readJsonAt = async (path, ref) => {
+                const response = await github.rest.repos.getContent({ owner, repo, path, ref });
+                if (Array.isArray(response.data) || response.data.type !== "file") {
+                  throw new Error(`Expected a file at ${path} for ${ref}.`);
+                }
+                return JSON.parse(Buffer.from(response.data.content, "base64").toString("utf8"));
+              };
+              const parseVersion = (value) => {
+                const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
+                if (!match) throw new Error(`Invalid SemVer: ${value}`);
+                return [Number(match[1]), Number(match[2]), Number(match[3]), match[4]];
+              };
+              const compareVersion = (left, right) => {
+                const a = parseVersion(left);
+                const b = parseVersion(right);
+                for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+                if (a[3] === b[3]) return 0;
+                if (a[3] === undefined) return 1;
+                if (b[3] === undefined) return -1;
+                const ai = a[3].split(".");
+                const bi = b[3].split(".");
+                for (let i = 0; i < Math.max(ai.length, bi.length); i += 1) {
+                  if (ai[i] === undefined) return -1;
+                  if (bi[i] === undefined) return 1;
+                  if (ai[i] === bi[i]) continue;
+                  const an = /^[0-9]+$/.test(ai[i]);
+                  const bn = /^[0-9]+$/.test(bi[i]);
+                  if (an && bn) return Number(ai[i]) < Number(bi[i]) ? -1 : 1;
+                  if (an !== bn) return an ? -1 : 1;
+                  return ai[i] < bi[i] ? -1 : 1;
+                }
+                return 0;
+              };
+              try {
+                const [baseIntegration, headIntegration, baseRelease, headRelease] = await Promise.all([
+                  readJsonAt("custom_components/allpowers_ble/manifest.json", pr.base.sha),
+                  readJsonAt("custom_components/allpowers_ble/manifest.json", headSha),
+                  readJsonAt(".release-please-manifest.json", pr.base.sha),
+                  readJsonAt(".release-please-manifest.json", headSha),
+                ]);
+                const baseVersion = baseIntegration.version;
+                const headVersion = headIntegration.version;
+                if (typeof baseVersion !== "string" || typeof headVersion !== "string") {
+                  throw new Error("Integration manifests must contain string versions.");
+                }
+                if (compareVersion(headVersion, baseVersion) < 0) {
+                  throw new Error(`Integration version regressed from ${baseVersion} to ${headVersion}.`);
+                }
+                if (headVersion !== baseVersion) {
+                  throw new Error("Promotion must preserve the integration version; use Release Please or a reviewed synchronization PR.");
+                }
+                if (
+                  typeof baseRelease !== "object"
+                  || typeof headRelease !== "object"
+                  || baseRelease === null
+                  || headRelease === null
+                  || Array.isArray(baseRelease)
+                  || Array.isArray(headRelease)
+                ) {
+                  throw new Error("Release Please manifests must contain version objects.");
+                }
+                for (const [name, version] of Object.entries(baseRelease)) {
+                  if (!(name in headRelease)) throw new Error(`Release Please history was removed for ${name}.`);
+                  if (typeof version !== "string" || typeof headRelease[name] !== "string") {
+                    throw new Error("Release Please manifest versions must be strings.");
+                  }
+                  if (compareVersion(headRelease[name], version) < 0) {
+                    throw new Error(`Release Please version regressed for ${name}.`);
+                  }
+                }
+                for (const version of Object.values(headRelease)) {
+                  if (typeof version !== "string") throw new Error("Release Please manifest versions must be strings.");
+                  parseVersion(version);
+                }
+              } catch (error) {
+                core.setFailed(`Promotion metadata validation failed: ${error.message}`);
+                return;
+              }
+              const current = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+              if (current.data.base.sha !== pr.base.sha || current.data.head.sha !== headSha) {
+                core.setFailed("Promotion refs moved during metadata validation; rerun the merge gate.");
+                return;
+              }
+            }
+
             // Draft PRs skip strict gate until marked ready for review.
             if (pr.draft) {
               core.info("Draft PR detected. Skipping strict gate until ready for review.");

@@ -176,6 +176,23 @@ A release is valid only when:
 - the checksum file matches the published ZIP digest;
 - compatibility claims match tested hardware.
 
+### Preparing a `devel` to `main` promotion
+
+From the default `main` branch, run **Actions → Promote devel to main → Run
+workflow**. The workflow checks ancestry and release metadata, then creates or
+reuses one draft PR. It does not merge, push, tag, or publish. The repository
+setting **Allow GitHub Actions to create and approve pull requests** must be
+enabled. Because the PR uses `GITHUB_TOKEN`, GitHub may require someone with
+write access to select **Approve workflows to run** before CI begins. The
+existing Merge gate checks promotion metadata again at the PR revisions before
+the PR can pass.
+
+The workflow file must first reach the default `main` branch before GitHub makes
+it available to `workflow_dispatch`. A reviewed synchronization/bootstrap may
+be needed when `main` and `devel` have diverged or their release metadata does
+not agree; resolve that separately before attempting promotion. Do not use this
+workflow to synchronize the branches.
+
 ## Manual Home Assistant development
 
 For interactive work, copy or symlink `custom_components/allpowers_ble` into a test

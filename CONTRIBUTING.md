@@ -68,6 +68,13 @@ The repository uses an explicit promotion model:
   `hotfix/*` branches.
 - Release Please runs from `main` and is the only automation that updates
   `CHANGELOG.md` and release tags.
+- To prepare a promotion, run **Actions → Promote devel to main → Run workflow**
+  from `main`. It runs preflight checks and opens/reuses a draft PR; it never
+  merges, pushes a branch, tags, or publishes a release. The repository setting
+  **Allow GitHub Actions to create and approve pull requests** must be enabled.
+- A PR created with `GITHUB_TOKEN` may require a maintainer with write access to
+  select **Approve workflows to run** before its CI starts. Review the PR and
+  wait for the existing `Gate all required checks` before merging manually.
 - Direct commits into `devel` and `main` are not permitted.
 - Urgent production fixes may target `main` only from a `hotfix/*` branch cut
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
