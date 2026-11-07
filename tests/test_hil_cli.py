@@ -774,6 +774,7 @@ def test_output_suite_checkpoint_cannot_be_resumed():
         ("outputs", "output_dc_cycle", "switch"),
         ("outputs", "output_light_cycle", "switch"),
         ("outputs", "output_car_charger_cycle", "switch"),
+        ("settings", "settings_eco_mode", "switch"),
         ("settings", "settings_work_mode", "select"),
         ("settings", "settings_eco_timeout", "select"),
     ],
@@ -1008,6 +1009,7 @@ def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
 @pytest.mark.parametrize(
     ("scenario_id", "control_key", "initial", "options"),
     [
+        ("settings_eco_mode", "eco_mode", "off", ["off", "on"]),
         (
             "settings_work_mode",
             "work_mode",
@@ -1109,7 +1111,14 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
     assert result == 0
     assert api_fake.actions == [
-        (control_key, "standard" if control_key == "work_mode" else "two_hours"),
+        (
+            control_key,
+            "on"
+            if control_key == "eco_mode"
+            else "standard"
+            if control_key == "work_mode"
+            else "two_hours",
+        ),
         (control_key, initial),
     ]
     assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]

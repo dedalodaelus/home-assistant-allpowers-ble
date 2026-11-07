@@ -20,6 +20,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
         "output_light_cycle",
         "read_only_snapshot",
         "recovery_reconnect",
+        "settings_eco_mode",
         "settings_eco_timeout",
         "settings_work_mode",
         "soak_24h_observation",
@@ -93,6 +94,7 @@ def test_write_plan_stays_blocked_until_live_preflight() -> None:
 def test_settings_plan_stays_blocked_until_live_preflight() -> None:
     planned = plan("settings")
     assert [item.scenario.id for item in planned] == [
+        "settings_eco_mode",
         "settings_eco_timeout",
         "settings_work_mode",
     ]
