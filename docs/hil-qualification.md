@@ -197,11 +197,12 @@ revision and routes, including whether reconnect reacquires settings.
 
 The CLI exposes `run --list-suites` and side-effect-free dry-run planning.
 Read-only collection is available, as are attended AC, DC and station-light
-on/off scenarios with per-action authorization and private trace evidence. A
-recovery guide lets the operator perform a route interruption/restoration,
+on/off scenarios plus work-mode and ECO-timeout setting checks with per-action
+authorization and private trace evidence. A recovery guide lets the operator
+perform a route interruption/restoration,
 vendor-app contention, or HA reload/upgrade while the CLI observes
-reconnection and current route evidence. Neither write nor recovery scenarios
-have been piloted on hardware;
+reconnection and current route evidence. No write, settings, or recovery
+scenario has been piloted on hardware;
 missing route or physical evidence remains inconclusive. Checkpoint resume is
 available for interrupted recovery and soak observation on the same
 fingerprinted device. Resume starts a new soak segment and records a

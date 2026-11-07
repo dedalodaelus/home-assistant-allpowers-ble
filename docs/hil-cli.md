@@ -133,6 +133,13 @@ write is never retried; in that case inspect and restore the station manually.
 A restoration does not turn an incomplete run into a pass. These scenarios
 have not been piloted on hardware.
 
+The `settings` suite currently provides selectable work-mode and ECO-timeout
+checks. Each change is restricted to a declared option exposed by HA, requires
+fresh settings and a separate authorization, and is followed by a separately
+authorized attempt to restore the original option. Missing confirmation or
+route evidence remains inconclusive; restoration is never retried after an
+ambiguous service call. Settings checks have not been piloted on hardware.
+
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA
 reload/upgrade; the CLI does not initiate any of those actions. It then waits
@@ -147,6 +154,8 @@ python -m scripts.hil --device 1 run --suite recovery
 python -m scripts.hil --device 1 run --suite outputs
 python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
 python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
+python -m scripts.hil --device 1 run --suite settings --scenario-id settings_work_mode
+python -m scripts.hil --device 1 run --suite settings --scenario-id settings_eco_timeout
 ```
 
 Each guided run writes private `scenarios.json` and `checkpoint.json` files

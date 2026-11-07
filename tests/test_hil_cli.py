@@ -768,17 +768,27 @@ def test_output_suite_checkpoint_cannot_be_resumed():
         cli.execute(args)
 
 
-@pytest.mark.parametrize("scenario_id", ["output_dc_cycle", "output_light_cycle"])
-def test_output_scenario_selection_is_a_side_effect_free_dry_run(scenario_id, capsys):
+@pytest.mark.parametrize(
+    ("suite", "scenario_id", "requested_action"),
+    [
+        ("outputs", "output_dc_cycle", "switch"),
+        ("outputs", "output_light_cycle", "switch"),
+        ("settings", "settings_work_mode", "select"),
+        ("settings", "settings_eco_timeout", "select"),
+    ],
+)
+def test_scenario_selection_is_a_side_effect_free_dry_run(
+    suite, scenario_id, requested_action, capsys
+):
     args = cli.make_parser().parse_args(
-        ["run", "--suite", "outputs", "--scenario-id", scenario_id, "--dry-run"]
+        ["run", "--suite", suite, "--scenario-id", scenario_id, "--dry-run"]
     )
 
     assert cli.execute(args) == 0
     output = capsys.readouterr().out
-    assert f"{scenario_id} [outputs]" in output
+    assert f"{scenario_id} [{suite}]" in output
     assert "ac_on [outputs]" not in output
-    assert "requested actions: switch" in output
+    assert f"requested actions: {requested_action}" in output
 
 
 @pytest.mark.parametrize("failure_mode", ["safe", "pending", "ambiguous"])
@@ -911,6 +921,192 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
         assert api_fake.actions == ["on", "off"]
         assert cleanup["service_attempted"] is True
         assert cleanup.get("cleanup_attempted") is not True
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "control_key", "initial", "options"),
+    [
+        (
+            "settings_work_mode",
+            "work_mode",
+            "mute",
+            ["mute", "standard", "fast"],
+        ),
+        (
+            "settings_eco_timeout",
+            "eco_timeout",
+            "six_hours",
+            ["one_hour", "two_hours", "four_hours", "six_hours"],
+        ),
+    ],
+)
+def test_settings_scenarios_restore_original_option_with_fresh_evidence(
+    monkeypatch, tmp_path, scenario_id, control_key, initial, options
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class SettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = initial
+            self.actions = []
+            self.capture = 0
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": self.state, "options": options}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [{"schema_version": 2, "capture_id": f"settings-{self.capture}"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "events": [],
+                    "frames": [],
+                    "complete": True,
+                    "observed_route": "local_adapter",
+                }
+            ]
+
+    api_fake = SettingsHA()
+    output_dir = tmp_path / scenario_id
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={control_key: f"select.private_{control_key}"},
+        config_entry_id="entry-safe",
+    )
+    inputs = iter(("1", "1", "1", "1"))
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(inputs), raising=False)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "correlate_transaction",
+        lambda trace, **kwargs: {"transaction_id": trace["capture_id"]},
+    )
+
+    def save_trace(trace_dir, trace):
+        (trace_dir / "trace.json").write_text(json.dumps(trace))
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto", scenario_id=scenario_id),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 0
+    assert api_fake.actions == [
+        (control_key, "standard" if control_key == "work_mode" else "two_hours"),
+        (control_key, initial),
+    ]
+    assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+    assert api_fake.state == initial
+
+
+@pytest.mark.parametrize(
+    ("failed_check", "failed_value"),
+    [
+        ("pending_transaction", True),
+        ("settings_fresh", False),
+        ("write_settings_controls", False),
+    ],
+)
+def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
+    monkeypatch, tmp_path, failed_check, failed_value
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class BlockedSettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+
+        def hil_capabilities(self, entry_id):
+            result = {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+            if failed_check == "write_settings_controls":
+                result["capabilities"][failed_check] = failed_value
+            else:
+                result[failed_check] = failed_value
+            return result
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": "mute", "options": ["mute", "standard"]}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+
+    output_dir = tmp_path / failed_check
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"work_mode": "select.private_mode"},
+        config_entry_id="entry-safe",
+    )
+    api_fake = BlockedSettingsHA()
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            scenario_id="settings_work_mode",
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert checkpoint["steps"][0]["outcome"] == "not_applicable"
+    assert api_fake.actions == []
 
 
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):

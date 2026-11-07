@@ -1,0 +1,25 @@
+{
+  "id": "settings_eco_timeout",
+  "schema_version": 1,
+  "suite": "settings",
+  "title": "Change and restore the ECO timeout setting",
+  "mode": "interactive_write",
+  "steps": [
+    {
+      "id": "eco_timeout_two_hours",
+      "instruction": "Select a two-hour ECO timeout, observe fresh settings, then restore the original option.",
+      "timeout_seconds": 30,
+      "action": "select",
+      "target": "eco_timeout",
+      "expected": "two_hours"
+    }
+  ],
+  "required_evidence": [
+    "fresh_settings_before_and_after",
+    "ha_service_acknowledgement",
+    "same_session_settings_transaction_confirmation",
+    "verified_connected_route",
+    "physical_observation",
+    "original_option_restored"
+  ]
+}
