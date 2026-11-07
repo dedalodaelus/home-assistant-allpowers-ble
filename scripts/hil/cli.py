@@ -206,10 +206,23 @@ def _scenario_controls(
     return result
 
 
-def _device_fingerprint(run_id: str, device: Device, ha_origin: str) -> str:
+def _device_fingerprint(
+    run_id: str, device: Device, ha_origin: str, requested_route: str = "auto"
+) -> str:
     """Create a run-scoped device/server fingerprint without persisting IDs."""
-    material = f"{run_id}\0{ha_origin}\0{device.config_entry_id or ''}\0{device.device_id}".encode()
+    material = f"{run_id}\0{ha_origin}\0{requested_route}\0{device.config_entry_id or ''}\0{device.device_id}".encode()
     return hashlib.sha256(material).hexdigest()
+
+
+def _has_verified_telemetry(snapshot: Any) -> bool:
+    """Require at least one safely normalized HA measurement in a sample."""
+    return isinstance(snapshot, dict) and any(
+        isinstance(value, dict)
+        and value.get("verified") is True
+        and value.get("source") == "ha_rest_entity_state"
+        and value.get("value") is not None
+        for value in snapshot.values()
+    )
 
 
 def _device_list(devices: list[Device]) -> None:
@@ -810,7 +823,7 @@ def _execute_output_suite(
         raise HAAPIError("Unknown output scenario")
     entry_id = device.config_entry_id
     steps: list[dict[str, Any]] = []
-    fingerprint = _device_fingerprint(run_id, device, api.origin)
+    fingerprint = _device_fingerprint(run_id, device, api.origin, args.route)
 
     def checkpoint() -> None:
         write_scenario_progress(output_dir, run_id, scenario.id, fingerprint, steps)
@@ -910,6 +923,42 @@ def _execute_output_suite(
                 checkpoint()
                 break
             capture_id = capture["capture_id"]
+            # Authorization can sit at the prompt while HA state changes. Once
+            # tracing is armed, repeat every live precondition at the write boundary.
+            recheck_caps = api.hil_capabilities(entry_id)
+            recheck_state = api.control_state(key, entity_id)
+            if (
+                recheck_caps.get("verified") is not True
+                or recheck_caps.get("identity_conflicted")
+                or recheck_caps.get("connected") is not True
+                or recheck_caps.get("pending_transaction")
+                or recheck_caps.get(freshness_key) is not True
+                or recheck_caps.get("session_generation") != generation
+                or recheck_caps.get("capabilities", {}).get(capability_key) is not True
+                or (
+                    key == "car_charger"
+                    and recheck_caps.get("capabilities", {}).get("car_charger_enabled")
+                    is not True
+                )
+                or not recheck_state.get("available")
+                or recheck_state.get("state") != state["state"]
+            ):
+                row["reason"] = "live pre-write recheck failed after authorization"
+                try:
+                    api.websocket(
+                        [
+                            {
+                                "type": "allpowers_ble/hil/stop",
+                                "entry_id": entry_id,
+                                "capture_id": capture_id,
+                            }
+                        ]
+                    )
+                except HAAPIError:
+                    row["trace_stop_failed"] = True
+                checkpoint()
+                print("Step stopped: live pre-write state changed")
+                break
             action_submitted = False
             observed_caps: dict[str, Any] | None = None
             post: dict[str, Any] = {"available": False, "state": None}
@@ -1485,7 +1534,7 @@ def _execute_settings_suite(
     if scenario is None:
         raise HAAPIError("Select a declared settings scenario with --scenario-id")
     entry_id = device.config_entry_id
-    fingerprint = _device_fingerprint(run_id, device, api.origin)
+    fingerprint = _device_fingerprint(run_id, device, api.origin, args.route)
     steps: list[dict[str, Any]] = []
 
     def checkpoint() -> None:
@@ -1640,7 +1689,7 @@ def _execute_recovery_suite(
         item for item in load_scenarios() if item.id == "recovery_reconnect"
     )
     entry_id = device.config_entry_id
-    fingerprint = _device_fingerprint(run_id, device, api.origin)
+    fingerprint = _device_fingerprint(run_id, device, api.origin, args.route)
     steps: list[dict[str, Any]] = (
         [dict(step) for step in resume_state["steps"]]
         if resume_state is not None
@@ -2000,7 +2049,7 @@ def _execute_soak_suite(
     )
     parameters = scenario.parameters
     entry_id = device.config_entry_id
-    fingerprint = _device_fingerprint(run_id, device, api.origin)
+    fingerprint = _device_fingerprint(run_id, device, api.origin, args.route)
     steps = (
         [dict(step) for step in resume_state["steps"]]
         if resume_state is not None
@@ -2198,6 +2247,7 @@ def _execute_soak_suite(
                 and capabilities["connected"] is True
                 and capabilities["status_fresh"] is True
                 and type(capabilities["session_generation"]) is int
+                and _has_verified_telemetry(snapshot)
             )
             if gap is not None and gap > parameters["max_gap_seconds"]:
                 maximum_gap = max(maximum_gap, gap)
@@ -2239,7 +2289,7 @@ def _execute_soak_suite(
                         ),
                     }
                 )
-                end_segment("fresh connected status unavailable")
+                end_segment("fresh connected status or verified telemetry unavailable")
             else:
                 if segment_started is None:
                     begin_segment(now, utc_now)
@@ -2623,7 +2673,9 @@ def execute(args: argparse.Namespace) -> int:
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
     if resume_state is not None:
-        fingerprint = _device_fingerprint(resume_state["run_id"], selected, api.origin)
+        fingerprint = _device_fingerprint(
+            resume_state["run_id"], selected, api.origin, args.route
+        )
         if not hmac.compare_digest(fingerprint, resume_state["device_fingerprint"]):
             raise HAAPIError("Selected device does not match the checkpoint")
     entry_id: str | None = None

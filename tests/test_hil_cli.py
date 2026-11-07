@@ -2797,6 +2797,91 @@ def test_device_fingerprint_is_run_and_server_scoped():
     assert same != cli._device_fingerprint(
         "0123456789abcdef", device, "https://other.example"
     )
+    assert same != cli._device_fingerprint(
+        "0123456789abcdef", device, "https://ha.example", "active_proxy"
+    )
+
+
+def test_soak_requires_a_verified_normalized_telemetry_value():
+    assert cli._has_verified_telemetry(
+        {"battery": {"value": 89, "source": "ha_rest_entity_state", "verified": True}}
+    )
+    assert not cli._has_verified_telemetry(
+        {"battery": {"value": None, "source": "unavailable", "verified": False}}
+    )
+    assert not cli._has_verified_telemetry({"battery": 89})
+
+
+def test_output_suite_rechecks_pre_state_after_authorization(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+        control_entities={"ac_output": "switch.private_ac"},
+    )
+
+    class HA:
+        origin = "https://ha.example.test"
+        state = "off"
+        actions = []
+        commands = []
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "session_generation": 3,
+                "capabilities": {"write_output_controls": True},
+            }
+
+        def control_state(self, _key, _entity):
+            return {"available": True, "state": self.state}
+
+        def call_control(self, *_args):
+            self.actions.append(_args)
+
+        def websocket(self, commands):
+            command = commands[0]
+            self.commands.append(command["type"])
+            if command["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture"}]
+            return [{}]
+
+    api = HA()
+    output_dir = tmp_path / "run"
+    output_dir.mkdir(mode=0o700)
+
+    def authorize(_prompt):
+        api.state = "on"  # Simulate another HA actor changing it at the prompt.
+        return "1"
+
+    monkeypatch.setattr(cli, "input", authorize, raising=False)
+    result = cli._execute_output_suite(
+        api,
+        SimpleNamespace(
+            non_interactive=False, route="auto", scenario_id="output_ac_cycle"
+        ),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert api.actions == []
+    assert api.commands == ["allpowers_ble/hil/start", "allpowers_ble/hil/stop"]
+    assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+    assert "pre-write recheck failed" in checkpoint["steps"][0]["reason"]
 
 
 def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):
@@ -2877,7 +2962,13 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
     monkeypatch.setattr(cli, "monotonic", clock.monotonic)
     monkeypatch.setattr(cli, "sleep", clock.sleep)
     monkeypatch.setattr(cli, "datetime", FakeDateTime)
-    monkeypatch.setattr(cli, "read_only_sample", lambda *_: {"battery": 89})
+    monkeypatch.setattr(
+        cli,
+        "read_only_sample",
+        lambda *_: {
+            "battery": {"value": 89, "source": "ha_rest_entity_state", "verified": True}
+        },
+    )
     monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
 
     def save_trace(trace_dir, trace):
