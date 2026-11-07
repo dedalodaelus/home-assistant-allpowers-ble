@@ -101,7 +101,11 @@ python -m scripts.hil run --suite all --dry-run
 
 `all` currently selects only read-only scenarios. Write, recovery and soak
 suites are never implicitly enabled. The ordinary `run` command remains the
-#228 read-only snapshot. Checkpoint resume is not available yet.
+#228 read-only snapshot. The recovery suite can resume a private schema v2
+checkpoint for the same selected device. Resume continues observation only;
+it never repeats the operator action or replays an output write. Output
+checkpoints are not resumable because an interrupted service call may be
+ambiguous.
 
 `run --suite read-only` also requests an admin-only runtime capability snapshot
 for the selected loaded entry. Without admin access, capability evidence is
@@ -133,7 +137,19 @@ python -m scripts.hil --device 1 run --suite outputs
 ```
 
 Each guided run writes private `scenarios.json` and `checkpoint.json` files
-after steps. Resume is not implemented; the checkpoints are evidence only.
+after steps. To resume a recovery observation, pass the existing run folder:
+
+```bash
+python -m scripts.hil --device 1 run --suite recovery \
+  --resume hil-results/2026-11-07T01-00-00Z_0123456789abcdef
+```
+
+Resume validates the checkpoint schema, matching session/run identity, private
+file permissions, and a run-scoped fingerprint of the selected HA origin and
+device. It refuses old checkpoint versions, symlinks, mismatched devices,
+output runs, and completed or failed recovery scenarios. It records the
+restart as an unobserved clock interval and never repeats the disruptive
+operator action; that gap cannot count as continuous qualification time.
 
 ```bash
 python -m pytest tests/test_hil_cli.py

@@ -712,6 +712,62 @@ def test_json_storage_excludes_internal_ids_when_public_types_are_used(
     assert session["route"]["qualification_allowed"] is False
 
 
+def test_checkpoint_round_trip_is_versioned_private_and_run_bound(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(
+        tmp_path, "resume-safe", {"ok": True}, {"run_id": run_id}
+    )
+    fingerprint = "a" * 64
+    steps = [{"step_id": "baseline", "outcome": "pass"}]
+    storage.write_scenario_progress(
+        folder, run_id, "recovery_reconnect", fingerprint, steps
+    )
+
+    loaded_dir, checkpoint = storage.load_scenario_checkpoint(folder)
+
+    assert loaded_dir == folder
+    assert checkpoint["schema_version"] == 2
+    assert checkpoint["scenario_id"] == "recovery_reconnect"
+    assert checkpoint["device_fingerprint"] == fingerprint
+    assert checkpoint["steps"] == steps
+    assert (folder / "checkpoint.json").stat().st_mode & 0o077 == 0
+
+
+def test_checkpoint_loader_rejects_symlinked_checkpoint(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(tmp_path, "resume-link", {}, {"run_id": run_id})
+    storage.write_scenario_progress(folder, run_id, "recovery_reconnect", "b" * 64, [])
+    saved = folder / "checkpoint.saved"
+    (folder / "checkpoint.json").rename(saved)
+    (folder / "checkpoint.json").symlink_to(saved.name)
+
+    with pytest.raises(api.HAAPIError, match="private regular files"):
+        storage.load_scenario_checkpoint(folder)
+
+
+def test_checkpoint_loader_rejects_legacy_schema(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(tmp_path, "resume-old", {}, {"run_id": run_id})
+    storage.write_scenario_progress(folder, run_id, "recovery_reconnect", "c" * 64, [])
+    payload = json.loads((folder / "checkpoint.json").read_text())
+    payload["schema_version"] = 1
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    (folder / "checkpoint.json").write_text(encoded)
+    (folder / "scenarios.json").write_text(encoded)
+
+    with pytest.raises(api.HAAPIError, match="schema or run identity"):
+        storage.load_scenario_checkpoint(folder)
+
+
+def test_output_suite_checkpoint_cannot_be_resumed():
+    args = cli.make_parser().parse_args(
+        ["run", "--suite", "outputs", "--resume", "/tmp/not-read"]
+    )
+
+    with pytest.raises(api.HAAPIError, match="Only an interactive recovery"):
+        cli.execute(args)
+
+
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
     """Use urllib's actual proxy dispatch with an in-memory HTTP transport.
 
@@ -1806,6 +1862,8 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     from scripts.hil.discovery import Device
 
     class RecoveryHA:
+        origin = "https://ha.example.test"
+
         def __init__(self):
             self.generations = iter((4, 5))
             self.commands = []
@@ -1867,6 +1925,113 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
+
+
+def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class RecoveryHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 5,
+            }
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-resumed"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "active_proxy",
+                    "complete": True,
+                }
+            ]
+
+    api_fake = RecoveryHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "resume"
+    output_dir.mkdir(mode=0o700)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "1")
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+    fingerprint = cli._device_fingerprint("0123456789abcdef", device, api_fake.origin)
+    resume_state = {
+        "run_id": "0123456789abcdef",
+        "scenario_id": "recovery_reconnect",
+        "device_fingerprint": fingerprint,
+        "steps": [
+            {
+                "step_id": "baseline",
+                "outcome": "pass",
+                "session_generation": 4,
+            },
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "route interruption and restoration",
+                "operator_confirmed": True,
+            },
+        ],
+    }
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+        resume_state,
+    )
+
+    assert result == 0
+    assert len(prompts) == 1
+    assert [command["type"] for command in api_fake.commands] == [
+        "allpowers_ble/hil/start",
+        "allpowers_ble/hil/stop",
+    ]
+
+
+def test_device_fingerprint_is_run_and_server_scoped():
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        config_entry_id="entry-safe",
+    )
+    same = cli._device_fingerprint("0123456789abcdef", device, "https://ha.example")
+    assert same == cli._device_fingerprint(
+        "0123456789abcdef", device, "https://ha.example"
+    )
+    assert same != cli._device_fingerprint(
+        "fedcba9876543210", device, "https://ha.example"
+    )
+    assert same != cli._device_fingerprint(
+        "0123456789abcdef", device, "https://other.example"
+    )
 
 
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():

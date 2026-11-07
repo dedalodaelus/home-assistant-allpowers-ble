@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 from typing import Any
 
 from .api import HAAPIError
@@ -41,14 +42,20 @@ def write_run(
 
 
 def write_scenario_progress(
-    run_dir: Path, run_id: str, steps: list[dict[str, Any]]
+    run_dir: Path,
+    run_id: str,
+    scenario_id: str,
+    device_fingerprint: str,
+    steps: list[dict[str, Any]],
 ) -> None:
     """Atomically persist private scenario results and a restart checkpoint."""
     if run_dir.is_symlink() or not run_dir.is_dir():
         raise HAAPIError("Invalid private scenario directory")
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
+        "scenario_id": scenario_id,
+        "device_fingerprint": device_fingerprint,
         "qualification_status": "inconclusive",
         "steps": steps,
     }
@@ -77,3 +84,79 @@ def write_scenario_progress(
             except OSError:
                 pass
         raise HAAPIError("Unable to persist private scenario progress") from ex
+
+
+def load_scenario_checkpoint(run_dir: Path) -> tuple[Path, dict[str, Any]]:
+    """Load a private, versioned checkpoint without following symlinks."""
+    run_dir = run_dir.expanduser()
+    absolute = Path(os.path.abspath(run_dir))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise HAAPIError("Checkpoint path must not contain symlinks")
+    if not run_dir.is_dir():
+        raise HAAPIError("Checkpoint directory does not exist")
+    try:
+        directory_mode = stat.S_IMODE(run_dir.stat().st_mode)
+        if directory_mode & 0o077:
+            raise HAAPIError("Checkpoint directory permissions are too broad")
+        checkpoint_path = run_dir / "checkpoint.json"
+        scenarios_path = run_dir / "scenarios.json"
+        session_path = run_dir / "session.json"
+        for path in (checkpoint_path, scenarios_path, session_path):
+            metadata = path.lstat()
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) & 0o077
+                or metadata.st_size > 1024 * 1024
+            ):
+                raise HAAPIError("Checkpoint files are not private regular files")
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        scenarios = json.loads(scenarios_path.read_text(encoding="utf-8"))
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except HAAPIError:
+        raise
+    except (OSError, UnicodeError, ValueError, TypeError) as ex:
+        raise HAAPIError("Unable to read private scenario checkpoint") from ex
+
+    expected = {
+        "schema_version",
+        "run_id",
+        "scenario_id",
+        "device_fingerprint",
+        "qualification_status",
+        "steps",
+    }
+    steps = checkpoint.get("steps") if isinstance(checkpoint, dict) else None
+    if (
+        not isinstance(checkpoint, dict)
+        or set(checkpoint) != expected
+        or checkpoint.get("schema_version") != 2
+        or not isinstance(checkpoint.get("run_id"), str)
+        or len(checkpoint["run_id"]) != 16
+        or any(char not in "0123456789abcdef" for char in checkpoint["run_id"])
+        or not isinstance(checkpoint.get("scenario_id"), str)
+        or not isinstance(checkpoint.get("device_fingerprint"), str)
+        or len(checkpoint["device_fingerprint"]) != 64
+        or any(
+            char not in "0123456789abcdef" for char in checkpoint["device_fingerprint"]
+        )
+        or checkpoint.get("qualification_status") != "inconclusive"
+        or not isinstance(steps, list)
+        or len(steps) > 128
+        or not isinstance(session, dict)
+        or session.get("run_id") != checkpoint.get("run_id")
+        or scenarios != checkpoint
+    ):
+        raise HAAPIError("Checkpoint schema or run identity is invalid")
+    if any(
+        not isinstance(step, dict)
+        or not isinstance(step.get("step_id"), str)
+        or not isinstance(step.get("outcome"), str)
+        or step["outcome"]
+        not in {"pass", "fail", "inconclusive", "skipped", "not_applicable"}
+        for step in steps
+    ):
+        raise HAAPIError("Checkpoint contains invalid scenario steps")
+    return run_dir, checkpoint
