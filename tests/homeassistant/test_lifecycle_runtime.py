@@ -2485,6 +2485,21 @@ async def test_pending_transaction_blocks_real_service_until_notification(
         # call must produce no second output_control frame.
         assert transport.writes[0][7] == 0x22
 
+    contradictory = notification_builder(
+        0x01 if group == "output" else 0x03,
+        bytes((0x10, 73, 0, 44, 0, 150, 0, 120))
+        if group == "output"
+        else bytes((0xA0, 2, 0, 0, 0x03, 0x11)),
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(contradictory))
+    await hass.async_block_till_done()
+    with pytest.raises(HomeAssistantError) as error:
+        await hass.services.async_call(
+            second_domain, second_service, {"entity_id": second_id}, blocking=True
+        )
+    assert error.value.translation_key == "command_unconfirmed"
+    assert len(transport.writes) == 1
+
     notification = notification_builder(
         0x01 if group == "output" else 0x03,
         bytes((0x12, 73, 1, 44, 0, 150, 0, 120))
