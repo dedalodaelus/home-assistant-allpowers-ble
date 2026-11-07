@@ -35,4 +35,5 @@ jobs:
         if: steps.promotion.outputs['pull-request-url'] != ''
         env:
           PR_URL: ${{ steps.promotion.outputs['pull-request-url'] }}
-        run: echo "Draft promotion PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          echo "Draft promotion PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
