@@ -1,18 +1,20 @@
-"""Command line preflight and read-only snapshot for HIL issue #228."""
+"""HIL CLI setup, device selection, common preflight, and dispatch."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
 import getpass
-import json
+import hashlib
+import hmac
+import json  # noqa: F401 - shared module object used by trace.py and CLI tests
 import math
 import os
 import re
-from time import sleep
+from time import monotonic, sleep
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
 from .discovery import Device, choose_device, find_devices
@@ -23,8 +25,39 @@ from .environment import (
     evaluate_preflight,
     new_run_id,
     read_only_sample,
+    unknown,
 )
-from .storage import write_run
+from .storage import (
+    load_scenario_checkpoint,
+    write_run,
+    write_scenario_progress,
+)
+from .runner import (
+    correlate_transaction,
+    plan as plan_scenarios,
+    plan_as_dict,
+    recovery_verdict,
+    route_matches_request,
+    soak_verdict,
+    verdict,
+)
+from .scenarios import SUITES, load_scenarios
+from .suite_runtime import SuiteServices
+from .trace import (
+    _save_private_trace,
+    _validate_trace_result,
+)
+
+_SWITCH_CONTROLS = {"ac_output", "dc_output", "light", "eco_mode", "car_charger"}
+
+
+def _control_value_available(key: str, state: dict[str, Any], expected: str) -> bool:
+    """Validate switch values or a select's server-advertised options."""
+    current = state.get("state")
+    if key in _SWITCH_CONTROLS:
+        return current in {"on", "off"} and expected in {"on", "off"}
+    options = state.get("options")
+    return isinstance(options, list) and current in options and expected in options
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -66,7 +99,27 @@ def make_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
-    commands.add_parser("run", parents=[common], help="Capture a read-only snapshot")
+    run_parser = commands.add_parser(
+        "run",
+        parents=[common],
+        help="Capture a read-only snapshot or guided scenario suite",
+    )
+    run_parser.add_argument("--suite", choices=(*SUITES, "all"))
+    run_parser.add_argument(
+        "--scenario-id",
+        help="Select one declared scenario for outputs or settings",
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print scenario eligibility without contacting Home Assistant",
+    )
+    run_parser.add_argument(
+        "--list-suites", action="store_true", help="List available scenario suites"
+    )
+    run_parser.add_argument(
+        "--resume", type=Path, help="Resume a validated scenario run directory"
+    )
     trace_parser = commands.add_parser(
         "trace",
         parents=[common],
@@ -106,6 +159,78 @@ def _discovery(
     return config, manifest, find_devices(entities, devices, entries)
 
 
+def _scenario_controls(
+    api: HAClient,
+    device: Device,
+    capabilities: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Record only safe control values and fail-closed eligibility decisions."""
+    settings_controls = {"eco_mode", "car_charger", "work_mode", "eco_timeout"}
+    result: dict[str, Any] = {}
+    for key in (
+        "ac_output",
+        "dc_output",
+        "light",
+        "eco_mode",
+        "car_charger",
+        "work_mode",
+        "eco_timeout",
+    ):
+        entity_id = device.control_entities.get(key)
+        if entity_id is None:
+            observed = {"available": False, "state": None, "options": []}
+        else:
+            try:
+                observed = api.control_state(key, entity_id)
+            except HAAPIError:
+                observed = {"available": False, "state": None, "options": []}
+        facts = capabilities or {}
+        capability_flags = facts.get("capabilities", {})
+        settings_key = key in settings_controls
+        control_capable = capability_flags.get(
+            "write_settings_controls" if settings_key else "write_output_controls",
+            False,
+        )
+        freshness = facts.get("settings_fresh" if settings_key else "status_fresh")
+        if key == "car_charger":
+            control_capable = control_capable and capability_flags.get(
+                "car_charger_enabled", False
+            )
+        result[key] = {
+            **observed,
+            "eligible": bool(
+                facts.get("connected") is True
+                and facts.get("pending_transaction") is False
+                and freshness is True
+                and control_capable is True
+                and observed["available"] is True
+            ),
+        }
+    return result
+
+
+def _device_fingerprint(
+    run_id: str, device: Device, ha_origin: str, requested_route: str = "auto"
+) -> str:
+    """Create a run-scoped device/server fingerprint without persisting IDs."""
+    material = f"{run_id}\0{ha_origin}\0{requested_route}\0{device.config_entry_id or ''}\0{device.device_id}".encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def _has_verified_telemetry(snapshot: Any) -> bool:
+    """Require at least one finite numeric physical measurement per sample."""
+    measurement_keys = {"battery", "input_power", "output_power", "remaining_time"}
+    return isinstance(snapshot, dict) and any(
+        isinstance(record, dict)
+        and record.get("verified") is True
+        and record.get("source") == "ha_rest_entity_state"
+        and type(record.get("value")) in (int, float)
+        and math.isfinite(record["value"])
+        for key, record in snapshot.items()
+        if key in measurement_keys
+    )
+
+
 def _device_list(devices: list[Device]) -> None:
     print(f"ALLPOWERS devices: {len(devices)}")
     for index, device in enumerate(devices, start=1):
@@ -115,411 +240,6 @@ def _device_list(devices: list[Device]) -> None:
             f"firmware {device.firmware or 'unknown'}, "
             f"integration {device.entry_state or 'unverified'})"
         )
-
-
-def _natural_int(value: Any) -> bool:
-    """Exclude booleans from integer fields and forbid negative counters."""
-    return type(value) is int and value >= 0
-
-
-def _check_trace_rows(
-    rows: list[dict[str, Any]],
-    *,
-    run_id: str,
-    scenario_id: str,
-    frame: bool,
-    schema_version: int = 1,
-) -> dict[int, dict[str, Any]]:
-    """Validate ordered v1/v2 event/frame rows without decoding private payloads."""
-    by_seq: dict[int, dict[str, Any]] = {}
-    previous = 0
-    previous_elapsed = 0.0
-    for row in rows:
-        seq = row.get("seq")
-        if (
-            not _natural_int(seq)
-            or seq <= previous
-            or row.get("schema_version") != schema_version
-            or row.get("run_id") != run_id
-            or row.get("scenario_id") != scenario_id
-            or row.get("layer") != "gatt_api"
-            or row.get("observed_route")
-            not in (
-                ("unverified",)
-                if schema_version == 1
-                else ("local_adapter", "active_proxy", "unverified")
-            )
-            or not isinstance(row.get("event"), str)
-            or re.fullmatch(r"[a-z][a-z0-9_]*", row["event"]) is None
-        ):
-            raise HAAPIError("Malformed HIL trace event/frame identity or order")
-        utc_value = row.get("utc")
-        try:
-            when = datetime.fromisoformat(utc_value)
-        except (TypeError, ValueError) as ex:
-            raise HAAPIError("Malformed HIL trace timestamp") from ex
-        if when.utcoffset() is None or when.utcoffset().total_seconds() != 0:
-            raise HAAPIError("HIL trace timestamp must be UTC")
-        elapsed = row.get("elapsed_ms")
-        generation = row.get("session_generation")
-        if (
-            type(elapsed) not in (float, int)
-            or not math.isfinite(elapsed)
-            or elapsed < previous_elapsed
-            or (
-                generation is not None
-                and (not _natural_int(generation) or generation < 1)
-            )
-        ):
-            raise HAAPIError("Malformed HIL trace timing or session generation")
-        if frame:
-            direction = row.get("direction")
-            opcode = row.get("command_type")
-            validation = row.get("frame_validation")
-            encoded = row.get("hex")
-            if (
-                direction not in ("rx", "tx")
-                or opcode
-                not in (
-                    "status_request",
-                    "output_control",
-                    "settings_control",
-                    "unknown",
-                )
-                or validation not in ("validated_tx", "unvalidated_chunk")
-                or not isinstance(encoded, str)
-                or len(encoded) > 512
-                or len(encoded) % 2
-                or re.fullmatch(r"[0-9a-f]*", encoded) is None
-                or (
-                    direction == "rx"
-                    and (opcode != "unknown" or validation != "unvalidated_chunk")
-                )
-                or (
-                    validation == "validated_tx"
-                    and (direction != "tx" or opcode == "unknown")
-                )
-                or (
-                    direction == "tx"
-                    and opcode != "unknown"
-                    and validation != "validated_tx"
-                )
-            ):
-                raise HAAPIError("Malformed HIL GATT frame or validation")
-        previous = seq
-        previous_elapsed = elapsed
-        by_seq[seq] = row
-    return by_seq
-
-
-def _check_v2_routes(
-    result: dict[str, Any],
-    events: list[dict[str, Any]],
-    frames: list[dict[str, Any]],
-) -> None:
-    """Validate per-generation proof and row-time binding before private I/O."""
-    observations = result.get("route_observations")
-    if not isinstance(observations, list):
-        raise HAAPIError("Missing HIL v2 route observations")
-    if len(observations) > 256:
-        raise HAAPIError("Too many HIL v2 route observations")
-    routes: dict[int, dict[str, Any]] = {}
-    previous_seq = 0
-    previous_elapsed = 0.0
-    for item in observations:
-        if not isinstance(item, dict):
-            raise HAAPIError("Malformed route observation")
-        required = {
-            "session_generation",
-            "seq",
-            "utc",
-            "elapsed_ms",
-            "observed_route",
-            "backend_kind",
-            "evidence",
-        }
-        if not required.issubset(item) or set(item) - (
-            required | {"adapter_id", "proxy_id"}
-        ):
-            raise HAAPIError("Malformed route observation fields")
-        gen = item["session_generation"]
-        seq = item["seq"]
-        elapsed = item["elapsed_ms"]
-        try:
-            when = datetime.fromisoformat(item["utc"])
-        except (TypeError, ValueError) as ex:
-            raise HAAPIError("Invalid route observation timestamp") from ex
-        if (
-            not _natural_int(gen)
-            or gen < 1
-            or gen in routes
-            or not _natural_int(seq)
-            or seq <= previous_seq
-            or type(elapsed) not in (float, int)
-            or not math.isfinite(elapsed)
-            or elapsed < previous_elapsed
-            or when.utcoffset() is None
-            or when.utcoffset().total_seconds() != 0
-        ):
-            raise HAAPIError("Invalid route observation generation or order")
-        route = item["observed_route"]
-        backend = item["backend_kind"]
-        evidence = item["evidence"]
-        if route == "local_adapter":
-            adapter = item.get("adapter_id")
-            if (
-                backend != "bluez"
-                or evidence != "bluez_device_path"
-                or type(adapter) is not str
-                or re.fullmatch(r"hci[0-9]+", adapter) is None
-                or "proxy_id" in item
-            ):
-                raise HAAPIError("Malformed local connected backend proof")
-        elif route == "active_proxy":
-            proxy = item.get("proxy_id")
-            if (
-                backend != "esphome"
-                or evidence != "esphome_scanner_binding"
-                or type(proxy) is not str
-                or not proxy
-                or len(proxy) > 128
-                or not proxy.isprintable()
-                or "adapter_id" in item
-            ):
-                raise HAAPIError("Malformed active proxy connected backend proof")
-        elif route == "unverified":
-            if (
-                backend != "unknown"
-                or evidence
-                not in (
-                    "no_ha_wrapper",
-                    "not_connected",
-                    "missing_tracking",
-                    "local_backend_mismatch",
-                    "bluez_path_mismatch",
-                    "esphome_backend_mismatch",
-                    "esphome_scanner_mismatch",
-                    "unsupported_backend",
-                    "inspection_failed",
-                )
-                or "adapter_id" in item
-                or "proxy_id" in item
-            ):
-                raise HAAPIError("Unverified connected route has forged backend proof")
-        else:
-            raise HAAPIError("Unrecognized connected route")
-        routes[gen] = item
-        previous_seq = seq
-        previous_elapsed = elapsed
-
-    observed = [row["observed_route"] for row in observations]
-    summary = (
-        "unverified"
-        if not observed or "unverified" in observed
-        else observed[0]
-        if len(set(observed)) == 1
-        else "mixed"
-    )
-    if result.get("observed_route") != summary:
-        raise HAAPIError("Connected route summary disagrees with its evidence")
-
-    found_observations: set[int] = set()
-    for row in events + frames:
-        generation = row.get("session_generation")
-        route_item = routes.get(generation)
-        expected = (
-            route_item["observed_route"]
-            if route_item is not None and row["seq"] >= route_item["seq"]
-            else "unverified"
-        )
-        if row["observed_route"] != expected:
-            raise HAAPIError("Connected backend route contradicts event timing")
-        if row["event"] == "route_observed":
-            if (
-                route_item is None
-                or row["seq"] != route_item["seq"]
-                or row.get("utc") != route_item["utc"]
-                or row.get("elapsed_ms") != route_item["elapsed_ms"]
-                or row.get("backend_kind") != route_item["backend_kind"]
-                or row.get("evidence") != route_item["evidence"]
-            ):
-                raise HAAPIError("Route observation is not bound to its generation")
-            found_observations.add(generation)
-    if result["dropped_events"] == 0 and found_observations != set(routes):
-        raise HAAPIError("Missing connected backend observation event")
-
-
-def _validate_trace_result(
-    result: Any,
-    *,
-    run_id: str,
-    scenario_id: str,
-    capture_id: str,
-    requested_route: str,
-    expected_version: int | None = None,
-    expected_scope: str = "runtime_entry",
-) -> None:
-    """Fail closed on private v1/v2 evidence, before writing any raw files."""
-    is_probe = (
-        isinstance(result, dict) and result.get("capture_scope") == "config_probe"
-    )
-    if (
-        not isinstance(result, dict)
-        or result.get("capture_scope", "runtime_entry") != expected_scope
-        or result.get("schema_version") not in (1, 2)
-        or (
-            expected_version is not None
-            and result.get("schema_version") != expected_version
-        )
-        or result.get("run_id") != run_id
-        or result.get("scenario_id") != scenario_id
-        or result.get("capture_id") != capture_id
-        or result.get("requested_route") != requested_route
-        or result.get("qualification_allowed") is not False
-        or (
-            result.get("observed_route") != "unverified"
-            if result.get("schema_version") == 1
-            else result.get("observed_route")
-            not in ("local_adapter", "active_proxy", "mixed", "unverified")
-        )
-        or result.get("capture_layer") != "gatt_api_not_rf"
-        or result.get("private_raw_bytes") is not True
-        or result.get("closed") is not True
-        or type(result.get("expired")) is not bool
-        or type(result.get("complete")) is not bool
-        or result.get("termination_reason")
-        not in (
-            ("probe_finished", "probe_skipped", "probe_interrupted", "expired")
-            if is_probe
-            else ("requested_stop", "runtime_stopped", "expired")
-        )
-    ):
-        raise HAAPIError("Capture metadata mismatch or final stop not acknowledged")
-    if is_probe and (
-        result.get("schema_version") != 2
-        or not isinstance(result.get("flow_id"), str)
-        or not result["flow_id"]
-        or result.get("probe_state") != "finished"
-        or result.get("probe_outcome")
-        not in ("success", "failure", "cancelled", "skipped", "interrupted")
-        or (
-            result["termination_reason"] == "probe_finished"
-            and result["probe_outcome"] not in ("success", "failure", "cancelled")
-        )
-        or (
-            result["termination_reason"] == "probe_skipped"
-            and result["probe_outcome"] != "skipped"
-        )
-        or (
-            result["termination_reason"] == "probe_interrupted"
-            and result["probe_outcome"] != "interrupted"
-        )
-    ):
-        raise HAAPIError("Invalid probe capture lifecycle metadata")
-    for key in ("events", "frames"):
-        if not isinstance(result.get(key), list) or not all(
-            isinstance(row, dict) for row in result[key]
-        ):
-            raise HAAPIError("Invalid private HIL trace records")
-    for name in ("event_count", "frame_count", "dropped_events", "dropped_frames"):
-        if not _natural_int(result.get(name)):
-            raise HAAPIError("Invalid HIL trace count")
-    events = result["events"]
-    frames = result["frames"]
-    if (
-        result["event_count"] != len(events)
-        or result["frame_count"] != len(frames)
-        or result.get("has_gatt_frames") is not bool(frames)
-    ):
-        raise HAAPIError("Incomplete private HIL trace record count")
-    expected_complete = (
-        result["termination_reason"]
-        == ("probe_finished" if is_probe else "requested_stop")
-        and not result["expired"]
-        and result["dropped_events"] == 0
-        and result["dropped_frames"] == 0
-    )
-    if result["complete"] is not expected_complete or (
-        is_probe and result.get("capture_complete") is not expected_complete
-    ):
-        raise HAAPIError("Contradictory HIL capture integrity fields")
-    version = result["schema_version"]
-    events_by_seq = _check_trace_rows(
-        events,
-        run_id=run_id,
-        scenario_id=scenario_id,
-        frame=False,
-        schema_version=version,
-    )
-    _check_trace_rows(
-        frames,
-        run_id=run_id,
-        scenario_id=scenario_id,
-        frame=True,
-        schema_version=version,
-    )
-    if version == 2:
-        _check_v2_routes(result, events, frames)
-    elif "route_observations" in result:
-        raise HAAPIError("Unexpected connected backend proof in v1 trace")
-    common_fields = (
-        "schema_version",
-        "seq",
-        "utc",
-        "elapsed_ms",
-        "run_id",
-        "scenario_id",
-        "event",
-        "session_generation",
-        "layer",
-        "observed_route",
-    )
-    for record in frames:
-        event = events_by_seq.get(record["seq"])
-        if event is None:
-            if result["dropped_events"] == 0:
-                raise HAAPIError("HIL frame is missing its corresponding event")
-            continue
-        if any(record[key] != event[key] for key in common_fields) or (
-            ("transaction_id" in record or "transaction_id" in event)
-            and (
-                "transaction_id" not in record
-                or "transaction_id" not in event
-                or record["transaction_id"] != event["transaction_id"]
-            )
-        ):
-            raise HAAPIError("HIL frame metadata differs from its matching event")
-
-
-def _save_private_trace(output_dir: Path, result: dict[str, Any]) -> None:
-    """Write only validated private evidence, scrubbing partial failures."""
-    private_paths = (
-        output_dir / "events.jsonl",
-        output_dir / "frames.jsonl",
-        output_dir / "trace.json",
-    )
-    try:
-        for path, key in zip(private_paths[:2], ("events", "frames"), strict=True):
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                for record in result[key]:
-                    stream.write(json.dumps(record, sort_keys=True) + "\n")
-        metadata = {
-            key: value
-            for key, value in result.items()
-            if key not in ("events", "frames")
-        }
-        fd = os.open(private_paths[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(metadata, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-    except (OSError, TypeError, ValueError) as ex:
-        for path in private_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise HAAPIError("Private HIL trace could not be saved") from ex
 
 
 def _select_probe(listed: Any, args: argparse.Namespace) -> tuple[str, str]:
@@ -651,6 +371,7 @@ def _execute_probe_trace(
         expected_version=2,
         expected_scope="config_probe",
     )
+
     if result["flow_id"] != flow_id:
         raise HAAPIError("Probe evidence belongs to another flow")
     _save_private_trace(output_dir, result)
@@ -681,8 +402,187 @@ def _execute_probe_trace(
     )
 
 
+def _suite_services() -> SuiteServices:
+    """Build the injected runtime dependencies for suite executors."""
+    return SuiteServices(
+        device_fingerprint=_device_fingerprint,
+        has_verified_telemetry=_has_verified_telemetry,
+        save_private_trace=_save_private_trace,
+        validate_trace_result=_validate_trace_result,
+        control_value_available=_control_value_available,
+        write_scenario_progress=write_scenario_progress,
+        load_scenarios=load_scenarios,
+        correlate_transaction=correlate_transaction,
+        route_matches_request=route_matches_request,
+        verdict=verdict,
+        recovery_verdict=recovery_verdict,
+        soak_verdict=soak_verdict,
+        read_only_sample=read_only_sample,
+        monotonic=monotonic,
+        sleep=sleep,
+        prompt=input,
+        datetime=datetime,
+    )
+
+
+def _execute_output_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    environment: dict[str, Any],
+    output_dir: Path,
+    run_id: str,
+) -> int:
+    from .outputs import _execute_output_suite as execute_suite
+
+    return execute_suite(
+        api, args, device, environment, output_dir, run_id, _suite_services()
+    )
+
+
+def _execute_settings_write(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+    scenario: Any,
+    key: str,
+    entity_id: str,
+    target: str,
+    expected_pre_state: str,
+    generation: int,
+    trace_name: str,
+    on_update: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    from .settings import _execute_settings_write as execute_write
+
+    return execute_write(
+        api,
+        args,
+        device,
+        output_dir,
+        run_id,
+        scenario,
+        key,
+        entity_id,
+        target,
+        expected_pre_state,
+        generation,
+        trace_name,
+        on_update,
+        _suite_services(),
+    )
+
+
+def _execute_settings_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+) -> int:
+    from .settings import _execute_settings_suite as execute_suite
+
+    return execute_suite(api, args, device, output_dir, run_id, _suite_services())
+
+
+def _execute_recovery_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+    resume_state: dict[str, Any] | None = None,
+) -> int:
+    from .recovery import _execute_recovery_suite as execute_suite
+
+    return execute_suite(
+        api, args, device, output_dir, run_id, _suite_services(), resume_state
+    )
+
+
+def _execute_soak_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+    resume_state: dict[str, Any] | None = None,
+) -> int:
+    from .soak import _execute_soak_suite as execute_suite
+
+    return execute_suite(
+        api, args, device, output_dir, run_id, _suite_services(), resume_state
+    )
+
+
 def execute(args: argparse.Namespace) -> int:
     """Execute read-only preflight and explicitly requested private HIL capture."""
+    if args.command == "run":
+        if args.list_suites:
+            print("Available HIL suites:")
+            for suite in SUITES:
+                print(f"  {suite}")
+            return 0
+        if args.resume is not None and (
+            args.suite not in {"recovery", "soak-24h"}
+            or args.dry_run
+            or args.list_suites
+        ):
+            raise HAAPIError("This scenario cannot be resumed")
+        if args.suite == "settings" and args.scenario_id is None:
+            raise HAAPIError("Select a settings scenario with --scenario-id")
+        if args.scenario_id is not None:
+            if args.suite not in {"outputs", "settings"}:
+                raise HAAPIError(
+                    "--scenario-id is currently supported only for outputs and settings"
+                )
+            if not any(
+                item.id == args.scenario_id and item.suite == args.suite
+                for item in load_scenarios()
+            ):
+                raise HAAPIError("Unknown selected scenario")
+        if args.dry_run:
+            suite = args.suite or "read-only"
+            planned = plan_scenarios(suite, non_interactive=args.non_interactive)
+            if args.scenario_id is not None:
+                planned = tuple(
+                    item for item in planned if item.scenario.id == args.scenario_id
+                )
+            if not planned:
+                print(
+                    f"blocked: {suite} — no runnable scenario declarations are available yet"
+                )
+            for item in planned:
+                entry = plan_as_dict(item)
+                status = "eligible" if entry["eligible"] else "blocked"
+                print(f"{status}: {entry['id']} [{entry['suite']}] — {entry['reason']}")
+                print("  requested actions:", ", ".join(entry["requested_effects"]))
+            return 0
+        if args.suite not in (
+            None,
+            "read-only",
+            "outputs",
+            "settings",
+            "recovery",
+            "soak-24h",
+        ):
+            raise HAAPIError(
+                "This suite is declarative but execution is not implemented yet; use --dry-run"
+            )
+        if args.suite in {"outputs", "settings", "recovery"} and args.non_interactive:
+            raise HAAPIError(f"The {args.suite} suite requires interactive operation")
+    resume_state: dict[str, Any] | None = None
+    resume_dir: Path | None = None
+    if args.command == "run" and args.resume is not None:
+        resume_dir, resume_state = load_scenario_checkpoint(args.resume)
+        expected_scenarios = {
+            "recovery": "recovery_reconnect",
+            "soak-24h": "soak_24h_observation",
+        }
+        if resume_state["scenario_id"] != expected_scenarios[args.suite]:
+            raise HAAPIError("Checkpoint does not belong to the selected scenario")
     url, token = _credential(args)
     api = HAClient(url, token, allow_insecure_http=args.allow_insecure_http)
     config, manifest, devices = _discovery(api)
@@ -745,6 +645,12 @@ def execute(args: argparse.Namespace) -> int:
         return 2
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
+    if resume_state is not None:
+        fingerprint = _device_fingerprint(
+            resume_state["run_id"], selected, api.origin, args.route
+        )
+        if not hmac.compare_digest(fingerprint, resume_state["device_fingerprint"]):
+            raise HAAPIError("Selected device does not match the checkpoint")
     entry_id: str | None = None
     if args.command == "trace":
         if not 1 <= args.duration <= 30:
@@ -781,7 +687,7 @@ def execute(args: argparse.Namespace) -> int:
         if len(candidates) != 1:
             raise HAAPIError("Cannot determine one loaded ALLPOWERS config entry")
         entry_id = next(iter(candidates))
-    run_id = new_run_id()
+    run_id = resume_state["run_id"] if resume_state is not None else new_run_id()
     sample = read_only_sample(api, selected)
     session = build_session(
         run_id=run_id,
@@ -790,10 +696,41 @@ def execute(args: argparse.Namespace) -> int:
         environment=environment,
         sample=sample,
     )
+    if args.command == "run" and args.suite == "read-only":
+        capabilities: dict[str, Any] | None = None
+        unavailable_reason = "no unique loaded integration entry found"
+        if selected.config_entry_id is not None:
+            try:
+                capabilities = api.hil_capabilities(selected.config_entry_id)
+            except HAAPIError:
+                unavailable_reason = "admin capability snapshot unavailable"
+        session["runtime_capabilities"] = (
+            capabilities if capabilities is not None else unknown(unavailable_reason)
+        )
+        session["controls"] = _scenario_controls(api, selected, capabilities)
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
-    output_dir = write_run(
-        args.output_root, f"{timestamp}_{run_id}", environment, session
-    )
+    if resume_state is not None:
+        if resume_dir is None:
+            raise HAAPIError("Missing validated recovery directory")
+        output_dir = resume_dir
+    else:
+        output_dir = write_run(
+            args.output_root, f"{timestamp}_{run_id}", environment, session
+        )
+    if args.command == "run" and args.suite == "outputs":
+        return _execute_output_suite(
+            api, args, selected, environment, output_dir, run_id
+        )
+    if args.command == "run" and args.suite == "settings":
+        return _execute_settings_suite(api, args, selected, output_dir, run_id)
+    if args.command == "run" and args.suite == "recovery":
+        return _execute_recovery_suite(
+            api, args, selected, output_dir, run_id, resume_state
+        )
+    if args.command == "run" and args.suite == "soak-24h":
+        return _execute_soak_suite(
+            api, args, selected, output_dir, run_id, resume_state
+        )
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")

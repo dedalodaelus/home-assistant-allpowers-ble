@@ -1,0 +1,32 @@
+{
+  "id": "output_light_cycle",
+  "schema_version": 1,
+  "suite": "outputs",
+  "title": "Turn the station light on and return it to the initial off state",
+  "mode": "interactive_write",
+  "steps": [
+    {
+      "id": "light_on",
+      "instruction": "Turn the station light on for the attended control check.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "light",
+      "expected": "on"
+    },
+    {
+      "id": "light_off",
+      "instruction": "Turn the station light off and confirm the initial state is restored.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "light",
+      "expected": "off"
+    }
+  ],
+  "required_evidence": [
+    "fresh_pre_and_post_state",
+    "ha_service_acknowledgement",
+    "same_session_transaction_confirmation",
+    "verified_connected_route",
+    "physical_observation"
+  ]
+}

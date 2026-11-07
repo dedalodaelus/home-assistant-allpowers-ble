@@ -110,6 +110,22 @@ async def test_noop_confirmed_control_does_not_block_real_change(control: str) -
     assert len(fake.writes) == 1
 
 
+def test_client_exposes_session_generation_and_pending_transaction_state() -> None:
+    client, _ = _connected_client()
+    assert client.active_session_generation == 1
+    assert client.has_pending_transaction is False
+    assert client._settings is not None
+
+    client._pending_settings_transaction = client_module.PendingSettingsTransaction(
+        session_generation=1,
+        source_version=0,
+        target=client._settings,
+        sent_monotonic=0,
+        confirm_deadline_monotonic=1,
+    )
+    assert client.has_pending_transaction is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("group", ["output", "settings"])
 @pytest.mark.parametrize("write_error", [False, True])
@@ -286,6 +302,47 @@ async def test_transaction_keepalive_rejects_pending_settings() -> None:
 
     assert len(fake.writes) == 1
     assert client._settings.eco_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_automatic_keepalive_does_not_replay_pending_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = ConnectionOptions(
+        status_interval=10,
+        stale_timeout=120,
+        watchdog_timeout=180,
+        settings_stale_timeout=180,
+        settings_keepalive=True,
+        settings_keepalive_interval=60,
+    )
+    client, fake = _connected_client(options)
+    now = 100.0
+    client._status = _status()
+    client._status_monotonic = now
+    client._settings_monotonic = now
+    client._connected_monotonic = now
+    client._last_packet_monotonic = now
+    client._last_status_request_monotonic = now
+    monkeypatch.setattr(client, "_loop_time", lambda: now)
+
+    await client.async_set_eco(True)
+    assert len(fake.writes) == 1
+
+    now += options.settings_keepalive_interval + 0.1
+    reconnects: list[str] = []
+
+    async def record_reconnect(reason: str) -> None:
+        reconnects.append(reason)
+        client._stop_event.set()
+
+    monkeypatch.setattr(client, "async_reconnect", record_reconnect)
+    await client._maintenance_loop()
+
+    assert reconnects == ["Settings confirmation unavailable; renewing BLE session"]
+    assert len(fake.writes) == 1
+    assert fake.writes[0][7] == 0xA1
+    assert client._pending_settings_transaction is not None
 
 
 @pytest.mark.asyncio

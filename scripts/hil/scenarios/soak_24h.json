@@ -1,0 +1,33 @@
+{
+  "id": "soak_24h_observation",
+  "schema_version": 1,
+  "suite": "soak-24h",
+  "title": "Observe fresh telemetry and route at bounded intervals for 24 hours",
+  "mode": "soak",
+  "steps": [
+    {
+      "id": "periodic_observation",
+      "instruction": "Sample read-only status periodically and capture a short route trace once per hour.",
+      "timeout_seconds": 86400,
+      "action": "observe",
+      "target": null,
+      "expected": "24 hours of uninterrupted measured observations"
+    }
+  ],
+  "required_evidence": [
+    "minimum_periodic_samples",
+    "maximum_sample_gap",
+    "hourly_complete_route_traces",
+    "continuous_monotonic_duration",
+    "bounded_private_storage"
+  ],
+  "parameters": {
+    "duration_seconds": 86400,
+    "sample_interval_seconds": 300,
+    "max_gap_seconds": 600,
+    "trace_interval_seconds": 3600,
+    "trace_window_seconds": 15,
+    "max_bytes": 10485760,
+    "minimum_samples": 289
+  }
+}

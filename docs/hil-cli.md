@@ -1,4 +1,4 @@
-# Guided HIL CLI: read-only preflight and opt-in private GATT trace
+# Guided HIL CLI: preflight, private traces and scenarios
 
 The `doctor` and `run` commands collect non-destructive environment provenance and existing Home Assistant entity states. The separate administrator-only `trace` command in #229 **does capture private runtime GATT API data**, using the integration's existing BLE connection and no extra BLE commands. The private trace v2 identifies the established local BlueZ adapter or ESPHome active proxy only when the connected backend exposes sufficient evidence; otherwise its route is unverified. The separately authorized `probe-trace` command also captures Home Assistant's existing config-flow GATT probe, including flows without a config entry. Neither capture mode provides independent RF evidence or physical hardware qualification. See [#227](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/227) and #229-#232.
 
@@ -87,6 +87,95 @@ unset HA_HIL_TOKEN
 If `doctor` exits 2 because the optional freshness sensor is disabled, that means **insufficient evidence**, not a failed device. `run` still saves the read-only snapshot.
 
 ## Verification
+
+## Guided scenario runner (#230)
+
+The scenario interface is being introduced incrementally. List declarations and
+inspect a side-effect-free plan with:
+
+```bash
+python -m scripts.hil run --list-suites
+python -m scripts.hil run --suite read-only --dry-run
+python -m scripts.hil run --suite all --dry-run
+```
+
+`all` currently selects only read-only scenarios. Write, recovery and soak
+suites are never implicitly enabled. The ordinary `run` command remains the
+#228 read-only snapshot. Run the bounded 24-hour observer explicitly with
+`python -m scripts.hil --non-interactive --device 1 run --suite soak-24h`.
+It samples every five minutes, allows at most a ten-minute observation gap,
+collects an hourly 15-second route trace, and caps private run data at 10 MiB.
+Only a full uninterrupted 24-hour segment can pass; a process restart starts a
+new segment and records the missing time as a discontinuity. Recovery and soak
+can resume a private schema v2 checkpoint for the same selected device. Resume
+continues observation only; it never repeats an operator action or replays an
+output write. Output checkpoints are not resumable because an interrupted
+service call may be ambiguous.
+
+`run --suite read-only` also requests an admin-only runtime capability snapshot
+for the selected loaded entry. Without admin access, capability evidence is
+recorded as unavailable and write eligibility stays false. Control entities
+are matched by integration ownership, device, platform and unique-ID suffix;
+disabled, ambiguous, missing or unavailable entities are ineligible. The
+snapshot stores only allowlisted states and options, never HA entity or entry
+IDs. This does not execute controls or establish physical qualification.
+
+The `outputs` suite offers separately selectable AC, DC and station-light
+on/off cycles, plus the optional car charger when its integration opt-in is
+enabled. AC remains the default; choose another declared scenario with
+`--scenario-id output_dc_cycle`, `--scenario-id output_light_cycle`, or
+`--scenario-id output_car_charger_cycle`. The car charger also requires fresh
+settings evidence and its explicit integration capability flag. Each scenario
+checks the active profile and state before each write, requires separate
+numeric consent, records short private traces and asks for the physical
+result. Run only with a safe noncritical load and no hazardous
+equipment connected. If the operator authorized the final off step but trace
+setup failed before its service call, the runner rechecks the same fresh
+session and may perform one traced restoration. An attempted or ambiguous
+write is never retried; in that case inspect and restore the station manually.
+A restoration does not turn an incomplete run into a pass. These scenarios
+have not been piloted on hardware.
+
+The `settings` suite currently provides ECO-mode, work-mode and ECO-timeout
+checks. Each change is restricted to a declared value exposed by HA, requires
+fresh settings and a separate authorization, and is followed by a separately
+authorized attempt to restore the original value. Missing confirmation or
+route evidence remains inconclusive; restoration is never retried after an
+ambiguous service call. Settings checks have not been piloted on hardware.
+
+The `recovery` suite is a guided observation. It asks the operator to choose
+and perform a route interruption/restoration, vendor-app contention, or HA
+reload/upgrade; the CLI does not initiate any of those actions. It then waits
+up to five minutes for a fresh connected session with a changed generation or
+an observed disconnect, captures a short route trace, and asks for a numeric
+physical outcome. Missing route proof, incomplete trace, or missing recovery
+confirmation remains inconclusive. The evidence is not build-level HIL
+qualification.
+
+```bash
+python -m scripts.hil --device 1 run --suite recovery
+python -m scripts.hil --device 1 run --suite outputs
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
+python -m scripts.hil --device 1 run --suite outputs --scenario-id output_car_charger_cycle
+python -m scripts.hil --device 1 run --suite settings --scenario-id settings_work_mode
+python -m scripts.hil --device 1 run --suite settings --scenario-id settings_eco_timeout
+```
+
+Each guided run writes private `scenarios.json` and `checkpoint.json` files
+after steps. To resume a recovery observation, pass the existing run folder:
+
+```bash
+python -m scripts.hil --device 1 run --suite recovery \
+  --resume hil-results/2026-11-07T01-00-00Z_0123456789abcdef
+```
+
+Resume validates the checkpoint schema, matching session/run identity, private
+file permissions, and a run-scoped fingerprint of the selected HA origin and
+device. It refuses old checkpoint versions, symlinks, mismatched devices,
+output runs, and completed or failed recovery scenarios. It records the
+restart as an unobserved clock interval and never repeats the disruptive
+operator action; that gap cannot count as continuous qualification time.
 
 ```bash
 python -m pytest tests/test_hil_cli.py

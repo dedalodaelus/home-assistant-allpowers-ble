@@ -1,0 +1,14 @@
+{
+  "id": "read_only_snapshot",
+  "schema_version": 1,
+  "suite": "read-only",
+  "title": "Observe device status, settings, freshness and route evidence",
+  "mode": "read_only",
+  "steps": [
+    {"id": "device_identity", "instruction": "Record the selected integration-owned device provenance.", "timeout_seconds": 12, "action": "observe", "target": null, "expected": "allowlisted device model and revisions"},
+    {"id": "status_freshness", "instruction": "Observe the current status snapshot and freshness indicators.", "timeout_seconds": 12, "action": "observe", "target": null, "expected": "freshness reported without inferring missing data"},
+    {"id": "settings_snapshot", "instruction": "Observe settings when available.", "timeout_seconds": 12, "action": "observe", "target": null, "expected": "settings captured or explicitly unavailable"},
+    {"id": "route_evidence", "instruction": "Use connected-backend evidence when available.", "timeout_seconds": 30, "action": "observe", "target": null, "expected": "observed route or inconclusive"}
+  ],
+  "required_evidence": ["device", "status", "settings", "route"]
+}

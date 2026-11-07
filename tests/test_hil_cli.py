@@ -108,6 +108,37 @@ class FakeHA:
         self.calls.append(("ws", "registry"))
         return self.entities, self.devices, {"version": "0.3.0"}, self.entries
 
+    def hil_capabilities(self, entry_id):
+        self.calls.append(("ws", "hil_capabilities", entry_id))
+        return {
+            "schema_version": 1,
+            "model": "R600",
+            "profile": "r600-hw-0.3",
+            "classification": "verified",
+            "verified": True,
+            "identity_conflicted": False,
+            "hardware_revision": "0.3",
+            "raw_hardware_revision": 3,
+            "firmware_revision": "0.2",
+            "raw_firmware_revision": 2,
+            "capabilities": {
+                "read_telemetry": True,
+                "write_output_controls": True,
+                "write_settings_controls": True,
+                "write_settings_keepalive": True,
+                "car_charger_enabled": False,
+            },
+            "connected": True,
+            "status_fresh": True,
+            "settings_fresh": True,
+            "session_generation": 3,
+            "pending_transaction": False,
+        }
+
+    def control_state(self, key, entity_id):
+        self.calls.append(("control", key, entity_id))
+        return {"available": True, "state": "off", "options": []}
+
     def entity_state(self, entity_id):
         self.calls.append(("get", entity_id))
         if entity_id in self.state_overrides:
@@ -172,6 +203,40 @@ def test_registry_selects_by_integration_owner_not_vendor_name(allpowers_registr
     assert choices[0].hardware == "0.3"
     assert choices[0].state_entities["battery"] == "sensor.my_name_battery"
     assert discovery.choose_device(choices, None, non_interactive=True) is choices[0]
+
+
+def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    """Explicit suite reads current metadata but never persists HA identifiers."""
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / "scenario"
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--suite",
+                "read-only",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 0
+    )
+
+    (run_dir,) = tuple(output_root.iterdir())
+    report = json.loads((run_dir / "session.json").read_text())
+    assert report["runtime_capabilities"]["profile"] == "r600-hw-0.3"
+    assert report["controls"]["car_charger"]["eligible"] is False
+    assert "secret-entry-1" not in json.dumps(report)
+    assert "AA:BB:CC:DD:EE:FF" not in json.dumps(report)
+    assert ("ws", "hil_capabilities", "secret-entry-1") in fake.calls
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
@@ -645,6 +710,707 @@ def test_json_storage_excludes_internal_ids_when_public_types_are_used(
     assert "secret-device-id" not in saved
     assert "AA:BB" not in saved
     assert session["route"]["qualification_allowed"] is False
+
+
+def test_checkpoint_round_trip_is_versioned_private_and_run_bound(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(
+        tmp_path, "resume-safe", {"ok": True}, {"run_id": run_id}
+    )
+    fingerprint = "a" * 64
+    steps = [{"step_id": "baseline", "outcome": "pass"}]
+    storage.write_scenario_progress(
+        folder, run_id, "recovery_reconnect", fingerprint, steps
+    )
+
+    loaded_dir, checkpoint = storage.load_scenario_checkpoint(folder)
+
+    assert loaded_dir == folder
+    assert checkpoint["schema_version"] == 2
+    assert checkpoint["scenario_id"] == "recovery_reconnect"
+    assert checkpoint["device_fingerprint"] == fingerprint
+    assert checkpoint["steps"] == steps
+    assert (folder / "checkpoint.json").stat().st_mode & 0o077 == 0
+
+
+def test_checkpoint_loader_rejects_symlinked_checkpoint(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(tmp_path, "resume-link", {}, {"run_id": run_id})
+    storage.write_scenario_progress(folder, run_id, "recovery_reconnect", "b" * 64, [])
+    saved = folder / "checkpoint.saved"
+    (folder / "checkpoint.json").rename(saved)
+    (folder / "checkpoint.json").symlink_to(saved.name)
+
+    with pytest.raises(api.HAAPIError, match="private regular files"):
+        storage.load_scenario_checkpoint(folder)
+
+
+def test_checkpoint_loader_rejects_legacy_schema(tmp_path):
+    run_id = "0123456789abcdef"
+    folder = storage.write_run(tmp_path, "resume-old", {}, {"run_id": run_id})
+    storage.write_scenario_progress(folder, run_id, "recovery_reconnect", "c" * 64, [])
+    payload = json.loads((folder / "checkpoint.json").read_text())
+    payload["schema_version"] = 1
+    encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    (folder / "checkpoint.json").write_text(encoded)
+    (folder / "scenarios.json").write_text(encoded)
+
+    with pytest.raises(api.HAAPIError, match="schema or run identity"):
+        storage.load_scenario_checkpoint(folder)
+
+
+def test_output_suite_checkpoint_cannot_be_resumed():
+    args = cli.make_parser().parse_args(
+        ["run", "--suite", "outputs", "--resume", "/tmp/not-read"]
+    )
+
+    with pytest.raises(api.HAAPIError, match="scenario cannot be resumed"):
+        cli.execute(args)
+
+
+@pytest.mark.parametrize(
+    ("suite", "scenario_id", "requested_action"),
+    [
+        ("outputs", "output_dc_cycle", "switch"),
+        ("outputs", "output_light_cycle", "switch"),
+        ("outputs", "output_car_charger_cycle", "switch"),
+        ("settings", "settings_eco_mode", "switch"),
+        ("settings", "settings_work_mode", "select"),
+        ("settings", "settings_eco_timeout", "select"),
+    ],
+)
+def test_scenario_selection_is_a_side_effect_free_dry_run(
+    suite, scenario_id, requested_action, capsys
+):
+    args = cli.make_parser().parse_args(
+        ["run", "--suite", suite, "--scenario-id", scenario_id, "--dry-run"]
+    )
+
+    assert cli.execute(args) == 0
+    output = capsys.readouterr().out
+    assert f"{scenario_id} [{suite}]" in output
+    assert "ac_on [outputs]" not in output
+    assert f"requested actions: {requested_action}" in output
+
+
+@pytest.mark.parametrize("failure_mode", ["safe", "pending", "ambiguous"])
+@pytest.mark.parametrize(
+    ("scenario_id", "control_key"),
+    [
+        ("output_ac_cycle", "ac_output"),
+        ("output_car_charger_cycle", "car_charger"),
+        ("output_dc_cycle", "dc_output"),
+        ("output_light_cycle", "light"),
+    ],
+)
+def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
+    monkeypatch, tmp_path, failure_mode, scenario_id, control_key
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class RestoreHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.starts = 0
+            self.actions = []
+            self.pending = False
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": self.pending,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 7,
+                "capabilities": {
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "car_charger_enabled": True,
+                },
+            }
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": self.state}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append(value)
+            if value == "off" and failure_mode == "ambiguous":
+                raise cli.HAAPIError("service acknowledgement lost")
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.starts += 1
+                if self.starts == 2 and failure_mode != "ambiguous":
+                    self.pending = failure_mode == "pending"
+                    raise cli.HAAPIError("trace unavailable")
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": f"capture-{self.starts}",
+                    }
+                ]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "events": [],
+                    "frames": [],
+                    "complete": True,
+                    "observed_route": "local_adapter",
+                }
+            ]
+
+    api_fake = RestoreHA()
+    output_dir = tmp_path / "restore-run"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={control_key: f"switch.private_{control_key}"},
+        config_entry_id="entry-safe",
+    )
+    inputs = iter(("1", "1", "1", "3" if failure_mode == "ambiguous" else "1"))
+    clock = [10_000.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(inputs), raising=False)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "correlate_transaction",
+        lambda trace, **kwargs: {"transaction_id": trace["capture_id"]},
+    )
+
+    def save_trace(trace_dir, trace):
+        (trace_dir / "trace.json").write_text(json.dumps(trace))
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+    result = cli._execute_output_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto", scenario_id=scenario_id),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    cleanup = checkpoint["steps"][-1]
+    assert result == 2
+    if failure_mode == "safe":
+        assert cleanup.get("service_attempted") is not True
+        assert cleanup["cleanup_attempted"] is True
+        assert api_fake.actions == ["on", "off"]
+        assert cleanup["cleanup_service_attempted"] is True
+        assert cleanup["cleanup_outcome"] == "pass"
+        assert cleanup["cleanup_post_state"] == "off"
+        assert cleanup["cleanup_trace"] == f"traces/{control_key}_cleanup"
+    elif failure_mode == "pending":
+        assert cleanup.get("service_attempted") is not True
+        assert cleanup["cleanup_attempted"] is True
+        assert api_fake.actions == ["on"]
+        assert cleanup.get("cleanup_service_attempted") is not True
+        assert cleanup["cleanup_reason"].startswith("fresh same-session")
+    else:
+        assert api_fake.actions == ["on", "off"]
+        assert cleanup["service_attempted"] is True
+        assert cleanup.get("cleanup_attempted") is not True
+
+
+def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class DisabledCarChargerHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+            self.trace_starts = 0
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 3,
+                "capabilities": {
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "car_charger_enabled": False,
+                },
+            }
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": "off"}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                self.trace_starts += 1
+            raise AssertionError("a disabled car charger must not start a trace")
+
+    output_dir = tmp_path / "car-disabled"
+    output_dir.mkdir(mode=0o700)
+    api_fake = DisabledCarChargerHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"car_charger": "switch.private_car_charger"},
+        config_entry_id="entry-safe",
+    )
+
+    result = cli._execute_output_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            scenario_id="output_car_charger_cycle",
+        ),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert api_fake.actions == []
+    assert api_fake.trace_starts == 0
+    assert checkpoint["steps"][0]["reason"] == (
+        "live capability or expected pre-state check failed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "control_key", "initial", "options"),
+    [
+        ("settings_eco_mode", "eco_mode", "off", ["off", "on"]),
+        (
+            "settings_work_mode",
+            "work_mode",
+            "mute",
+            ["mute", "standard", "fast"],
+        ),
+        (
+            "settings_eco_timeout",
+            "eco_timeout",
+            "six_hours",
+            ["one_hour", "two_hours", "four_hours", "six_hours"],
+        ),
+    ],
+)
+def test_settings_scenarios_restore_original_option_with_fresh_evidence(
+    monkeypatch, tmp_path, scenario_id, control_key, initial, options
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class SettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = initial
+            self.actions = []
+            self.capture = 0
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def control_state(self, key, entity_id):
+            del key, entity_id
+            return (
+                api.HAClient.control_state(
+                    self, control_key, f"switch.private_{control_key}"
+                )
+                if control_key == "eco_mode"
+                else api.HAClient.control_state(
+                    self, control_key, f"select.private_{control_key}"
+                )
+            )
+
+        def entity_state(self, entity_id):
+            del entity_id
+            attributes = {"options": options} if control_key != "eco_mode" else {}
+            return {"state": self.state, "attributes": attributes}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [{"schema_version": 2, "capture_id": f"settings-{self.capture}"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "events": [],
+                    "frames": [],
+                    "complete": True,
+                    "observed_route": "local_adapter",
+                }
+            ]
+
+    api_fake = SettingsHA()
+    output_dir = tmp_path / scenario_id
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={control_key: f"select.private_{control_key}"},
+        config_entry_id="entry-safe",
+    )
+    inputs = iter(("1", "1", "1", "1"))
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(inputs), raising=False)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "correlate_transaction",
+        lambda trace, **kwargs: {"transaction_id": trace["capture_id"]},
+    )
+
+    def save_trace(trace_dir, trace):
+        (trace_dir / "trace.json").write_text(json.dumps(trace))
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto", scenario_id=scenario_id),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 0
+    assert api_fake.actions == [
+        (
+            control_key,
+            "on"
+            if control_key == "eco_mode"
+            else "standard"
+            if control_key == "work_mode"
+            else "two_hours",
+        ),
+        (control_key, initial),
+    ]
+    assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+    assert api_fake.state == initial
+
+
+@pytest.mark.parametrize("include_control_frame", [True, False])
+@pytest.mark.parametrize("requested_route", ["auto", "active_proxy"])
+def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
+    monkeypatch, tmp_path, include_control_frame, requested_route
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from custom_components.allpowers_ble.protocol import SettingsData, WorkMode
+    from custom_components.allpowers_ble.protocol import encode_settings_control
+    from scripts.hil.discovery import Device
+
+    class TracedSettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.capture = 0
+            self.actions = []
+            self.requested_route = requested_route
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def entity_state(self, entity_id):
+            assert entity_id == "switch.private_eco_mode"
+            return {"state": self.state}
+
+        def control_state(self, key, entity_id):
+            return api.HAClient.control_state(self, key, entity_id)
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [{"schema_version": 2, "capture_id": f"eco-{self.capture}"}]
+            return [self.trace(command["capture_id"])]
+
+        def trace(self, capture_id):
+            utc = datetime.now(UTC).isoformat()
+            transaction_id = f"tx-eco-{self.capture}"
+            common = {
+                "schema_version": 2,
+                "utc": utc,
+                "run_id": "0123456789abcdef",
+                "scenario_id": "settings_eco_mode",
+                "session_generation": 9,
+                "layer": "gatt_api",
+                "observed_route": "local_adapter",
+            }
+            route_event = {
+                **common,
+                "seq": 1,
+                "elapsed_ms": 0,
+                "event": "route_observed",
+                "backend_kind": "bluez",
+                "evidence": "bluez_device_path",
+            }
+            frame = encode_settings_control(
+                SettingsData(
+                    eco_enabled=self.state == "on",
+                    work_mode=WorkMode.MUTE,
+                    car_charger_enabled=False,
+                    eco_timeout_hours=2,
+                    hardware_version="0.3",
+                    firmware_version="1.1",
+                    raw_flags=0xA1 if self.state == "on" else 0xA0,
+                    raw_hardware_version=3,
+                    raw_firmware_version=0x11,
+                )
+            )
+            write_event = {
+                **common,
+                "seq": 2,
+                "elapsed_ms": 1,
+                "event": "write_attempt",
+                "transaction_id": transaction_id,
+                "direction": "tx",
+            }
+            events = [
+                route_event,
+                write_event,
+                {
+                    **common,
+                    "seq": 3,
+                    "elapsed_ms": 2,
+                    "event": "transaction_submitted",
+                    "transaction_id": transaction_id,
+                    "transaction_kind": "settings",
+                },
+                {
+                    **common,
+                    "seq": 4,
+                    "elapsed_ms": 3,
+                    "event": "transaction_confirmed",
+                    "transaction_id": transaction_id,
+                    "reason": "matching_validated_telemetry",
+                },
+            ]
+            frames = (
+                [
+                    {
+                        **write_event,
+                        "hex": frame.hex(),
+                        "command_type": "settings_control",
+                        "frame_validation": "validated_tx",
+                    }
+                ]
+                if include_control_frame
+                else []
+            )
+            return {
+                "schema_version": 2,
+                "capture_scope": "runtime_entry",
+                "capture_id": capture_id,
+                "run_id": "0123456789abcdef",
+                "scenario_id": "settings_eco_mode",
+                "requested_route": self.requested_route,
+                "observed_route": "local_adapter",
+                "capture_layer": "gatt_api_not_rf",
+                "private_raw_bytes": True,
+                "qualification_allowed": False,
+                "closed": True,
+                "termination_reason": "requested_stop",
+                "expired": False,
+                "complete": True,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "events": events,
+                "frames": frames,
+                "event_count": len(events),
+                "frame_count": len(frames),
+                "has_gatt_frames": bool(frames),
+                "route_observations": [
+                    {
+                        "session_generation": 9,
+                        "seq": 1,
+                        "utc": utc,
+                        "elapsed_ms": 0,
+                        "observed_route": "local_adapter",
+                        "backend_kind": "bluez",
+                        "evidence": "bluez_device_path",
+                        "adapter_id": "hci0",
+                    }
+                ],
+            }
+
+    api_fake = TracedSettingsHA()
+    output_dir = tmp_path / f"real-trace-{include_control_frame}"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    answers = iter(("1", "1", "1", "1"))
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(answers), raising=False)
+
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route=requested_route,
+            scenario_id="settings_eco_mode",
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    if include_control_frame and requested_route == "auto":
+        assert result == 0
+        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+    else:
+        assert result == 2
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("failed_check", "failed_value"),
+    [
+        ("pending_transaction", True),
+        ("settings_fresh", False),
+        ("write_settings_controls", False),
+    ],
+)
+def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
+    monkeypatch, tmp_path, failed_check, failed_value
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class BlockedSettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+
+        def hil_capabilities(self, entry_id):
+            result = {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+            if failed_check == "write_settings_controls":
+                result["capabilities"][failed_check] = failed_value
+            else:
+                result[failed_check] = failed_value
+            return result
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": "mute", "options": ["mute", "standard"]}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+
+    output_dir = tmp_path / failed_check
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"work_mode": "select.private_mode"},
+        config_entry_id="entry-safe",
+    )
+    api_fake = BlockedSettingsHA()
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            scenario_id="settings_work_mode",
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert checkpoint["steps"][0]["outcome"] == "not_applicable"
+    assert api_fake.actions == []
 
 
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
@@ -1588,3 +2354,850 @@ def test_cli_route_text_distinguishes_preflight_and_connected_trace(
         assert trace["qualification_allowed"] is False
     else:
         assert "Observed connection route:" not in output
+
+
+def test_discovery_maps_only_unambiguous_integration_control_entities():
+    """Renamed controls resolve by owner/domain/key and ambiguous keys disappear."""
+    entities = [
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.renamed_ac",
+            "unique_id": "registry_ac_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.second_ac",
+            "unique_id": "registry_ac_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.dc_power",
+            "unique_id": "registry_dc_output",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "switch.car_charger",
+            "unique_id": "registry_car_charger",
+            "config_entry_id": "entry-1",
+            "disabled_by": "user",
+        },
+        {
+            "device_id": "device-1",
+            "platform": "foreign_integration",
+            "entity_id": "select.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "sensor.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "other-device",
+            "platform": "allpowers_ble",
+            "entity_id": "select.work_mode",
+            "unique_id": "registry_work_mode",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+    ]
+    devices = [
+        {
+            "id": "device-1",
+            "config_entry_id": "entry-1",
+            "identifiers": [["allpowers_ble", "private-registry-id"]],
+            "model": "R600",
+        }
+    ]
+    entries = [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}]
+
+    (device,) = discovery.find_devices(entities, devices, entries)
+
+    assert device.control_entities == {"dc_output": "switch.dc_power"}
+    assert device.config_entry_id == "entry-1"
+
+
+def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatch):
+    """Only current values and select choices defined by the integration survive."""
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    payloads = {
+        "select.mode": {
+            "state": "standard",
+            "attributes": {"options": ["mute", "standard", "fast", "unsafe"]},
+        },
+        "switch.offline": {"state": "unavailable", "attributes": {}},
+    }
+    monkeypatch.setattr(client, "entity_state", payloads.__getitem__)
+
+    assert client.control_state("work_mode", "select.mode") == {
+        "available": True,
+        "state": "standard",
+        "options": ["fast", "mute", "standard"],
+    }
+    assert client.control_state("ac_output", "switch.offline") == {
+        "available": False,
+        "state": None,
+        "options": [],
+    }
+
+
+def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+
+    def websocket(rows):
+        commands.extend(rows)
+        return [{"context": {}}]
+
+    monkeypatch.setattr(client, "websocket", websocket)
+    client.call_control("ac_output", "switch.station_ac", "on")
+    client.call_control("work_mode", "select.station_mode", "fast")
+    assert commands == [
+        {
+            "type": "call_service",
+            "domain": "switch",
+            "service": "turn_on",
+            "target": {"entity_id": "switch.station_ac"},
+        },
+        {
+            "type": "call_service",
+            "domain": "select",
+            "service": "select_option",
+            "service_data": {"option": "fast"},
+            "target": {"entity_id": "select.station_mode"},
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "entity_id", "value", "domain", "service", "service_data"),
+    [
+        (key, f"switch.station_{key}", value, "switch", service, None)
+        for key in ("ac_output", "dc_output", "light", "eco_mode", "car_charger")
+        for value, service in (("on", "turn_on"), ("off", "turn_off"))
+    ]
+    + [
+        (
+            "work_mode",
+            "select.station_mode",
+            option,
+            "select",
+            "select_option",
+            {"option": option},
+        )
+        for option in ("mute", "standard", "fast")
+    ]
+    + [
+        (
+            "eco_timeout",
+            "select.station_timeout",
+            option,
+            "select",
+            "select_option",
+            {"option": option},
+        )
+        for option in ("one_hour", "two_hours", "four_hours", "six_hours")
+    ],
+)
+def test_call_control_maps_supported_controls_to_narrow_services(
+    monkeypatch, key, entity_id, value, domain, service, service_data
+):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+
+    def websocket(rows):
+        commands.extend(rows)
+        return [{"context": {}}]
+
+    monkeypatch.setattr(client, "websocket", websocket)
+    client.call_control(key, entity_id, value)
+
+    expected = {
+        "type": "call_service",
+        "domain": domain,
+        "service": service,
+        "target": {"entity_id": entity_id},
+    }
+    if service_data is not None:
+        expected["service_data"] = service_data
+    assert commands == [expected]
+
+
+@pytest.mark.parametrize(
+    ("key", "entity_id", "value"),
+    [
+        ("ac_output", "switch.station_ac", "toggle"),
+        ("work_mode", "select.station_mode", "unsafe"),
+        ("unknown", "switch.station_ac", "on"),
+        ("ac_output", "light.station_ac", "on"),
+    ],
+)
+def test_call_control_rejects_unallowlisted_actions(key, entity_id, value):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    with pytest.raises(api.HAAPIError):
+        client.call_control(key, entity_id, value)
+
+
+def test_recovery_suite_only_observes_operator_action_and_new_route(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class RecoveryHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.generations = iter((4, 5))
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            generation = next(self.generations)
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": generation,
+            }
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-safe"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                }
+            ]
+
+    api_fake = RecoveryHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "run"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "run-safe",
+    )
+
+    assert result == 0
+    assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
+    assert api_fake.commands[1]["type"] == "allpowers_ble/hil/stop"
+    assert all(
+        command["type"] not in {"call_service", "allpowers_ble/command"}
+        for command in api_fake.commands
+    )
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    assert stored["steps"][-1]["outcome"] == "pass"
+
+
+def test_recovery_transient_api_failure_does_not_prove_new_ble_session(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class TransientFailureHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.calls = 0
+            self.trace_starts = 0
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            if self.calls == 2:
+                raise cli.HAAPIError("transient websocket failure")
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                self.trace_starts += 1
+                return [{"schema_version": 2, "capture_id": "unexpected"}]
+            raise AssertionError("same-generation API recovery must not capture")
+
+    api_fake = TransientFailureHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "transient-recovery"
+    output_dir.mkdir(mode=0o700)
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(cli, "sleep", advance)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "run-transient",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    assert result == 2
+    assert api_fake.trace_starts == 0
+    assert stored["steps"][-1]["outcome"] == "inconclusive"
+    assert stored["steps"][-1]["disconnect_observed"] is False
+
+
+def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class RecoveryHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 5,
+            }
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-resumed"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "active_proxy",
+                    "complete": True,
+                }
+            ]
+
+    api_fake = RecoveryHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "resume"
+    output_dir.mkdir(mode=0o700)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "1")
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+    fingerprint = cli._device_fingerprint("0123456789abcdef", device, api_fake.origin)
+    resume_state = {
+        "run_id": "0123456789abcdef",
+        "scenario_id": "recovery_reconnect",
+        "device_fingerprint": fingerprint,
+        "steps": [
+            {
+                "step_id": "baseline",
+                "outcome": "pass",
+                "session_generation": 4,
+            },
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "route interruption and restoration",
+                "operator_confirmed": True,
+            },
+        ],
+    }
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+        resume_state,
+    )
+
+    assert result == 0
+    assert len(prompts) == 1
+    assert [command["type"] for command in api_fake.commands] == [
+        "allpowers_ble/hil/start",
+        "allpowers_ble/hil/stop",
+    ]
+
+
+def test_device_fingerprint_is_run_and_server_scoped():
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        config_entry_id="entry-safe",
+    )
+    same = cli._device_fingerprint("0123456789abcdef", device, "https://ha.example")
+    assert same == cli._device_fingerprint(
+        "0123456789abcdef", device, "https://ha.example"
+    )
+    assert same != cli._device_fingerprint(
+        "fedcba9876543210", device, "https://ha.example"
+    )
+    assert same != cli._device_fingerprint(
+        "0123456789abcdef", device, "https://other.example"
+    )
+    assert same != cli._device_fingerprint(
+        "0123456789abcdef", device, "https://ha.example", "active_proxy"
+    )
+
+
+def test_soak_requires_a_verified_normalized_telemetry_value():
+    assert cli._has_verified_telemetry(
+        {"battery": {"value": 89, "source": "ha_rest_entity_state", "verified": True}}
+    )
+    assert not cli._has_verified_telemetry(
+        {"battery": {"value": None, "source": "unavailable", "verified": False}}
+    )
+    assert not cli._has_verified_telemetry({"battery": 89})
+    non_measurements = {
+        key: {"value": value, "source": "ha_rest_entity_state", "verified": True}
+        for key, value in {
+            "connected": "on",
+            "telemetry_available": "on",
+            "hardware_version": "0.3",
+            "firmware_version": "0.2",
+        }.items()
+    }
+    assert not cli._has_verified_telemetry(non_measurements)
+    assert not cli._has_verified_telemetry(
+        {"battery": {"value": True, "source": "ha_rest_entity_state", "verified": True}}
+    )
+
+
+@pytest.mark.parametrize("failure", ["changed_state", "capabilities", "control_state"])
+def test_output_suite_rechecks_pre_state_after_authorization(
+    monkeypatch, tmp_path, failure
+):
+    from types import SimpleNamespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+        control_entities={"ac_output": "switch.private_ac"},
+    )
+
+    class HA:
+        origin = "https://ha.example.test"
+        state = "off"
+        actions = []
+        commands = []
+        capability_calls = 0
+        control_calls = 0
+
+        def hil_capabilities(self, _entry):
+            self.capability_calls += 1
+            if failure == "capabilities" and self.capability_calls > 1:
+                raise cli.HAAPIError("capability snapshot unavailable")
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "session_generation": 3,
+                "capabilities": {"write_output_controls": True},
+            }
+
+        def control_state(self, _key, _entity):
+            self.control_calls += 1
+            if failure == "control_state" and self.control_calls > 1:
+                raise cli.HAAPIError("control state unavailable")
+            return {"available": True, "state": self.state}
+
+        def call_control(self, *_args):
+            self.actions.append(_args)
+
+        def websocket(self, commands):
+            command = commands[0]
+            self.commands.append(command["type"])
+            if command["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture"}]
+            return [{}]
+
+    api = HA()
+    output_dir = tmp_path / "run"
+    output_dir.mkdir(mode=0o700)
+
+    def authorize(_prompt):
+        if failure == "changed_state":
+            api.state = "on"  # Simulate another HA actor changing it at the prompt.
+        return "1"
+
+    monkeypatch.setattr(cli, "input", authorize, raising=False)
+    result = cli._execute_output_suite(
+        api,
+        SimpleNamespace(
+            non_interactive=False, route="auto", scenario_id="output_ac_cycle"
+        ),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    assert result == 2
+    assert api.actions == []
+    assert api.commands == ["allpowers_ble/hil/start", "allpowers_ble/hil/stop"]
+    assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+    assert "pre-write recheck" in checkpoint["steps"][0]["reason"]
+
+
+def test_soak_without_numeric_measurements_cannot_start_a_passing_segment(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+
+    class SoakHA:
+        origin = "https://ha.example.test"
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+            }
+
+    def interrupt_sleep(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(cli, "sleep", interrupt_sleep)
+    monkeypatch.setattr(
+        cli,
+        "read_only_sample",
+        lambda *_: {
+            key: {"value": value, "source": "ha_rest_entity_state", "verified": True}
+            for key, value in {
+                "connected": "on",
+                "telemetry_available": "on",
+                "hardware_version": "0.3",
+                "firmware_version": "0.2",
+            }.items()
+        },
+    )
+    output_dir = tmp_path / "soak-non-measurements"
+    output_dir.mkdir(mode=0o700)
+
+    result = cli._execute_soak_suite(
+        SoakHA(),
+        SimpleNamespace(route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    sample_lines = (output_dir / "soak_samples_001.jsonl").read_text().splitlines()
+    assert result == 2
+    assert checkpoint["steps"] == []
+    assert json.loads(sample_lines[-1])["event"] == "sample_gap"
+
+
+def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+    import os
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class FakeClock:
+        value = 10_000.0
+
+        def monotonic(self):
+            return self.value
+
+        def sleep(self, seconds):
+            self.value += seconds
+
+    class FakeDateTime:
+        @staticmethod
+        def now(tz=UTC):
+            base = datetime(2026, 1, 1, tzinfo=tz)
+            return base + timedelta(seconds=clock.value - 10_000.0)
+
+    class SoakHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.capture = 0
+            self.commands = []
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+            }
+
+        def websocket(self, commands):
+            command = commands[0]
+            self.commands.append(command["type"])
+            if command["type"].endswith("/start"):
+                self.capture += 1
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": f"capture-{self.capture}",
+                        "ttl_seconds": 30,
+                    }
+                ]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                }
+            ]
+
+    clock = FakeClock()
+    api_fake = SoakHA()
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "soak"
+    output_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(cli, "monotonic", clock.monotonic)
+    monkeypatch.setattr(cli, "sleep", clock.sleep)
+    monkeypatch.setattr(cli, "datetime", FakeDateTime)
+    monkeypatch.setattr(
+        cli,
+        "read_only_sample",
+        lambda *_: {
+            "battery": {"value": 89, "source": "ha_rest_entity_state", "verified": True}
+        },
+    )
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+
+    def save_trace(trace_dir, trace):
+        fd = os.open(
+            trace_dir / "trace.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"observed_route": trace["observed_route"]}, stream)
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+
+    result = cli._execute_soak_suite(
+        api_fake,
+        SimpleNamespace(route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    assert result == 0
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    segment = checkpoint["steps"][-1]
+    assert segment["outcome"] == "pass"
+    assert segment["measured_seconds"] >= 86400
+    assert segment["sample_count"] == 289
+    assert segment["trace_count"] >= 24
+    assert len(api_fake.commands) == 48
+    assert all(
+        command in {"allpowers_ble/hil/start", "allpowers_ble/hil/stop"}
+        for command in api_fake.commands
+    )
+    assert (output_dir / "soak_samples_001.jsonl").exists()
+
+
+def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        control_entities={
+            "ac_output": "switch.renamed_ac",
+            "eco_mode": "switch.renamed_eco",
+            "car_charger": "switch.renamed_car",
+        },
+    )
+
+    class Controls:
+        @staticmethod
+        def control_state(key, entity_id):
+            return {"available": True, "state": "off", "options": []}
+
+    capabilities = {
+        "connected": True,
+        "pending_transaction": False,
+        "status_fresh": True,
+        "settings_fresh": False,
+        "capabilities": {
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "car_charger_enabled": False,
+        },
+    }
+
+    result = cli._scenario_controls(Controls(), device, capabilities)
+
+    assert result["ac_output"]["eligible"] is True
+    assert result["eco_mode"]["eligible"] is False
+    assert result["car_charger"]["eligible"] is False
+    assert result["dc_output"]["available"] is False
+
+
+def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypatch):
+    """Normalize the admin-only reply without retaining IDs or unknown fields."""
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    response = {
+        "schema_version": 1,
+        "model": "R600",
+        "profile": "r600-hw-0.3",
+        "classification": "verified",
+        "verified": True,
+        "identity_conflicted": False,
+        "hardware_revision": "0.3",
+        "raw_hardware_revision": 3,
+        "firmware_revision": "0.2",
+        "raw_firmware_revision": 2,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 4,
+        "pending_transaction": False,
+        "entry_id": "private-entry",
+        "raw_address": "AA:BB:CC:DD:EE:FF",
+    }
+    calls = []
+    monkeypatch.setattr(
+        client, "websocket", lambda commands: calls.append(commands) or [response]
+    )
+
+    normalized = client.hil_capabilities("entry-123")
+
+    assert calls == [
+        [{"type": "allpowers_ble/hil/capabilities", "entry_id": "entry-123"}]
+    ]
+    assert normalized["model"] == "R600"
+    assert normalized["session_generation"] == 4
+    assert "entry_id" not in normalized
+    assert "raw_address" not in normalized
+
+
+def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [
+            {
+                "schema_version": 1,
+                "model": "R600 AA:BB:CC:DD:EE:FF",
+                "profile": "r600-hw-0.3",
+                "classification": "verified",
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "capabilities": {},
+            }
+        ],
+    )
+
+    with pytest.raises(api.HAAPIError):
+        client.hil_capabilities("entry-123")

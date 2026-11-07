@@ -192,3 +192,29 @@ This integration deliberately keeps confirmed and requested state separate and
 requires fresh settings after session renewal instead of adopting optimistic
 replay. Physical capture must compare both implementations on the same R600
 revision and routes, including whether reconnect reacquires settings.
+
+## Guided scenarios (#230 status)
+
+The CLI exposes `run --list-suites` and side-effect-free dry-run planning.
+Read-only collection is available, as are attended AC, DC and station-light
+on/off scenarios, the opt-in gated car-charger cycle, and ECO-mode, work-mode
+and ECO-timeout setting checks with per-action authorization and private trace
+evidence. A
+recovery guide lets the operator perform a route interruption/restoration,
+vendor-app contention, or HA reload/upgrade while the CLI observes
+reconnection and current route evidence. No write, settings, or recovery
+scenario has been piloted on hardware;
+missing route or physical evidence remains inconclusive. Checkpoint resume is
+available for interrupted recovery and soak observation on the same
+fingerprinted device. Resume starts a new soak segment and records a
+restart discontinuity; it never repeats the manual action. Output checkpoint
+resume is refused because an interrupted write can be ambiguous. A bounded
+24-hour soak collector is implemented with periodic telemetry, route traces,
+gap detection, private storage limits, and restart-aware checkpoints. The
+collector has offline simulation coverage, but no hardware soak has been run.
+The AC scenario can perform one traced restoration when its off action was
+authorized but trace setup failed before the service call, after fresh
+same-session checks confirm restoration is safe. Ambiguous or already
+attempted writes still require manual intervention; restoration leaves the
+run inconclusive. Broader cleanup and transaction-safety suite execution
+remain outstanding. No build-level physical qualification is claimed.

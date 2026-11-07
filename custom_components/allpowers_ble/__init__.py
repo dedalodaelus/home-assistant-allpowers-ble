@@ -48,10 +48,12 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Register authenticated, opt-in HIL capture commands."""
     del config
     from .hil_probe import async_register as async_register_probe
+    from .hil_capabilities import async_register as async_register_capabilities
     from .hil_trace import async_register
 
     await async_register(hass)
     await async_register_probe(hass)
+    await async_register_capabilities(hass)
     return True
 
 

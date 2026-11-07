@@ -1,0 +1,32 @@
+{
+  "id": "output_dc_cycle",
+  "schema_version": 1,
+  "suite": "outputs",
+  "title": "Turn DC output on and return it to the initial off state",
+  "mode": "interactive_write",
+  "steps": [
+    {
+      "id": "dc_on",
+      "instruction": "Turn DC output on for the attended noncritical-load check.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "dc_output",
+      "expected": "on"
+    },
+    {
+      "id": "dc_off",
+      "instruction": "Turn DC output off and confirm the initial safe state is restored.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "dc_output",
+      "expected": "off"
+    }
+  ],
+  "required_evidence": [
+    "fresh_pre_and_post_state",
+    "ha_service_acknowledgement",
+    "same_session_transaction_confirmation",
+    "verified_connected_route",
+    "physical_observation"
+  ]
+}
