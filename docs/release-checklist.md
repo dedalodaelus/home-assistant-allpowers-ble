@@ -25,6 +25,14 @@
   `CHANGELOG.md` and release tags.
 - Dependabot pull requests target `devel`.
 - Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
+- Prepare routine promotion by manually dispatching **Promote devel to main** on
+  `main`. It creates or reuses a draft PR and never merges or publishes.
+- Enable **Allow GitHub Actions to create and approve pull requests**. A
+  maintainer with write access may need to select **Approve workflows to run**
+  for CI on the `GITHUB_TOKEN`-created PR.
+- The workflow is dispatchable only after its file reaches default `main`.
+  Resolve branch synchronization and release manifest differences through a
+  separate reviewed bootstrap before dispatching it.
 
 ## Code and metadata
 

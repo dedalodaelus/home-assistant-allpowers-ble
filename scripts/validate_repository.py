@@ -22,7 +22,10 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/ci.yml",
     ".github/workflows/hacs.yml",
     ".github/workflows/hassfest.yml",
+    ".github/workflows/merge-gate.yml",
+    ".github/workflows/promote-devel.yml",
     ".github/workflows/release.yml",
+    ".github/PULL_REQUEST_TEMPLATE/promotion.md",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "docs/user-guide.md",
@@ -33,6 +36,9 @@ REQUIRED_REPOSITORY_FILES = {
     "hacs.json",
     "pyproject.toml",
     "scripts/validate_release_metadata.py",
+    "scripts/promote_devel.py",
+    "scripts/promotion_metadata.py",
+    "tests/test_promote_devel.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
@@ -529,6 +535,32 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             errors.append(
                 "release workflow must upload checksum asset for allpowers_ble.zip"
             )
+
+    try:
+        promotion_workflow = (
+            ROOT / ".github" / "workflows" / "promote-devel.yml"
+        ).read_text(encoding="utf-8")
+    except OSError as ex:
+        errors.append(f"failed reading .github/workflows/promote-devel.yml: {ex}")
+        promotion_workflow = ""
+    if promotion_workflow:
+        for required in (
+            "workflow_dispatch:",
+            "github.ref == 'refs/heads/main'",
+            "contents: read",
+            "pull-requests: write",
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "python3 -m scripts.promote_devel",
+        ):
+            if required not in promotion_workflow:
+                errors.append(f"promotion workflow must contain {required!r}")
+        for forbidden in (
+            "pull_request_target",
+            "create-github-app-token",
+            "PROMOTION_APP_",
+        ):
+            if forbidden in promotion_workflow:
+                errors.append(f"promotion workflow must not contain {forbidden!r}")
 
 
 def _module_list(value: Any) -> list[str]:
