@@ -804,7 +804,7 @@ def _execute_output_suite(
         return 2
 
     print("Scenario:", scenario.title)
-    print("Device:", device.model, "profile:", device.profile or "unknown")
+    print("Device:", device.model)
     for index, declaration in enumerate(scenario.steps, start=1):
         key, desired = declaration["target"], declaration["expected"]
         entity_id = device.control_entities.get(key)
@@ -845,18 +845,25 @@ def _execute_output_suite(
                 row["reason"] = "authorization not granted"
                 checkpoint()
                 break
+            row["pre_state"] = state["state"]
+            row["session_generation"] = generation
+            row["authorized"] = True
 
-            capture = api.websocket(
-                [
-                    {
-                        "type": "allpowers_ble/hil/start",
-                        "entry_id": entry_id,
-                        "run_id": run_id,
-                        "scenario_id": scenario.id,
-                        "requested_route": args.route,
-                    }
-                ]
-            )[0]
+            try:
+                capture = api.websocket(
+                    [
+                        {
+                            "type": "allpowers_ble/hil/start",
+                            "entry_id": entry_id,
+                            "run_id": run_id,
+                            "scenario_id": scenario.id,
+                            "requested_route": args.route,
+                        }
+                    ]
+                )[0]
+            except HAAPIError:
+                row["prewrite_trace_failed"] = True
+                raise
             if (
                 not isinstance(capture, dict)
                 or capture.get("schema_version") != 2
@@ -866,11 +873,10 @@ def _execute_output_suite(
                 checkpoint()
                 break
             capture_id = capture["capture_id"]
-            row["pre_state"] = state["state"]
-            row["session_generation"] = generation
             action_submitted = False
             observed_caps: dict[str, Any] | None = None
             post: dict[str, Any] = {"available": False, "state": None}
+            row["service_attempted"] = True
             try:
                 api.call_control(key, entity_id, desired)
                 action_submitted = True
@@ -979,12 +985,195 @@ def _execute_output_suite(
                 "Step inconclusive; inspect the station and restore it manually if needed"
             )
             break
-    if len(steps) < len(scenario.steps) or (
+    # If the operator authorized the planned AC-off action but its trace could
+    # not be armed, the service was never called. Reuse that still-current
+    # authorization for one cleanup attempt, after repeating the live safety
+    # checks. Never use this path after an ambiguous service call.
+    if len(steps) == 2 and steps[0].get("outcome") == "pass":
+        cleanup = steps[1]
+        if (
+            cleanup.get("step_id") == "ac_off"
+            and cleanup.get("authorized") is True
+            and cleanup.get("prewrite_trace_failed") is True
+            and cleanup.get("service_attempted") is not True
+        ):
+            cleanup.update(
+                {
+                    "cleanup_attempted": True,
+                    "cleanup_target": "off",
+                    "outcome": "inconclusive",
+                }
+            )
+            checkpoint()
+            try:
+                current_caps = api.hil_capabilities(entry_id)
+                current_state = api.control_state(
+                    "ac_output", device.control_entities.get("ac_output")
+                )
+                if (
+                    current_caps.get("verified") is not True
+                    or current_caps.get("identity_conflicted") is not False
+                    or current_caps.get("connected") is not True
+                    or current_caps.get("status_fresh") is not True
+                    or current_caps.get("pending_transaction") is not False
+                    or current_caps.get("session_generation")
+                    != cleanup.get("session_generation")
+                    or current_caps.get("capabilities", {}).get("write_output_controls")
+                    is not True
+                    or current_state.get("available") is not True
+                    or current_state.get("state") != "on"
+                ):
+                    cleanup["cleanup_reason"] = (
+                        "fresh same-session telemetry did not prove AC was on "
+                        "and safe to restore"
+                    )
+                else:
+                    restore_capture = api.websocket(
+                        [
+                            {
+                                "type": "allpowers_ble/hil/start",
+                                "entry_id": entry_id,
+                                "run_id": run_id,
+                                "scenario_id": scenario.id,
+                                "requested_route": args.route,
+                            }
+                        ]
+                    )[0]
+                    if (
+                        not isinstance(restore_capture, dict)
+                        or restore_capture.get("schema_version") != 2
+                        or not isinstance(restore_capture.get("capture_id"), str)
+                    ):
+                        cleanup["cleanup_reason"] = (
+                            "restoration trace could not be armed"
+                        )
+                    else:
+                        restore_capture_id = restore_capture["capture_id"]
+                        restore_action_submitted = False
+                        restore_caps: dict[str, Any] | None = None
+                        restored: dict[str, Any] = {
+                            "available": False,
+                            "state": None,
+                        }
+                        try:
+                            cleanup["cleanup_service_attempted"] = True
+                            checkpoint()
+                            api.call_control(
+                                "ac_output",
+                                device.control_entities["ac_output"],
+                                "off",
+                            )
+                            restore_action_submitted = True
+                        except HAAPIError:
+                            cleanup["cleanup_service_call"] = (
+                                "unacknowledged; no retry performed"
+                            )
+                        finally:
+                            restore_deadline = monotonic() + 30
+                            while monotonic() < restore_deadline:
+                                try:
+                                    restore_caps = api.hil_capabilities(entry_id)
+                                    restored = api.control_state(
+                                        "ac_output",
+                                        device.control_entities["ac_output"],
+                                    )
+                                except HAAPIError:
+                                    break
+                                if (
+                                    restore_caps.get("session_generation")
+                                    != cleanup.get("session_generation")
+                                    or restore_caps.get("connected") is not True
+                                ):
+                                    break
+                                if (
+                                    restore_caps.get("status_fresh") is True
+                                    and restored.get("available") is True
+                                    and restored.get("state") == "off"
+                                ):
+                                    break
+                                sleep(min(1, max(0, restore_deadline - monotonic())))
+                            restore_trace = api.websocket(
+                                [
+                                    {
+                                        "type": "allpowers_ble/hil/stop",
+                                        "entry_id": entry_id,
+                                        "capture_id": restore_capture_id,
+                                    }
+                                ]
+                            )[0]
+                        _validate_trace_result(
+                            restore_trace,
+                            run_id=run_id,
+                            scenario_id=scenario.id,
+                            capture_id=restore_capture_id,
+                            requested_route=args.route,
+                            expected_version=2,
+                        )
+                        trace_dir = output_dir / "traces" / "ac_off_cleanup"
+                        trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+                        trace_dir.mkdir(mode=0o700, exist_ok=False)
+                        _save_private_trace(trace_dir, restore_trace)
+                        restore_tx = correlate_transaction(
+                            restore_trace,
+                            expected_generation=cleanup["session_generation"],
+                            kind="output",
+                        )
+                        physical_restore = input(
+                            "Restoration physical outcome: "
+                            "1=off, 2=still on, 3=unable to observe: "
+                        ).strip()
+                        physical_restore_outcome = {
+                            "1": "yes",
+                            "2": "no",
+                            "3": "unable_to_observe",
+                        }.get(physical_restore)
+                        cleanup.update(
+                            {
+                                "cleanup_trace": "traces/ac_off_cleanup",
+                                "cleanup_post_state": restored.get("state"),
+                                "cleanup_transaction": restore_tx,
+                                "cleanup_physical_outcome": physical_restore_outcome,
+                                "cleanup_route": restore_trace.get("observed_route"),
+                            }
+                        )
+                        cleanup["cleanup_outcome"] = verdict(
+                            telemetry_matches=(
+                                restore_caps is not None
+                                and restore_caps.get("session_generation")
+                                == cleanup.get("session_generation")
+                                and restore_caps.get("status_fresh") is True
+                                and restored.get("available") is True
+                                and restored.get("state") == "off"
+                            ),
+                            telemetry_contradictory=(
+                                restored.get("available") is True
+                                and restored.get("state") not in {"off", "on"}
+                            ),
+                            physical_outcome=physical_restore_outcome,
+                            route_verified=restore_trace.get("observed_route")
+                            in {"local_adapter", "active_proxy"},
+                            trace_complete=restore_trace.get("complete") is True,
+                            action_submitted=restore_action_submitted,
+                            transaction_confirmed=restore_tx is not None,
+                        )
+                        cleanup["cleanup_reason"] = (
+                            "restoration evidence collected; scenario remains "
+                            "inconclusive because its planned trace could not start"
+                        )
+            except HAAPIError, OSError, EOFError, KeyboardInterrupt:
+                cleanup["cleanup_reason"] = (
+                    "safe restoration could not be verified; no retry performed"
+                )
+            checkpoint()
+
+    restoration_passed = bool(steps and steps[-1].get("cleanup_outcome") == "pass")
+    if (len(steps) < len(scenario.steps) and not restoration_passed) or (
         steps and steps[-1].get("outcome") != "pass"
     ):
-        print(
-            "Check the AC output physically and restore the intended state manually if needed."
-        )
+        if not restoration_passed:
+            print(
+                "Check the AC output physically and restore the intended state manually if needed."
+            )
     print("Private scenario results saved to:", output_dir)
     return (
         0

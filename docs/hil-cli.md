@@ -123,9 +123,12 @@ IDs. This does not execute controls or establish physical qualification.
 The `outputs` suite currently offers an attended AC on/off cycle. It checks the
 active profile and state before each write, requires separate numeric consent,
 records short private traces and asks for the physical result. Run only with a
-safe noncritical load and no hazardous equipment connected. An ambiguous write
-is never retried; inspect and restore the station manually if a step stops
-early. This has not been piloted on hardware.
+safe noncritical load and no hazardous equipment connected. If the operator
+authorized the AC-off step but trace setup failed before its service call, the
+runner rechecks the same fresh session and may perform one traced restoration.
+An attempted or ambiguous write is never retried; in that case inspect and
+restore the station manually. A restoration does not turn an incomplete run
+into a pass. This has not been piloted on hardware.
 
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA

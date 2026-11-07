@@ -209,5 +209,9 @@ resume is refused because an interrupted write can be ambiguous. A bounded
 24-hour soak collector is implemented with periodic telemetry, route traces,
 gap detection, private storage limits, and restart-aware checkpoints. The
 collector has offline simulation coverage, but no hardware soak has been run.
-Automated safe restoration and transaction-safety suite execution remain
-outstanding. No build-level physical qualification is claimed.
+The AC scenario can perform one traced restoration when its off action was
+authorized but trace setup failed before the service call, after fresh
+same-session checks confirm restoration is safe. Ambiguous or already
+attempted writes still require manual intervention; restoration leaves the
+run inconclusive. Broader cleanup and transaction-safety suite execution
+remain outstanding. No build-level physical qualification is claimed.

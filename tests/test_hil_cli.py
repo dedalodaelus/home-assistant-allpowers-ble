@@ -768,6 +768,130 @@ def test_output_suite_checkpoint_cannot_be_resumed():
         cli.execute(args)
 
 
+@pytest.mark.parametrize("failure_mode", ["safe", "pending", "ambiguous"])
+def test_output_suite_restores_only_after_authorized_unsubmitted_ac_off(
+    monkeypatch, tmp_path, failure_mode
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class RestoreHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.starts = 0
+            self.actions = []
+            self.pending = False
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": self.pending,
+                "status_fresh": True,
+                "session_generation": 7,
+                "capabilities": {"write_output_controls": True},
+            }
+
+        def control_state(self, key, entity_id):
+            return {"available": True, "state": self.state}
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append(value)
+            if value == "off" and failure_mode == "ambiguous":
+                raise cli.HAAPIError("service acknowledgement lost")
+            self.state = value
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.starts += 1
+                if self.starts == 2 and failure_mode != "ambiguous":
+                    self.pending = failure_mode == "pending"
+                    raise cli.HAAPIError("trace unavailable")
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": f"capture-{self.starts}",
+                    }
+                ]
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "events": [],
+                    "frames": [],
+                    "complete": True,
+                    "observed_route": "local_adapter",
+                }
+            ]
+
+    api_fake = RestoreHA()
+    output_dir = tmp_path / "restore-run"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"ac_output": "switch.private_ac"},
+        config_entry_id="entry-safe",
+    )
+    inputs = iter(("1", "1", "1", "3" if failure_mode == "ambiguous" else "1"))
+    clock = [10_000.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(inputs), raising=False)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "correlate_transaction",
+        lambda trace, **kwargs: {"transaction_id": trace["capture_id"]},
+    )
+
+    def save_trace(trace_dir, trace):
+        (trace_dir / "trace.json").write_text(json.dumps(trace))
+
+    monkeypatch.setattr(cli, "_save_private_trace", save_trace)
+    result = cli._execute_output_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        {},
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    cleanup = checkpoint["steps"][-1]
+    assert result == 2
+    if failure_mode == "safe":
+        assert cleanup.get("service_attempted") is not True
+        assert cleanup["cleanup_attempted"] is True
+        assert api_fake.actions == ["on", "off"]
+        assert cleanup["cleanup_service_attempted"] is True
+        assert cleanup["cleanup_outcome"] == "pass"
+        assert cleanup["cleanup_post_state"] == "off"
+        assert cleanup["cleanup_trace"] == "traces/ac_off_cleanup"
+    elif failure_mode == "pending":
+        assert cleanup.get("service_attempted") is not True
+        assert cleanup["cleanup_attempted"] is True
+        assert api_fake.actions == ["on"]
+        assert cleanup.get("cleanup_service_attempted") is not True
+        assert cleanup["cleanup_reason"].startswith("fresh same-session")
+    else:
+        assert api_fake.actions == ["on", "off"]
+        assert cleanup["service_attempted"] is True
+        assert cleanup.get("cleanup_attempted") is not True
+
+
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
     """Use urllib's actual proxy dispatch with an in-memory HTTP transport.
 
