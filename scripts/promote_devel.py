@@ -53,14 +53,25 @@ def open_promotion() -> dict[str, object] | None:
             "--head",
             "devel",
             "--json",
-            "url,headRefName,baseRefName,draft",
+            "url,headRefName,baseRefName,isDraft,isCrossRepository",
         ]
     )
     try:
         pulls = json.loads(result)
     except json.JSONDecodeError as error:
         raise PromotionError("GitHub CLI returned invalid PR data.") from error
-    return pulls[0] if pulls else None
+    if not isinstance(pulls, list) or any(not isinstance(pull, dict) for pull in pulls):
+        raise PromotionError("GitHub CLI returned an unexpected PR list shape.")
+    for pull in pulls:
+        if (
+            pull.get("baseRefName") == "main"
+            and pull.get("headRefName") == "devel"
+            and isinstance(pull.get("isDraft"), bool)
+            and pull.get("isCrossRepository") is False
+            and isinstance(pull.get("url"), str)
+        ):
+            return pull
+    return None
 
 
 def render_body(template: str, base_sha: str, head_sha: str) -> str:
@@ -164,9 +175,13 @@ def prepare_promotion(template: str) -> str | None:
     pull = json.loads(
         run(["gh", "pr", "view", url, "--json", "url,isDraft,headRefOid,baseRefOid"])
     )
-    if (pull.get("headRefOid"), pull.get("baseRefOid")) != (head_sha, base_sha):
+    if pull.get("isDraft") is not True or (
+        pull.get("headRefOid"),
+        pull.get("baseRefOid"),
+    ) != (head_sha, base_sha):
         raise PromotionError(
-            f"Draft {url} was created against moved refs. Keep it draft, close it, and rerun."
+            f"Draft {url} was not created as a draft at the validated revisions. "
+            "Keep it draft, close it, and rerun."
         )
     return url
 
