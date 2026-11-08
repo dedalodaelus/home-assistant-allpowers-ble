@@ -747,10 +747,12 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             if not isinstance(outcome, str) or outcome not in OUTCOMES:
                 continue
             evidence: list[str] = []
-            incomplete = True
-            for trace_key, transaction_key in (
-                ("trace", "transaction"),
-                ("cleanup_trace", "cleanup_transaction"),
+            cleanup_evidence: list[str] = []
+            missing_evidence = True
+            cleanup_missing_evidence = True
+            for trace_key, transaction_key, destination in (
+                ("trace", "transaction", "primary"),
+                ("cleanup_trace", "cleanup_transaction", "cleanup"),
             ):
                 entry = trace_references.get(step.get(trace_key))
                 if not entry:
@@ -761,23 +763,23 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 )
                 if seqs and all_refs:
                     capture_id = all_refs[0].split(":", 1)[0]
-                    evidence.extend(f"{capture_id}:{seq}" for seq in seqs)
-                    incomplete = (
-                        incomplete and capture_incomplete
-                        if evidence
-                        else capture_incomplete
-                    )
-            evidence = sorted(
-                set(evidence),
-                key=lambda ref: (ref.split(":")[0], int(ref.split(":")[1])),
-            )
-            incomplete = incomplete or not evidence
+                    refs = [f"{capture_id}:{seq}" for seq in seqs]
+                    if destination == "primary":
+                        evidence = refs
+                        missing_evidence = capture_incomplete
+                    else:
+                        cleanup_evidence = refs
+                        cleanup_missing_evidence = capture_incomplete
+            missing_evidence = missing_evidence or not evidence
+            cleanup_missing_evidence = cleanup_missing_evidence or not cleanup_evidence
             safe_steps.append(
                 {
                     "step_id": step_id,
                     "outcome": outcome,
                     "evidence": evidence,
-                    "missing_evidence": incomplete,
+                    "missing_evidence": missing_evidence,
+                    "cleanup_evidence": cleanup_evidence,
+                    "cleanup_missing_evidence": cleanup_missing_evidence,
                     "physical_observation": step.get("physical_outcome")
                     if isinstance(step.get("physical_outcome"), str)
                     and step["physical_outcome"] in {"yes", "no", "unable_to_observe"}
@@ -844,6 +846,15 @@ def _render_report(
     for row in scenarios.get("steps", []):
         refs = ", ".join(f"`{ref}`" for ref in row["evidence"])
         evidence_text = refs if refs else "evidence unavailable"
+        if row["missing_evidence"]:
+            evidence_text += " (incomplete)"
+        cleanup_refs = ", ".join(f"`{ref}`" for ref in row["cleanup_evidence"])
+        if cleanup_refs or row["cleanup_missing_evidence"]:
+            evidence_text += "; cleanup evidence " + (
+                cleanup_refs if cleanup_refs else "unavailable"
+            )
+            if row["cleanup_missing_evidence"]:
+                evidence_text += " (incomplete)"
         if row["physical_observation"] is not None:
             evidence_text += f"; physical observation `{row['physical_observation']}`"
         if row["cleanup_physical_observation"] is not None:
@@ -856,8 +867,6 @@ def _render_report(
             evidence_text += f"; ended `{row['ended_at_utc']}`"
         if row["elapsed_seconds"] is not None:
             evidence_text += f"; elapsed {row['elapsed_seconds']} s"
-        if row["missing_evidence"]:
-            evidence_text += " (incomplete)"
         step_lines.append(
             f"- `{row['step_id']}`: **{row['outcome']}**; {evidence_text}"
         )
@@ -1352,6 +1361,8 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                             "outcome",
                             "evidence",
                             "missing_evidence",
+                            "cleanup_evidence",
+                            "cleanup_missing_evidence",
                             "physical_observation",
                             "cleanup_physical_observation",
                             "started_at_utc",
@@ -1371,6 +1382,18 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         )
                         or type(row.get("missing_evidence")) is not bool
                         or (not row["evidence"] and not row["missing_evidence"])
+                        or not isinstance(row.get("cleanup_evidence"), list)
+                        or any(
+                            not isinstance(ref, str)
+                            or re.fullmatch(r"capture-[0-9]{4}:[1-9][0-9]{0,6}", ref)
+                            is None
+                            for ref in row["cleanup_evidence"]
+                        )
+                        or type(row.get("cleanup_missing_evidence")) is not bool
+                        or (
+                            not row["cleanup_evidence"]
+                            and not row["cleanup_missing_evidence"]
+                        )
                         or (
                             row.get("physical_observation") is not None
                             and (
@@ -1558,61 +1581,66 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         complete_captures = {
             row["capture_id"] for row in capture_rows if row["complete"]
         }
-        for step in scenario_steps:
-            if any(ref not in event_references for ref in step["evidence"]):
+
+        def verify_step_channel(refs: list[str], missing: bool) -> None:
+            if any(ref not in event_references for ref in refs):
                 raise HAAPIError("HIL scenario references missing event evidence")
-            if not step["missing_evidence"] and any(
-                ref.split(":", 1)[0] not in complete_captures
-                for ref in step["evidence"]
+            if not refs:
+                if not missing:
+                    raise HAAPIError("HIL scenario marks absent evidence complete")
+                return
+            rows = [
+                next(
+                    row
+                    for row in event_rows
+                    if f"{row['capture_id']}:{row['seq']}" == ref
+                )
+                for ref in refs
+            ]
+            if (
+                len(rows) != 3
+                or [row["event"] for row in rows]
+                != [
+                    "write_attempt",
+                    "transaction_submitted",
+                    "transaction_confirmed",
+                ]
+                or len({row["capture_id"] for row in rows}) != 1
+                or len({row["session_generation"] for row in rows}) != 1
+                or rows[1]["transaction_kind"] not in {"output", "settings"}
+            ):
+                raise HAAPIError(
+                    "HIL step evidence does not prove a confirmed transaction"
+                )
+            write_frame = frames_by_reference.get(
+                (rows[0]["capture_id"], rows[0]["seq"])
+            )
+            expected_command = (
+                "output_control"
+                if rows[1]["transaction_kind"] == "output"
+                else "settings_control"
+            )
+            if (
+                not isinstance(write_frame, dict)
+                or write_frame.get("direction") != "tx"
+                or write_frame.get("frame_validation") != "validated_tx"
+                or write_frame.get("command_type") != expected_command
+                or write_frame.get("session_generation")
+                != rows[0]["session_generation"]
+            ):
+                raise HAAPIError(
+                    "HIL step evidence lacks a matching validated control frame"
+                )
+            if not missing and any(
+                row["capture_id"] not in complete_captures for row in rows
             ):
                 raise HAAPIError("HIL scenario relies on incomplete capture evidence")
-            if not step["missing_evidence"]:
-                refs = step["evidence"]
-                if len(refs) != 3:
-                    raise HAAPIError(
-                        "HIL control evidence must include write, submission, and confirmation"
-                    )
-                rows = [
-                    next(
-                        row
-                        for row in event_rows
-                        if f"{row['capture_id']}:{row['seq']}" == ref
-                    )
-                    for ref in refs
-                ]
-                if (
-                    [row["event"] for row in rows]
-                    != [
-                        "write_attempt",
-                        "transaction_submitted",
-                        "transaction_confirmed",
-                    ]
-                    or len({row["capture_id"] for row in rows}) != 1
-                    or len({row["session_generation"] for row in rows}) != 1
-                    or rows[1]["transaction_kind"] not in {"output", "settings"}
-                ):
-                    raise HAAPIError(
-                        "HIL step evidence does not prove a confirmed transaction"
-                    )
-                write_frame = frames_by_reference.get(
-                    (rows[0]["capture_id"], rows[0]["seq"])
-                )
-                expected_command = (
-                    "output_control"
-                    if rows[1]["transaction_kind"] == "output"
-                    else "settings_control"
-                )
-                if (
-                    not isinstance(write_frame, dict)
-                    or write_frame.get("direction") != "tx"
-                    or write_frame.get("frame_validation") != "validated_tx"
-                    or write_frame.get("command_type") != expected_command
-                    or write_frame.get("session_generation")
-                    != rows[0]["session_generation"]
-                ):
-                    raise HAAPIError(
-                        "HIL step evidence lacks a matching validated control frame"
-                    )
+
+        for step in scenario_steps:
+            verify_step_channel(step["evidence"], step["missing_evidence"])
+            verify_step_channel(
+                step["cleanup_evidence"], step["cleanup_missing_evidence"]
+            )
     session_data = json.loads(data["session.json"])["data"]
     scenario_data = (
         json.loads(data["scenarios.json"])

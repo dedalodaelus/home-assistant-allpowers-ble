@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 import zipfile
 
@@ -169,6 +170,14 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
     trace_dir = private / "traces" / "output_ac_cycle"
     trace_dir.mkdir(parents=True)
     _save_private_trace(trace_dir, trace)
+    cleanup_trace = deepcopy(trace)
+    cleanup_trace["capture_id"] = "cleanup-capture-id"
+    for record in cleanup_trace["events"] + cleanup_trace["frames"]:
+        if record.get("transaction_id"):
+            record["transaction_id"] = "private-cleanup-tx-id"
+    cleanup_dir = private / "traces" / "output_ac_cycle_cleanup"
+    cleanup_dir.mkdir(parents=True)
+    _save_private_trace(cleanup_dir, cleanup_trace)
     write_scenario_progress(
         private,
         run_id,
@@ -181,6 +190,16 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
                 "trace": "traces/output_ac_cycle",
                 "transaction": {
                     "transaction_id": "private-tx-id",
+                    "session_generation": 1,
+                    "kind": "output",
+                    "command_type": "output_control",
+                    "write_seq": 2,
+                    "submitted_seq": 3,
+                    "confirmed_seq": 4,
+                },
+                "cleanup_trace": "traces/output_ac_cycle_cleanup",
+                "cleanup_transaction": {
+                    "transaction_id": "private-cleanup-tx-id",
                     "session_generation": 1,
                     "kind": "output",
                     "command_type": "output_control",
@@ -208,6 +227,12 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
             "capture-0001:4",
         ]
         assert scenarios["steps"][0]["missing_evidence"] is False
+        assert scenarios["steps"][0]["cleanup_evidence"] == [
+            "capture-0002:2",
+            "capture-0002:3",
+            "capture-0002:4",
+        ]
+        assert scenarios["steps"][0]["cleanup_missing_evidence"] is False
         public_frames = [
             json.loads(line)
             for line in evidence.read("public/frames.jsonl").splitlines()
@@ -250,6 +275,91 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
             target.writestr(name, content)
     with pytest.raises(HAAPIError, match="matching validated control frame"):
         verify_public_archive(tampered)
+
+    cleanup_only_root = write_run(
+        tmp_path,
+        "cleanup-only",
+        {"schema_version": 1},
+        {"schema_version": 1, "run_id": run_id},
+    )
+    incomplete_action_trace = deepcopy(trace)
+    incomplete_action_trace["complete"] = False
+    incomplete_action_trace["dropped_events"] = 1
+    action_dir = cleanup_only_root / "traces" / "action"
+    action_dir.mkdir(parents=True)
+    _save_private_trace(action_dir, incomplete_action_trace)
+    cleanup_only_dir = cleanup_only_root / "traces" / "cleanup"
+    cleanup_only_dir.mkdir(parents=True)
+    _save_private_trace(cleanup_only_dir, cleanup_trace)
+    write_scenario_progress(
+        cleanup_only_root,
+        run_id,
+        "output_ac_cycle",
+        "b" * 64,
+        [
+            {
+                "step_id": "ac_on",
+                "outcome": "pass",
+                "trace": "traces/action",
+                "transaction": {
+                    "transaction_id": "private-tx-id",
+                    "session_generation": 1,
+                    "kind": "output",
+                    "command_type": "output_control",
+                    "write_seq": 2,
+                    "submitted_seq": 3,
+                    "confirmed_seq": 4,
+                },
+                "cleanup_trace": "traces/cleanup",
+                "cleanup_transaction": {
+                    "transaction_id": "private-cleanup-tx-id",
+                    "session_generation": 1,
+                    "kind": "output",
+                    "command_type": "output_control",
+                    "write_seq": 2,
+                    "submitted_seq": 3,
+                    "confirmed_seq": 4,
+                },
+            },
+            {
+                "step_id": "restore_original",
+                "outcome": "pass",
+                "trace": "traces/action",
+                "cleanup_trace": "traces/cleanup",
+                "cleanup_transaction": {
+                    "transaction_id": "private-cleanup-tx-id",
+                    "session_generation": 1,
+                    "kind": "output",
+                    "command_type": "output_control",
+                    "write_seq": 2,
+                    "submitted_seq": 3,
+                    "confirmed_seq": 4,
+                },
+            },
+        ],
+    )
+    cleanup_only_archive = export_archive(tmp_path / "cleanup-only", confirmed=True)
+    with zipfile.ZipFile(cleanup_only_archive) as evidence_zip:
+        steps = json.loads(evidence_zip.read("public/scenarios.json"))["steps"]
+    incomplete_action, cleanup_only_step = steps
+    assert incomplete_action["evidence"] == [
+        "capture-0001:2",
+        "capture-0001:3",
+        "capture-0001:4",
+    ]
+    assert incomplete_action["missing_evidence"] is True
+    assert incomplete_action["cleanup_evidence"] == [
+        "capture-0002:2",
+        "capture-0002:3",
+        "capture-0002:4",
+    ]
+    assert incomplete_action["cleanup_missing_evidence"] is False
+    assert cleanup_only_step["evidence"] == []
+    assert cleanup_only_step["missing_evidence"] is True
+    assert (
+        cleanup_only_step["cleanup_evidence"] == incomplete_action["cleanup_evidence"]
+    )
+    assert cleanup_only_step["cleanup_missing_evidence"] is False
 
 
 def test_transaction_reference_requires_submission_and_confirmation() -> None:
