@@ -303,17 +303,18 @@ def _execute_output_suite(
                 "Step inconclusive; inspect the station and restore it manually if needed"
             )
             break
-    # If the operator authorized the planned AC-off action but its trace could
-    # not be armed, the service was never called. Reuse that still-current
-    # authorization for one cleanup attempt, after repeating the live safety
-    # checks. Never use this path after an ambiguous service call.
-    if len(steps) == 2 and steps[0].get("outcome") == "pass":
-        cleanup = steps[1]
-        restore_key = scenario.steps[-1]["target"]
-        restore_step_id = scenario.steps[-1]["id"]
-        restore_expected = scenario.steps[-1]["expected"]
+    # Restore after the final cycle action when either tracing failed before
+    # the service call, or an ambiguous attempt left fresh telemetry at the
+    # known intermediate state. The latter requires a separate authorization.
+    if steps:
+        cleanup = steps[-1]
+        restore_key = cleanup.get("target")
+        restore_step_id = cleanup.get("step_id")
+        restore_expected = steps[0].get("pre_state")
         restore_entity = device.control_entities.get(restore_key)
-        restore_pre_state = "off" if restore_expected == "on" else "on"
+        restore_pre_state = cleanup.get("post_state") or (
+            "off" if restore_expected == "on" else "on"
+        )
         restore_is_settings = restore_key in {"eco_mode", "car_charger"}
         restore_freshness_key = (
             "settings_fresh" if restore_is_settings else "status_fresh"
@@ -323,12 +324,38 @@ def _execute_output_suite(
             if restore_is_settings
             else "write_output_controls"
         )
-        if (
-            cleanup.get("step_id") == restore_step_id
+        prewrite_cleanup = (
+            len(steps) == 2
+            and steps[0].get("outcome") == "pass"
+            and cleanup.get("step_id") == restore_step_id
             and cleanup.get("authorized") is True
             and cleanup.get("prewrite_trace_failed") is True
             and cleanup.get("service_attempted") is not True
-        ):
+        )
+        ambiguous_cleanup = (
+            cleanup.get("step_id") == restore_step_id
+            and cleanup.get("authorized") is True
+            and cleanup.get("service_attempted") is True
+            and cleanup.get("outcome") != "pass"
+            and restore_expected in {"on", "off"}
+            and restore_pre_state in {"on", "off"}
+            and restore_pre_state != restore_expected
+        )
+        cleanup_authorized = prewrite_cleanup
+        if ambiguous_cleanup:
+            try:
+                cleanup_authorized = (
+                    services.prompt(
+                        f"Fresh telemetry shows {restore_key} is "
+                        f"{restore_pre_state}. Type 1 to authorize one traced "
+                        f"restoration to {restore_expected}: "
+                    ).strip()
+                    == "1"
+                )
+            except EOFError, KeyboardInterrupt:
+                cleanup_authorized = False
+            cleanup["cleanup_authorized"] = cleanup_authorized
+        if prewrite_cleanup or (ambiguous_cleanup and cleanup_authorized):
             cleanup.update(
                 {
                     "cleanup_attempted": True,

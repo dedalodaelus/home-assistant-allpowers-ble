@@ -21,6 +21,16 @@ class PlannedScenario:
 
 def plan(suite: str, *, non_interactive: bool = False) -> tuple[PlannedScenario, ...]:
     """Build a side-effect-free plan; writes are never eligible yet."""
+    if suite == "transaction-safety":
+        return tuple(
+            PlannedScenario(
+                item,
+                False,
+                "offline simulation only; live transaction-safety execution is not enabled",
+            )
+            for item in load_scenarios()
+            if item.suite == suite
+        )
     if suite == "all":
         selected = [item for item in load_scenarios() if item.suite == "read-only"]
     else:

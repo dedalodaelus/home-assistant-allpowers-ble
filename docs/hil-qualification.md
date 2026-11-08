@@ -212,9 +212,18 @@ resume is refused because an interrupted write can be ambiguous. A bounded
 24-hour soak collector is implemented with periodic telemetry, route traces,
 gap detection, private storage limits, and restart-aware checkpoints. The
 collector has offline simulation coverage, but no hardware soak has been run.
-The AC scenario can perform one traced restoration when its off action was
-authorized but trace setup failed before the service call, after fresh
-same-session checks confirm restoration is safe. Ambiguous or already
-attempted writes still require manual intervention; restoration leaves the
-run inconclusive. Broader cleanup and transaction-safety suite execution
-remain outstanding. No build-level physical qualification is claimed.
+The output cycle can perform one separately authorized, traced restoration
+after an ambiguous final write when fresh same-session telemetry confirms the
+known intermediate state and no transaction is pending. Settings changes use
+the same guarded restoration rule. If the changed state cannot be proven, the
+session changed, or a transaction remains pending, the CLI does not issue
+another write and instructs the operator to inspect and restore manually.
+Restoration never upgrades an inconclusive original action to a pass.
+
+`run --suite transaction-safety --simulate` runs an offline deterministic
+rehearsal covering pending-write rejection, same-generation confirmation,
+combined output-state preservation, keepalive/settings non-replay, and
+ambiguous evidence without automatic retries. Its private report is explicitly
+marked synthetic and cannot qualify an integration build or hardware. Live
+transaction-safety execution and all hardware qualification remain outstanding.
+No build-level physical qualification is claimed.

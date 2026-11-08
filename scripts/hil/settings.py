@@ -363,6 +363,63 @@ def _execute_settings_suite(
         services,
     )
     if change.get("outcome") != "pass":
+        # A service response can be lost after the setting changed. Offer one
+        # separately authorized, traced restoration only when fresh state and
+        # a clear transaction slot still prove that the changed value is live.
+        if change.get("post_state") == target:
+            try:
+                cleanup_caps = api.hil_capabilities(entry_id)
+                cleanup_state = api.control_state(key, entity_id)
+            except HAAPIError:
+                cleanup_caps = {}
+                cleanup_state = {"available": False, "state": None}
+            can_restore = (
+                cleanup_caps.get("verified") is True
+                and cleanup_caps.get("identity_conflicted") is False
+                and cleanup_caps.get("connected") is True
+                and cleanup_caps.get("settings_fresh") is True
+                and cleanup_caps.get("pending_transaction") is False
+                and cleanup_caps.get("session_generation") == caps["session_generation"]
+                and cleanup_caps.get("capabilities", {}).get("write_settings_controls")
+                is True
+                and cleanup_state.get("available") is True
+                and cleanup_state.get("state") == target
+            )
+            if can_restore:
+                try:
+                    cleanup_authorized = (
+                        services.prompt(
+                            f"Fresh telemetry confirms {key} changed despite incomplete "
+                            f"evidence. Type 1 to authorize one traced restoration to "
+                            f"{initial}: "
+                        ).strip()
+                        == "1"
+                    )
+                except EOFError, KeyboardInterrupt:
+                    cleanup_authorized = False
+                if cleanup_authorized:
+                    restoration = _execute_settings_write(
+                        api,
+                        args,
+                        device,
+                        output_dir,
+                        run_id,
+                        scenario,
+                        key,
+                        entity_id,
+                        initial,
+                        target,
+                        caps["session_generation"],
+                        "restore_after_ambiguous_write",
+                        checkpoint_step,
+                        services,
+                    )
+                    if restoration.get("outcome") == "pass":
+                        print(
+                            "Ambiguous settings action was restored; the original "
+                            "scenario remains inconclusive"
+                        )
+                        return 2
         print("Settings change inconclusive; inspect and restore manually if needed")
         return 2
     try:
