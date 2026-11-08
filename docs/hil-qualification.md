@@ -220,10 +220,11 @@ session changed, or a transaction remains pending, the CLI does not issue
 another write and instructs the operator to inspect and restore manually.
 Restoration never upgrades an inconclusive original action to a pass.
 
-`run --suite transaction-safety --simulate` runs an offline deterministic
-rehearsal covering pending-write rejection, same-generation confirmation,
-combined output-state preservation, keepalive/settings non-replay, and
-ambiguous evidence without automatic retries. Its private report is explicitly
-marked synthetic and cannot qualify an integration build or hardware. Live
+`run --suite transaction-safety --simulate` runs selected offline fake-GATT
+regression cases against the production client for pending-write rejection,
+same-generation confirmation, combined output-state preservation,
+keepalive/settings non-replay, and ambiguous evidence without automatic
+retries. Its private report contains test names and outcomes only, is explicitly
+marked synthetic, and cannot qualify an integration build or hardware. Live
 transaction-safety execution and all hardware qualification remain outstanding.
 No build-level physical qualification is claimed.
