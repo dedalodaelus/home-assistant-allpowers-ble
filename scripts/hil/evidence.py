@@ -20,7 +20,7 @@ from .scenarios import load_scenarios
 from .discovery import KNOWN_MODELS, safe_model, safe_version
 from .trace import _validate_trace_result
 
-PUBLIC_SCHEMA = 1
+PUBLIC_SCHEMA = 2
 MAX_FILE = 2 * 1024 * 1024
 MAX_ARCHIVE = 8 * 1024 * 1024
 MAX_MEMBERS = 8
@@ -29,6 +29,7 @@ PUBLIC_NAMES = {
     "session.json",
     "scenarios.json",
     "events.jsonl",
+    "frames.jsonl",
     "manifest.json",
     "report.md",
 }
@@ -207,6 +208,63 @@ def _safe_utc(value: Any) -> str | None:
     return parsed.isoformat(timespec="microseconds")
 
 
+def _verified_transaction_references(
+    transaction: Any, events: dict[int, dict[str, Any]]
+) -> list[int]:
+    """Return only event sequences proving a validated submitted/confirmed TX."""
+    if not isinstance(transaction, dict):
+        return []
+    kind = transaction.get("kind")
+    expected_kind = (
+        "output" if transaction.get("command_type") == "output_control" else "settings"
+    )
+    if kind != expected_kind or transaction.get("command_type") not in {
+        "output_control",
+        "settings_control",
+    }:
+        return []
+    transaction_id = transaction.get("transaction_id")
+    generation = transaction.get("session_generation")
+    write_seq, submitted_seq, confirmed_seq = (
+        transaction.get("write_seq"),
+        transaction.get("submitted_seq"),
+        transaction.get("confirmed_seq"),
+    )
+    if (
+        not isinstance(transaction_id, str)
+        or not transaction_id
+        or type(generation) is not int
+        or any(
+            type(seq) is not int or seq < 1
+            for seq in (write_seq, submitted_seq, confirmed_seq)
+        )
+        or not write_seq < submitted_seq < confirmed_seq
+    ):
+        return []
+    write, submitted, confirmed = (
+        events.get(seq) for seq in (write_seq, submitted_seq, confirmed_seq)
+    )
+    if not all(isinstance(row, dict) for row in (write, submitted, confirmed)):
+        return []
+    if not (
+        write.get("event") == "write_attempt"
+        and submitted.get("event") == "transaction_submitted"
+        and confirmed.get("event") == "transaction_confirmed"
+        and all(
+            row.get("transaction_id") == transaction_id
+            for row in (write, submitted, confirmed)
+        )
+        and all(
+            row.get("session_generation") == generation
+            for row in (write, submitted, confirmed)
+        )
+        and submitted.get("transaction_kind") == kind
+        and confirmed.get("reason") == "matching_validated_telemetry"
+    ):
+        return []
+    return [write_seq, submitted_seq, confirmed_seq]
+
+
 def _safe_directory(path: Path) -> None:
     absolute = Path(os.path.abspath(path))
     current = Path(absolute.anchor)
@@ -277,6 +335,16 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                             else "unknown",
                             "verified": item.get("verified") is True,
                         }
+                elif (
+                    key == "build_match"
+                    and isinstance(item, str)
+                    and item in {"mismatch", "unverified"}
+                ):
+                    allowed[key] = {
+                        "value": item,
+                        "source": "runner_repository_manifest",
+                        "verified": item == "mismatch",
+                    }
             result["data"][group_name] = allowed
     else:
         for key in (
@@ -470,7 +538,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
         omissions.append("missing_run_metadata")
     capture_index = 0
     capture_stats: list[dict[str, Any]] = []
-    trace_references: dict[str, tuple[list[str], bool]] = {}
+    trace_references: dict[str, tuple[list[str], bool, dict[int, dict[str, Any]]]] = {}
+    transaction_kind_by_trace_seq: dict[tuple[str, int], str] = {}
+    scenario_source = _read_json(scenario_path) if scenario_path.exists() else {}
     trace_root = private / "traces"
     trace_dirs = (
         sorted(p for p in trace_root.glob("*") if p.is_dir())
@@ -518,6 +588,25 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
         except (HAAPIError, TypeError, ValueError, KeyError) as exc:
             raise HAAPIError("Private HIL trace validation failed") from exc
         source_events = trace_result["events"]
+        source_by_seq = {item["seq"]: item for item in source_events}
+        trace_name = f"traces/{base.name}"
+        for step in scenario_source.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            for trace_key, transaction_key in (
+                ("trace", "transaction"),
+                ("cleanup_trace", "cleanup_transaction"),
+            ):
+                transaction = step.get(transaction_key)
+                if step.get(trace_key) != trace_name or not isinstance(
+                    transaction, dict
+                ):
+                    continue
+                seqs = _verified_transaction_references(transaction, source_by_seq)
+                for seq in seqs:
+                    transaction_kind_by_trace_seq[(trace_name, seq)] = transaction[
+                        "kind"
+                    ]
         total_rows = len(source_events)
         capture_rows = []
         for item in source_events:
@@ -568,7 +657,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 {
                     "capture_id": public_capture_id,
                     "events": len(capture_rows),
-                    "frames": frame_count,
+                    "frames": 0,
                     "dropped_events": dropped_events,
                     "dropped_frames": dropped_frames,
                     "complete": complete,
@@ -579,6 +668,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 trace_references[f"traces/{base.name}"] = (
                     [f"{public_capture_id}:{seq}" for seq, *_ in capture_rows],
                     not complete,
+                    {item["seq"]: item for item in source_events},
                 )
             rows = [
                 {
@@ -591,12 +681,39 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     "elapsed_ms": elapsed_ms,
                     "session_generation": generation,
                     "observed_route": event_route,
+                    "transaction_kind": item.get("transaction_kind")
+                    if item.get("transaction_kind") in {"output", "settings"}
+                    else transaction_kind_by_trace_seq.get(
+                        (f"traces/{base.name}", seq)
+                    ),
                 }
                 for seq, event, item_utc, elapsed_ms, generation, event_route in capture_rows
             ]
             existing = files.get("events.jsonl", b"")
             files["events.jsonl"] = existing + b"".join(
                 (json.dumps(row, sort_keys=True) + "\n").encode() for row in rows
+            )
+            public_frames = []
+            for frame in trace_result["frames"]:
+                if frame.get("event") not in EVENT_NAMES:
+                    continue
+                public_frames.append(
+                    {
+                        "schema_version": PUBLIC_SCHEMA,
+                        "capture_id": public_capture_id,
+                        "seq": frame["seq"],
+                        "direction": frame["direction"],
+                        "command_type": frame["command_type"],
+                        "frame_validation": frame["frame_validation"],
+                        "session_generation": frame["session_generation"],
+                        "payload_omitted": True,
+                    }
+                )
+            capture_stats[-1]["frames"] = len(public_frames)
+            existing_frames = files.get("frames.jsonl", b"")
+            files["frames.jsonl"] = existing_frames + b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode()
+                for row in public_frames
             )
     if scenario_path.exists():
         scenario = _read_json(scenario_path)
@@ -609,7 +726,32 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 continue
             if not isinstance(outcome, str) or outcome not in OUTCOMES:
                 continue
-            evidence, incomplete = trace_references.get(step.get("trace"), ([], True))
+            evidence: list[str] = []
+            incomplete = True
+            for trace_key, transaction_key in (
+                ("trace", "transaction"),
+                ("cleanup_trace", "cleanup_transaction"),
+            ):
+                entry = trace_references.get(step.get(trace_key))
+                if not entry:
+                    continue
+                all_refs, capture_incomplete, source_events = entry
+                seqs = _verified_transaction_references(
+                    step.get(transaction_key), source_events
+                )
+                if seqs and all_refs:
+                    capture_id = all_refs[0].split(":", 1)[0]
+                    evidence.extend(f"{capture_id}:{seq}" for seq in seqs)
+                    incomplete = (
+                        incomplete and capture_incomplete
+                        if evidence
+                        else capture_incomplete
+                    )
+            evidence = sorted(
+                set(evidence),
+                key=lambda ref: (ref.split(":")[0], int(ref.split(":")[1])),
+            )
+            incomplete = incomplete or not evidence
             safe_steps.append(
                 {
                     "step_id": step_id,
@@ -849,6 +991,7 @@ def _valid_public_facts(groups: dict[str, Any]) -> bool:
         "ha_rest_config",
         "ha_ws_manifest_get",
         "runner_repository_manifest",
+        "runner_git_checkout",
         "unknown",
     }
     if set(groups) - {"home_assistant", "runner_host", "integration"}:
@@ -1247,6 +1390,52 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
             try:
                 for line in data[name].splitlines():
                     event = json.loads(line)
+                    if name == "frames.jsonl":
+                        if (
+                            not isinstance(event, dict)
+                            or set(event)
+                            != {
+                                "schema_version",
+                                "capture_id",
+                                "seq",
+                                "direction",
+                                "command_type",
+                                "frame_validation",
+                                "session_generation",
+                                "payload_omitted",
+                            }
+                            or event.get("schema_version") != PUBLIC_SCHEMA
+                            or event.get("direction") not in {"tx", "rx"}
+                            or event.get("command_type")
+                            not in {
+                                "status_request",
+                                "output_control",
+                                "settings_control",
+                                "unknown",
+                            }
+                            or event.get("frame_validation")
+                            not in {"validated_tx", "unvalidated_chunk"}
+                            or (
+                                event.get("direction") == "tx"
+                                and event.get("frame_validation") != "validated_tx"
+                            )
+                            or (
+                                event.get("direction") == "rx"
+                                and (
+                                    event.get("command_type") != "unknown"
+                                    or event.get("frame_validation")
+                                    != "unvalidated_chunk"
+                                )
+                            )
+                            or event.get("payload_omitted") is not True
+                            or not isinstance(event.get("capture_id"), str)
+                            or re.fullmatch(r"capture-[0-9]{4}", event["capture_id"])
+                            is None
+                            or type(event.get("seq")) is not int
+                            or event["seq"] < 1
+                        ):
+                            raise ValueError
+                        continue
                     if (
                         not isinstance(event, dict)
                         or set(event)
@@ -1260,6 +1449,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                             "elapsed_ms",
                             "session_generation",
                             "observed_route",
+                            "transaction_kind",
                         }
                         or event.get("schema_version") != PUBLIC_SCHEMA
                         or not isinstance(event.get("capture_id"), str)
@@ -1289,20 +1479,29 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         or not isinstance(event.get("observed_route"), str)
                         or event.get("observed_route")
                         not in {"local_adapter", "active_proxy", "unverified", "mixed"}
+                        or event.get("transaction_kind")
+                        not in {None, "output", "settings"}
                     ):
                         raise ValueError
             except (UnicodeError, ValueError, TypeError) as exc:
                 raise HAAPIError("Malformed JSONL in HIL archive") from exc
-    if "session.json" not in data or "report.md" not in data:
+    if (
+        "session.json" not in data
+        or "report.md" not in data
+        or (captures["count"] and "frames.jsonl" not in data)
+    ):
         raise HAAPIError("Required public archive members are missing")
     event_rows = [
         json.loads(line) for line in data.get("events.jsonl", b"").splitlines()
+    ]
+    frame_rows = [
+        json.loads(line) for line in data.get("frames.jsonl", b"").splitlines()
     ]
     capture_rows = captures["by_capture"]
     if (
         captures["count"] != len(capture_rows)
         or captures["events"] != len(event_rows)
-        or captures["frames"] != sum(row["frames"] for row in capture_rows)
+        or captures["frames"] != len(frame_rows)
         or captures["dropped_events"]
         != sum(row["dropped_events"] for row in capture_rows)
         or captures["dropped_frames"]
@@ -1323,6 +1522,15 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         for row in capture_rows
     ):
         raise HAAPIError("HIL archive event references do not match captures")
+    frame_counts: dict[str, int] = {}
+    for frame in frame_rows:
+        if f"{frame['capture_id']}:{frame['seq']}" not in event_references:
+            raise HAAPIError("HIL frame metadata has no corresponding event")
+        frame_counts[frame["capture_id"]] = frame_counts.get(frame["capture_id"], 0) + 1
+    if any(
+        frame_counts.get(row["capture_id"], 0) != row["frames"] for row in capture_rows
+    ):
+        raise HAAPIError("HIL archive frame counters do not match evidence")
     if "scenarios.json" in data:
         scenario_steps = json.loads(data["scenarios.json"])["steps"]
         complete_captures = {
@@ -1336,6 +1544,34 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                 for ref in step["evidence"]
             ):
                 raise HAAPIError("HIL scenario relies on incomplete capture evidence")
+            if not step["missing_evidence"]:
+                refs = step["evidence"]
+                if len(refs) != 3:
+                    raise HAAPIError(
+                        "HIL control evidence must include write, submission, and confirmation"
+                    )
+                rows = [
+                    next(
+                        row
+                        for row in event_rows
+                        if f"{row['capture_id']}:{row['seq']}" == ref
+                    )
+                    for ref in refs
+                ]
+                if (
+                    [row["event"] for row in rows]
+                    != [
+                        "write_attempt",
+                        "transaction_submitted",
+                        "transaction_confirmed",
+                    ]
+                    or len({row["capture_id"] for row in rows}) != 1
+                    or len({row["session_generation"] for row in rows}) != 1
+                    or rows[1]["transaction_kind"] not in {"output", "settings"}
+                ):
+                    raise HAAPIError(
+                        "HIL step evidence does not prove a confirmed transaction"
+                    )
     session_data = json.loads(data["session.json"])["data"]
     scenario_data = (
         json.loads(data["scenarios.json"])

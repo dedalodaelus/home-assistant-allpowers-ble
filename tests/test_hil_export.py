@@ -61,7 +61,7 @@ def test_archive_reimport_rejects_tampered_public_member(tmp_path: Path) -> None
         verify_public_archive(tampered)
 
 
-def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
+def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
     tmp_path: Path,
 ) -> None:
     run_id = "0123456789abcdef"
@@ -82,8 +82,25 @@ def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
         "session_generation": 1,
         "observed_route": "unverified",
         "event": "write_attempt",
-        "transaction_id": None,
+        "transaction_id": "private-tx-id",
         "vendor_private": "do-not-export-token",
+    }
+    submitted = {
+        **{key: value for key, value in event.items() if key != "vendor_private"},
+        "seq": 2,
+        "event": "transaction_submitted",
+        "transaction_kind": "output",
+    }
+    confirmed = {
+        **{key: value for key, value in event.items() if key != "vendor_private"},
+        "seq": 3,
+        "event": "transaction_confirmed",
+        "reason": "matching_validated_telemetry",
+    }
+    received = {
+        **{key: value for key, value in event.items() if key != "vendor_private"},
+        "seq": 4,
+        "event": "notification_received",
     }
     frame = {
         **{k: v for k, v in event.items() if k != "vendor_private"},
@@ -91,6 +108,13 @@ def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
         "command_type": "status_request",
         "frame_validation": "validated_tx",
         "hex": "a565b1000106010000000000",
+    }
+    rx_frame = {
+        **received,
+        "direction": "rx",
+        "command_type": "unknown",
+        "frame_validation": "unvalidated_chunk",
+        "hex": "deadbeef",
     }
     trace = {
         "schema_version": 1,
@@ -109,10 +133,10 @@ def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
         "complete": True,
         "dropped_events": 0,
         "dropped_frames": 0,
-        "event_count": 1,
-        "frame_count": 1,
-        "events": [event],
-        "frames": [frame],
+        "event_count": 4,
+        "frame_count": 2,
+        "events": [event, submitted, confirmed, received],
+        "frames": [frame, rx_frame],
     }
     trace_dir = private / "traces" / "output_ac_cycle"
     trace_dir.mkdir(parents=True)
@@ -127,6 +151,15 @@ def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
                 "step_id": "ac_on",
                 "outcome": "pass",
                 "trace": "traces/output_ac_cycle",
+                "transaction": {
+                    "transaction_id": "private-tx-id",
+                    "session_generation": 1,
+                    "kind": "output",
+                    "command_type": "output_control",
+                    "write_seq": 1,
+                    "submitted_seq": 2,
+                    "confirmed_seq": 3,
+                },
                 "physical_outcome": "yes",
                 "started_utc": "2026-11-05T00:00:00+00:00",
                 "elapsed_seconds": 1.5,
@@ -138,13 +171,91 @@ def test_validated_private_trace_exports_allowlisted_events_but_no_frames(
     with zipfile.ZipFile(archive) as evidence:
         members = evidence.namelist()
         assert "public/events.jsonl" in members
-        assert "public/frames.jsonl" not in members
+        assert "public/frames.jsonl" in members
         combined = b"".join(evidence.read(name) for name in members)
         scenarios = json.loads(evidence.read("public/scenarios.json"))
-        assert scenarios["steps"][0]["evidence"] == ["capture-0001:1"]
+        assert scenarios["steps"][0]["evidence"] == [
+            "capture-0001:1",
+            "capture-0001:2",
+            "capture-0001:3",
+        ]
         assert scenarios["steps"][0]["missing_evidence"] is False
+        public_frames = [
+            json.loads(line)
+            for line in evidence.read("public/frames.jsonl").splitlines()
+        ]
+        assert public_frames[0]["payload_omitted"] is True
+        assert public_frames[0]["frame_validation"] == "validated_tx"
+        assert public_frames[1]["direction"] == "rx"
+        assert public_frames[1]["command_type"] == "unknown"
+        assert public_frames[1]["frame_validation"] == "unvalidated_chunk"
         assert b"capture-0001:1" in evidence.read("public/report.md")
     assert b"do-not-export-token" not in combined
     assert b"a565b1000106010000000000" not in combined
+    assert b"deadbeef" not in combined
     assert b"capture-0001" in combined
     assert verify_public_archive(archive)["captures"]["complete"] is True
+
+
+def test_transaction_reference_requires_submission_and_confirmation() -> None:
+    from scripts.hil.evidence import _verified_transaction_references
+
+    event = {"transaction_id": "private-id", "session_generation": 1}
+    transaction = {
+        "transaction_id": "private-id",
+        "session_generation": 1,
+        "kind": "output",
+        "command_type": "output_control",
+        "write_seq": 1,
+        "submitted_seq": 2,
+        "confirmed_seq": 3,
+    }
+    events = {
+        1: {**event, "seq": 1, "event": "write_attempt"},
+        2: {
+            **event,
+            "seq": 2,
+            "event": "transaction_submitted",
+            "transaction_kind": "output",
+        },
+        3: {
+            **event,
+            "seq": 3,
+            "event": "transaction_confirmed",
+            "reason": "matching_validated_telemetry",
+        },
+    }
+    assert _verified_transaction_references(transaction, events) == [1, 2, 3]
+    del events[3]
+    assert _verified_transaction_references(transaction, events) == []
+
+
+def test_real_environment_checkout_and_mismatch_facts_verify(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scripts.hil import environment
+
+    monkeypatch.setattr(
+        environment,
+        "local_commit",
+        lambda: {"value": "a" * 40, "source": "runner_git_checkout", "verified": True},
+    )
+    monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
+    env = environment.build_environment(
+        {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
+        {"version": "1.0.0"},
+    )
+    write_run(
+        tmp_path,
+        "environment",
+        env,
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+        },
+    )
+    archive = export_archive(tmp_path / "environment", confirmed=True)
+    manifest = verify_public_archive(archive)
+    assert manifest["build_provenance"]["runner_checkout_commit"] == "a" * 40
+    assert manifest["build_provenance"]["verification"] == "mismatch"
