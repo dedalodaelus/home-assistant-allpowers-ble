@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -17,6 +18,10 @@ from .storage import write_run, write_scenario_progress
 
 _ROOT = Path(__file__).resolve().parents[2]
 _REGRESSION_CASES = (
+    (
+        "tests/test_client_logic.py",
+        "test_transaction_notification_during_write",
+    ),
     (
         "tests/test_client_logic.py",
         "test_transaction_rejects_unconfirmed_dependent_write",
@@ -36,6 +41,10 @@ _REGRESSION_CASES = (
     (
         "tests/test_client_logic.py",
         "test_transaction_failed_write_requires_new_telemetry",
+    ),
+    (
+        "tests/test_client_logic.py",
+        "test_transaction_contradiction_during_write_revokes_convergence",
     ),
     (
         "tests/test_client_logic.py",
@@ -59,6 +68,10 @@ _REGRESSION_CASES = (
     ),
     (
         "tests/test_hil_capture.py",
+        "test_late_matching_status_cannot_resurrect_timed_out_transaction",
+    ),
+    (
+        "tests/test_hil_capture.py",
         "test_real_disconnect_records_one_terminal_pending_transaction",
     ),
     (
@@ -68,30 +81,54 @@ _REGRESSION_CASES = (
 )
 
 
-def _test_results(report_path: Path) -> tuple[list[dict[str, Any]], int, int, int]:
+def _test_results(
+    report_path: Path,
+) -> tuple[list[dict[str, Any]], int, int, int, int, set[str]]:
     """Extract only test names and counts; never persist runner output/tracebacks."""
     root = ET.parse(report_path).getroot()
     cases = root.findall(".//testcase")
     rows = []
     failures = 0
     errors = 0
+    skipped = 0
+    observed: set[str] = set()
     for case in cases:
         failed = case.find("failure") is not None
         errored = case.find("error") is not None
+        was_skipped = case.find("skipped") is not None
         failures += int(failed)
         errors += int(errored)
+        skipped += int(was_skipped)
         name = case.get("name", "unnamed")
+        observed.add(name.split("[", 1)[0])
         safe_name = "".join(
             char if char.isalnum() or char in "_-" else "_" for char in name
         )
-        rows.append(
-            {
-                "step_id": f"case_{safe_name[:54]}",
-                "outcome": "fail" if failed or errored else "pass",
-                "test": name[:120],
-            }
+        digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+        row = {
+            "step_id": f"case_{safe_name[:48]}_{digest}",
+            "outcome": (
+                "fail"
+                if failed or errored
+                else "inconclusive"
+                if was_skipped
+                else "pass"
+            ),
+            "test": name[:120],
+        }
+        detail = (
+            case.find("failure")
+            if failed
+            else case.find("error")
+            if errored
+            else case.find("skipped")
         )
-    return rows, len(cases), failures, errors
+        if detail is not None:
+            message = detail.get("message")
+            if message:
+                row["failure_summary"] = message[:240]
+        rows.append(row)
+    return rows, len(cases), failures, errors, skipped, observed
 
 
 def execute_transaction_safety_simulation(output_root: Path) -> int:
@@ -106,7 +143,8 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
     )
     steps: list[dict[str, Any]] = []
     process_returncode: int | None = None
-    total = failures = errors = 0
+    total = failures = errors = skipped = 0
+    observed_cases: set[str] = set()
     try:
         with tempfile.TemporaryDirectory(prefix="allpowers-hil-transaction-") as temp:
             report_path = Path(temp) / "junit.xml"
@@ -132,16 +170,31 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
             )
             process_returncode = result.returncode
             if report_path.is_file():
-                steps, total, failures, errors = _test_results(report_path)
+                steps, total, failures, errors, skipped, observed_cases = _test_results(
+                    report_path
+                )
     except OSError, subprocess.SubprocessError, ET.ParseError:
         steps = []
 
+    expected_cases = {name for _, name in _REGRESSION_CASES}
+    missing_cases = sorted(expected_cases - observed_cases)
+    if missing_cases:
+        steps.append(
+            {
+                "step_id": "configured_case_coverage",
+                "outcome": "inconclusive",
+                "reason": "one or more configured regression cases did not run",
+                "missing_cases": missing_cases,
+            }
+        )
     passed = (
         process_returncode == 0
         and total > 0
         and failures == 0
         and errors == 0
-        and len(steps) == total
+        and skipped == 0
+        and not missing_cases
+        and all(row["outcome"] == "pass" for row in steps)
     )
     if not steps:
         steps = [
@@ -164,8 +217,11 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         "evidence_mode": "simulation",
         "hardware_qualification": False,
         "tests_run": total,
+        "configured_cases": len(expected_cases),
+        "missing_cases": missing_cases,
         "failures": failures,
         "errors": errors,
+        "skipped": skipped,
         "simulation_status": "pass" if passed else "inconclusive",
         "qualification_status": "not_applicable",
         "steps": steps,
@@ -180,7 +236,8 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         raise HAAPIError("Unable to persist private transaction-safety report") from ex
     print(f"Transaction-safety fake-GATT simulation: {report['simulation_status']}")
     print(
-        f"Synthetic regression cases: {total}; failures: {failures}; errors: {errors}"
+        f"Synthetic regression cases: {total}; failures: {failures}; "
+        f"errors: {errors}; skipped: {skipped}"
     )
     print("This run provides no hardware or integration qualification")
     print("Private report:", path)

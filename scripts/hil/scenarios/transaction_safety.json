@@ -16,9 +16,12 @@
   ],
   "required_evidence": [
     "zero_second_output_frame_while_pending",
+    "telemetry_notification_during_write_is_correlated",
     "same_generation_confirmation_before_retry",
     "combined_output_bitmap_preserves_unrelated_state",
+    "contradictory_and_late_telemetry_do_not_confirm",
     "no_keepalive_or_settings_replay",
+    "write_error_cancellation_timeout_and_disconnect_do_not_replay",
     "no_automatic_retry_for_ambiguous_evidence"
   ]
 }
