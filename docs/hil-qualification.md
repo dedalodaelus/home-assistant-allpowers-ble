@@ -22,6 +22,13 @@ For a non-destructive first step, use the [guided HIL CLI](hil-cli.md) to collec
 read-only environment and entity snapshots. It does not produce qualifying BLE
 or physical evidence until later guided-capture stages are implemented.
 
+The `report` and `export` commands described in [hil-cli.md](hil-cli.md) produce
+a local, privacy-filtered attachment for review. Attach the generated ZIP
+manually; it is not a qualification record. A software step marked `pass`, a
+complete GATT API capture, or a verified route must not be used to mark a
+physical qualification matrix result `PASS` without the required independent
+hardware observations and evidence.
+
 ## Prerequisites
 
 - One physical ALLPOWERS device for the target revision.

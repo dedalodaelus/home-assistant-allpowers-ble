@@ -55,15 +55,40 @@ Each `run` creates a permission-restricted folder:
 
 ```text
 hil-results/<UTC-time>_<random-run-id>/
-  environment.json
-  session.json
+  private/                  # raw local evidence and restart checkpoints
+    environment.json
+    session.json
+  public/                   # generated allowlisted projection
 ```
 
-Both files use schema version 1, UTC timestamps, structured `value/source/verified` metadata and explicit `unavailable` reasons. The session records the sanitized associated config-entry state (`loaded`, `not_loaded`, `setup_error`, etc.) and a separate `preflight.checks` object with `entry_loaded`, `connected` and `telemetry_fresh`. Unknown is **not** treated as failure or success. `run` is always allowed to save a degraded read-only snapshot; `qualification_status` remains `inconclusive`. Registry device IDs, entity IDs, BLE addresses, tokens, IP addresses, SSIDs, hostnames, full HA configuration and device-provided arbitrary attributes are **never written**. Environment and session schemas will be extended in #229-#232; these files are not yet a publishable evidence ZIP.
+The private environment and session sources use schema version 1, UTC timestamps, structured `value/source/verified` metadata and explicit `unavailable` reasons. The session records the sanitized associated config-entry state (`loaded`, `not_loaded`, `setup_error`, etc.) and a separate `preflight.checks` object with `entry_loaded`, `connected` and `telemetry_fresh`. Unknown is **not** treated as failure or success. `run` is always allowed to save a degraded read-only snapshot; `qualification_status` remains `inconclusive`. Registry device IDs, entity IDs, BLE addresses, tokens, IP addresses, SSIDs, hostnames, full HA configuration and device-provided arbitrary attributes are **never written**. The private source files are not themselves an attachment; use `report` or `export` below to build the public projection.
 
 ## What can and cannot be verified
 
 The CLI reads `/api/config`, `config/entity_registry/list`, `config/device_registry/list`, `manifest/get` and optionally `config_entries/get`, plus selected `/api/states/<entity_id>` GETs. Registry `model`, hardware and firmware are **last recorded metadata**, not proof of live BLE freshness. The `binary_sensor.connected` state reflects the integration's coordinator-reported connection; `binary_sensor.telemetry_available`, when enabled, reflects its fresh-status check, *not independent hardware causality*. Unavailable states are not replaced with guessed values, and translated entity names are never used to infer functionality.
+
+## Build and attach a privacy-safe report (#231)
+
+Reporting and export operate offline on an existing run; they do not use a Home
+Assistant URL/token or upload anything. Point them at the visible run directory
+(legacy flat runs are also accepted):
+
+```bash
+python -m scripts.hil report hil-results/<UTC-time>_<run-id>
+python -m scripts.hil export hil-results/<UTC-time>_<run-id>
+```
+
+`report` rebuilds `public/` from an allowlisted projection and writes
+`public/report.md`. Review the report and the export preview. In a terminal,
+type `EXPORT` when prompted; in automation, use
+`export <run-directory> --non-interactive --confirm-export` only after review.
+The archive `hil-evidence.zip` contains `public/` files only. Attach it
+manually to the issue or PR; there is no automatic posting. Unknown frame
+payloads and uncorrelated trace data are omitted. A step result or complete
+capture does not establish physical HIL qualification, and the generated
+qualification status remains inconclusive where evidence is insufficient.
+After interruption, run `report` on the same directory; it does not resume or
+repeat HIL actions.
 
 ### Bluetooth adapter/proxy candidates in Home Assistant 2026.10.4
 

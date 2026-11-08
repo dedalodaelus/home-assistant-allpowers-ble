@@ -231,7 +231,7 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
     )
 
     (run_dir,) = tuple(output_root.iterdir())
-    report = json.loads((run_dir / "session.json").read_text())
+    report = json.loads((run_dir / "private" / "session.json").read_text())
     assert report["runtime_capabilities"]["profile"] == "r600-hw-0.3"
     assert report["controls"]["car_charger"]["eligible"] is False
     assert "secret-entry-1" not in json.dumps(report)
@@ -414,10 +414,12 @@ def test_run_writes_private_allowlisted_json_without_identifiers(
     assert cli.execute(args) == 0
     dirs = list((tmp_path / "results").iterdir())
     assert len(dirs) == 1
-    public_files = {p.name for p in dirs[0].iterdir()}
+    assert {p.name for p in dirs[0].iterdir()} == {"private", "public"}
+    private = dirs[0] / "private"
+    public_files = {p.name for p in private.iterdir()}
     assert public_files == {"session.json", "environment.json"}
-    data = json.loads((dirs[0] / "session.json").read_text())
-    content = " ".join(p.read_text() for p in dirs[0].iterdir())
+    data = json.loads((private / "session.json").read_text())
+    content = " ".join(p.read_text() for p in private.iterdir())
     for secret in (
         "MY_PRIVATE_TOKEN",
         "my-secret-host",
@@ -651,7 +653,7 @@ def test_doctor_missing_entry_permissions_remains_unknown_but_run_is_available(
     args = ["--ha-url", "https://example.test", "--non-interactive"]
     assert cli.main(["doctor", *args]) == 2
     assert cli.main(["run", *args, "--output-root", str(tmp_path)]) == 0
-    sessions = list(tmp_path.glob("*/session.json"))
+    sessions = list(tmp_path.glob("*/private/session.json"))
     assert len(sessions) == 1
     state = json.loads(sessions[0].read_text())["device"]["integration_entry_state"]
     assert state["value"] is None
@@ -1777,7 +1779,7 @@ def test_degraded_run_is_still_recorded_with_preflight_result(
         str(tmp_path),
     )
     assert cli.execute(args) == 0
-    path = next(tmp_path.iterdir()) / "session.json"
+    path = next(tmp_path.iterdir()) / "private" / "session.json"
     session = json.loads(path.read_text())
     assert session["preflight"]["overall"] == "incomplete"
     assert session["preflight"]["checks"]["connected"] == "incomplete"
@@ -1905,7 +1907,9 @@ def test_scanner_inventory_environment_is_privacy_safe(
         )
         == 0
     )
-    env = json.loads((next(tmp_path.iterdir()) / "environment.json").read_text())
+    env = json.loads(
+        (next(tmp_path.iterdir()) / "private" / "environment.json").read_text()
+    )
     scanners = env["home_assistant"]["bluetooth_scanner_candidates"]
     assert scanners["value"] == fake.scanners
     assert scanners["source"] == "ha_ws_bluetooth_subscribe_scanner_details_admin"
@@ -2155,7 +2159,8 @@ def test_trace_cli_private_jsonl_agrees_with_manifest_and_recovers_lost_stop(
         ]
     )
     assert rc == 0
-    (directory,) = list(output.iterdir())
+    (run_root,) = list(output.iterdir())
+    directory = run_root / "private"
     assert (directory.stat().st_mode & 0o777) == 0o700
     assert {p.name for p in directory.iterdir()} == {
         "environment.json",
@@ -2225,7 +2230,8 @@ def test_trace_cli_never_qualifies_missing_or_interrupted_evidence(
         )
         == exit_code
     )
-    (directory,) = list(output.iterdir())
+    (run_root,) = list(output.iterdir())
+    directory = run_root / "private"
     session = json.loads((directory / "session.json").read_text())
     assert session["qualification_status"] == "inconclusive"
     assert fake.closed
@@ -2286,7 +2292,8 @@ def test_runtime_stopped_trace_returns_two_even_when_it_has_valid_frames(
         )
         == 2
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     trace = json.loads((directory / "trace.json").read_text())
     assert trace["frame_count"] == 1
     assert trace["termination_reason"] == "runtime_stopped"
@@ -2355,7 +2362,8 @@ def test_trace_cli_fails_closed_on_malformed_v1_evidence(
         )
         == 2
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     assert (directory / "environment.json").exists()
     assert (directory / "session.json").exists()
     assert not (directory / "events.jsonl").exists()
@@ -2391,7 +2399,8 @@ def test_trace_cli_accepts_equal_timestamps_and_explains_dropped_orphan(
         )
         == expected_return
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     metadata = json.loads((directory / "trace.json").read_text())
     events = [
         json.loads(value)
@@ -2445,7 +2454,8 @@ def test_private_trace_second_file_open_failure_erases_all_partial_bytes(
         )
         == 2
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     assert sorted(p.name for p in directory.iterdir()) == [
         "environment.json",
         "session.json",
@@ -2491,7 +2501,8 @@ def test_private_trace_manifest_write_failure_scrubs_created_jsonl(
         )
         == 2
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     assert not (directory / "trace.json").exists()
     assert not (directory / "events.jsonl").exists()
     assert not (directory / "frames.jsonl").exists()
@@ -2523,7 +2534,8 @@ def test_trace_cli_with_observer_loss_fails_with_valid_gatt_frame(
         )
         == 2
     )
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     trace = json.loads((directory / "trace.json").read_text())
     assert trace["frame_count"] == 1
     assert trace["dropped_events"] == 1
@@ -2567,7 +2579,8 @@ def test_cli_route_text_distinguishes_preflight_and_connected_trace(
     assert "no route instrumentation yet" not in output
     if command == "trace":
         assert "Observed connection route: active_proxy" in output
-        (directory,) = list(output_root.iterdir())
+        (run_root,) = list(output_root.iterdir())
+        directory = run_root / "private"
         trace = json.loads((directory / "trace.json").read_text())
         session = json.loads((directory / "session.json").read_text())
         assert trace["schema_version"] == 2

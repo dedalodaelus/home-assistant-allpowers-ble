@@ -23,19 +23,26 @@ def write_run(
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if root.is_symlink() or not root.is_dir():
             raise HAAPIError("Invalid output directory")
-        run_dir = root / run_name
-        run_dir.mkdir(mode=0o700, exist_ok=False)
+        run_root = root / run_name
+        run_root.mkdir(mode=0o700, exist_ok=False)
+        run_dir = run_root / "private"
+        run_dir.mkdir(mode=0o700)
+        (run_root / "public").mkdir(mode=0o700)
         for name, value in (
             ("environment.json", environment),
             ("session.json", session),
         ):
             file_path = run_dir / name
+            temporary = run_dir / f".{name}.{secrets.token_hex(8)}.tmp"
             data = (
                 json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
             ).encode("utf-8")
-            fd = os.open(file_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, file_path)
     except (OSError, ValueError) as ex:
         raise HAAPIError("Unable to create private HIL result files") from ex
     return run_dir
@@ -89,6 +96,8 @@ def write_scenario_progress(
 def load_scenario_checkpoint(run_dir: Path) -> tuple[Path, dict[str, Any]]:
     """Load a private, versioned checkpoint without following symlinks."""
     run_dir = run_dir.expanduser()
+    if (run_dir / "private").is_dir() and not (run_dir / "checkpoint.json").exists():
+        run_dir = run_dir / "private"
     absolute = Path(os.path.abspath(run_dir))
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
@@ -160,3 +169,8 @@ def load_scenario_checkpoint(run_dir: Path) -> tuple[Path, dict[str, Any]]:
     ):
         raise HAAPIError("Checkpoint contains invalid scenario steps")
     return run_dir, checkpoint
+
+
+def run_root(path: Path) -> Path:
+    """Return the visible run root for either a new private path or legacy run."""
+    return path.parent if path.name == "private" else path

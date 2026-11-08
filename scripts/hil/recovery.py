@@ -11,6 +11,7 @@ from typing import Any
 from .api import HAAPIError, HAClient
 from .discovery import Device
 from .suite_runtime import SuiteServices
+from .storage import run_root
 
 
 def _execute_recovery_suite(
@@ -352,5 +353,5 @@ def _execute_recovery_suite(
     )
     checkpoint()
     print("Recovery observation:", observation["outcome"])
-    print("Scenario checkpoint saved to:", output_dir)
+    print("Scenario checkpoint saved to:", run_root(output_dir))
     return 0 if observation["outcome"] == "pass" else 2

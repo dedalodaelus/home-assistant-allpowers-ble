@@ -238,7 +238,8 @@ def test_v2_cli_roundtrip_private_files_never_public_ids(
         ]
     )
     assert code == (2 if invalid else 0)
-    (directory,) = list(root.iterdir())
+    (run_root,) = list(root.iterdir())
+    directory = run_root / "private"
     if invalid:
         assert not (directory / "frames.jsonl").exists()
         assert not (directory / "trace.json").exists()
