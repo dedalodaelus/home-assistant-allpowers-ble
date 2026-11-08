@@ -115,6 +115,11 @@ def make_parser() -> argparse.ArgumentParser:
         help="Print scenario eligibility without contacting Home Assistant",
     )
     run_parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Run the offline transaction-safety rehearsal; no HA or hardware access",
+    )
+    run_parser.add_argument(
         "--list-suites", action="store_true", help="List available scenario suites"
     )
     run_parser.add_argument(
@@ -531,6 +536,19 @@ def execute(args: argparse.Namespace) -> int:
             or args.list_suites
         ):
             raise HAAPIError("This scenario cannot be resumed")
+        if args.simulate:
+            if args.suite != "transaction-safety" or args.dry_run:
+                raise HAAPIError(
+                    "--simulate is supported only for run --suite transaction-safety"
+                )
+            from .transaction_safety import execute_transaction_safety_simulation
+
+            return execute_transaction_safety_simulation(args.output_root)
+        if args.suite == "transaction-safety":
+            raise HAAPIError(
+                "Transaction-safety live execution is not enabled; use --simulate "
+                "for the offline rehearsal"
+            )
         if args.suite == "settings" and args.scenario_id is None:
             raise HAAPIError("Select a settings scenario with --scenario-id")
         if args.scenario_id is not None:

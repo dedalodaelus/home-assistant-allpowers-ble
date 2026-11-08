@@ -24,6 +24,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
         "settings_eco_timeout",
         "settings_work_mode",
         "soak_24h_observation",
+        "transaction_safety_simulation",
     ]
     assert all(
         1 <= step["timeout_seconds"] <= 86400
@@ -100,6 +101,16 @@ def test_settings_plan_stays_blocked_until_live_preflight() -> None:
     ]
     assert all(item.eligible is False for item in planned)
     assert all("live capability" in item.reason for item in planned)
+
+
+def test_transaction_safety_plan_is_simulation_only() -> None:
+    planned = plan("transaction-safety")
+    assert [item.scenario.id for item in planned] == ["transaction_safety_simulation"]
+    assert all(item.eligible is False for item in planned)
+    assert all(
+        "live transaction-safety execution is not enabled" in item.reason
+        for item in planned
+    )
 
 
 @pytest.mark.parametrize(

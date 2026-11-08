@@ -793,7 +793,16 @@ def test_scenario_selection_is_a_side_effect_free_dry_run(
     assert f"requested actions: {requested_action}" in output
 
 
-@pytest.mark.parametrize("failure_mode", ["safe", "pending", "ambiguous"])
+@pytest.mark.parametrize(
+    "failure_mode",
+    [
+        "safe",
+        "pending",
+        "ambiguous",
+        "race_after_cleanup_trace",
+        "pending_after_restore",
+    ],
+)
 @pytest.mark.parametrize(
     ("scenario_id", "control_key"),
     [
@@ -803,7 +812,7 @@ def test_scenario_selection_is_a_side_effect_free_dry_run(
         ("output_light_cycle", "light"),
     ],
 )
-def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
+def test_output_scenario_restoration_requires_fresh_safe_state(
     monkeypatch, tmp_path, failure_mode, scenario_id, control_key
 ):
     from types import SimpleNamespace
@@ -818,6 +827,7 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
             self.starts = 0
             self.actions = []
             self.pending = False
+            self.off_attempts = 0
 
         def hil_capabilities(self, entry_id):
             return {
@@ -840,15 +850,33 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
 
         def call_control(self, key, entity_id, value):
             self.actions.append(value)
-            if value == "off" and failure_mode == "ambiguous":
-                raise cli.HAAPIError("service acknowledgement lost")
+            if value == "off":
+                self.off_attempts += 1
+                if (
+                    failure_mode
+                    in {
+                        "ambiguous",
+                        "race_after_cleanup_trace",
+                        "pending_after_restore",
+                    }
+                    and self.off_attempts == 1
+                ):
+                    raise cli.HAAPIError("service acknowledgement lost")
             self.state = value
+            if value == "off" and failure_mode == "pending_after_restore":
+                self.pending = True
 
         def websocket(self, commands):
             command = commands[0]
             if command["type"].endswith("/start"):
                 self.starts += 1
-                if self.starts == 2 and failure_mode != "ambiguous":
+                if self.starts == 3 and failure_mode == "race_after_cleanup_trace":
+                    self.state = "off"
+                if self.starts == 2 and failure_mode not in {
+                    "ambiguous",
+                    "race_after_cleanup_trace",
+                    "pending_after_restore",
+                }:
                     self.pending = failure_mode == "pending"
                     raise cli.HAAPIError("trace unavailable")
                 return [
@@ -881,7 +909,12 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
         control_entities={control_key: f"switch.private_{control_key}"},
         config_entry_id="entry-safe",
     )
-    inputs = iter(("1", "1", "1", "3" if failure_mode == "ambiguous" else "1"))
+    inputs = iter(
+        ("1", "1", "1", "3", "1", "1")
+        if failure_mode
+        in {"ambiguous", "race_after_cleanup_trace", "pending_after_restore"}
+        else ("1", "1", "1", "1")
+    )
     clock = [10_000.0]
     monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
@@ -919,16 +952,35 @@ def test_output_scenario_restores_only_after_authorized_unsubmitted_off(
         assert cleanup["cleanup_outcome"] == "pass"
         assert cleanup["cleanup_post_state"] == "off"
         assert cleanup["cleanup_trace"] == f"traces/{control_key}_cleanup"
+        assert "pre-write trace setup failure" in cleanup["cleanup_reason"]
     elif failure_mode == "pending":
         assert cleanup.get("service_attempted") is not True
         assert cleanup["cleanup_attempted"] is True
         assert api_fake.actions == ["on"]
         assert cleanup.get("cleanup_service_attempted") is not True
         assert cleanup["cleanup_reason"].startswith("fresh same-session")
+    elif failure_mode == "ambiguous":
+        assert api_fake.actions == ["on", "off", "off"]
+        assert cleanup["service_attempted"] is True
+        assert cleanup["cleanup_authorized"] is True
+        assert cleanup["cleanup_service_attempted"] is True
+        assert cleanup["cleanup_outcome"] == "pass"
+        assert cleanup["cleanup_post_state"] == "off"
+        assert cleanup["outcome"] == "inconclusive"
+        assert "after ambiguous write" in cleanup["cleanup_reason"]
+    elif failure_mode == "pending_after_restore":
+        assert api_fake.actions == ["on", "off", "off"]
+        assert cleanup["cleanup_service_attempted"] is True
+        assert cleanup["cleanup_post_state"] == "off"
+        assert cleanup["cleanup_outcome"] == "inconclusive"
+        assert cleanup["cleanup_status"] == "restoration_inconclusive"
     else:
         assert api_fake.actions == ["on", "off"]
         assert cleanup["service_attempted"] is True
-        assert cleanup.get("cleanup_attempted") is not True
+        assert cleanup["cleanup_authorized"] is True
+        assert cleanup.get("cleanup_service_attempted") is not True
+        assert cleanup["cleanup_status"] == "restoration_blocked_at_write_boundary"
+        assert "after the restoration trace was armed" in cleanup["cleanup_reason"]
 
 
 def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
@@ -1139,6 +1191,174 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
     assert api_fake.state == initial
 
 
+@pytest.mark.parametrize(
+    ("cleanup_state", "trace_unavailable"),
+    [
+        ("safe", False),
+        ("unchanged", False),
+        ("pending", False),
+        ("pending_after_restore", False),
+        ("generation", False),
+        ("race_after_cleanup_trace", False),
+        ("safe", True),
+    ],
+)
+def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
+    monkeypatch, tmp_path, cleanup_state, trace_unavailable
+):
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    class AmbiguousSettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.actions = []
+            self.pending = False
+            self.generation = 9
+            self.captures = 0
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": self.pending,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": self.generation,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def control_state(self, key, entity_id):
+            del key, entity_id
+            return {
+                "available": self.state in {"off", "on"},
+                "state": self.state if self.state in {"off", "on"} else None,
+                "options": ["off", "on"],
+            }
+
+        def call_control(self, key, entity_id, value):
+            self.actions.append((key, value))
+            if value == "on":
+                if cleanup_state == "unchanged":
+                    raise cli.HAAPIError("service acknowledgement lost")
+                self.state = "on"
+                if cleanup_state == "pending":
+                    self.pending = True
+                elif cleanup_state == "generation":
+                    self.generation += 1
+                raise cli.HAAPIError("service acknowledgement lost")
+            self.state = value
+            if value == "off" and cleanup_state == "pending_after_restore":
+                self.pending = True
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.captures += 1
+                if self.captures == 2 and cleanup_state == "race_after_cleanup_trace":
+                    self.state = "off"
+                return [
+                    {"schema_version": 2, "capture_id": f"ambiguous-{self.captures}"}
+                ]
+            if trace_unavailable:
+                raise cli.HAAPIError("capture could not be finalized")
+            return [
+                {
+                    "schema_version": 2,
+                    "capture_id": command["capture_id"],
+                    "events": [],
+                    "frames": [],
+                    "complete": True,
+                    "observed_route": "local_adapter",
+                }
+            ]
+
+    api_fake = AmbiguousSettingsHA()
+    output_dir = tmp_path / f"{cleanup_state}-{trace_unavailable}"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    answers = iter(("1", "1", "1") if trace_unavailable else ("1", "3", "1", "1"))
+    clock = [10_000.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "input", lambda _prompt: next(answers), raising=False)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "correlate_transaction",
+        lambda trace, **kwargs: {"transaction_id": trace["capture_id"]},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_save_private_trace",
+        lambda trace_dir, trace: (trace_dir / "trace.json").write_text(
+            json.dumps(trace)
+        ),
+    )
+
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            scenario_id="settings_eco_mode",
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    change = checkpoint["steps"][0]
+    assert result == 2
+    assert change["service_attempted"] is True
+    assert change["post_state"] == ("off" if cleanup_state == "unchanged" else "on")
+    if cleanup_state == "safe":
+        restoration = checkpoint["steps"][1]
+        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert change["cleanup_status"] == (
+            "restoration_inconclusive" if trace_unavailable else "restoration_confirmed"
+        )
+        assert restoration["outcome"] == (
+            "inconclusive" if trace_unavailable else "pass"
+        )
+        assert api_fake.state == "off"
+    elif cleanup_state == "race_after_cleanup_trace":
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert change["cleanup_status"] == "restoration_inconclusive"
+        assert checkpoint["steps"][1]["step_id"] == "restore_after_ambiguous_write"
+        assert checkpoint["steps"][1].get("service_attempted") is not True
+        assert "changed after trace start" in checkpoint["steps"][1]["reason"]
+    elif cleanup_state == "pending_after_restore":
+        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert change["cleanup_status"] == "restoration_inconclusive"
+        assert checkpoint["steps"][1]["outcome"] == "inconclusive"
+        assert api_fake.state == "off"
+    elif cleanup_state == "unchanged":
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert change["cleanup_status"] == "original_state_confirmed_no_restore_needed"
+        assert api_fake.state == "off"
+    else:
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert change["cleanup_status"] == "manual_inspection_required"
+        assert change["cleanup_reason"].startswith("fresh same-session state")
+
+
 @pytest.mark.parametrize("include_control_frame", [True, False])
 @pytest.mark.parametrize("requested_route", ["auto", "active_proxy"])
 def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
@@ -1334,8 +1554,11 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
     else:
         assert result == 2
-        assert api_fake.actions == [("eco_mode", "on")]
+        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
         assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+        assert checkpoint["steps"][0]["cleanup_status"] == ("restoration_inconclusive")
+        assert checkpoint["steps"][1]["step_id"] == "restore_after_ambiguous_write"
+        assert checkpoint["steps"][1]["outcome"] == "inconclusive"
 
 
 @pytest.mark.parametrize(

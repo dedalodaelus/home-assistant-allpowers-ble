@@ -1,0 +1,27 @@
+{
+  "id": "transaction_safety_simulation",
+  "schema_version": 1,
+  "suite": "transaction-safety",
+  "title": "Offline transaction-safety regression rehearsal",
+  "mode": "read_only",
+  "steps": [
+    {
+      "id": "pending_transaction_rejection",
+      "instruction": "Simulate concurrent output rejection, matching telemetry confirmation, combined-state retry, and ambiguous evidence handling.",
+      "timeout_seconds": 30,
+      "action": "observe",
+      "target": null,
+      "expected": "No duplicate or automatic retry; ambiguous evidence remains inconclusive."
+    }
+  ],
+  "required_evidence": [
+    "zero_second_output_frame_while_pending",
+    "telemetry_notification_during_write_is_correlated",
+    "same_generation_confirmation_before_retry",
+    "combined_output_bitmap_preserves_unrelated_state",
+    "contradictory_and_late_telemetry_do_not_confirm",
+    "no_keepalive_or_settings_replay",
+    "write_error_cancellation_timeout_and_disconnect_do_not_replay",
+    "no_automatic_retry_for_ambiguous_evidence"
+  ]
+}

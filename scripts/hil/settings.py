@@ -93,6 +93,26 @@ def _execute_settings_write(
             on_update(row)
             return row
         capture_id = capture["capture_id"]
+        write_caps = api.hil_capabilities(device.config_entry_id)
+        write_state = api.control_state(key, entity_id)
+        if (
+            write_caps.get("verified") is not True
+            or write_caps.get("identity_conflicted") is not False
+            or write_caps.get("connected") is not True
+            or write_caps.get("status_fresh") is not True
+            or write_caps.get("settings_fresh") is not True
+            or write_caps.get("pending_transaction") is not False
+            or write_caps.get("session_generation") != generation
+            or write_caps.get("capabilities", {}).get("write_settings_controls")
+            is not True
+            or write_state.get("available") is not True
+            or write_state.get("state") != expected_pre_state
+            or not services.control_value_available(key, write_state, target)
+        ):
+            row["reason"] = "settings changed after trace start; service not attempted"
+            row["ended_utc"] = services.datetime.now(UTC).isoformat()
+            on_update(row)
+            return row
         row["service_attempted"] = True
         on_update(row)
         try:
@@ -153,6 +173,28 @@ def _execute_settings_write(
                     )[0]
                 except HAAPIError:
                     trace = None
+            if row.get("service_attempted") is True:
+                row.update(
+                    {
+                        "post_state": post.get("state"),
+                        "post_state_available": post.get("available") is True,
+                        "post_settings_fresh": (
+                            observed_caps is not None
+                            and observed_caps.get("settings_fresh") is True
+                        ),
+                        "post_session_generation": (
+                            observed_caps.get("session_generation")
+                            if observed_caps is not None
+                            else None
+                        ),
+                        "post_pending_transaction": (
+                            observed_caps.get("pending_transaction")
+                            if observed_caps is not None
+                            else None
+                        ),
+                    }
+                )
+                on_update(row)
 
     if not isinstance(trace, dict):
         row["reason"] = "settings trace could not be finalized"
@@ -223,6 +265,7 @@ def _execute_settings_write(
             observed_caps is not None
             and observed_caps.get("session_generation") == generation
             and observed_caps.get("settings_fresh") is True
+            and observed_caps.get("pending_transaction") is False
             and post.get("available") is True
             and post.get("state") == target
         ),
@@ -363,6 +406,87 @@ def _execute_settings_suite(
         services,
     )
     if change.get("outcome") != "pass":
+        # A service response can be lost after the setting changed. Offer one
+        # separately authorized, traced restoration only when fresh state and
+        # a clear transaction slot still prove that the changed value is live.
+        if change.get("service_attempted") is True:
+            change["cleanup_status"] = "checking_live_state"
+            checkpoint_step(change)
+            try:
+                cleanup_caps = api.hil_capabilities(entry_id)
+                cleanup_state = api.control_state(key, entity_id)
+            except HAAPIError:
+                cleanup_caps = {}
+                cleanup_state = {"available": False, "state": None}
+            can_restore = (
+                cleanup_caps.get("verified") is True
+                and cleanup_caps.get("identity_conflicted") is False
+                and cleanup_caps.get("connected") is True
+                and cleanup_caps.get("status_fresh") is True
+                and cleanup_caps.get("settings_fresh") is True
+                and cleanup_caps.get("pending_transaction") is False
+                and cleanup_caps.get("session_generation") == caps["session_generation"]
+                and cleanup_caps.get("capabilities", {}).get("write_settings_controls")
+                is True
+                and cleanup_state.get("available") is True
+            )
+            if can_restore and cleanup_state.get("state") == initial:
+                change["cleanup_status"] = "original_state_confirmed_no_restore_needed"
+                checkpoint_step(change)
+            elif can_restore and cleanup_state.get("state") == target:
+                change["cleanup_status"] = "awaiting_restoration_authorization"
+                checkpoint_step(change)
+                try:
+                    cleanup_authorized = (
+                        services.prompt(
+                            f"Fresh telemetry confirms {key} changed despite incomplete "
+                            f"evidence. Type 1 to authorize one traced restoration to "
+                            f"{initial}: "
+                        ).strip()
+                        == "1"
+                    )
+                except EOFError, KeyboardInterrupt:
+                    cleanup_authorized = False
+                if cleanup_authorized:
+                    change["cleanup_status"] = "restoration_authorized"
+                    checkpoint_step(change)
+                    restoration = _execute_settings_write(
+                        api,
+                        args,
+                        device,
+                        output_dir,
+                        run_id,
+                        scenario,
+                        key,
+                        entity_id,
+                        initial,
+                        target,
+                        caps["session_generation"],
+                        "restore_after_ambiguous_write",
+                        checkpoint_step,
+                        services,
+                    )
+                    change["cleanup_status"] = (
+                        "restoration_confirmed"
+                        if restoration.get("outcome") == "pass"
+                        else "restoration_inconclusive"
+                    )
+                    checkpoint_step(change)
+                    if restoration.get("outcome") == "pass":
+                        print(
+                            "Ambiguous settings action was restored; the original "
+                            "scenario remains inconclusive"
+                        )
+                else:
+                    change["cleanup_status"] = "restoration_authorization_declined"
+                    checkpoint_step(change)
+            else:
+                change["cleanup_status"] = "manual_inspection_required"
+                change["cleanup_reason"] = (
+                    "fresh same-session state did not prove the original or "
+                    "requested value with no transaction pending"
+                )
+                checkpoint_step(change)
         print("Settings change inconclusive; inspect and restore manually if needed")
         return 2
     try:
