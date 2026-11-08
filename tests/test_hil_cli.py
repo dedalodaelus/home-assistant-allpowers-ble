@@ -952,6 +952,7 @@ def test_output_scenario_restoration_requires_fresh_safe_state(
         assert cleanup["cleanup_outcome"] == "pass"
         assert cleanup["cleanup_post_state"] == "off"
         assert cleanup["cleanup_trace"] == f"traces/{control_key}_cleanup"
+        assert "pre-write trace setup failure" in cleanup["cleanup_reason"]
     elif failure_mode == "pending":
         assert cleanup.get("service_attempted") is not True
         assert cleanup["cleanup_attempted"] is True
@@ -966,6 +967,7 @@ def test_output_scenario_restoration_requires_fresh_safe_state(
         assert cleanup["cleanup_outcome"] == "pass"
         assert cleanup["cleanup_post_state"] == "off"
         assert cleanup["outcome"] == "inconclusive"
+        assert "after ambiguous write" in cleanup["cleanup_reason"]
     elif failure_mode == "pending_after_restore":
         assert api_fake.actions == ["on", "off", "off"]
         assert cleanup["cleanup_service_attempted"] is True

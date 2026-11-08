@@ -668,8 +668,11 @@ def _execute_output_suite(
                             else "restoration_inconclusive"
                         )
                         cleanup["cleanup_reason"] = (
-                            "restoration evidence collected; scenario remains "
-                            "inconclusive because its planned trace could not start"
+                            "restoration evidence collected after ambiguous write; "
+                            "original scenario remains inconclusive"
+                            if ambiguous_cleanup
+                            else "restoration evidence collected after pre-write "
+                            "trace setup failure; original scenario remains inconclusive"
                         )
             except HAAPIError, OSError, EOFError, KeyboardInterrupt:
                 cleanup.setdefault(

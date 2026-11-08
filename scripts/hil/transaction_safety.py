@@ -109,9 +109,9 @@ def _test_results(
             "step_id": f"case_{safe_name[:48]}_{digest}",
             "outcome": (
                 "fail"
-                if failed or errored
+                if failed
                 else "inconclusive"
-                if was_skipped
+                if errored or was_skipped
                 else "pass"
             ),
             "test": name[:120],
@@ -145,6 +145,7 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
     process_returncode: int | None = None
     total = failures = errors = skipped = 0
     observed_cases: set[str] = set()
+    runner_problem: str | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="allpowers-hil-transaction-") as temp:
             report_path = Path(temp) / "junit.xml"
@@ -173,8 +174,35 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
                 steps, total, failures, errors, skipped, observed_cases = _test_results(
                     report_path
                 )
-    except OSError, subprocess.SubprocessError, ET.ParseError:
-        steps = []
+            else:
+                runner_problem = (
+                    "pytest did not produce JUnit output; install the optional "
+                    "simulator dependencies with `python -m pip install "
+                    "-r requirements_test.txt`"
+                )
+    except FileNotFoundError:
+        runner_problem = (
+            "pytest is unavailable; install the optional simulator dependencies "
+            "with `python -m pip install -r requirements_test.txt`"
+        )
+    except subprocess.TimeoutExpired:
+        runner_problem = "fake-GATT regression runner exceeded its 300-second limit"
+    except ET.ParseError:
+        runner_problem = "pytest produced invalid JUnit output"
+    except OSError, subprocess.SubprocessError:
+        runner_problem = (
+            "fake-GATT regression runner could not start or complete; install the "
+            "optional simulator dependencies with `python -m pip install "
+            "-r requirements_test.txt`"
+        )
+    if runner_problem is not None:
+        steps.append(
+            {
+                "step_id": "runner_unavailable",
+                "outcome": "inconclusive",
+                "reason": runner_problem,
+            }
+        )
 
     expected_cases = {name for _, name in _REGRESSION_CASES}
     missing_cases = sorted(expected_cases - observed_cases)
@@ -189,6 +217,7 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         )
     passed = (
         process_returncode == 0
+        and runner_problem is None
         and total > 0
         and failures == 0
         and errors == 0
@@ -212,6 +241,7 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         fingerprint,
         steps,
     )
+    simulation_status = "fail" if failures > 0 else "pass" if passed else "inconclusive"
     report = {
         "schema_version": 1,
         "evidence_mode": "simulation",
@@ -222,7 +252,7 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         "failures": failures,
         "errors": errors,
         "skipped": skipped,
-        "simulation_status": "pass" if passed else "inconclusive",
+        "simulation_status": simulation_status,
         "qualification_status": "not_applicable",
         "steps": steps,
     }
@@ -234,11 +264,24 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
         path.chmod(0o600)
     except OSError as ex:
         raise HAAPIError("Unable to persist private transaction-safety report") from ex
-    print(f"Transaction-safety fake-GATT simulation: {report['simulation_status']}")
+    print(f"Transaction-safety fake-GATT simulation: {simulation_status}")
     print(
         f"Synthetic regression cases: {total}; failures: {failures}; "
         f"errors: {errors}; skipped: {skipped}"
     )
+    if runner_problem is not None:
+        print("Simulation unavailable:", runner_problem)
+    elif failures > 0:
+        print("Regression failures are listed in the private report.")
+    elif errors > 0:
+        print(
+            "Runner/test dependency errors occurred; install optional simulator "
+            "dependencies with `python -m pip install -r requirements_test.txt`."
+        )
+    elif skipped > 0 or missing_cases:
+        print(
+            "Simulation incomplete: configured regression cases were skipped or missing."
+        )
     print("This run provides no hardware or integration qualification")
     print("Private report:", path)
-    return 0 if passed else 2
+    return 0 if simulation_status == "pass" else 2

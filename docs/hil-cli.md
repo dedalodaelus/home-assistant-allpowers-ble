@@ -13,6 +13,20 @@ python -m pip install -r requirements_hil.txt
 python -m scripts.hil --help
 ```
 
+The offline `transaction-safety --simulate` runner is optional and uses the
+repository's fake-GATT test harness. To enable it in this isolated environment,
+install the development/test dependencies separately:
+
+```bash
+python -m pip install -r requirements_test.txt
+python -m scripts.hil run --suite transaction-safety --simulate
+```
+
+This installs test tooling only in `.venv-hil`; it does not change
+`requirements_hil.txt` or the HACS integration dependencies. Without the
+optional dependencies, the command exits inconclusive and prints this install
+command.
+
 Set `HA_HIL_TOKEN` in the process environment first, or omit `--non-interactive` to enter a long-lived access token via a hidden prompt. Create the token from the Home Assistant user profile. The CLI **does not** accept `--token`, save credentials, load `.storage` files, use the Docker socket, access D-Bus or open an independent BLE connection. Use a dedicated testing HA account with the read access needed for entity/device registries. For ordinary data, authentication is required; restricted registry permissions result in a safe error.
 
 `HA_HIL_URL` may be used instead of `--ha-url`. Only the HA origin is valid, without `/api`, user info, query strings or embedded tokens. HTTPS uses normal certificate verification; there is **no** option to disable it. Plain HTTP to a non-loopback address requires `--allow-insecure-http` and exposes the token on the network; only use it on an explicitly trusted, isolated test network. **The CLI deliberately ignores environment proxy variables** (`http_proxy`, `https_proxy`, `ALL_PROXY`, etc.) for both REST and WebSocket transport: this prevents a token intended for a loopback HA server from leaking to an ambient proxy. A reverse proxy at the explicitly selected HA URL still works; upstream HTTP CONNECT proxies are not supported. Do not expose the token in shell history or screenshots.
@@ -100,7 +114,11 @@ python -m scripts.hil run --suite all --dry-run
 ```
 
 `all` currently selects only read-only scenarios. Write, recovery and soak
-suites are never implicitly enabled. The ordinary `run` command remains the
+suites are never implicitly enabled. The `transaction-safety` suite is offline
+only; `--simulate` runs selected existing fake-GATT regression tests against the
+production client. A failing assertion reports `fail`; missing, skipped or
+unavailable cases report `inconclusive`. This simulation does not contact HA,
+write to hardware, or qualify a build. The ordinary `run` command remains the
 #228 read-only snapshot. Run the bounded 24-hour observer explicitly with
 `python -m scripts.hil --non-interactive --device 1 run --suite soak-24h`.
 It samples every five minutes, allows at most a ten-minute observation gap,
@@ -131,17 +149,21 @@ numeric consent, records short private traces and asks for the physical
 result. Run only with a safe noncritical load and no hazardous
 equipment connected. If the operator authorized the final off step but trace
 setup failed before its service call, the runner rechecks the same fresh
-session and may perform one traced restoration. An attempted or ambiguous
-write is never retried; in that case inspect and restore the station manually.
+session and may perform one traced restoration. After an ambiguous service
+call, one separately authorized, traced restoration may be offered only when
+fresh same-session telemetry shows the known intermediate state and no
+transaction is pending. Otherwise inspect and restore the station manually.
 A restoration does not turn an incomplete run into a pass. These scenarios
 have not been piloted on hardware.
 
 The `settings` suite currently provides ECO-mode, work-mode and ECO-timeout
 checks. Each change is restricted to a declared value exposed by HA, requires
 fresh settings and a separate authorization, and is followed by a separately
-authorized attempt to restore the original value. Missing confirmation or
-route evidence remains inconclusive; restoration is never retried after an
-ambiguous service call. Settings checks have not been piloted on hardware.
+authorized attempt to restore the original value. After an ambiguous service
+call, the runner may offer one traced restoration only when fresh same-session
+telemetry confirms the changed value and no transaction is pending. Missing
+confirmation or route evidence remains inconclusive. Settings checks have not
+been piloted on hardware.
 
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA
