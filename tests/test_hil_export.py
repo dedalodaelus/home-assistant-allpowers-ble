@@ -1,6 +1,7 @@
 """Archive confirmation and integrity tests for HIL exports."""
 
 import json
+import hashlib
 from pathlib import Path
 import zipfile
 
@@ -71,41 +72,55 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         {"schema_version": 1},
         {"schema_version": 1, "run_id": run_id},
     )
-    event = {
-        "schema_version": 1,
+    route_event = {
+        "schema_version": 2,
         "seq": 1,
+        "utc": "2026-11-05T00:00:00+00:00",
+        "elapsed_ms": 0.0,
+        "run_id": run_id,
+        "scenario_id": "output_ac_cycle",
+        "layer": "gatt_api",
+        "session_generation": 1,
+        "observed_route": "local_adapter",
+        "event": "route_observed",
+        "backend_kind": "bluez",
+        "evidence": "bluez_device_path",
+    }
+    event = {
+        "schema_version": 2,
+        "seq": 2,
         "utc": "2026-11-05T00:00:00+00:00",
         "elapsed_ms": 1.0,
         "run_id": run_id,
         "scenario_id": "output_ac_cycle",
         "layer": "gatt_api",
         "session_generation": 1,
-        "observed_route": "unverified",
+        "observed_route": "local_adapter",
         "event": "write_attempt",
         "transaction_id": "private-tx-id",
         "vendor_private": "do-not-export-token",
     }
     submitted = {
         **{key: value for key, value in event.items() if key != "vendor_private"},
-        "seq": 2,
+        "seq": 3,
         "event": "transaction_submitted",
         "transaction_kind": "output",
     }
     confirmed = {
         **{key: value for key, value in event.items() if key != "vendor_private"},
-        "seq": 3,
+        "seq": 4,
         "event": "transaction_confirmed",
         "reason": "matching_validated_telemetry",
     }
     received = {
         **{key: value for key, value in event.items() if key != "vendor_private"},
-        "seq": 4,
+        "seq": 5,
         "event": "notification_received",
     }
     frame = {
         **{k: v for k, v in event.items() if k != "vendor_private"},
         "direction": "tx",
-        "command_type": "status_request",
+        "command_type": "output_control",
         "frame_validation": "validated_tx",
         "hex": "a565b1000106010000000000",
     }
@@ -117,7 +132,8 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         "hex": "deadbeef",
     }
     trace = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "capture_scope": "runtime_entry",
         "capture_id": "capture-private-id",
         "run_id": run_id,
         "scenario_id": "output_ac_cycle",
@@ -129,14 +145,26 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         "expired": False,
         "termination_reason": "requested_stop",
         "qualification_allowed": False,
-        "observed_route": "unverified",
+        "observed_route": "local_adapter",
         "complete": True,
         "dropped_events": 0,
         "dropped_frames": 0,
-        "event_count": 4,
+        "event_count": 5,
         "frame_count": 2,
-        "events": [event, submitted, confirmed, received],
+        "events": [route_event, event, submitted, confirmed, received],
         "frames": [frame, rx_frame],
+        "route_observations": [
+            {
+                "session_generation": 1,
+                "seq": 1,
+                "utc": "2026-11-05T00:00:00+00:00",
+                "elapsed_ms": 0.0,
+                "observed_route": "local_adapter",
+                "backend_kind": "bluez",
+                "evidence": "bluez_device_path",
+                "adapter_id": "hci0",
+            }
+        ],
     }
     trace_dir = private / "traces" / "output_ac_cycle"
     trace_dir.mkdir(parents=True)
@@ -156,9 +184,9 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
                     "session_generation": 1,
                     "kind": "output",
                     "command_type": "output_control",
-                    "write_seq": 1,
-                    "submitted_seq": 2,
-                    "confirmed_seq": 3,
+                    "write_seq": 2,
+                    "submitted_seq": 3,
+                    "confirmed_seq": 4,
                 },
                 "physical_outcome": "yes",
                 "started_utc": "2026-11-05T00:00:00+00:00",
@@ -175,9 +203,9 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         combined = b"".join(evidence.read(name) for name in members)
         scenarios = json.loads(evidence.read("public/scenarios.json"))
         assert scenarios["steps"][0]["evidence"] == [
-            "capture-0001:1",
             "capture-0001:2",
             "capture-0001:3",
+            "capture-0001:4",
         ]
         assert scenarios["steps"][0]["missing_evidence"] is False
         public_frames = [
@@ -189,12 +217,39 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         assert public_frames[1]["direction"] == "rx"
         assert public_frames[1]["command_type"] == "unknown"
         assert public_frames[1]["frame_validation"] == "unvalidated_chunk"
-        assert b"capture-0001:1" in evidence.read("public/report.md")
+        assert b"capture-0001:2" in evidence.read("public/report.md")
     assert b"do-not-export-token" not in combined
     assert b"a565b1000106010000000000" not in combined
     assert b"deadbeef" not in combined
     assert b"capture-0001" in combined
     assert verify_public_archive(archive)["captures"]["complete"] is True
+
+    tampered = tmp_path / "wrong-control-command.zip"
+    with zipfile.ZipFile(archive) as source:
+        contents = {name: source.read(name) for name in source.namelist()}
+    frame_rows = [
+        json.loads(line) for line in contents["public/frames.jsonl"].splitlines()
+    ]
+    frame_rows[0]["command_type"] = "status_request"
+    contents["public/frames.jsonl"] = b"".join(
+        (json.dumps(row, sort_keys=True) + "\n").encode() for row in frame_rows
+    )
+    manifest = json.loads(contents["public/manifest.json"])
+    frame_manifest = next(
+        row for row in manifest["files"] if row["name"] == "frames.jsonl"
+    )
+    frame_manifest["size"] = len(contents["public/frames.jsonl"])
+    frame_manifest["sha256"] = hashlib.sha256(
+        contents["public/frames.jsonl"]
+    ).hexdigest()
+    contents["public/manifest.json"] = (
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    with zipfile.ZipFile(tampered, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, content in contents.items():
+            target.writestr(name, content)
+    with pytest.raises(HAAPIError, match="matching validated control frame"):
+        verify_public_archive(tampered)
 
 
 def test_transaction_reference_requires_submission_and_confirmation() -> None:
@@ -225,9 +280,22 @@ def test_transaction_reference_requires_submission_and_confirmation() -> None:
             "reason": "matching_validated_telemetry",
         },
     }
-    assert _verified_transaction_references(transaction, events) == [1, 2, 3]
+    frames = {
+        1: {
+            "event": "write_attempt",
+            "direction": "tx",
+            "frame_validation": "validated_tx",
+            "command_type": "output_control",
+            "session_generation": 1,
+            "transaction_id": "private-id",
+        }
+    }
+    assert _verified_transaction_references(transaction, events, frames) == [1, 2, 3]
+    wrong_command = {1: {**frames[1], "command_type": "status_request"}}
+    assert _verified_transaction_references(transaction, events, wrong_command) == []
+    assert _verified_transaction_references(transaction, events, {}) == []
     del events[3]
-    assert _verified_transaction_references(transaction, events) == []
+    assert _verified_transaction_references(transaction, events, frames) == []
 
 
 def test_real_environment_checkout_and_mismatch_facts_verify(

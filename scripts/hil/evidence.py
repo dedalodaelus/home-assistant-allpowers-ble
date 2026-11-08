@@ -209,9 +209,11 @@ def _safe_utc(value: Any) -> str | None:
 
 
 def _verified_transaction_references(
-    transaction: Any, events: dict[int, dict[str, Any]]
+    transaction: Any,
+    events: dict[int, dict[str, Any]],
+    frames: dict[int, dict[str, Any]],
 ) -> list[int]:
-    """Return only event sequences proving a validated submitted/confirmed TX."""
+    """Return event sequences proving a validated, command-matched TX."""
     if not isinstance(transaction, dict):
         return []
     kind = transaction.get("kind")
@@ -260,6 +262,16 @@ def _verified_transaction_references(
         )
         and submitted.get("transaction_kind") == kind
         and confirmed.get("reason") == "matching_validated_telemetry"
+    ):
+        return []
+    frame = frames.get(write_seq)
+    if not isinstance(frame, dict) or not (
+        frame.get("direction") == "tx"
+        and frame.get("frame_validation") == "validated_tx"
+        and frame.get("command_type") == transaction["command_type"]
+        and frame.get("session_generation") == generation
+        and frame.get("transaction_id") == transaction_id
+        and frame.get("event") == "write_attempt"
     ):
         return []
     return [write_seq, submitted_seq, confirmed_seq]
@@ -538,7 +550,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
         omissions.append("missing_run_metadata")
     capture_index = 0
     capture_stats: list[dict[str, Any]] = []
-    trace_references: dict[str, tuple[list[str], bool, dict[int, dict[str, Any]]]] = {}
+    trace_references: dict[
+        str,
+        tuple[list[str], bool, dict[int, dict[str, Any]], dict[int, dict[str, Any]]],
+    ] = {}
     transaction_kind_by_trace_seq: dict[tuple[str, int], str] = {}
     scenario_source = _read_json(scenario_path) if scenario_path.exists() else {}
     trace_root = private / "traces"
@@ -589,6 +604,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             raise HAAPIError("Private HIL trace validation failed") from exc
         source_events = trace_result["events"]
         source_by_seq = {item["seq"]: item for item in source_events}
+        source_frames = trace_result["frames"]
+        frames_by_seq = {item["seq"]: item for item in source_frames}
         trace_name = f"traces/{base.name}"
         for step in scenario_source.get("steps", []):
             if not isinstance(step, dict):
@@ -602,7 +619,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     transaction, dict
                 ):
                     continue
-                seqs = _verified_transaction_references(transaction, source_by_seq)
+                seqs = _verified_transaction_references(
+                    transaction, source_by_seq, frames_by_seq
+                )
                 for seq in seqs:
                     transaction_kind_by_trace_seq[(trace_name, seq)] = transaction[
                         "kind"
@@ -669,6 +688,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     [f"{public_capture_id}:{seq}" for seq, *_ in capture_rows],
                     not complete,
                     {item["seq"]: item for item in source_events},
+                    {item["seq"]: item for item in source_frames},
                 )
             rows = [
                 {
@@ -735,9 +755,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 entry = trace_references.get(step.get(trace_key))
                 if not entry:
                     continue
-                all_refs, capture_incomplete, source_events = entry
+                all_refs, capture_incomplete, source_events, source_frames = entry
                 seqs = _verified_transaction_references(
-                    step.get(transaction_key), source_events
+                    step.get(transaction_key), source_events, source_frames
                 )
                 if seqs and all_refs:
                     capture_id = all_refs[0].split(":", 1)[0]
@@ -1523,10 +1543,12 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
     ):
         raise HAAPIError("HIL archive event references do not match captures")
     frame_counts: dict[str, int] = {}
+    frames_by_reference = {}
     for frame in frame_rows:
         if f"{frame['capture_id']}:{frame['seq']}" not in event_references:
             raise HAAPIError("HIL frame metadata has no corresponding event")
         frame_counts[frame["capture_id"]] = frame_counts.get(frame["capture_id"], 0) + 1
+        frames_by_reference[(frame["capture_id"], frame["seq"])] = frame
     if any(
         frame_counts.get(row["capture_id"], 0) != row["frames"] for row in capture_rows
     ):
@@ -1571,6 +1593,25 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                 ):
                     raise HAAPIError(
                         "HIL step evidence does not prove a confirmed transaction"
+                    )
+                write_frame = frames_by_reference.get(
+                    (rows[0]["capture_id"], rows[0]["seq"])
+                )
+                expected_command = (
+                    "output_control"
+                    if rows[1]["transaction_kind"] == "output"
+                    else "settings_control"
+                )
+                if (
+                    not isinstance(write_frame, dict)
+                    or write_frame.get("direction") != "tx"
+                    or write_frame.get("frame_validation") != "validated_tx"
+                    or write_frame.get("command_type") != expected_command
+                    or write_frame.get("session_generation")
+                    != rows[0]["session_generation"]
+                ):
+                    raise HAAPIError(
+                        "HIL step evidence lacks a matching validated control frame"
                     )
     session_data = json.loads(data["session.json"])["data"]
     scenario_data = (
