@@ -220,6 +220,27 @@ def _execute_output_suite(
                     ):
                         break
                     services.sleep(min(1, max(0, deadline - services.monotonic())))
+                row.update(
+                    {
+                        "post_state": post.get("state"),
+                        "post_state_available": post.get("available") is True,
+                        "post_state_fresh": (
+                            observed_caps is not None
+                            and observed_caps.get(freshness_key) is True
+                        ),
+                        "post_state_generation": (
+                            observed_caps.get("session_generation")
+                            if observed_caps is not None
+                            else None
+                        ),
+                        "post_state_pending_transaction": (
+                            observed_caps.get("pending_transaction")
+                            if observed_caps is not None
+                            else None
+                        ),
+                    }
+                )
+                checkpoint()
                 fetch_cmd = {
                     "type": "allpowers_ble/hil/fetch",
                     "entry_id": entry_id,
@@ -269,6 +290,7 @@ def _execute_output_suite(
             telemetry_matches = (
                 after_caps.get("session_generation") == generation
                 and after_caps.get(freshness_key) is True
+                and after_caps.get("pending_transaction") is False
                 and post.get("available") is True
                 and post.get("state") == desired
             )
@@ -343,22 +365,68 @@ def _execute_output_suite(
         )
         cleanup_authorized = prewrite_cleanup
         if ambiguous_cleanup:
+            cleanup["cleanup_status"] = "checking_live_state_before_authorization"
+            checkpoint()
             try:
-                cleanup_authorized = (
-                    services.prompt(
-                        f"Fresh telemetry shows {restore_key} is "
-                        f"{restore_pre_state}. Type 1 to authorize one traced "
-                        f"restoration to {restore_expected}: "
-                    ).strip()
-                    == "1"
+                offer_caps = api.hil_capabilities(entry_id)
+                offer_state = api.control_state(restore_key, restore_entity)
+                offer_is_safe = (
+                    offer_caps.get("verified") is True
+                    and offer_caps.get("identity_conflicted") is False
+                    and offer_caps.get("connected") is True
+                    and offer_caps.get(restore_freshness_key) is True
+                    and offer_caps.get("pending_transaction") is False
+                    and offer_caps.get("session_generation")
+                    == cleanup.get("session_generation")
+                    and offer_caps.get("capabilities", {}).get(restore_capability_key)
+                    is True
+                    and (
+                        restore_key != "car_charger"
+                        or offer_caps.get("capabilities", {}).get("car_charger_enabled")
+                        is True
+                    )
+                    and offer_state.get("available") is True
+                    and offer_state.get("state") == restore_pre_state
+                )
+                if offer_is_safe:
+                    cleanup["cleanup_status"] = "awaiting_restoration_authorization"
+                    checkpoint()
+                    cleanup_authorized = (
+                        services.prompt(
+                            f"Fresh telemetry confirms {restore_key} is "
+                            f"{restore_pre_state}. Type 1 to authorize one traced "
+                            f"restoration to {restore_expected}: "
+                        ).strip()
+                        == "1"
+                    )
+                    cleanup["cleanup_status"] = (
+                        "restoration_authorized"
+                        if cleanup_authorized
+                        else "restoration_authorization_declined"
+                    )
+                else:
+                    cleanup["cleanup_reason"] = (
+                        "fresh same-session state did not prove the expected "
+                        "intermediate state with no transaction pending"
+                    )
+                    cleanup["cleanup_status"] = "manual_inspection_required"
+            except HAAPIError:
+                cleanup_authorized = False
+                cleanup["cleanup_status"] = "manual_inspection_required"
+                cleanup["cleanup_reason"] = (
+                    "fresh same-session state was unavailable before restoration "
+                    "authorization"
                 )
             except EOFError, KeyboardInterrupt:
                 cleanup_authorized = False
+                cleanup["cleanup_status"] = "restoration_authorization_interrupted"
             cleanup["cleanup_authorized"] = cleanup_authorized
+            checkpoint()
         if prewrite_cleanup or (ambiguous_cleanup and cleanup_authorized):
             cleanup.update(
                 {
                     "cleanup_attempted": True,
+                    "cleanup_status": "restoration_preflight",
                     "cleanup_target": restore_expected,
                     "outcome": "inconclusive",
                 }
@@ -420,7 +488,40 @@ def _execute_output_suite(
                             "state": None,
                         }
                         try:
+                            write_caps = api.hil_capabilities(entry_id)
+                            write_state = api.control_state(restore_key, restore_entity)
+                            if (
+                                write_caps.get("verified") is not True
+                                or write_caps.get("identity_conflicted") is not False
+                                or write_caps.get("connected") is not True
+                                or write_caps.get("pending_transaction") is not False
+                                or write_caps.get(restore_freshness_key) is not True
+                                or write_caps.get("session_generation")
+                                != cleanup.get("session_generation")
+                                or write_caps.get("capabilities", {}).get(
+                                    restore_capability_key
+                                )
+                                is not True
+                                or (
+                                    restore_key == "car_charger"
+                                    and write_caps.get("capabilities", {}).get(
+                                        "car_charger_enabled"
+                                    )
+                                    is not True
+                                )
+                                or write_state.get("available") is not True
+                                or write_state.get("state") != restore_pre_state
+                            ):
+                                cleanup["cleanup_reason"] = (
+                                    "live same-session state changed after the "
+                                    "restoration trace was armed"
+                                )
+                                cleanup["cleanup_status"] = (
+                                    "restoration_blocked_at_write_boundary"
+                                )
+                                raise HAAPIError("Restoration pre-write check failed")
                             cleanup["cleanup_service_attempted"] = True
+                            cleanup["cleanup_status"] = "restoration_service_attempted"
                             checkpoint()
                             api.call_control(
                                 restore_key,
@@ -429,9 +530,12 @@ def _execute_output_suite(
                             )
                             restore_action_submitted = True
                         except HAAPIError:
-                            cleanup["cleanup_service_call"] = (
-                                "unacknowledged; no retry performed"
-                            )
+                            if cleanup.get("cleanup_service_attempted") is True:
+                                cleanup["cleanup_service_call"] = (
+                                    "unacknowledged; no retry performed"
+                                )
+                            else:
+                                raise
                         finally:
                             restore_deadline = services.monotonic() + 30
                             while services.monotonic() < restore_deadline:
@@ -461,6 +565,36 @@ def _execute_output_suite(
                                         max(0, restore_deadline - services.monotonic()),
                                     )
                                 )
+                            cleanup.update(
+                                {
+                                    "cleanup_observed_state": restored.get("state"),
+                                    "cleanup_observed_available": (
+                                        restored.get("available") is True
+                                    ),
+                                    "cleanup_observed_fresh": (
+                                        restore_caps is not None
+                                        and restore_caps.get(restore_freshness_key)
+                                        is True
+                                    ),
+                                    "cleanup_observed_generation": (
+                                        restore_caps.get("session_generation")
+                                        if restore_caps is not None
+                                        else None
+                                    ),
+                                    "cleanup_observed_pending_transaction": (
+                                        restore_caps.get("pending_transaction")
+                                        if restore_caps is not None
+                                        else None
+                                    ),
+                                    "cleanup_status": (
+                                        "restoration_observed"
+                                        if cleanup.get("cleanup_service_attempted")
+                                        is True
+                                        else cleanup.get("cleanup_status")
+                                    ),
+                                }
+                            )
+                            checkpoint()
                             restore_trace = api.websocket(
                                 [
                                     {
@@ -512,6 +646,7 @@ def _execute_output_suite(
                                 and restore_caps.get("session_generation")
                                 == cleanup.get("session_generation")
                                 and restore_caps.get(restore_freshness_key) is True
+                                and restore_caps.get("pending_transaction") is False
                                 and restored.get("available") is True
                                 and restored.get("state") == restore_expected
                             ),
@@ -527,14 +662,21 @@ def _execute_output_suite(
                             action_submitted=restore_action_submitted,
                             transaction_confirmed=restore_tx is not None,
                         )
+                        cleanup["cleanup_status"] = (
+                            "restoration_confirmed"
+                            if cleanup["cleanup_outcome"] == "pass"
+                            else "restoration_inconclusive"
+                        )
                         cleanup["cleanup_reason"] = (
                             "restoration evidence collected; scenario remains "
                             "inconclusive because its planned trace could not start"
                         )
             except HAAPIError, OSError, EOFError, KeyboardInterrupt:
-                cleanup["cleanup_reason"] = (
-                    "safe restoration could not be verified; no retry performed"
+                cleanup.setdefault(
+                    "cleanup_reason",
+                    "safe restoration could not be verified; no retry performed",
                 )
+                cleanup.setdefault("cleanup_status", "restoration_inconclusive")
             checkpoint()
 
     restoration_passed = bool(steps and steps[-1].get("cleanup_outcome") == "pass")

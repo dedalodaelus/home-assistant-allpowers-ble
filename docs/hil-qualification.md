@@ -218,6 +218,11 @@ known intermediate state and no transaction is pending. Settings changes use
 the same guarded restoration rule. If the changed state cannot be proven, the
 session changed, or a transaction remains pending, the CLI does not issue
 another write and instructs the operator to inspect and restore manually.
+The CLI repeats the live preflight after arming the restoration trace, records
+the last observed state and cleanup status in the private checkpoint, and
+never retries a cleanup write whose acknowledgement is ambiguous. Write
+checkpoints are deliberately not resumable: after interruption, inspect a new
+read-only snapshot and the station before starting another write scenario.
 Restoration never upgrades an inconclusive original action to a pass.
 
 `run --suite transaction-safety --simulate` runs selected offline fake-GATT
