@@ -7,6 +7,7 @@ import re
 import sys
 from types import ModuleType
 from urllib.error import HTTPError
+import zipfile
 
 import pytest
 
@@ -237,6 +238,39 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
     assert "secret-entry-1" not in json.dumps(report)
     assert "AA:BB:CC:DD:EE:FF" not in json.dumps(report)
     assert ("ws", "hil_capabilities", "secret-entry-1") in fake.calls
+
+    from scripts.hil.evidence import export_archive, verify_public_archive
+
+    assert cli.main(["report", str(run_dir)]) == 0
+    archive = export_archive(run_dir, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        public = {name: exported.read(name) for name in exported.namelist()}
+        session = json.loads(public["public/session.json"])
+        report_text = public["public/report.md"].decode()
+    combined = b"".join(public.values())
+    assert session["data"]["mode"] == "read_only_preflight"
+    assert session["data"]["route"]["requested"] == "auto"
+    assert session["data"]["preflight"]["checks"] == {
+        "connected": "ready",
+        "entry_loaded": "ready",
+        "telemetry_fresh": "ready",
+    }
+    assert session["data"]["telemetry"]["battery"] == {
+        "value": 76,
+        "verified": True,
+    }
+    assert (
+        session["data"]["runtime_capabilities"]["capabilities"]["read_telemetry"]
+        is True
+    )
+    assert "battery `76`" in report_text
+    assert "connected `ready`" in report_text
+    assert "Requested route: `auto`" in report_text
+    assert b"secret-device-id-012345" not in combined
+    assert b"secret-entry-1" not in combined
+    assert b"10.0.0.100" not in combined
+    assert b"PRIVATE_TOKEN" not in combined
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):

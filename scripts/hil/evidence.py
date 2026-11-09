@@ -17,7 +17,7 @@ from typing import Any
 
 from .api import HAAPIError
 from .scenarios import load_scenarios
-from .discovery import KNOWN_MODELS, safe_model, safe_version
+from .discovery import BINARY_KEYS, KNOWN_MODELS, SENSOR_KEYS, safe_model, safe_version
 from .trace import _validate_trace_result
 
 PUBLIC_SCHEMA = 2
@@ -96,6 +96,50 @@ STEP_IDS.update(
         "soak_segment",
     }
 )
+REQUESTED_ROUTES = {"auto", "local_adapter", "active_proxy"}
+PREFLIGHT_CHECKS = {"entry_loaded", "connected", "telemetry_fresh"}
+PREFLIGHT_RESULTS = {"ready", "incomplete", "unknown"}
+RUNTIME_CAPABILITIES = {
+    "read_telemetry",
+    "write_output_controls",
+    "write_settings_controls",
+    "write_settings_keepalive",
+    "car_charger_enabled",
+}
+
+
+def _safe_read_only_value(key: str, value: Any) -> int | float | str | None:
+    if value is None:
+        return None
+    if key in BINARY_KEYS:
+        return value if isinstance(value, str) and value in {"on", "off"} else None
+    if key in {"hardware_version", "firmware_version"}:
+        return safe_version(value)
+    if key in SENSOR_KEYS and type(value) in (int, float):
+        if (
+            math.isfinite(value)
+            and abs(value) <= 99_999_999
+            and re.fullmatch(r"-?\d{1,8}(?:\.\d{1,5})?", str(value))
+        ):
+            return value
+    return None
+
+
+def _public_read_only_telemetry(source: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(source, dict):
+        return {}
+    result = {}
+    for key in SENSOR_KEYS + BINARY_KEYS:
+        record = source.get(key)
+        if not isinstance(record, dict):
+            continue
+        value = _safe_read_only_value(key, record.get("value"))
+        verified = record.get("verified") is True and value is not None
+        result[key] = {
+            "value": value if verified else None,
+            "verified": verified,
+        }
+    return result
 
 
 def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any]:
@@ -600,8 +644,11 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
             "run_id",
             "scenario_id",
             "qualification_status",
+            "mode",
             "route",
             "preflight",
+            "telemetry",
+            "runtime_capabilities",
             "started_at",
         ):
             value = source.get(key)
@@ -619,26 +666,77 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                 result["data"][key] = value
             elif key == "qualification_status":
                 result["data"][key] = "inconclusive"
+            elif key == "mode" and value == "read_only_preflight":
+                result["data"][key] = value
             elif key == "route" and isinstance(value, dict):
                 observed = value.get("observed")
+                route = {}
                 if (
                     isinstance(observed, dict)
                     and isinstance(observed.get("value"), str)
                     and observed.get("value")
                     in {"local_adapter", "active_proxy", "unverified"}
                 ):
-                    result["data"][key] = {
-                        "observed": {
-                            "value": observed["value"],
-                            "verified": observed.get("verified") is True,
-                        }
+                    route["observed"] = {
+                        "value": observed["value"],
+                        "verified": observed.get("verified") is True,
                     }
+                requested = value.get("requested")
+                if isinstance(requested, str) and requested in REQUESTED_ROUTES:
+                    route["requested"] = requested
+                if route:
+                    result["data"][key] = route
             elif key == "preflight" and isinstance(value, dict):
-                result["data"][key] = {
+                preflight = {
                     "overall": value.get("overall")
                     if isinstance(value.get("overall"), str)
                     and value.get("overall") in {"ready", "incomplete", "inconclusive"}
                     else "inconclusive"
+                }
+                checks = value.get("checks")
+                if isinstance(checks, dict):
+                    preflight["checks"] = {
+                        name: status
+                        for name, status in checks.items()
+                        if name in PREFLIGHT_CHECKS
+                        and isinstance(status, str)
+                        and status in PREFLIGHT_RESULTS
+                    }
+                result["data"][key] = preflight
+            elif key == "telemetry":
+                telemetry = _public_read_only_telemetry(value)
+                if telemetry:
+                    result["data"][key] = telemetry
+            elif key == "runtime_capabilities" and isinstance(value, dict):
+                source_capabilities = value.get("capabilities")
+                available = (
+                    isinstance(source_capabilities, dict)
+                    and value.get("verified") is True
+                )
+                capabilities = (
+                    {
+                        name: flag
+                        for name, flag in source_capabilities.items()
+                        if name in RUNTIME_CAPABILITIES and type(flag) is bool
+                    }
+                    if available
+                    else {}
+                )
+                result["data"][key] = {
+                    "available": available,
+                    "connected": value.get("connected")
+                    if available and type(value.get("connected")) is bool
+                    else None,
+                    "status_fresh": value.get("status_fresh")
+                    if available and type(value.get("status_fresh")) is bool
+                    else None,
+                    "settings_fresh": value.get("settings_fresh")
+                    if available and type(value.get("settings_fresh")) is bool
+                    else None,
+                    "pending_transaction": value.get("pending_transaction")
+                    if available and type(value.get("pending_transaction")) is bool
+                    else None,
+                    "capabilities": capabilities,
                 }
             elif key == "started_at" and isinstance(value, str):
                 try:
@@ -1099,9 +1197,47 @@ def _render_report(
     ha_facts = env_data.get("home_assistant", {})
     integration_facts = env_data.get("integration", {})
     device = session.get("data", {}).get("device", {})
+    session_data = session.get("data", {})
     model = device.get("model", {}).get("value", "unavailable")
     firmware = device.get("firmware_version", {}).get("value", "unavailable")
     hardware = device.get("hardware_version", {}).get("value", "unavailable")
+    read_only_text = ""
+    if session_data.get("mode") == "read_only_preflight":
+        route = session_data.get("route", {})
+        preflight = session_data.get("preflight", {})
+        checks = preflight.get("checks", {})
+        telemetry = session_data.get("telemetry", {})
+        runtime = session_data.get("runtime_capabilities", {})
+        check_text = (
+            ", ".join(f"{name} `{checks[name]}`" for name in sorted(checks))
+            or "unavailable"
+        )
+        telemetry_text = (
+            ", ".join(
+                f"{key} `{record['value'] if record['value'] is not None else 'unavailable'}`"
+                for key, record in sorted(telemetry.items())
+            )
+            or "unavailable"
+        )
+        capability_text = (
+            ", ".join(
+                f"{name} `{value}`"
+                for name, value in sorted(runtime.get("capabilities", {}).items())
+            )
+            or "unavailable"
+        )
+        read_only_text = (
+            "## Read-only observations\n\n"
+            + f"- Execution mode: `{session_data['mode']}`\n"
+            + f"- Requested route: `{route.get('requested', 'unavailable')}`\n"
+            + f"- Preflight: `{preflight.get('overall', 'inconclusive')}`; {check_text}\n"
+            + f"- Telemetry: {telemetry_text}\n"
+            + f"- Runtime capabilities available: `{runtime.get('available', False)}`; "
+            + f"connected `{runtime.get('connected', 'unavailable')}`, "
+            + f"status fresh `{runtime.get('status_fresh', 'unavailable')}`, "
+            + f"settings fresh `{runtime.get('settings_fresh', 'unavailable')}`; "
+            + f"capabilities {capability_text}\n\n"
+        )
     step_lines = []
     for row in scenarios.get("steps", []):
         refs = ", ".join(f"`{ref}`" for ref in row["evidence"])
@@ -1171,6 +1307,7 @@ def _render_report(
         + f"- Integration manifest version: {integration_facts.get('installed_manifest_version', {}).get('value', 'unavailable')} (installed build identity {integration_facts.get('build_match', {}).get('value', 'unverified')})\n"
         + f"- Device: {model}; hardware {hardware}; firmware {firmware}\n"
         + f"- Observed GATT route: {route_summary}\n\n"
+        + read_only_text
         + "## Scenario results\n\n"
         + steps_text
         + f"\n\nGATT evidence: {event_count} allowlisted events across {capture_count} captures.\n\n"
@@ -1568,8 +1705,11 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         "run_id",
                         "scenario_id",
                         "qualification_status",
+                        "mode",
                         "route",
                         "preflight",
+                        "telemetry",
+                        "runtime_capabilities",
                         "started_at",
                         "device",
                     }
@@ -1599,6 +1739,11 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         or scenario_id not in SCENARIO_IDS
                     ):
                         raise HAAPIError("Invalid public scenario identity")
+                    if public_session.get("mode") not in (
+                        None,
+                        "read_only_preflight",
+                    ):
+                        raise HAAPIError("Invalid public execution mode")
                     if "device" in public_session and not isinstance(
                         public_session["device"], dict
                     ):
@@ -1615,25 +1760,114 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         )
                         if (
                             not isinstance(route, dict)
-                            or set(route) != {"observed"}
-                            or not isinstance(observed, dict)
-                            or set(observed) != {"value", "verified"}
-                            or not isinstance(observed.get("value"), str)
-                            or observed.get("value")
-                            not in {"local_adapter", "active_proxy", "unverified"}
-                            or type(observed.get("verified")) is not bool
+                            or not route
+                            or set(route) - {"observed", "requested"}
+                            or (
+                                "requested" in route
+                                and (
+                                    not isinstance(route["requested"], str)
+                                    or route["requested"] not in REQUESTED_ROUTES
+                                )
+                            )
+                            or (
+                                "observed" in route
+                                and (
+                                    not isinstance(observed, dict)
+                                    or set(observed) != {"value", "verified"}
+                                    or not isinstance(observed.get("value"), str)
+                                    or observed.get("value")
+                                    not in {
+                                        "local_adapter",
+                                        "active_proxy",
+                                        "unverified",
+                                    }
+                                    or type(observed.get("verified")) is not bool
+                                )
+                            )
                         ):
                             raise HAAPIError("Invalid public route metadata")
                     if "preflight" in public_session:
                         preflight = public_session["preflight"]
                         if (
                             not isinstance(preflight, dict)
-                            or set(preflight) != {"overall"}
+                            or set(preflight) - {"overall", "checks"}
+                            or "overall" not in preflight
                             or not isinstance(preflight.get("overall"), str)
                             or preflight.get("overall")
                             not in {"ready", "incomplete", "inconclusive"}
+                            or (
+                                "checks" in preflight
+                                and (
+                                    not isinstance(preflight["checks"], dict)
+                                    or set(preflight["checks"]) - PREFLIGHT_CHECKS
+                                    or any(
+                                        not isinstance(status, str)
+                                        or status not in PREFLIGHT_RESULTS
+                                        for status in preflight["checks"].values()
+                                    )
+                                )
+                            )
                         ):
                             raise HAAPIError("Invalid public preflight metadata")
+                    if "telemetry" in public_session:
+                        telemetry = public_session["telemetry"]
+                        if not isinstance(telemetry, dict) or set(telemetry) - set(
+                            SENSOR_KEYS + BINARY_KEYS
+                        ):
+                            raise HAAPIError("Invalid public telemetry metadata")
+                        for key, fact in telemetry.items():
+                            if (
+                                not isinstance(fact, dict)
+                                or set(fact) != {"value", "verified"}
+                                or type(fact.get("verified")) is not bool
+                                or _safe_read_only_value(key, fact.get("value"))
+                                != fact.get("value")
+                                or fact["verified"] != (fact["value"] is not None)
+                            ):
+                                raise HAAPIError("Invalid public telemetry value")
+                    if "runtime_capabilities" in public_session:
+                        runtime = public_session["runtime_capabilities"]
+                        runtime_fields = {
+                            "available",
+                            "connected",
+                            "status_fresh",
+                            "settings_fresh",
+                            "pending_transaction",
+                            "capabilities",
+                        }
+                        optional_bools = {
+                            "connected",
+                            "status_fresh",
+                            "settings_fresh",
+                            "pending_transaction",
+                        }
+                        if (
+                            not isinstance(runtime, dict)
+                            or set(runtime) != runtime_fields
+                            or type(runtime.get("available")) is not bool
+                            or any(
+                                runtime.get(name) is not None
+                                and type(runtime[name]) is not bool
+                                for name in optional_bools
+                            )
+                            or not isinstance(runtime.get("capabilities"), dict)
+                            or set(runtime["capabilities"]) - RUNTIME_CAPABILITIES
+                            or any(
+                                type(flag) is not bool
+                                for flag in runtime["capabilities"].values()
+                            )
+                            or (
+                                not runtime["available"]
+                                and (
+                                    runtime["capabilities"]
+                                    or any(
+                                        runtime[name] is not None
+                                        for name in optional_bools
+                                    )
+                                )
+                            )
+                        ):
+                            raise HAAPIError("Invalid public runtime capabilities")
                     device = public_session.get("device", {})
                     if set(device) - {"model", "hardware_version", "firmware_version"}:
                         raise HAAPIError("Unexpected public device metadata")
@@ -1947,6 +2181,17 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
     ):
         raise HAAPIError("HIL archive capture counters do not match evidence")
     per_capture_counts = {}
+    capture_ids = [row["capture_id"] for row in capture_rows]
+    if len(capture_ids) != len(set(capture_ids)):
+        raise HAAPIError("Duplicate HIL capture identity")
+    declared_captures = set(capture_ids)
+    event_identity_rows = [(row["capture_id"], row["seq"]) for row in event_rows]
+    if len(event_identity_rows) != len(set(event_identity_rows)):
+        raise HAAPIError("Duplicate HIL event reference")
+    if any(
+        capture_id not in declared_captures for capture_id, _ in event_identity_rows
+    ):
+        raise HAAPIError("HIL event references undeclared capture")
     event_references = set()
     for row in event_rows:
         per_capture_counts[row["capture_id"]] = (
@@ -1960,6 +2205,13 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         raise HAAPIError("HIL archive event references do not match captures")
     frame_counts: dict[str, int] = {}
     frames_by_reference = {}
+    frame_identity_rows = [(row["capture_id"], row["seq"]) for row in frame_rows]
+    if len(frame_identity_rows) != len(set(frame_identity_rows)):
+        raise HAAPIError("Duplicate HIL frame reference")
+    if any(
+        capture_id not in declared_captures for capture_id, _ in frame_identity_rows
+    ):
+        raise HAAPIError("HIL frame references undeclared capture")
     for frame in frame_rows:
         if f"{frame['capture_id']}:{frame['seq']}" not in event_references:
             raise HAAPIError("HIL frame metadata has no corresponding event")

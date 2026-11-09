@@ -33,12 +33,17 @@ def _run(path: Path) -> None:
 
 
 def _rewrite_archive_members(
-    archive: Path, destination: Path, updates: dict[str, bytes]
+    archive: Path,
+    destination: Path,
+    updates: dict[str, bytes],
+    manifest_updates: dict[str, Any] | None = None,
 ) -> None:
     with zipfile.ZipFile(archive) as source:
         contents = {name: source.read(name) for name in source.namelist()}
     contents.update({f"public/{name}": payload for name, payload in updates.items()})
     manifest = json.loads(contents["public/manifest.json"])
+    if manifest_updates:
+        manifest.update(manifest_updates)
     manifest["files"] = [
         {
             "name": name.removeprefix("public/"),
@@ -703,6 +708,106 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
     assert b"deadbeef" not in combined
     assert b"capture-0001" in combined
     assert verify_public_archive(archive)["captures"]["complete"] is True
+
+    with zipfile.ZipFile(archive) as source:
+        members = {name: source.read(name) for name in source.namelist()}
+    base_manifest = json.loads(members["public/manifest.json"])
+
+    duplicate_events = [
+        json.loads(line) for line in members["public/events.jsonl"].splitlines()
+    ]
+    duplicate_events.append(deepcopy(duplicate_events[1]))
+    duplicate_frames = [
+        json.loads(line) for line in members["public/frames.jsonl"].splitlines()
+    ]
+    duplicate_frames.append(deepcopy(duplicate_frames[0]))
+    duplicate_frames[-1]["command_type"] = "status_request"
+    capture_counts = deepcopy(base_manifest["captures"])
+    capture_counts["events"] += 1
+    capture_counts["frames"] += 1
+    capture_row = next(
+        row
+        for row in capture_counts["by_capture"]
+        if row["capture_id"] == "capture-0001"
+    )
+    capture_row["events"] += 1
+    capture_row["frames"] += 1
+    ambiguous = tmp_path / "duplicate-public-references.zip"
+    _rewrite_archive_members(
+        archive,
+        ambiguous,
+        {
+            "events.jsonl": b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode()
+                for row in duplicate_events
+            ),
+            "frames.jsonl": b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode()
+                for row in duplicate_frames
+            ),
+        },
+        {"captures": capture_counts},
+    )
+    with pytest.raises(HAAPIError, match="Duplicate HIL event reference"):
+        verify_public_archive(ambiguous)
+
+    duplicate_frame_rows = [
+        json.loads(line) for line in members["public/frames.jsonl"].splitlines()
+    ]
+    duplicate_frame_rows.append(deepcopy(duplicate_frame_rows[0]))
+    duplicate_frame_rows[-1]["command_type"] = "status_request"
+    frame_counts = deepcopy(base_manifest["captures"])
+    frame_counts["frames"] += 1
+    frame_capture_row = next(
+        row for row in frame_counts["by_capture"] if row["capture_id"] == "capture-0001"
+    )
+    frame_capture_row["frames"] += 1
+    duplicate_frame = tmp_path / "duplicate-frame-reference.zip"
+    _rewrite_archive_members(
+        archive,
+        duplicate_frame,
+        {
+            "frames.jsonl": b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode()
+                for row in duplicate_frame_rows
+            )
+        },
+        {"captures": frame_counts},
+    )
+    with pytest.raises(HAAPIError, match="Duplicate HIL frame reference"):
+        verify_public_archive(duplicate_frame)
+
+    duplicate_capture_counts = deepcopy(base_manifest["captures"])
+    duplicate_capture_counts["count"] += 1
+    duplicate_capture_counts["by_capture"].append(
+        deepcopy(duplicate_capture_counts["by_capture"][0])
+    )
+    duplicate_capture = tmp_path / "duplicate-capture-summary.zip"
+    _rewrite_archive_manifest(
+        archive,
+        duplicate_capture,
+        {"captures": duplicate_capture_counts},
+    )
+    with pytest.raises(HAAPIError, match="Duplicate HIL capture identity"):
+        verify_public_archive(duplicate_capture)
+
+    undeclared_events = [
+        json.loads(line) for line in members["public/events.jsonl"].splitlines()
+    ]
+    undeclared_events[0]["capture_id"] = "capture-9999"
+    undeclared = tmp_path / "undeclared-event-capture.zip"
+    _rewrite_archive_members(
+        archive,
+        undeclared,
+        {
+            "events.jsonl": b"".join(
+                (json.dumps(row, sort_keys=True) + "\n").encode()
+                for row in undeclared_events
+            )
+        },
+    )
+    with pytest.raises(HAAPIError, match="undeclared capture"):
+        verify_public_archive(undeclared)
 
     tampered = tmp_path / "wrong-control-command.zip"
     with zipfile.ZipFile(archive) as source:
