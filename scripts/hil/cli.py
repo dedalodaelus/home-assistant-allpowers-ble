@@ -17,6 +17,7 @@ import sys
 from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
+from .evidence import export_archive, write_report
 from .discovery import Device, choose_device, find_devices
 from .environment import (
     build_environment,
@@ -29,6 +30,7 @@ from .environment import (
 )
 from .storage import (
     load_scenario_checkpoint,
+    run_root,
     write_run,
     write_scenario_progress,
 )
@@ -96,6 +98,16 @@ def make_parser() -> argparse.ArgumentParser:
         help="Requested BLE route; never treated as proof of the actual route",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    report_parser = commands.add_parser(
+        "report", help="Build a privacy-safe report offline"
+    )
+    report_parser.add_argument("run_directory", type=Path)
+    export_parser = commands.add_parser(
+        "export", help="Preview and export public HIL evidence offline"
+    )
+    export_parser.add_argument("run_directory", type=Path)
+    export_parser.add_argument("--non-interactive", action="store_true")
+    export_parser.add_argument("--confirm-export", action="store_true")
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
@@ -380,7 +392,7 @@ def _execute_probe_trace(
     if result["flow_id"] != flow_id:
         raise HAAPIError("Probe evidence belongs to another flow")
     _save_private_trace(output_dir, result)
-    print("Private config-flow probe saved to:", output_dir)
+    print("Private config-flow probe saved to:", run_root(output_dir))
     print("Probe outcome:", result["probe_outcome"])
     print("Observed connection route:", result["observed_route"])
     print("Physical HIL qualification: not permitted")
@@ -523,7 +535,39 @@ def _execute_soak_suite(
 
 
 def execute(args: argparse.Namespace) -> int:
-    """Execute read-only preflight and explicitly requested private HIL capture."""
+    """Execute a validated command; credentials stay in memory for live commands."""
+    if args.command == "report":
+        write_report(args.run_directory)
+        print("HIL report written to: public/report.md")
+        return 0
+    if args.command == "export":
+        confirmed = args.confirm_export
+        if not confirmed and not args.non_interactive and sys.stdin.isatty():
+            try:
+                export_archive(args.run_directory, confirmed=False)
+            except HAAPIError as ex:
+                if str(ex) != "Export requires explicit confirmation":
+                    raise
+            confirmed = (
+                input("Type EXPORT to create the local public evidence ZIP: ").strip()
+                == "EXPORT"
+            )
+            if not confirmed:
+                return 2
+        if args.non_interactive and not confirmed:
+            print(
+                "Export preview follows; rerun with --confirm-export to create the ZIP."
+            )
+            try:
+                export_archive(args.run_directory, confirmed=False)
+            except HAAPIError as ex:
+                if str(ex) == "Export requires explicit confirmation":
+                    return 2
+                raise
+            return 2
+        export_archive(args.run_directory, confirmed=confirmed)
+        print("HIL evidence archive written to: hil-evidence.zip")
+        return 0
     if args.command == "run":
         if args.list_suites:
             print("Available HIL suites:")
@@ -801,7 +845,7 @@ def execute(args: argparse.Namespace) -> int:
             expected_version=start["schema_version"],
         )
         _save_private_trace(output_dir, result)
-        print("Private HIL trace saved to:", output_dir)
+        print("Private HIL trace saved to:", run_root(output_dir))
         print(
             "Capture completeness:",
             "complete" if result.get("complete") else "incomplete",
@@ -818,7 +862,7 @@ def execute(args: argparse.Namespace) -> int:
             "(GATT backend only; physical HIL PASS not permitted)",
         )
         return 0 if result["complete"] and result["frame_count"] else 2
-    print("Read-only preflight saved to:", output_dir)
+    print("Read-only preflight saved to:", run_root(output_dir))
     print("Read-only readiness:", session["preflight"]["overall"])
     print(
         "Qualification: inconclusive (no GATT trace, physical proof or verified route)"

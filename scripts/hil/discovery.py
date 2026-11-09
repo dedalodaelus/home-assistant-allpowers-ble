@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import ipaddress
 import re
 from typing import Any
 
@@ -68,6 +69,12 @@ def safe_model(value: Any) -> str:
 def safe_version(value: Any) -> str | None:
     """Reject arbitrary device-provided strings (could contain identifiers)."""
     if isinstance(value, str):
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            pass
+        else:
+            return None
         if re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,3}", value):
             return value
         if re.fullmatch(r"0[xX][0-9a-fA-F]{1,4}", value):

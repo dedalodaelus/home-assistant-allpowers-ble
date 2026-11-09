@@ -13,6 +13,7 @@ from typing import Any
 from .api import HAAPIError, HAClient
 from .discovery import Device
 from .suite_runtime import SuiteServices
+from .storage import run_root
 
 
 def _private_run_size(run_dir: Path) -> int:
@@ -544,5 +545,7 @@ def _execute_soak_suite(
         active_segment["reason"] = "per-run evidence byte cap reached"
         active_segment["data_limit_hit"] = data_limit_hit
     checkpoint()
-    print("Soak stopped inconclusive; private checkpoint saved to:", output_dir)
+    print(
+        "Soak stopped inconclusive; private checkpoint saved to:", run_root(output_dir)
+    )
     return 2

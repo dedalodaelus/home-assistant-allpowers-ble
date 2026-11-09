@@ -144,7 +144,8 @@ def test_probe_cli_succeeds_with_real_v2_private_route_and_no_fake_gatt(
     assert fake.selected == ("flow-a", "opaque-A")
     assert [c for c in fake.calls if c[1] == "allpowers_ble/hil/probe/arm"]
     assert not any("flow/configure" in call[1] for call in fake.calls)
-    (directory,) = list((tmp_path / "captures").iterdir())
+    (run_root,) = list((tmp_path / "captures").iterdir())
+    directory = run_root / "private"
     assert (directory.stat().st_mode & 0o777) == 0o700
     assert all((path.stat().st_mode & 0o777) == 0o600 for path in directory.iterdir())
     names = {path.name for path in directory.iterdir()}
@@ -176,7 +177,8 @@ def test_probe_cli_failed_or_skipped_outcome_is_saved_but_never_passes(
     fake = ProbeHA(allpowers_registry)
     fake.outcome = outcome
     assert run_probe(monkeypatch, tmp_path, fake) == 2
-    (directory,) = list((tmp_path / "captures").iterdir())
+    (run_root,) = list((tmp_path / "captures").iterdir())
+    directory = run_root / "private"
     metadata = json.loads((directory / "trace.json").read_text())
     assert metadata["probe_outcome"] == outcome
     assert metadata["capture_complete"] is (outcome in ("failure", "cancelled"))
@@ -190,7 +192,8 @@ def test_probe_cli_rejects_tampered_private_evidence_before_raw_disk(
     fake = ProbeHA(allpowers_registry)
     fake.tamper = tamper
     assert run_probe(monkeypatch, tmp_path, fake) == 2
-    (directory,) = list((tmp_path / "captures").iterdir())
+    (run_root,) = list((tmp_path / "captures").iterdir())
+    directory = run_root / "private"
     assert (directory / "environment.json").exists()
     assert not (directory / "events.jsonl").exists()
     assert not (directory / "trace.json").exists()
@@ -377,7 +380,8 @@ def test_probe_cli_private_save_failure_scrubs_only_trace_files(
         )
         == 2
     )
-    (directory,) = list((tmp_path / "private").iterdir())
+    (run_root,) = list((tmp_path / "private").iterdir())
+    directory = run_root / "private"
     assert not (directory / "events.jsonl").exists()
     assert not (directory / "frames.jsonl").exists()
     assert not (directory / "trace.json").exists()
