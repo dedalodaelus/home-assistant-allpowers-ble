@@ -118,6 +118,60 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
         == 0
     )
     assert len(json.loads(matrix_path.read_text())["revisions"][0]["runs"]) == 1
+    matrix_before_conflict = matrix_path.read_bytes()
+    evidence[0].write_text("conflicting contents", encoding="utf-8")
+    with pytest.raises(HAAPIError, match="Existing import evidence conflicts"):
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    assert evidence[0].read_text(encoding="utf-8") == "conflicting contents"
+    assert matrix_path.read_bytes() == matrix_before_conflict
+
+
+def test_conflicting_run_identity_fails_before_writing_fixtures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import importer
+
+    archive = _public_archive(tmp_path)
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    proposal = importer._build_proposal(archive, matrix_path, repo_root=tmp_path)
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    conflicting_run = dict(proposal["run"])
+    conflicting_run["evidence"] = []
+    conflicting_run["reported_scenario_id"] = "different-run-content"
+    matrix["revisions"][0]["runs"] = [conflicting_run]
+    matrix_path.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
+    matrix_before = matrix_path.read_bytes()
+
+    with pytest.raises(HAAPIError, match="Archive identity conflicts"):
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    assert matrix_path.read_bytes() == matrix_before
+    assert not (tmp_path / "tests" / "hil" / "fixtures").exists()
+
+
+def test_fixture_collision_does_not_overwrite_or_leave_partial_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import importer
+
+    archive = _public_archive(tmp_path)
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    proposal = importer._build_proposal(archive, matrix_path, repo_root=tmp_path)
+    destinations = list(proposal["destination_files"].items())
+    first_path = destinations[0][0]
+    collision_path = destinations[1][0]
+    collision_path.parent.mkdir(parents=True)
+    collision_path.write_bytes(b"pre-existing unrelated evidence")
+    matrix_before = matrix_path.read_bytes()
+
+    with pytest.raises(HAAPIError, match="Evidence file collision"):
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    assert collision_path.read_bytes() == b"pre-existing unrelated evidence"
+    assert not first_path.exists()
+    assert matrix_path.read_bytes() == matrix_before
 
 
 def test_failed_matrix_validation_rolls_back_imported_evidence(
