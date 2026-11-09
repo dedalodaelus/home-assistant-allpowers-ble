@@ -3,6 +3,48 @@
 This runbook explains how to execute and document real hardware qualification for
 verified profiles.
 
+## Qualification matrix schema v2
+
+`tests/hil/qualification_matrix.json` uses schema v2. A revision describes the
+model and hardware revision; each item in its `runs` list is scoped to one
+firmware version, one observed BLE route, and one HIL run. A run records its
+timestamp, tool and installed integration versions, capture completeness, an
+build verification (`verified`, `unverified`, or `mismatch`), an overall
+qualification status, scenario results, write-capability results, and links to
+sanitized evidence. Use `null` for firmware only when it is unknown; unknown
+firmware cannot qualify a run.
+
+Result statuses have distinct meanings:
+
+- `pending`: not yet evaluated;
+- `fail`: evidence demonstrates a failed result;
+- `not_applicable`: explicitly exempt, with a recorded rationale;
+- `inconclusive`: evidence is missing, incomplete, or cannot establish an outcome;
+- `pass`: the scoped result is supported by its linked evidence.
+
+Only a complete, fresh run with a verified installed build, known firmware, an
+observed supported route, linked evidence, and `pass` results can satisfy
+`--require-pass`. Neither `not_applicable` nor `inconclusive` counts as a pass
+in strict mode.
+
+The v1 migration preserves each old revision and all its route, scenario, and
+write-capability values under `legacy_results`. These records are marked
+`unscoped_legacy`: v1 shared scenario/control results cannot be assigned to a
+route or firmware after the fact. Historical `na` values are retained verbatim
+in the source snapshot and normalized to `not_applicable` in the legacy outcome
+summary. They remain unscoped and never satisfy the strict gate. Migration
+creates no scoped runs and therefore cannot add qualification or make the strict
+gate pass. To migrate another v1 matrix without overwriting it, write to a new
+path:
+
+```bash
+python -m scripts.migrate_hil_qualification old-matrix.json migrated-matrix.json
+```
+
+The default validator checks structure and privacy while allowing unfinished
+runs. Add `--require-pass --max-age-days 30` to require fresh, fully scoped
+passes.
+
 The runtime `verified` classification is a software model/revision decision, not a
 claim that physical qualification is complete. Track that separately in the
 qualification matrix, and leave routes, scenarios, or write capabilities pending
@@ -108,15 +150,15 @@ Recommended execution pattern:
 
 ## 4. Update the qualification matrix
 
-Edit tests/hil/qualification_matrix.json:
+Add one run record per firmware and observed route in
+`tests/hil/qualification_matrix.json`:
 
-- set route status for local_adapter and active_proxy;
-- update last_tested to current date (YYYY-MM-DD);
-- set each scenario status;
-- set each write_capabilities status;
-- keep privacy_review as pass.
-
-Allowed values are pass, fail, pending, and na.
+- set `run_id`, `firmware_version`, and timezone-aware `captured_at`;
+- record the observed `route`, capture completeness, tool/integration versions,
+  build verification, and sanitized evidence paths;
+- record each required scenario and write capability independently, with its
+  status and evidence links;
+- keep revision `privacy_review` as `pass`.
 
 ## 5. Validate matrix and fixture hygiene
 
