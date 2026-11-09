@@ -56,6 +56,21 @@ def _rewrite_archive_members(
             target.writestr(name, payload)
 
 
+def _rewrite_archive_manifest(
+    archive: Path, destination: Path, changes: dict[str, Any]
+) -> None:
+    with zipfile.ZipFile(archive) as source:
+        contents = {name: source.read(name) for name in source.namelist()}
+    manifest = json.loads(contents["public/manifest.json"])
+    manifest.update(changes)
+    contents["public/manifest.json"] = (
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, payload in contents.items():
+            target.writestr(name, payload)
+
+
 def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _run(run)
@@ -394,6 +409,103 @@ def test_environment_export_rejects_embedded_ip_and_hostname_values(
     assert (
         normal_public["data"]["runner_host"]["cpu"]["value"] == "Intel Core i7-10700K"
     )
+
+
+def test_device_version_export_omits_ip_and_verifier_rejects_forged_ip(
+    tmp_path: Path,
+) -> None:
+    ip_address = "192.168.1.25"
+    run = write_run(
+        tmp_path,
+        "device-ip-version",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+            "device": {
+                "model": {"value": "S200", "verified": True},
+                "hardware_version": {"value": ip_address, "verified": True},
+                "firmware_version": {"value": "1.2.3", "verified": True},
+            },
+        },
+    )
+    archive = export_archive(run, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        members = {name: exported.read(name) for name in exported.namelist()}
+        session = json.loads(members["public/session.json"])
+    combined = b"".join(members.values())
+    assert ip_address.encode() not in combined
+    assert "hardware_version" not in session["data"]["device"]
+    assert session["data"]["device"]["firmware_version"]["value"] == "1.2.3"
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+    session["data"]["device"]["hardware_version"] = {
+        "value": ip_address,
+        "source": "ha_device_registry",
+        "verified": True,
+    }
+    forged = tmp_path / "forged-device-ip.zip"
+    _rewrite_archive_members(
+        archive,
+        forged,
+        {
+            "session.json": (
+                json.dumps(session, sort_keys=True, indent=2) + "\n"
+            ).encode()
+        },
+    )
+    with pytest.raises(HAAPIError, match="Unsafe public device values"):
+        verify_public_archive(forged)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"qualification_status": "pass"}, "Unsupported HIL archive manifest"),
+        (
+            {
+                "build_provenance": {
+                    "installed_manifest_version": "9.9.9",
+                    "verification": "mismatch",
+                    "runner_checkout_commit": "b" * 40,
+                }
+            },
+            "disagrees with environment",
+        ),
+    ],
+)
+def test_archive_verifier_rejects_contradictory_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changes: dict[str, Any], error: str
+) -> None:
+    from scripts.hil import environment
+
+    monkeypatch.setattr(
+        environment,
+        "local_commit",
+        lambda: {
+            "value": "a" * 40,
+            "source": "runner_git_checkout",
+            "verified": True,
+        },
+    )
+    monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
+    env = environment.build_environment(
+        {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
+        {"version": "1.0.0"},
+    )
+    run = write_run(
+        tmp_path,
+        "manifest-consistency",
+        env,
+        {"schema_version": 1, "run_id": "0123456789abcdef"},
+    )
+    archive = export_archive(run, confirmed=True)
+    tampered = tmp_path / "contradictory-manifest.zip"
+    _rewrite_archive_manifest(archive, tampered, changes)
+
+    with pytest.raises(HAAPIError, match=error):
+        verify_public_archive(tampered)
 
 
 def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(

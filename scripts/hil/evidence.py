@@ -1406,6 +1406,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         or manifest.get("privacy_policy") != "allowlist"
         or manifest.get("validation") != "passed"
         or manifest.get("export_confirmed") is not True
+        or manifest.get("qualification_status") != "inconclusive"
         or not isinstance(manifest.get("omissions"), list)
         or any(
             not isinstance(item, str)
@@ -1449,6 +1450,30 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         )
     ):
         raise HAAPIError("Invalid HIL archive build provenance")
+    try:
+        environment_data = json.loads(data["environment.json"]).get("data", {})
+        integration_facts = environment_data.get("integration", {})
+    except (KeyError, AttributeError, UnicodeError, ValueError) as exc:
+        raise HAAPIError("HIL archive build provenance has no environment") from exc
+    if not isinstance(environment_data, dict) or not isinstance(
+        integration_facts, dict
+    ):
+        raise HAAPIError("Invalid HIL archive integration facts")
+
+    def environment_fact_value(name: str) -> str | None:
+        fact = integration_facts.get(name)
+        value = fact.get("value") if isinstance(fact, dict) else None
+        return value if isinstance(value, str) else None
+
+    expected_build = {
+        "installed_manifest_version": environment_fact_value(
+            "installed_manifest_version"
+        ),
+        "verification": environment_fact_value("build_match") or "unverified",
+        "runner_checkout_commit": environment_fact_value("runner_checkout_commit"),
+    }
+    if build != expected_build:
+        raise HAAPIError("HIL archive build provenance disagrees with environment")
     captures = manifest.get("captures")
     capture_fields = {
         "count",
