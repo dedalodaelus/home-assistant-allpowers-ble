@@ -48,6 +48,70 @@ def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> No
     assert archive.read_bytes() == previous
 
 
+def test_blocked_output_run_is_retained_in_public_report(tmp_path: Path) -> None:
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+    from scripts.hil.outputs import _execute_output_suite
+    from scripts.hil.scenarios import load_scenarios
+    from scripts.hil.storage import write_scenario_progress
+
+    run_id = "0123456789abcdef"
+    run = write_run(
+        tmp_path,
+        "blocked-output",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "qualification_status": "inconclusive",
+        },
+    )
+    services = SimpleNamespace(
+        load_scenarios=load_scenarios,
+        device_fingerprint=lambda *args: "a" * 64,
+        write_scenario_progress=write_scenario_progress,
+    )
+    device = Device(
+        device_id="private-device-id",
+        model="S200",
+        hardware=None,
+        firmware=None,
+        state_entities={},
+        entry_state=None,
+        config_entry_id=None,
+    )
+
+    result = _execute_output_suite(
+        SimpleNamespace(origin="http://home-assistant.local"),
+        Namespace(
+            scenario_id="output_ac_cycle", non_interactive=True, route="local_adapter"
+        ),
+        device,
+        {},
+        run,
+        run_id,
+        services,
+    )
+
+    assert result == 2
+    archive = export_archive(run, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        scenarios = json.loads(exported.read("public/scenarios.json"))
+        report = exported.read("public/report.md").decode("utf-8")
+
+    assert scenarios["qualification_status"] == "inconclusive"
+    assert len(scenarios["steps"]) == 1
+    step = scenarios["steps"][0]
+    assert step["step_id"] == "output_preflight"
+    assert step["outcome"] == "not_applicable"
+    assert step["limitation_reason"] == "precondition_or_observation_incomplete"
+    assert "`output_preflight`: **not_applicable**" in report
+    assert "limitation `precondition_or_observation_incomplete`" in report
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
 def test_interrupted_zip_export_cleans_temp_and_can_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

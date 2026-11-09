@@ -86,6 +86,7 @@ STEP_IDS = {step["id"] for scenario in DECLARATIONS for step in scenario.steps}
 STEP_IDS.update(
     {
         "settings_preflight",
+        "output_preflight",
         "restore_original",
         "baseline",
         "operator_action",

@@ -63,6 +63,7 @@ def _execute_output_suite(
         steps.append(
             {
                 "scenario_id": scenario.id,
+                "step_id": "output_preflight",
                 "outcome": "not_applicable",
                 "reason": "interactive authorization or loaded entry unavailable",
             }
