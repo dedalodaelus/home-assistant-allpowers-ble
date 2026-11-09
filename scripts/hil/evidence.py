@@ -33,6 +33,21 @@ PUBLIC_NAMES = {
     "manifest.json",
     "report.md",
 }
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON object key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_public_json(raw: bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+
+
 OUTCOMES = {"pass", "fail", "inconclusive", "skipped", "not_applicable"}
 EVENT_NAMES = {
     "capture_started",
@@ -1522,7 +1537,7 @@ def verify_public_archive(
     if "manifest.json" not in data:
         raise HAAPIError("HIL archive manifest missing")
     try:
-        manifest = json.loads(data["manifest.json"])
+        manifest = _load_public_json(data["manifest.json"])
     except (UnicodeError, ValueError) as exc:
         raise HAAPIError("Invalid HIL archive manifest") from exc
     if (
@@ -1595,7 +1610,7 @@ def verify_public_archive(
     ):
         raise HAAPIError("Invalid HIL archive build provenance")
     try:
-        environment_data = json.loads(data["environment.json"]).get("data", {})
+        environment_data = _load_public_json(data["environment.json"]).get("data", {})
         integration_facts = environment_data.get("integration", {})
     except (KeyError, AttributeError, UnicodeError, ValueError) as exc:
         raise HAAPIError("HIL archive build provenance has no environment") from exc
@@ -1683,7 +1698,7 @@ def verify_public_archive(
             raise HAAPIError("HIL archive digest mismatch")
         if name.endswith(".json"):
             try:
-                value = json.loads(data[name])
+                value = _load_public_json(data[name])
             except (UnicodeError, ValueError) as exc:
                 raise HAAPIError("Malformed JSON in HIL archive") from exc
             if (
@@ -2059,7 +2074,7 @@ def verify_public_archive(
         elif name.endswith(".jsonl"):
             try:
                 for line in data[name].splitlines():
-                    event = json.loads(line)
+                    event = _load_public_json(line)
                     if name == "frames.jsonl":
                         if (
                             not isinstance(event, dict)
@@ -2169,10 +2184,10 @@ def verify_public_archive(
     ):
         raise HAAPIError("Required public archive members are missing")
     event_rows = [
-        json.loads(line) for line in data.get("events.jsonl", b"").splitlines()
+        _load_public_json(line) for line in data.get("events.jsonl", b"").splitlines()
     ]
     frame_rows = [
-        json.loads(line) for line in data.get("frames.jsonl", b"").splitlines()
+        _load_public_json(line) for line in data.get("frames.jsonl", b"").splitlines()
     ]
     capture_rows = captures["by_capture"]
     if (

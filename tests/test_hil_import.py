@@ -298,6 +298,52 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
     assert matrix_path.read_bytes() == matrix_before_conflict
 
 
+def test_import_rejects_duplicate_json_keys_without_writing(
+    tmp_path: Path,
+) -> None:
+    archive = _public_archive(tmp_path / "source")
+    tampered = tmp_path / "duplicate-device-key.zip"
+    with zipfile.ZipFile(archive) as source:
+        members = {name: source.read(name) for name in source.namelist()}
+
+    session_name = "public/session.json"
+    session = members[session_name].decode("utf-8")
+    device_key = '"device": {'
+    assert device_key in session
+    session = session.replace(
+        device_key,
+        '"device": {"private_marker": "DO_NOT_IMPORT_PRIVATE_DATA"},\n'
+        f"    {device_key}",
+        1,
+    )
+    members[session_name] = session.encode("utf-8")
+
+    manifest_name = "public/manifest.json"
+    manifest = json.loads(members[manifest_name])
+    session_record = next(
+        entry for entry in manifest["files"] if entry["name"] == "session.json"
+    )
+    session_record["size"] = len(members[session_name])
+    session_record["sha256"] = hashlib.sha256(members[session_name]).hexdigest()
+    members[manifest_name] = json.dumps(manifest, sort_keys=True, indent=2).encode()
+    with zipfile.ZipFile(tampered, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, contents in members.items():
+            target.writestr(name, contents)
+
+    matrix_path = _matrix(tmp_path / "repo")
+    matrix_before = matrix_path.read_bytes()
+    fixture_tree = tmp_path / "repo" / "tests" / "hil" / "fixtures"
+    assert not fixture_tree.exists()
+
+    with pytest.raises(HAAPIError, match="Invalid HIL archive manifest|Malformed JSON"):
+        import_archive(
+            tampered, matrix_path=matrix_path, apply=True, repo_root=tmp_path / "repo"
+        )
+
+    assert matrix_path.read_bytes() == matrix_before
+    assert not fixture_tree.exists()
+
+
 def test_conflicting_run_identity_fails_before_writing_fixtures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
