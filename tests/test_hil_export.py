@@ -86,6 +86,67 @@ def test_archive_reimport_rejects_tampered_public_member(tmp_path: Path) -> None
         verify_public_archive(tampered)
 
 
+def test_archive_reimport_rejects_extra_member(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _run(run)
+    archive = export_archive(run, confirmed=True)
+    tampered = tmp_path / "extra-member.zip"
+    with zipfile.ZipFile(archive) as source, zipfile.ZipFile(tampered, "w") as target:
+        for member in source.infolist():
+            target.writestr(member.filename, source.read(member.filename))
+        target.writestr("public/unexpected.txt", b"private data")
+
+    with pytest.raises(HAAPIError, match="Unsafe HIL archive members"):
+        verify_public_archive(tampered)
+
+
+def test_archive_reimport_rejects_malformed_zip(tmp_path: Path) -> None:
+    malformed = tmp_path / "malformed.zip"
+    malformed.write_bytes(b"this is not a ZIP archive")
+
+    with pytest.raises(HAAPIError, match="Invalid HIL archive"):
+        verify_public_archive(malformed)
+
+
+def test_environment_export_omits_sensitive_and_unknown_source_fields(
+    tmp_path: Path,
+) -> None:
+    run_id = "0123456789abcdef"
+    private_ip = "192.0.2.123"
+    host_secret = "secret-hostname.internal"
+    env = {
+        "schema_version": 1,
+        "home_assistant": {
+            "os": {"value": "Linux", "source": "runner_platform"},
+            "cpu": {"value": private_ip, "source": "runner_platform"},
+            "hostname": host_secret,
+        },
+        "private_network": private_ip,
+    }
+    write_run(
+        tmp_path,
+        "sensitive-environment",
+        env,
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "qualification_status": "inconclusive",
+        },
+    )
+
+    archive = export_archive(tmp_path / "sensitive-environment", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        members = b"".join(exported.read(name) for name in exported.namelist())
+        environment = json.loads(exported.read("public/environment.json"))
+
+    assert private_ip.encode() not in members
+    assert host_secret.encode() not in members
+    assert "cpu" not in environment["data"]["home_assistant"]
+    assert "hostname" not in environment["data"]["home_assistant"]
+    assert environment["omitted"] == ["unknown_source_fields"]
+    verify_public_archive(archive)
+
+
 def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
     tmp_path: Path,
 ) -> None:
