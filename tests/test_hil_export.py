@@ -207,6 +207,8 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
                     "submitted_seq": 3,
                     "confirmed_seq": 4,
                 },
+                "pre_state": "off",
+                "post_state": "on",
                 "physical_outcome": "yes",
                 "started_utc": "2026-11-05T00:00:00+00:00",
                 "elapsed_seconds": 1.5,
@@ -221,6 +223,12 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         assert "public/frames.jsonl" in members
         combined = b"".join(evidence.read(name) for name in members)
         scenarios = json.loads(evidence.read("public/scenarios.json"))
+        assert scenarios["scenario_id"] == "output_ac_cycle"
+        assert scenarios["steps"][0]["target"] == "ac_output"
+        assert scenarios["steps"][0]["expected"] == "on"
+        assert scenarios["steps"][0]["actual"] == "on"
+        assert scenarios["steps"][0]["observation"]["pre_state"] == "off"
+        assert scenarios["steps"][0]["observation_evidence"] == ["capture-0001:1"]
         assert scenarios["steps"][0]["evidence"] == [
             "capture-0001:2",
             "capture-0001:3",
@@ -243,6 +251,8 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         assert public_frames[1]["command_type"] == "unknown"
         assert public_frames[1]["frame_validation"] == "unvalidated_chunk"
         assert b"capture-0001:2" in evidence.read("public/report.md")
+        assert b"Scenario: `output_ac_cycle`" in evidence.read("public/report.md")
+        assert b"expected `on`; observed `on`" in evidence.read("public/report.md")
     assert b"do-not-export-token" not in combined
     assert b"a565b1000106010000000000" not in combined
     assert b"deadbeef" not in combined
@@ -406,6 +416,199 @@ def test_transaction_reference_requires_submission_and_confirmation() -> None:
     assert _verified_transaction_references(transaction, events, {}) == []
     del events[3]
     assert _verified_transaction_references(transaction, events, frames) == []
+
+
+def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
+    from scripts.hil.evidence import _public_observation
+
+    recovery = _public_observation(
+        "recovery_reconnect",
+        {
+            "step_id": "recovered_session",
+            "outcome": "pass",
+            "connected": True,
+            "status_fresh": True,
+            "session_generation_before": 4,
+            "session_generation_after": 5,
+            "disconnect_observed": True,
+            "route": "local_adapter",
+            "reason": "private address aa:bb:cc:dd:ee:ff recovered",
+        },
+    )
+    assert recovery["expected"] == "new session generation and fresh status"
+    assert recovery["actual"] == "reconnected"
+    assert recovery["observation"]["session_generation_after"] == 5
+    assert recovery["observation"]["route"] == "local_adapter"
+    assert recovery["limitation_reason"] == "precondition_or_observation_incomplete"
+    assert "aa:bb:cc:dd:ee:ff" not in json.dumps(recovery)
+
+    soak = _public_observation(
+        "soak_24h_observation",
+        {
+            "step_id": "soak_segment",
+            "outcome": "inconclusive",
+            "segment": 2,
+            "sample_count": 14,
+            "measured_seconds": 3900.0,
+            "maximum_gap_seconds": 300.0,
+            "trace_count": 1,
+            "dropped_traces": 0,
+            "clock_discontinuities": 0,
+            "restart_discontinuity": True,
+            "reason": "process restart makes an unobserved interval unknowable",
+        },
+    )
+    assert soak["expected"] == "24 hours of uninterrupted measured observations"
+    assert soak["actual"] == "inconclusive"
+    assert soak["observation"]["sample_count"] == 14
+    assert soak["observation"]["maximum_gap_seconds"] == 300.0
+    assert soak["limitation_reason"] == "restart_discontinuity"
+
+
+def test_recovery_route_observation_exports_with_controlled_scenario_summary(
+    tmp_path: Path,
+) -> None:
+    run_id = "0123456789abcdef"
+    private = write_run(
+        tmp_path,
+        "recovery",
+        {"schema_version": 1},
+        {"schema_version": 1, "run_id": run_id},
+    )
+    event = {
+        "schema_version": 1,
+        "seq": 1,
+        "utc": "2026-11-05T00:00:00+00:00",
+        "elapsed_ms": 1.0,
+        "run_id": run_id,
+        "scenario_id": "recovery_reconnect",
+        "layer": "gatt_api",
+        "session_generation": 2,
+        "observed_route": "unverified",
+        "event": "route_observed",
+    }
+    trace_dir = private / "traces" / "recovery"
+    trace_dir.mkdir(parents=True)
+    _save_private_trace(
+        trace_dir,
+        {
+            "schema_version": 1,
+            "capture_id": "private-recovery-capture",
+            "run_id": run_id,
+            "scenario_id": "recovery_reconnect",
+            "requested_route": "auto",
+            "capture_layer": "gatt_api_not_rf",
+            "private_raw_bytes": True,
+            "has_gatt_frames": False,
+            "closed": True,
+            "expired": False,
+            "termination_reason": "requested_stop",
+            "qualification_allowed": False,
+            "observed_route": "unverified",
+            "complete": True,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "event_count": 1,
+            "frame_count": 0,
+            "events": [event],
+            "frames": [],
+        },
+    )
+    write_scenario_progress(
+        private,
+        run_id,
+        "recovery_reconnect",
+        "c" * 64,
+        [
+            {
+                "step_id": "baseline",
+                "outcome": "pass",
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 1,
+            },
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "vendor-app contention",
+                "operator_confirmed": True,
+            },
+            {
+                "step_id": "recovered_session",
+                "outcome": "pass",
+                "trace": "traces/recovery",
+                "connected": True,
+                "status_fresh": True,
+                "session_generation_before": 1,
+                "session_generation_after": 2,
+                "disconnect_observed": True,
+                "trace_complete": True,
+                "route": "unverified",
+                "physical_outcome": "yes",
+            },
+        ],
+    )
+    archive = export_archive(tmp_path / "recovery", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        scenarios = json.loads(exported.read("public/scenarios.json"))
+        assert scenarios["scenario_id"] == "recovery_reconnect"
+        recovered = scenarios["steps"][2]
+        assert recovered["expected"] == "new session generation and fresh status"
+        assert recovered["actual"] == "reconnected"
+        assert recovered["observation_evidence"] == ["capture-0001:1"]
+        assert recovered["missing_observation_evidence"] is False
+        report = exported.read("public/report.md")
+        assert b"Scenario: `recovery_reconnect`" in report
+        assert b"new session generation and fresh status" in report
+        assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+def test_soak_summary_exports_metrics_without_private_samples(tmp_path: Path) -> None:
+    run_id = "0123456789abcdef"
+    private = write_run(
+        tmp_path,
+        "soak",
+        {"schema_version": 1},
+        {"schema_version": 1, "run_id": run_id},
+    )
+    write_scenario_progress(
+        private,
+        run_id,
+        "soak_24h_observation",
+        "d" * 64,
+        [
+            {
+                "step_id": "soak_segment",
+                "segment": 1,
+                "outcome": "inconclusive",
+                "measured_seconds": 1800.0,
+                "sample_count": 7,
+                "trace_count": 0,
+                "maximum_gap_seconds": 300.0,
+                "dropped_traces": 1,
+                "clock_discontinuities": 0,
+                "restart_discontinuity": True,
+                "reason": "process restart makes the unobserved interval unknowable",
+            }
+        ],
+    )
+    (private / "soak_samples_001.jsonl").write_text(
+        '{"event":"sample","private_state":"192.168.1.25"}\n', encoding="utf-8"
+    )
+    archive = export_archive(tmp_path / "soak", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        scenarios = json.loads(exported.read("public/scenarios.json"))
+        step = scenarios["steps"][0]
+        assert scenarios["scenario_id"] == "soak_24h_observation"
+        assert step["expected"] == "24 hours of uninterrupted measured observations"
+        assert step["actual"] == "inconclusive"
+        assert step["observation"]["sample_count"] == 7
+        assert step["observation"]["maximum_gap_seconds"] == 300.0
+        assert "soak_samples_001.jsonl" not in exported.namelist()
+        assert b"192.168.1.25" not in b"".join(
+            exported.read(name) for name in exported.namelist()
+        )
+        assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
 
 def test_real_environment_checkout_and_mismatch_facts_verify(

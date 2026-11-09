@@ -81,6 +81,7 @@ EVENT_NAMES = {
 }
 DECLARATIONS = load_scenarios()
 SCENARIO_IDS = {scenario.id for scenario in DECLARATIONS}
+DECLARATION_BY_ID = {scenario.id: scenario for scenario in DECLARATIONS}
 STEP_IDS = {step["id"] for scenario in DECLARATIONS for step in scenario.steps}
 STEP_IDS.update(
     {
@@ -94,6 +95,230 @@ STEP_IDS.update(
         "soak_segment",
     }
 )
+
+
+def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    """Project only typed values and declaration-backed expectations."""
+    declaration = DECLARATION_BY_ID.get(scenario_id)
+    step_id = step.get("step_id")
+    declared_step_id = (
+        "periodic_observation"
+        if scenario_id == "soak_24h_observation" and step_id == "soak_segment"
+        else step_id
+    )
+    declared_step = (
+        next(
+            (item for item in declaration.steps if item.get("id") == declared_step_id),
+            None,
+        )
+        if declaration is not None
+        else None
+    )
+    allowed_values = {
+        "on",
+        "off",
+        "two_hours",
+        "standard",
+        "mute",
+        "performance",
+        "sleep",
+        "auto",
+        "unknown",
+        "unavailable",
+        "yes",
+        "no",
+        "unable_to_observe",
+    }
+    if declared_step is not None and isinstance(declared_step.get("expected"), str):
+        expected = declared_step["expected"]
+        if re.fullmatch(r"[a-z][a-z0-9_ -]{0,80}", expected):
+            allowed_values.add(expected)
+
+    def state_value(name: str) -> str | None:
+        value = step.get(name)
+        return value if isinstance(value, str) and value in allowed_values else None
+
+    observation: dict[str, Any] = {}
+    for name in ("pre_state", "post_state", "cleanup_post_state"):
+        value = state_value(name)
+        if value is not None:
+            observation[name] = value
+    for name in (
+        "connected",
+        "status_fresh",
+        "disconnect_observed",
+        "operator_confirmed",
+        "route_verified",
+        "restart_discontinuity",
+        "data_limit_hit",
+    ):
+        if type(step.get(name)) is bool:
+            observation[name] = step[name]
+    for name in (
+        "session_generation",
+        "session_generation_before",
+        "session_generation_after",
+        "segment",
+        "sample_count",
+        "trace_count",
+        "dropped_traces",
+        "clock_discontinuities",
+    ):
+        value = step.get(name)
+        if type(value) is int and 0 <= value <= 1_000_000:
+            observation[name] = value
+    for name in ("measured_seconds", "maximum_gap_seconds"):
+        value = step.get(name)
+        if (
+            type(value) in (int, float)
+            and math.isfinite(value)
+            and 0 <= value <= 86_400
+        ):
+            observation[name] = value
+    route = step.get("route")
+    if route in {"local_adapter", "active_proxy", "unverified", "mixed"}:
+        observation["route"] = route
+    action = step.get("action")
+    if action in {
+        "route interruption and restoration",
+        "vendor-app contention",
+        "Home Assistant or integration reload/upgrade",
+    }:
+        observation["operator_action"] = action
+
+    target = declared_step.get("target") if declared_step is not None else None
+    expected = declared_step.get("expected") if declared_step is not None else None
+    if not isinstance(target, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", target):
+        target = None
+    if not isinstance(expected, str) or not 0 < len(expected) <= 128:
+        expected = None
+    actual = state_value("post_state")
+    if actual is None and step.get("step_id") == "recovered_session":
+        if (
+            step.get("connected") is True
+            and type(step.get("session_generation_after")) is int
+        ):
+            actual = "reconnected"
+        elif step.get("trace_complete") is False:
+            actual = "observation_incomplete"
+    if actual is None and step.get("step_id") == "soak_segment":
+        actual = "completed" if step.get("outcome") == "pass" else "inconclusive"
+    reason = step.get("reason")
+    limitation = None
+    if isinstance(reason, str):
+        lowered = reason.lower()
+        if "restart" in lowered or "unobserved interval" in lowered:
+            limitation = "restart_discontinuity"
+        elif "interrupt" in lowered or "declined" in lowered or "confirm" in lowered:
+            limitation = "operator_interruption_or_decline"
+        elif "storage" in lowered or "byte cap" in lowered:
+            limitation = "storage_limit"
+        elif "trace" in lowered or "capture" in lowered:
+            limitation = "trace_unavailable"
+        elif "fresh" in lowered or "status" in lowered or "telemetry" in lowered:
+            limitation = "observation_unavailable"
+        else:
+            limitation = "precondition_or_observation_incomplete"
+    return {
+        "target": target,
+        "expected": expected,
+        "actual": actual,
+        "observation": observation,
+        "limitation_reason": limitation,
+    }
+
+
+def _valid_public_observation(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    allowed = {
+        "pre_state",
+        "post_state",
+        "cleanup_post_state",
+        "connected",
+        "status_fresh",
+        "disconnect_observed",
+        "operator_confirmed",
+        "route_verified",
+        "restart_discontinuity",
+        "data_limit_hit",
+        "session_generation",
+        "session_generation_before",
+        "session_generation_after",
+        "segment",
+        "sample_count",
+        "trace_count",
+        "dropped_traces",
+        "clock_discontinuities",
+        "measured_seconds",
+        "maximum_gap_seconds",
+        "route",
+        "operator_action",
+    }
+    state_values = {
+        "on",
+        "off",
+        "two_hours",
+        "standard",
+        "mute",
+        "performance",
+        "sleep",
+        "auto",
+        "unknown",
+        "unavailable",
+        "yes",
+        "no",
+        "unable_to_observe",
+    }
+    if set(value) - allowed:
+        return False
+    for key in {"pre_state", "post_state", "cleanup_post_state"} & set(value):
+        if value[key] not in state_values:
+            return False
+    for key in {
+        "connected",
+        "status_fresh",
+        "disconnect_observed",
+        "operator_confirmed",
+        "route_verified",
+        "restart_discontinuity",
+        "data_limit_hit",
+    } & set(value):
+        if type(value[key]) is not bool:
+            return False
+    for key in {
+        "session_generation",
+        "session_generation_before",
+        "session_generation_after",
+        "segment",
+        "sample_count",
+        "trace_count",
+        "dropped_traces",
+        "clock_discontinuities",
+    } & set(value):
+        if type(value[key]) is not int or not 0 <= value[key] <= 1_000_000:
+            return False
+    for key in {"measured_seconds", "maximum_gap_seconds"} & set(value):
+        if (
+            type(value[key]) not in (int, float)
+            or not math.isfinite(value[key])
+            or not 0 <= value[key] <= 86_400
+        ):
+            return False
+    if "route" in value and value["route"] not in {
+        "local_adapter",
+        "active_proxy",
+        "unverified",
+        "mixed",
+    }:
+        return False
+    if "operator_action" in value and value["operator_action"] not in {
+        "route interruption and restoration",
+        "vendor-app contention",
+        "Home Assistant or integration reload/upgrade",
+    }:
+        return False
+    return True
 
 
 def _safe_fact_value(key: str, value: Any) -> bool:
@@ -746,6 +971,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 continue
             if not isinstance(outcome, str) or outcome not in OUTCOMES:
                 continue
+            safe_fields = _public_observation(scenario["scenario_id"], step)
             evidence: list[str] = []
             cleanup_evidence: list[str] = []
             missing_evidence = True
@@ -772,14 +998,35 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         cleanup_missing_evidence = capture_incomplete
             missing_evidence = missing_evidence or not evidence
             cleanup_missing_evidence = cleanup_missing_evidence or not cleanup_evidence
+            observation_evidence: list[str] = []
+            observation_incomplete = True
+            observation_trace = step.get("trace") or step.get("last_trace")
+            observation_entry = trace_references.get(observation_trace)
+            if observation_entry:
+                all_refs, capture_incomplete, source_events, _ = observation_entry
+                capture_id = all_refs[0].split(":", 1)[0] if all_refs else None
+                if capture_id:
+                    observation_evidence = [
+                        f"{capture_id}:{seq}"
+                        for seq, event in source_events.items()
+                        if event.get("event") == "route_observed"
+                    ]
+                observation_incomplete = (
+                    capture_incomplete
+                    or step.get("trace_complete") is False
+                    or not observation_evidence
+                )
             safe_steps.append(
                 {
                     "step_id": step_id,
                     "outcome": outcome,
+                    **safe_fields,
                     "evidence": evidence,
                     "missing_evidence": missing_evidence,
                     "cleanup_evidence": cleanup_evidence,
                     "cleanup_missing_evidence": cleanup_missing_evidence,
+                    "observation_evidence": observation_evidence,
+                    "missing_observation_evidence": observation_incomplete,
                     "physical_observation": step.get("physical_outcome")
                     if isinstance(step.get("physical_outcome"), str)
                     and step["physical_outcome"] in {"yes", "no", "unable_to_observe"}
@@ -803,6 +1050,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 {
                     "schema_version": PUBLIC_SCHEMA,
                     "source_schema_version": 2,
+                    "scenario_id": scenario["scenario_id"],
                     "qualification_status": "inconclusive",
                     "steps": safe_steps,
                 },
@@ -855,6 +1103,28 @@ def _render_report(
             )
             if row["cleanup_missing_evidence"]:
                 evidence_text += " (incomplete)"
+        if row["observation_evidence"] or row["missing_observation_evidence"]:
+            observation_refs = ", ".join(
+                f"`{ref}`" for ref in row["observation_evidence"]
+            )
+            evidence_text += "; observation evidence " + (
+                observation_refs if observation_refs else "unavailable"
+            )
+            if row["missing_observation_evidence"]:
+                evidence_text += " (incomplete)"
+        if row["expected"] is not None:
+            evidence_text += f"; expected `{row['expected']}`"
+        if row["actual"] is not None:
+            evidence_text += f"; observed `{row['actual']}`"
+        if row["target"] is not None:
+            evidence_text += f"; target `{row['target']}`"
+        if row["observation"]:
+            summary = ", ".join(
+                f"{key} `{value}`" for key, value in sorted(row["observation"].items())
+            )
+            evidence_text += f"; observations {summary}"
+        if row["limitation_reason"] is not None:
+            evidence_text += f"; limitation `{row['limitation_reason']}`"
         if row["physical_observation"] is not None:
             evidence_text += f"; physical observation `{row['physical_observation']}`"
         if row["cleanup_physical_observation"] is not None:
@@ -878,6 +1148,11 @@ def _render_report(
     report = (
         "# HIL evidence report\n\n"
         + f"Run: `{run_id}`\n\n"
+        + (
+            f"Scenario: `{scenarios.get('scenario_id', 'unavailable')}`\n\n"
+            if scenarios.get("scenario_id")
+            else ""
+        )
         + "Qualification: **inconclusive**. This report summarizes collected software evidence and does not qualify hardware or prove RF behavior.\n\n"
         + "## Environment\n\n"
         + f"- Home Assistant: {ha_facts.get('version', {}).get('value', 'unavailable')}\n"
@@ -1344,12 +1619,14 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                     != {
                         "schema_version",
                         "source_schema_version",
+                        "scenario_id",
                         "qualification_status",
                         "steps",
                     }
                     or value["qualification_status"] != "inconclusive"
                     or not isinstance(value["steps"], list)
                     or value.get("source_schema_version") != 2
+                    or value.get("scenario_id") not in SCENARIO_IDS
                 ):
                     raise HAAPIError("Invalid public scenario schema")
                 for row in value["steps"]:
@@ -1359,10 +1636,17 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         != {
                             "step_id",
                             "outcome",
+                            "target",
+                            "expected",
+                            "actual",
+                            "observation",
+                            "limitation_reason",
                             "evidence",
                             "missing_evidence",
                             "cleanup_evidence",
                             "cleanup_missing_evidence",
+                            "observation_evidence",
+                            "missing_observation_evidence",
                             "physical_observation",
                             "cleanup_physical_observation",
                             "started_at_utc",
@@ -1373,6 +1657,53 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         or row.get("step_id") not in STEP_IDS
                         or not isinstance(row.get("outcome"), str)
                         or row.get("outcome") not in OUTCOMES
+                        or (
+                            row.get("target") is not None
+                            and (
+                                not isinstance(row["target"], str)
+                                or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", row["target"])
+                                is None
+                            )
+                        )
+                        or (
+                            row.get("expected") is not None
+                            and (
+                                not isinstance(row["expected"], str)
+                                or len(row["expected"]) > 128
+                            )
+                        )
+                        or row.get("actual")
+                        not in {
+                            None,
+                            "on",
+                            "off",
+                            "two_hours",
+                            "standard",
+                            "mute",
+                            "performance",
+                            "sleep",
+                            "auto",
+                            "unknown",
+                            "unavailable",
+                            "yes",
+                            "no",
+                            "unable_to_observe",
+                            "reconnected",
+                            "observation_incomplete",
+                            "completed",
+                            "inconclusive",
+                        }
+                        or not _valid_public_observation(row.get("observation"))
+                        or row.get("limitation_reason")
+                        not in {
+                            None,
+                            "restart_discontinuity",
+                            "operator_interruption_or_decline",
+                            "storage_limit",
+                            "trace_unavailable",
+                            "observation_unavailable",
+                            "precondition_or_observation_incomplete",
+                        }
                         or not isinstance(row.get("evidence"), list)
                         or any(
                             not isinstance(ref, str)
@@ -1393,6 +1724,18 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         or (
                             not row["cleanup_evidence"]
                             and not row["cleanup_missing_evidence"]
+                        )
+                        or not isinstance(row.get("observation_evidence"), list)
+                        or any(
+                            not isinstance(ref, str)
+                            or re.fullmatch(r"capture-[0-9]{4}:[1-9][0-9]{0,6}", ref)
+                            is None
+                            for ref in row["observation_evidence"]
+                        )
+                        or type(row.get("missing_observation_evidence")) is not bool
+                        or (
+                            not row["observation_evidence"]
+                            and not row["missing_observation_evidence"]
                         )
                         or (
                             row.get("physical_observation") is not None
@@ -1637,6 +1980,30 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                 raise HAAPIError("HIL scenario relies on incomplete capture evidence")
 
         for step in scenario_steps:
+            declared = _public_observation(
+                json.loads(data["scenarios.json"])["scenario_id"],
+                {"step_id": step["step_id"]},
+            )
+            if (
+                step["target"] != declared["target"]
+                or step["expected"] != declared["expected"]
+            ):
+                raise HAAPIError(
+                    "HIL scenario target or expected value disagrees with declaration"
+                )
+            if any(ref not in event_references for ref in step["observation_evidence"]):
+                raise HAAPIError("HIL observation references missing event evidence")
+            for ref in step["observation_evidence"]:
+                capture_id, seq = ref.split(":", 1)
+                matching = next(
+                    row
+                    for row in event_rows
+                    if row["capture_id"] == capture_id and row["seq"] == int(seq)
+                )
+                if matching["event"] != "route_observed":
+                    raise HAAPIError(
+                        "HIL observation reference is not a route observation"
+                    )
             verify_step_channel(step["evidence"], step["missing_evidence"])
             verify_step_channel(
                 step["cleanup_evidence"], step["cleanup_missing_evidence"]
