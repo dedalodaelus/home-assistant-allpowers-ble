@@ -2069,10 +2069,12 @@ def export_archive(run_path: Path, *, confirmed: bool) -> Path:
     print(json.dumps(preview, sort_keys=True))
     if not confirmed:
         raise HAAPIError("Export requires explicit confirmation")
-    temp = run_dir / ".hil-evidence.zip.tmp"
+    temp = run_dir / f".hil-evidence.zip.{secrets.token_hex(8)}.tmp"
     target = run_dir / "hil-evidence.zip"
+    created = False
     try:
         fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        created = True
         os.close(fd)
         with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name in sorted(all_files):
@@ -2082,7 +2084,8 @@ def export_archive(run_path: Path, *, confirmed: bool) -> Path:
         with temp.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temp, target)
-    except Exception:
-        temp.unlink(missing_ok=True)
+    except BaseException:
+        if created:
+            temp.unlink(missing_ok=True)
         raise
     return target

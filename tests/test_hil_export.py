@@ -48,6 +48,29 @@ def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> No
     assert archive.read_bytes() == previous
 
 
+def test_interrupted_zip_export_cleans_temp_and_can_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    _run(run)
+    archive = export_archive(run, confirmed=True)
+    previous = archive.read_bytes()
+
+    def interrupt_write(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", interrupt_write)
+    with pytest.raises(KeyboardInterrupt):
+        export_archive(run, confirmed=True)
+    assert archive.read_bytes() == previous
+    assert list(run.glob(".hil-evidence.zip.*.tmp")) == []
+
+    monkeypatch.undo()
+    retried = export_archive(run, confirmed=True)
+    assert retried == archive
+    assert verify_public_archive(retried)["export_confirmed"] is True
+
+
 def test_archive_reimport_rejects_tampered_public_member(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _run(run)
