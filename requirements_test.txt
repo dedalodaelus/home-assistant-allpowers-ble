@@ -4,7 +4,7 @@ bleak-esphome==4.0.0
 # Required by homeassistant.components.usb import path pulled by bluetooth.
 aiousbwatcher>=1.1.2
 serialx>=1.15.1
-aioesphomeapi>=46.23.0
+aioesphomeapi>=46.28.0
 pytest-homeassistant-custom-component==0.13.375
 pytest>=9.0.3,<10
 pytest-asyncio>=1.4.0,<2
