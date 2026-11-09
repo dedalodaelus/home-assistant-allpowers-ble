@@ -1469,8 +1469,10 @@ def _valid_public_facts(groups: dict[str, Any]) -> bool:
     return True
 
 
-def verify_public_archive(path: Path) -> dict[str, Any]:
-    """Validate archive member set and manifest digests before consumers import it."""
+def verify_public_archive(
+    path: Path, *, include_contents: bool = False
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, bytes], str]:
+    """Validate the public archive, optionally returning the verified member bytes."""
     absolute = Path(os.path.abspath(path))
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
@@ -1485,6 +1487,11 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         with os.fdopen(fd, "rb") as archive_file:
             if not stat.S_ISREG(os.fstat(archive_file.fileno()).st_mode):
                 raise HAAPIError("Invalid HIL archive file")
+            archive_bytes = archive_file.read(MAX_ARCHIVE + 1)
+            if len(archive_bytes) > MAX_ARCHIVE:
+                raise HAAPIError("Invalid HIL archive")
+            archive_digest = hashlib.sha256(archive_bytes).hexdigest()
+            archive_file.seek(0)
             with zipfile.ZipFile(archive_file) as archive:
                 infos = archive.infolist()
                 names = [i.filename for i in infos]
@@ -2335,6 +2342,8 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         raise HAAPIError("HIL report does not match public evidence")
     if manifest.get("run_id") != session_data.get("run_id", "unavailable"):
         raise HAAPIError("HIL archive run identity mismatch")
+    if include_contents:
+        return manifest, data, archive_digest
     return manifest
 
 

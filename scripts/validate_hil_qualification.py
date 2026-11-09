@@ -188,7 +188,9 @@ def _validate_run(
         _error(errors, f"{context} cannot qualify without a firmware_version")
     captured_at = run.get("captured_at")
     captured_date: date | None = None
-    if not isinstance(captured_at, str):
+    if captured_at is None:
+        pass
+    elif not isinstance(captured_at, str):
         _error(errors, f"{context} captured_at must be an ISO-8601 timestamp")
     else:
         try:
