@@ -18,14 +18,19 @@ Result statuses have distinct meanings:
 
 - `pending`: not yet evaluated;
 - `fail`: evidence demonstrates a failed result;
-- `not_applicable`: explicitly exempt, with a recorded rationale;
+- `not_applicable`: a write capability is absent on this model, with a recorded
+  rationale and evidence for that absence;
 - `inconclusive`: evidence is missing, incomplete, or cannot establish an outcome;
 - `pass`: the scoped result is supported by its linked evidence.
 
-Only a complete, fresh run with a verified installed build, known firmware, an
-observed supported route, linked evidence, and `pass` results can satisfy
-`--require-pass`. Neither `not_applicable` nor `inconclusive` counts as a pass
-in strict mode.
+Strict mode selects the newest complete, dated, build-verified `pass` or `fail`
+run for each revision/firmware/route group. An inconclusive imported archive is
+kept as history and does not supersede a qualification run; a newer eligible
+physical failure supersedes an older pass. Every required scenario must pass.
+Each write capability must pass or have a justified `not_applicable` result
+with evidence for its absence. PASS/N/A evidence must contain a route- and
+operation-bound capture row; a generic note or a legacy `*.sample.jsonl` file
+cannot satisfy the gate.
 
 The v1 migration preserves each old revision and all its route, scenario, and
 write-capability values under `legacy_results`. These records are marked
@@ -43,7 +48,7 @@ python -m scripts.migrate_hil_qualification old-matrix.json migrated-matrix.json
 
 The default validator checks structure and privacy while allowing unfinished
 runs. Add `--require-pass --max-age-days 30` to require fresh, fully scoped
-passes.
+current results using the selection policy above.
 
 The runtime `verified` classification is a software model/revision decision, not a
 claim that physical qualification is complete. Track that separately in the
@@ -119,10 +124,10 @@ PASS results.
 When independently reviewed physical byte captures are available, keep the
 sanitized fixture files under:
 
-- tests/hil/fixtures/<revision-id>/local-adapter-status.sample.jsonl
-- tests/hil/fixtures/<revision-id>/local-adapter-settings.sample.jsonl
-- tests/hil/fixtures/<revision-id>/proxy-status.sample.jsonl
-- tests/hil/fixtures/<revision-id>/proxy-settings.sample.jsonl
+- tests/hil/fixtures/<revision-id>/local-adapter-status.jsonl
+- tests/hil/fixtures/<revision-id>/local-adapter-settings.jsonl
+- tests/hil/fixtures/<revision-id>/proxy-status.jsonl
+- tests/hil/fixtures/<revision-id>/proxy-settings.jsonl
 
 Each independently sourced JSONL row should be a sanitized object with:
 
@@ -131,11 +136,23 @@ Each independently sourced JSONL row should be a sanitized object with:
 - direction: write or notify
 - frame_hex: payload bytes in hex
 - verdict: ok, timeout, reconnect, or rejected
+- physical_outcome: pass, fail, or not_applicable, based on the observed result
+- capability: required for write-capability evidence; use the matrix key
+
+For strict qualification, a scenario row must match the run's route and
+scenario key, have a `write` or `notify` direction, a valid frame, and
+`verdict: "ok"` plus `physical_outcome: "pass"`. A capability PASS row must
+match its capability key and use `direction: "write"`; a justified
+`not_applicable` row must use `direction: "observe"`,
+`verdict: "not_applicable"`, `physical_outcome: "not_applicable"`, and a matrix
+rationale. These checks bind a claim to a specific capture record. They do not
+cryptographically authenticate where a file came from; independent physical
+evidence review remains required.
 
 Example row:
 
 ```json
-{"route":"local_adapter","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B...","verdict":"ok"}
+{"route":"local_adapter","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
 ```
 
 Do not describe a synthetic frame made with the project's checksum helper or a
@@ -197,10 +214,13 @@ The validator checks:
 - redaction failures such as raw Bluetooth MAC addresses.
 
 The default command validates structure and privacy while allowing pending and
-inconclusive results. It does not qualify hardware. `--require-pass` requires
-fresh, complete, firmware- and route-scoped `pass` results, a verified build, and
-both supported routes for each qualified firmware. `not_applicable`, inconclusive,
-unknown, partial, expired, or legacy results do not satisfy that gate.
+inconclusive results. It does not qualify hardware. `--require-pass` selects the
+newest eligible run for each firmware and route, checks freshness and capture
+bindings, and requires both supported routes for each qualified firmware. A
+newer eligible failure supersedes an older pass; incomplete or inconclusive
+imports do not. Scenarios require PASS. Write capabilities allow PASS or
+evidence-backed `not_applicable` with a rationale. Unknown, partial, expired,
+or legacy results do not satisfy the gate.
 
 ## 6. Privacy and publication rules
 

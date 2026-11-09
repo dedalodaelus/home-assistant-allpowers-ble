@@ -86,8 +86,11 @@ sha256sum --check dist/allpowers_ble.zip.sha256
   `REQUIRE_HIL_STABLE_GATE=true` and run
   `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`.
 - The ordinary CI validator checks metadata offline; the strict gate requires
-  fresh, complete, verified-build PASS results for both supported routes per
-  firmware and does not accept legacy, inconclusive, or `not_applicable` results.
+  the newest fresh, complete, verified-build result for both supported routes
+  per firmware. A newer eligible failure supersedes an older pass; incomplete
+  and inconclusive imports do not. Scenarios require PASS; write capabilities
+  may use evidence-backed `not_applicable` with a rationale. Legacy results do
+  not qualify.
 
 ## Publishing
 

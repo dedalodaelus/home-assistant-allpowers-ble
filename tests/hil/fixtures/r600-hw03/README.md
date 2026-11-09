@@ -27,10 +27,19 @@ An independently reviewed capture row should be a sanitized JSON object and
 include:
 
 - route (`local_adapter` or `active_proxy`)
-- scenario name
+- scenario key for a scenario result
+- capability key for a write-capability result
 - direction (`write` or `notify`)
 - frame payload in hex (`frame_hex`)
 - normalized verdict (`ok`, `timeout`, `reconnect`, `rejected`)
+- observed physical outcome (`pass`, `fail`, or `not_applicable`)
+
+For a justified unsupported control, use the capability key, `direction` of
+`observe`, and `verdict` of `not_applicable`; the matrix entry must include a
+rationale. Strict validation requires a matching route and operation row for
+every PASS or `not_applicable` claim, including matching
+`physical_outcome: "pass"` or `physical_outcome: "not_applicable"`. Generic
+notes and the legacy `*.sample` files do not qualify.
 
 ## Validation command
 

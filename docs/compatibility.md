@@ -32,7 +32,12 @@ Schema v2 keeps results scoped to a model/hardware revision, firmware, observed
 route, and run. Only linked, independently reviewed physical evidence can
 support a `pass`; a successful default matrix-validator run checks structure and
 privacy, not qualification. The opt-in strict gate accepts only fresh, complete
-and attributed `pass` results.
+and attributed current results. It selects the newest eligible run for each
+firmware and route, so a later complete failure supersedes an older pass while
+an inconclusive archive import does not. Scenario results must pass; a write
+capability may be `not_applicable` only with scoped supporting evidence and a
+rationale. The gate checks route- and operation-bound capture records, while
+independent physical evidence review remains necessary.
 
 ## Current matrix
 

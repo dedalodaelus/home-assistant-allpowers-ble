@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MATRIX_SCHEMA_VERSION = 2
 DEFAULT_MATRIX = ROOT / "tests" / "hil" / "qualification_matrix.json"
 STATUSES = {"pass", "fail", "pending", "not_applicable", "inconclusive"}
-STRICT_STATUSES = {"pass"}
+STRICT_SCENARIO_STATUSES = {"pass"}
+STRICT_CAPABILITY_STATUSES = {"pass", "not_applicable"}
 REQUIRED_ROUTES = {"local_adapter", "active_proxy"}
 RUN_ROUTES = REQUIRED_ROUTES | {"unverified", "mixed"}
 CAPTURE_COMPLETENESS = {"complete", "incomplete", "unknown"}
@@ -126,6 +127,62 @@ def _check_evidence(
             _error(errors, f"{value} contains a Bluetooth MAC address")
 
 
+def _capture_rows(values: Any) -> list[dict[str, Any]]:
+    """Load explicitly scoped JSONL capture rows, excluding legacy examples."""
+    if not isinstance(values, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, str) or ".sample." in Path(value).name:
+            continue
+        path = (ROOT / value).resolve()
+        try:
+            path.relative_to(ROOT)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError, UnicodeError, ValueError:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError, TypeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def _has_bound_capture(
+    values: Any,
+    *,
+    route: Any,
+    result_key: str,
+    capability: bool,
+    expected_verdict: str,
+) -> bool:
+    for row in _capture_rows(values):
+        frame_hex = row.get("frame_hex")
+        if (
+            row.get("route") != route
+            or row.get("verdict") != expected_verdict
+            or row.get("physical_outcome")
+            != ("not_applicable" if expected_verdict == "not_applicable" else "pass")
+            or not isinstance(frame_hex, str)
+            or re.fullmatch(r"(?:[0-9A-Fa-f]{2}){1,256}", frame_hex) is None
+        ):
+            continue
+        if capability:
+            if row.get("capability") == result_key and row.get("direction") == (
+                "write" if expected_verdict == "ok" else "observe"
+            ):
+                return True
+        elif row.get("scenario") == result_key and row.get("direction") in {
+            "write",
+            "notify",
+        }:
+            return True
+    return False
+
+
 def _check_result_map(
     results: Any,
     expected: tuple[str, ...],
@@ -133,6 +190,8 @@ def _check_result_map(
     errors: list[str],
     *,
     require_pass: bool,
+    route: Any,
+    capability: bool = False,
 ) -> None:
     if not isinstance(results, dict):
         _error(errors, f"{context} must be an object")
@@ -150,14 +209,35 @@ def _check_result_map(
             item.get("evidence"),
             item_context,
             errors,
-            required=status == "pass",
+            required=status == "pass"
+            or (require_pass and capability and status == "not_applicable"),
         )
         if status == "not_applicable" and not (
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
         ):
             _error(errors, f"{item_context} not_applicable status requires a rationale")
-        if require_pass and status not in STRICT_STATUSES:
-            _error(errors, f"{item_context} must be pass in require-pass mode")
+        if require_pass:
+            acceptable = (
+                STRICT_CAPABILITY_STATUSES if capability else STRICT_SCENARIO_STATUSES
+            )
+            if status not in acceptable:
+                expected = "pass or justified not_applicable" if capability else "pass"
+                _error(
+                    errors, f"{item_context} must be {expected} in require-pass mode"
+                )
+            elif not _has_bound_capture(
+                item.get("evidence"),
+                route=route,
+                result_key=key,
+                capability=capability,
+                expected_verdict="not_applicable"
+                if status == "not_applicable"
+                else "ok",
+            ):
+                _error(
+                    errors,
+                    f"{item_context} evidence must contain a route- and operation-bound capture row",
+                )
 
 
 def _validate_run(
@@ -263,6 +343,7 @@ def _validate_run(
         f"{context} scenario",
         errors,
         require_pass=require_pass,
+        route=route,
     )
     _check_result_map(
         run.get("write_capabilities"),
@@ -270,6 +351,8 @@ def _validate_run(
         f"{context} write capability",
         errors,
         require_pass=require_pass,
+        route=route,
+        capability=True,
     )
     if qualification == "pass" and (
         route not in REQUIRED_ROUTES
@@ -284,6 +367,34 @@ def _validate_run(
             f"{context} cannot claim pass without complete, dated, firmware- and route-attributed evidence",
         )
     return run_id if isinstance(run_id, str) else None
+
+
+def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
+    """Return only complete, build-verified physical outcomes eligible for strict gating."""
+    if not isinstance(run, dict):
+        return None
+    firmware = run.get("firmware_version")
+    route = run.get("route")
+    captured_at = run.get("captured_at")
+    if (
+        not isinstance(firmware, str)
+        or not firmware.strip()
+        or route not in REQUIRED_ROUTES
+        or run.get("capture_completeness") != "complete"
+        or run.get("build_verification") != "verified"
+        or run.get("qualification_status") not in {"pass", "fail"}
+        or not isinstance(run.get("evidence"), list)
+        or not run["evidence"]
+        or not isinstance(captured_at, str)
+    ):
+        return None
+    try:
+        parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return firmware, route, parsed.astimezone(UTC)
 
 
 def validate_matrix(
@@ -324,28 +435,25 @@ def validate_matrix(
         if not isinstance(runs, list):
             _error(errors, f"revision {revision_id} runs must be a list")
             continue
-        attributed_routes: dict[str, set[str]] = {}
+        strict_candidates: dict[tuple[str, str], list[tuple[datetime, Any]]] = {}
         for run_index, run in enumerate(runs, 1):
             run_id = _validate_run(
                 run,
                 f"revision {revision_id} run[{run_index}]",
                 errors,
-                require_pass=require_pass,
+                require_pass=False,
                 max_age_days=max_age_days,
             )
             if run_id is not None:
                 if run_id in seen_runs:
                     _error(errors, f"duplicate run_id: {run_id}")
                 seen_runs.add(run_id)
-            if isinstance(run, dict):
-                firmware = run.get("firmware_version")
-                route = run.get("route")
-                if (
-                    isinstance(firmware, str)
-                    and isinstance(route, str)
-                    and route in REQUIRED_ROUTES
-                ):
-                    attributed_routes.setdefault(firmware, set()).add(route)
+            candidate = _strict_candidate(run)
+            if candidate is not None:
+                firmware, route, captured_at = candidate
+                strict_candidates.setdefault((firmware, route), []).append(
+                    (captured_at, run)
+                )
         legacy = revision.get("legacy_results")
         if not isinstance(legacy, list):
             _error(errors, f"revision {revision_id} legacy_results must be a list")
@@ -393,24 +501,43 @@ def validate_matrix(
             for value in _strings(source):
                 if MAC_ADDRESS.search(value):
                     _error(errors, f"{context} contains a Bluetooth MAC address")
-        if require_pass and not runs:
+        if require_pass and not strict_candidates:
             _error(
                 errors,
-                f"revision {revision_id} has no scoped runs for require-pass mode",
+                f"revision {revision_id} has no eligible scoped runs for require-pass mode",
             )
         if require_pass:
-            for firmware, routes in attributed_routes.items():
-                missing = REQUIRED_ROUTES - routes
-                if missing:
-                    _error(
+            firmwares = sorted({firmware for firmware, _ in strict_candidates})
+            for firmware in firmwares:
+                for route in sorted(REQUIRED_ROUTES):
+                    candidates = strict_candidates.get((firmware, route), [])
+                    if not candidates:
+                        _error(
+                            errors,
+                            f"revision {revision_id} firmware {firmware} missing strict route: {route}",
+                        )
+                        continue
+                    newest_at = max(captured_at for captured_at, _ in candidates)
+                    newest = [
+                        run
+                        for captured_at, run in candidates
+                        if captured_at == newest_at
+                    ]
+                    if len(newest) != 1:
+                        _error(
+                            errors,
+                            f"revision {revision_id} firmware {firmware} route {route} has ambiguous latest runs at {newest_at.isoformat()}",
+                        )
+                        continue
+                    run = newest[0]
+                    run_id = run.get("run_id", "unknown")
+                    _validate_run(
+                        run,
+                        f"revision {revision_id} current run {run_id}",
                         errors,
-                        f"revision {revision_id} firmware {firmware} missing strict route(s): {sorted(missing)}",
+                        require_pass=True,
+                        max_age_days=max_age_days,
                     )
-            if not attributed_routes:
-                _error(
-                    errors,
-                    f"revision {revision_id} has no firmware-attributed supported routes",
-                )
         summaries.append(
             f"{revision_id}: {len(runs)} scoped run(s), "
             f"{len(legacy)} unscoped legacy record(s)"
