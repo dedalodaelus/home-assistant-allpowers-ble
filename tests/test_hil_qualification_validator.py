@@ -253,6 +253,95 @@ def test_strict_gate_uses_latest_eligible_run_and_ignores_imported_inconclusive(
     assert any("must be pass in require-pass mode" in item for item in errors)
 
 
+def test_strict_gate_requires_routes_for_every_reported_firmware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    runs = [
+        _qualified_run(
+            tmp_path,
+            route,
+            f"{route}-fw-1.1",
+            now,
+            firmware_version="1.1",
+        )
+        for route in sorted(validator.REQUIRED_ROUTES)
+    ]
+    # A newer inconclusive import on an already qualified firmware must not
+    # supersede its latest eligible route result.
+    inconclusive_1_1 = _qualified_run(
+        tmp_path,
+        "local_adapter",
+        "import-fw-1.1",
+        now + timedelta(hours=1),
+        firmware_version="1.1",
+    )
+    inconclusive_1_1.update(
+        qualification_status="inconclusive",
+        capture_completeness="unknown",
+        build_verification="unverified",
+        scenarios={
+            key: {"status": "inconclusive", "evidence": []}
+            for key in validator.REQUIRED_SCENARIOS
+        },
+        write_capabilities={
+            key: {"status": "inconclusive", "evidence": []}
+            for key in validator.REQUIRED_WRITE_CAPABILITIES
+        },
+    )
+    runs.append(inconclusive_1_1)
+    matrix_path = tmp_path / "matrix.json"
+
+    def errors_for(current_runs: list[dict[str, Any]]) -> list[str]:
+        matrix = _matrix(current_runs)
+        matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+        errors, _ = validator.validate_matrix(
+            matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+        )
+        return errors
+
+    assert errors_for(runs) == []
+
+    inconclusive_1_2 = _qualified_run(
+        tmp_path,
+        "local_adapter",
+        "import-fw-1.2",
+        now + timedelta(hours=2),
+        firmware_version="1.2",
+    )
+    inconclusive_1_2.update(
+        qualification_status="inconclusive",
+        capture_completeness="unknown",
+        build_verification="unverified",
+        scenarios={
+            key: {"status": "inconclusive", "evidence": []}
+            for key in validator.REQUIRED_SCENARIOS
+        },
+        write_capabilities={
+            key: {"status": "inconclusive", "evidence": []}
+            for key in validator.REQUIRED_WRITE_CAPABILITIES
+        },
+    )
+    runs.append(inconclusive_1_2)
+    errors = errors_for(runs)
+    assert any(
+        "firmware 1.2 missing strict route: active_proxy" in item for item in errors
+    )
+
+    runs.extend(
+        _qualified_run(
+            tmp_path,
+            route,
+            f"{route}-fw-1.2",
+            now + timedelta(hours=3),
+            firmware_version="1.2",
+        )
+        for route in sorted(validator.REQUIRED_ROUTES)
+    )
+    assert errors_for(runs) == []
+
+
 def test_strict_gate_rejects_note_only_or_wrong_route_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

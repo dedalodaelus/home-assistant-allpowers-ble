@@ -471,6 +471,7 @@ def validate_matrix(
             _error(errors, f"revision {revision_id} runs must be a list")
             continue
         strict_candidates: dict[tuple[str, str], list[tuple[datetime, Any]]] = {}
+        firmware_scope: set[str] = set()
         for run_index, run in enumerate(runs, 1):
             run_id = _validate_run(
                 run,
@@ -484,6 +485,13 @@ def validate_matrix(
                 if run_id in seen_runs:
                     _error(errors, f"duplicate run_id: {run_id}")
                 seen_runs.add(run_id)
+            # Any explicitly reported firmware is in the qualification scope,
+            # even when its run is incomplete or inconclusive. Eligibility for
+            # a route remains a separate decision below.
+            if isinstance(run, dict):
+                firmware = run.get("firmware_version")
+                if isinstance(firmware, str) and firmware.strip():
+                    firmware_scope.add(firmware)
             candidate = _strict_candidate(run)
             if candidate is not None:
                 firmware, route, captured_at = candidate
@@ -543,8 +551,7 @@ def validate_matrix(
                 f"revision {revision_id} has no eligible scoped runs for require-pass mode",
             )
         if require_pass:
-            firmwares = sorted({firmware for firmware, _ in strict_candidates})
-            for firmware in firmwares:
+            for firmware in sorted(firmware_scope):
                 for route in sorted(REQUIRED_ROUTES):
                     candidates = strict_candidates.get((firmware, route), [])
                     if not candidates:

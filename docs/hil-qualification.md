@@ -219,11 +219,13 @@ The validator checks:
 The default command validates structure and privacy while allowing pending and
 inconclusive results. It does not qualify hardware. `--require-pass` selects the
 newest eligible run for each firmware and route, checks freshness and capture
-bindings, and requires both supported routes for each qualified firmware. A
-newer eligible failure supersedes an older pass; incomplete or inconclusive
-imports do not. Scenarios require PASS. Write capabilities allow PASS or
-evidence-backed `not_applicable` with a rationale. Unknown, partial, expired,
-or legacy results do not satisfy the gate.
+bindings, and requires both supported routes for every non-empty firmware
+version recorded in the revision's scoped runs. Incomplete or inconclusive runs
+still put their reported firmware in scope, but do not count as route evidence.
+A newer eligible failure supersedes an older pass; incomplete or inconclusive
+imports do not supersede eligible results. Scenarios require PASS. Write
+capabilities allow PASS or evidence-backed `not_applicable` with a rationale.
+Unknown, partial, expired, or legacy results do not satisfy the gate.
 
 ## 6. Privacy and publication rules
 
