@@ -106,8 +106,15 @@ evidence before rerunning with `--apply`. The importer verifies archive members,
 schemas, privacy allowlist and file hashes, then copies only public ZIP members
 into `tests/hil/fixtures/` and records the run in the v2 matrix. Imported run,
 scenario, and write-capability results remain `inconclusive`; a guided software
-step or route trace does not become a physical qualification PASS. Reimporting
-the same archive is idempotent, and conflicting existing evidence is rejected.
+step or route trace does not become a physical qualification PASS. The original
+session run ID, scoped to the verified model/revision, firmware, and route,
+defines logical run identity; ZIP SHA-256 is retained separately as an artifact
+integrity value. Repackaging or re-exporting the same public members is
+idempotent. If a known session ID arrives with different verified member
+contents or scope, import fails without changing the matrix or fixtures. When
+the source session ID is unavailable, a canonical hash of the verified member
+names and contents supplies a deterministic fallback independent of ZIP
+timestamps and packaging. Conflicting existing evidence is rejected.
 Archives without verified model or hardware metadata are kept under an
 unattributed revision identifier. Missing capture timestamps or firmware remain
 unknown and cannot satisfy strict qualification.

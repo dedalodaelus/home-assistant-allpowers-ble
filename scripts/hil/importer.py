@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,12 +78,45 @@ def _route_and_completeness(manifest: dict[str, Any]) -> tuple[str, str]:
     return route, completeness
 
 
-def _revision_id(model: str | None, hardware: str | None, archive_digest: str) -> str:
+def _revision_id(model: str | None, hardware: str | None, fallback_digest: str) -> str:
     if model is None or hardware is None:
-        return f"unattributed-{archive_digest[:12]}"
+        return f"unattributed-{fallback_digest[:12]}"
     model_part = re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-")[:40]
     hardware_part = re.sub(r"[^a-z0-9]+", "-", hardware.lower()).strip("-")[:24]
     return f"{model_part or 'model'}-hw-{hardware_part or 'unknown'}"
+
+
+def _canonical_content_sha256(members: dict[str, bytes]) -> str:
+    """Hash verified member names and contents, excluding ZIP container metadata."""
+    canonical_members = [
+        {
+            "name": name,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        for name, content in sorted(members.items())
+    ]
+    encoded = json.dumps(
+        canonical_members, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _logical_run_id(
+    *,
+    source_run_id: str | None,
+    content_sha256: str,
+    scope: dict[str, Any],
+) -> str:
+    identity = (
+        {"source_run_id": source_run_id, "scope": scope}
+        if source_run_id is not None
+        else {"content_sha256": content_sha256, "scope": scope}
+    )
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return f"archive-{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _load_archive(archive_path: Path) -> tuple[dict[str, Any], dict[str, bytes], str]:
@@ -140,7 +174,17 @@ def _build_proposal(
     if firmware is not None:
         firmware = safe_version(firmware)
 
-    revision_id = _revision_id(model, hardware, archive_digest)
+    route, completeness = _route_and_completeness(manifest)
+    content_sha256 = _canonical_content_sha256(members)
+    source_run_id = manifest.get("run_id")
+    if not isinstance(source_run_id, str) or source_run_id == "unavailable":
+        source_run_id = None
+    revision_fallback = (
+        hashlib.sha256(source_run_id.encode("utf-8")).hexdigest()
+        if source_run_id is not None
+        else content_sha256
+    )
+    revision_id = _revision_id(model, hardware, revision_fallback)
     revisions = matrix["revisions"]
     existing = next(
         (
@@ -154,21 +198,63 @@ def _build_proposal(
         ),
         None,
     )
+    if existing is None:
+        existing = next(
+            (
+                revision
+                for revision in revisions
+                if isinstance(revision, dict) and revision.get("id") == revision_id
+            ),
+            None,
+        )
     if existing is not None:
         revision_id = existing["id"]
     elif any(
         isinstance(revision, dict) and revision.get("id") == revision_id
         for revision in revisions
     ):
-        revision_id = f"{revision_id}-{archive_digest[:12]}"
+        revision_id = f"{revision_id}-{content_sha256[:12]}"
         if any(
             isinstance(revision, dict) and revision.get("id") == revision_id
             for revision in revisions
         ):
-            revision_id = f"{revision_id}-{archive_digest}"
+            revision_id = f"{revision_id}-{content_sha256}"
 
-    route, completeness = _route_and_completeness(manifest)
-    run_id = f"archive-{archive_digest}"
+    scope = {
+        "revision_id": revision_id,
+        "model": model,
+        "hardware_version": hardware,
+        "firmware_version": firmware,
+        "route": route,
+    }
+    if source_run_id is not None:
+        known_source = next(
+            (
+                (revision, item)
+                for revision in revisions
+                if isinstance(revision, dict)
+                for item in revision.get("runs", [])
+                if isinstance(item, dict) and item.get("source_run_id") == source_run_id
+            ),
+            None,
+        )
+        if known_source is not None:
+            prior_revision, prior_run = known_source
+            if (
+                prior_revision.get("id") != revision_id
+                or prior_run.get("firmware_version") != firmware
+                or prior_run.get("route") != route
+            ):
+                raise HAAPIError(
+                    "Source run identity conflicts with existing firmware or route scope"
+                )
+            if prior_run.get("content_sha256") != content_sha256:
+                raise HAAPIError("Source run identity conflicts with existing contents")
+    run_id = _logical_run_id(
+        source_run_id=source_run_id,
+        content_sha256=content_sha256,
+        scope=scope,
+    )
     run_rel_dir = Path("tests/hil/fixtures") / revision_id / "runs" / run_id
     imported_members = {
         name: content for name, content in members.items() if name in PUBLIC_NAMES
@@ -238,10 +324,13 @@ def _build_proposal(
             for name in CAPABILITIES
         },
         "archive_sha256": archive_digest,
+        "content_sha256": content_sha256,
+        "source_run_id": source_run_id,
         "reported_scenario_id": reported_scenario,
         "reported_step_ids": reported_step_ids,
         "capture_summary": manifest["captures"],
     }
+    prior = None
     if existing is None:
         new_revision = {
             "id": revision_id,
@@ -256,16 +345,25 @@ def _build_proposal(
         new_revision = json.loads(json.dumps(existing))
         if not isinstance(new_revision.get("runs"), list):
             raise HAAPIError("Target revision has invalid runs list")
+        existing_runs = new_revision["runs"]
         prior = next(
             (
                 item
-                for item in new_revision["runs"]
+                for item in existing_runs
                 if isinstance(item, dict) and item.get("run_id") == run_id
             ),
             None,
         )
-        if prior is not None and prior != run:
-            raise HAAPIError("Archive identity conflicts with existing run contents")
+        if prior is not None:
+            if prior.get("content_sha256") != content_sha256:
+                raise HAAPIError("Source run identity conflicts with existing contents")
+            prior_without_artifact_hash = dict(prior)
+            run_without_artifact_hash = dict(run)
+            prior_without_artifact_hash.pop("archive_sha256", None)
+            run_without_artifact_hash.pop("archive_sha256", None)
+            if prior_without_artifact_hash != run_without_artifact_hash:
+                raise HAAPIError("Source run identity conflicts with existing contents")
+            run = prior
         if prior is None:
             new_revision["runs"].append(run)
 
@@ -314,14 +412,7 @@ def _build_proposal(
         "missing_reasons": missing_reasons,
         "run": run,
         "destination_files": destination_files,
-        "existing_run": any(
-            isinstance(revision, dict)
-            and any(
-                isinstance(item, dict) and item.get("run_id") == run_id
-                for item in revision.get("runs", [])
-            )
-            for revision in revisions
-        ),
+        "existing_run": prior is not None,
         "archive_digest": archive_digest,
         "repo_root": repo_root,
     }

@@ -24,6 +24,7 @@ def _capture_fixture(
     *,
     firmware_version: str,
     captured_at: str,
+    row_run_id: str | None = None,
     verdict: str = "ok",
     not_applicable_capability: str | None = None,
 ) -> str:
@@ -35,7 +36,7 @@ def _capture_fixture(
             "route": route,
             "revision_id": "r600-hw03",
             "firmware_version": firmware_version,
-            "run_id": name,
+            "run_id": row_run_id or name,
             "captured_at": captured_at,
             "scenario": scenario,
             "direction": "notify" if scenario == "golden_vector_replay" else "write",
@@ -52,7 +53,7 @@ def _capture_fixture(
                 "route": route,
                 "revision_id": "r600-hw03",
                 "firmware_version": firmware_version,
-                "run_id": name,
+                "run_id": row_run_id or name,
                 "captured_at": captured_at,
                 "capability": capability,
                 "direction": "observe" if is_na else "write",
@@ -335,9 +336,10 @@ def test_capture_evidence_is_bound_to_revision_firmware_run_and_timestamp(
     wrong_route = _capture_fixture(
         tmp_path,
         wrong_route_name,
-        "wrong-route",
+        f"{runs[0]['run_id']}-route-mismatch",
         firmware_version=runs[0]["firmware_version"],
         captured_at=runs[0]["captured_at"],
+        row_run_id=runs[0]["run_id"],
         verdict="ok",
     )
     runs[0]["scenarios"]["golden_vector_replay"]["evidence"] = [wrong_route]

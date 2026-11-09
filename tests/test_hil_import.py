@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
+import zipfile
 
 import pytest
 
@@ -20,7 +22,14 @@ def _fact(value: Any, source: str, verified: bool = True) -> dict[str, Any]:
     return {"value": value, "source": source, "verified": verified}
 
 
-def _public_archive(path: Path) -> Path:
+def _public_archive(
+    path: Path,
+    *,
+    source_run_id: str | None = "0123456789abcdef",
+    installed_version: str = "1.2.3",
+    firmware_version: str = "1.1",
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
     run = path / "run"
     run.mkdir(parents=True)
     environment = {
@@ -28,14 +37,15 @@ def _public_archive(path: Path) -> Path:
         "home_assistant": {},
         "runner_host": {},
         "integration": {
-            "installed_manifest_version": _fact("1.2.3", "ha_ws_manifest_get"),
+            "installed_manifest_version": _fact(
+                installed_version, "ha_ws_manifest_get"
+            ),
             "build_match": _fact("mismatch", "runner_repository_manifest"),
             "runner_checkout_commit": _fact(None, "unknown", False),
         },
     }
     session = {
         "schema_version": 1,
-        "run_id": "0123456789abcdef",
         "qualification_status": "inconclusive",
         "mode": "read_only_preflight",
         "scenario_id": "read_only",
@@ -43,12 +53,32 @@ def _public_archive(path: Path) -> Path:
         "device": {
             "model": _fact("R600", "ha_device_registry"),
             "hardware_version": _fact("0.3", "ha_device_registry"),
-            "firmware_version": _fact("1.1", "ha_device_registry"),
+            "firmware_version": _fact(firmware_version, "ha_device_registry"),
         },
     }
+    if source_run_id is not None:
+        session["run_id"] = source_run_id
     (run / "environment.json").write_text(json.dumps(environment), encoding="utf-8")
     (run / "session.json").write_text(json.dumps(session), encoding="utf-8")
     return export_archive(run, confirmed=True)
+
+
+def _repack_archive(
+    source: Path, destination: Path, timestamp: tuple[int, ...]
+) -> Path:
+    with (
+        zipfile.ZipFile(source) as old_archive,
+        zipfile.ZipFile(
+            destination, "w", compression=zipfile.ZIP_DEFLATED
+        ) as new_archive,
+    ):
+        for name in old_archive.namelist():
+            original = old_archive.getinfo(name)
+            info = zipfile.ZipInfo(name, date_time=timestamp)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = original.external_attr
+            new_archive.writestr(info, old_archive.read(name))
+    return destination
 
 
 def _matrix(path: Path) -> Path:
@@ -242,6 +272,24 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
         == 0
     )
     assert len(json.loads(matrix_path.read_text())["revisions"][0]["runs"]) == 1
+    matrix_after_first_import = matrix_path.read_bytes()
+    repackaged = _repack_archive(
+        archive,
+        tmp_path / "same-session-different-zip-metadata.zip",
+        (2024, 1, 2, 3, 4, 6),
+    )
+    assert (
+        hashlib.sha256(repackaged.read_bytes()).digest()
+        != hashlib.sha256(archive.read_bytes()).digest()
+    )
+    assert (
+        import_archive(
+            repackaged, matrix_path=matrix_path, apply=True, repo_root=tmp_path
+        )
+        == 0
+    )
+    assert matrix_path.read_bytes() == matrix_after_first_import
+    assert len(json.loads(matrix_path.read_text())["revisions"][0]["runs"]) == 1
     matrix_before_conflict = matrix_path.read_bytes()
     evidence[0].write_text("conflicting contents", encoding="utf-8")
     with pytest.raises(HAAPIError, match="Existing import evidence conflicts"):
@@ -268,10 +316,94 @@ def test_conflicting_run_identity_fails_before_writing_fixtures(
     matrix_path.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
     matrix_before = matrix_path.read_bytes()
 
-    with pytest.raises(HAAPIError, match="Archive identity conflicts"):
+    with pytest.raises(HAAPIError, match="Source run identity conflicts"):
         import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
     assert matrix_path.read_bytes() == matrix_before
     assert not (tmp_path / "tests" / "hil" / "fixtures").exists()
+
+
+def test_modified_contents_for_same_source_run_fail_without_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+
+    repo_root = tmp_path / "repo"
+    matrix_path = _matrix(repo_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    first = _public_archive(tmp_path / "first")
+    changed = _public_archive(tmp_path / "changed", installed_version="1.2.4")
+    changed_scope = _public_archive(tmp_path / "changed-scope", firmware_version="1.2")
+    assert (
+        import_archive(first, matrix_path=matrix_path, apply=True, repo_root=repo_root)
+        == 0
+    )
+    matrix_before = matrix_path.read_bytes()
+    revision = json.loads(matrix_before)["revisions"][0]
+    imported = revision["runs"][0]
+    evidence_before = {
+        path: (repo_root / path).read_bytes() for path in imported["evidence"]
+    }
+
+    with pytest.raises(
+        HAAPIError, match="Source run identity conflicts with existing contents"
+    ):
+        import_archive(
+            changed, matrix_path=matrix_path, apply=True, repo_root=repo_root
+        )
+
+    assert matrix_path.read_bytes() == matrix_before
+    assert {path: (repo_root / path).read_bytes() for path in evidence_before} == (
+        evidence_before
+    )
+    with pytest.raises(
+        HAAPIError,
+        match="Source run identity conflicts with existing firmware or route scope",
+    ):
+        import_archive(
+            changed_scope,
+            matrix_path=matrix_path,
+            apply=True,
+            repo_root=repo_root,
+        )
+    assert matrix_path.read_bytes() == matrix_before
+    assert {path: (repo_root / path).read_bytes() for path in evidence_before} == (
+        evidence_before
+    )
+
+
+def test_missing_source_run_id_uses_canonical_member_content_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+
+    repo_root = tmp_path / "repo"
+    matrix_path = _matrix(repo_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    archive = _public_archive(tmp_path / "source-unavailable", source_run_id=None)
+    repackaged = _repack_archive(
+        archive,
+        tmp_path / "source-unavailable-repacked.zip",
+        (2022, 6, 8, 10, 12, 14),
+    )
+
+    assert (
+        import_archive(
+            archive, matrix_path=matrix_path, apply=True, repo_root=repo_root
+        )
+        == 0
+    )
+    first_matrix = matrix_path.read_bytes()
+    assert (
+        import_archive(
+            repackaged, matrix_path=matrix_path, apply=True, repo_root=repo_root
+        )
+        == 0
+    )
+    assert matrix_path.read_bytes() == first_matrix
+    runs = json.loads(first_matrix)["revisions"][0]["runs"]
+    assert len(runs) == 1
+    assert runs[0]["source_run_id"] is None
+    assert runs[0]["content_sha256"]
 
 
 def test_fixture_collision_does_not_overwrite_or_leave_partial_files(
