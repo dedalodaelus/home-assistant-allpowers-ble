@@ -333,6 +333,17 @@ def _safe_fact_value(key: str, value: Any) -> bool:
         return False
     if re.search(r"(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", value):
         return False
+    if re.search(
+        r"(?i)(?<![a-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,62})\.)+[a-z]{2,63}(?![a-z0-9_-])",
+        value,
+    ):
+        return False
+    for match in re.finditer(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)", value):
+        try:
+            ipaddress.ip_address(match.group())
+        except ValueError:
+            continue
+        return False
     try:
         ipaddress.ip_address(value)
     except ValueError:
@@ -1509,6 +1520,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
             if (
                 not isinstance(value, dict)
                 or type(value.get("schema_version")) is not int
+                or value["schema_version"] != PUBLIC_SCHEMA
             ):
                 raise HAAPIError("Unsupported JSON schema in HIL archive")
             if name in {"environment.json", "session.json"}:
@@ -1566,6 +1578,11 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                         public_session["device"], dict
                     ):
                         raise HAAPIError("Invalid public device metadata")
+                    if (
+                        "started_at" in public_session
+                        and _safe_utc(public_session["started_at"]) is None
+                    ):
+                        raise HAAPIError("Invalid public session timestamp")
                     if "route" in public_session:
                         route = public_session["route"]
                         observed = (
@@ -1812,6 +1829,13 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
                                     event.get("command_type") != "unknown"
                                     or event.get("frame_validation")
                                     != "unvalidated_chunk"
+                                )
+                            )
+                            or (
+                                event.get("session_generation") is not None
+                                and (
+                                    type(event["session_generation"]) is not int
+                                    or not 1 <= event["session_generation"] <= 1_000_000
                                 )
                             )
                             or event.get("payload_omitted") is not True

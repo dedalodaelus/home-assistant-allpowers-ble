@@ -4,6 +4,7 @@ import json
 import hashlib
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 import zipfile
 
 import pytest
@@ -29,6 +30,30 @@ def _run(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _rewrite_archive_members(
+    archive: Path, destination: Path, updates: dict[str, bytes]
+) -> None:
+    with zipfile.ZipFile(archive) as source:
+        contents = {name: source.read(name) for name in source.namelist()}
+    contents.update({f"public/{name}": payload for name, payload in updates.items()})
+    manifest = json.loads(contents["public/manifest.json"])
+    manifest["files"] = [
+        {
+            "name": name.removeprefix("public/"),
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        for name, payload in sorted(contents.items())
+        if name != "public/manifest.json"
+    ]
+    contents["public/manifest.json"] = (
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, payload in contents.items():
+            target.writestr(name, payload)
 
 
 def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> None:
@@ -172,6 +197,97 @@ def test_archive_reimport_rejects_malformed_zip(tmp_path: Path) -> None:
         verify_public_archive(malformed)
 
 
+@pytest.mark.parametrize(
+    ("member", "payload", "error"),
+    [
+        (
+            "environment.json",
+            {"schema_version": 1, "source_schema_version": 1, "data": {}},
+            "Unsupported JSON schema",
+        ),
+        (
+            "scenarios.json",
+            {
+                "schema_version": 1,
+                "source_schema_version": 2,
+                "scenario_id": "output_ac_cycle",
+                "qualification_status": "inconclusive",
+                "steps": [],
+            },
+            "Unsupported JSON schema",
+        ),
+        (
+            "session.json",
+            {
+                "schema_version": 1,
+                "source_schema_version": 1,
+                "data": {"qualification_status": "inconclusive"},
+            },
+            "Unsupported JSON schema",
+        ),
+        (
+            "session.json",
+            {
+                "schema_version": 2,
+                "source_schema_version": 1,
+                "data": {
+                    "run_id": "0123456789abcdef",
+                    "qualification_status": "inconclusive",
+                    "started_at": {"unexpected": "object"},
+                },
+            },
+            "Invalid public session timestamp",
+        ),
+        (
+            "frames.jsonl",
+            {
+                "schema_version": 2,
+                "capture_id": "capture-0001",
+                "seq": 1,
+                "direction": "tx",
+                "command_type": "status_request",
+                "frame_validation": "validated_tx",
+                "session_generation": "1",
+                "payload_omitted": True,
+            },
+            "Malformed JSONL",
+        ),
+        (
+            "frames.jsonl",
+            {
+                "schema_version": 2,
+                "capture_id": "capture-0001",
+                "seq": 1,
+                "direction": "tx",
+                "command_type": "status_request",
+                "frame_validation": "validated_tx",
+                "session_generation": 1_000_001,
+                "payload_omitted": True,
+            },
+            "Malformed JSONL",
+        ),
+    ],
+)
+def test_archive_verifier_rejects_rehashed_schema_and_type_tampering(
+    tmp_path: Path, member: str, payload: dict[str, Any], error: str
+) -> None:
+    run = tmp_path / "run"
+    _run(run)
+    archive = export_archive(run, confirmed=True)
+    tampered = tmp_path / "tampered-contract.zip"
+    if member.endswith(".jsonl"):
+        data = (json.dumps(payload, sort_keys=True) + "\n").encode()
+        updates = {member: data}
+    else:
+        updates = {
+            member: (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
+        }
+    _rewrite_archive_members(archive, tampered, updates)
+
+    with pytest.raises(HAAPIError, match=error):
+        verify_public_archive(tampered)
+
+
 def test_environment_export_omits_sensitive_and_unknown_source_fields(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +325,75 @@ def test_environment_export_omits_sensitive_and_unknown_source_fields(
     assert "hostname" not in environment["data"]["home_assistant"]
     assert environment["omitted"] == ["unknown_source_fields"]
     verify_public_archive(archive)
+
+
+def test_environment_export_rejects_embedded_ip_and_hostname_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.hil import environment
+
+    monkeypatch.setattr(
+        environment,
+        "platform",
+        type(
+            "PlatformFacts",
+            (),
+            {
+                "system": staticmethod(lambda: "Linux"),
+                "machine": staticmethod(lambda: "x86_64"),
+                "release": staticmethod(lambda: "6.8.0"),
+                "processor": staticmethod(lambda: "Intel Core i7 homebox.local"),
+                "python_version": staticmethod(lambda: "3.14.0"),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        environment, "local_commit", lambda: environment.unknown("unavailable")
+    )
+    monkeypatch.setattr(environment, "local_manifest_version", lambda: "1.2.3")
+
+    malicious_version = "2026.10.4.192.168.1.25"
+    env = environment.build_environment(
+        {"version": malicious_version, "installation_type": "Home Assistant OS"},
+        {"version": "1.2.3"},
+    )
+    write_run(
+        tmp_path,
+        "embedded-identifiers",
+        env,
+        {"schema_version": 1, "run_id": "0123456789abcdef"},
+    )
+    archive = export_archive(tmp_path / "embedded-identifiers", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        public_members = {name: exported.read(name) for name in exported.namelist()}
+    combined = b"".join(public_members.values())
+    assert b"192.168.1.25" not in combined
+    assert b"homebox.local" not in combined
+    public_environment = json.loads(public_members["public/environment.json"])
+    assert "version" not in public_environment["data"]["home_assistant"]
+    assert "cpu" not in public_environment["data"]["runner_host"]
+    monkeypatch.setattr(
+        environment.platform,
+        "processor",
+        lambda: "Intel Core i7-10700K",
+    )
+    normal_env = environment.build_environment(
+        {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
+        {"version": "1.2.3"},
+    )
+    write_run(
+        tmp_path,
+        "ordinary-environment",
+        normal_env,
+        {"schema_version": 1, "run_id": "1123456789abcdef"},
+    )
+    normal_archive = export_archive(tmp_path / "ordinary-environment", confirmed=True)
+    with zipfile.ZipFile(normal_archive) as exported:
+        normal_public = json.loads(exported.read("public/environment.json"))
+    assert normal_public["data"]["home_assistant"]["version"]["value"] == "2026.10.4"
+    assert (
+        normal_public["data"]["runner_host"]["cpu"]["value"] == "Intel Core i7-10700K"
+    )
 
 
 def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
