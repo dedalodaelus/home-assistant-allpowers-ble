@@ -8,11 +8,11 @@ verified profiles.
 `tests/hil/qualification_matrix.json` uses schema v2. A revision describes the
 model and hardware revision; each item in its `runs` list is scoped to one
 firmware version, one observed BLE route, and one HIL run. A run records its
-timestamp, tool and installed integration versions, capture completeness, an
-build verification (`verified`, `unverified`, or `mismatch`), an overall
-qualification status, scenario results, write-capability results, and links to
-sanitized evidence. Use `null` for firmware only when it is unknown; unknown
-firmware cannot qualify a run.
+timestamp when available, tool and installed integration versions, capture
+completeness, build verification (`verified`, `unverified`, or `mismatch`), an
+overall qualification status, scenario results, write-capability results, and
+links to sanitized evidence. Use `null` for firmware only when it is unknown;
+unknown firmware cannot qualify a run.
 
 Result statuses have distinct meanings:
 
@@ -60,16 +60,15 @@ Use this process when you need to:
 - refresh stale HIL evidence before a stable release;
 - qualify a new hardware revision for write-capable support.
 
-For a non-destructive first step, use the [guided HIL CLI](hil-cli.md) to collect
-read-only environment and entity snapshots. It does not produce qualifying BLE
-or physical evidence until later guided-capture stages are implemented.
+Use the [guided HIL CLI](hil-cli.md) to collect a run and make a public evidence
+ZIP. Read-only snapshots and guided software steps are useful review evidence;
+they do not by themselves qualify a physical scenario or write capability.
 
 The `report` and `export` commands described in [hil-cli.md](hil-cli.md) produce
-a local, privacy-filtered attachment for review. Attach the generated ZIP
-manually; it is not a qualification record. A software step marked `pass`, a
-complete GATT API capture, or a verified route must not be used to mark a
-physical qualification matrix result `PASS` without the required independent
-hardware observations and evidence.
+a local, privacy-filtered ZIP. An imported ZIP becomes an `inconclusive` run
+record until separately reviewed physical evidence supports each result. A
+software step marked `pass`, a complete GATT API capture, or a verified route
+must not be used to mark a physical qualification result `pass`.
 
 ## Prerequisites
 
@@ -107,14 +106,25 @@ Run every scenario in both lanes:
 - local_adapter
 - active_proxy
 
-For each lane, capture at least one status and one settings fixture file under:
+For each observed route, create a separate guided run and export its public ZIP
+using the steps in the [archive handoff example](#complete-archive-handoff-example).
+The ZIP records available route/capture metadata but omits raw frame payloads.
+It is an importable review record, not a physical qualification result.
+
+The older `*.sample.jsonl` files under `tests/hil/fixtures/` are retained as
+legacy examples. They are not independent hardware golden vectors and do not
+qualify a route, scenario, or write capability. Do not turn their contents into
+PASS results.
+
+When independently reviewed physical byte captures are available, keep the
+sanitized fixture files under:
 
 - tests/hil/fixtures/<revision-id>/local-adapter-status.sample.jsonl
 - tests/hil/fixtures/<revision-id>/local-adapter-settings.sample.jsonl
 - tests/hil/fixtures/<revision-id>/proxy-status.sample.jsonl
 - tests/hil/fixtures/<revision-id>/proxy-settings.sample.jsonl
 
-Each JSONL row should be a sanitized object with:
+Each independently sourced JSONL row should be a sanitized object with:
 
 - route: local_adapter or active_proxy
 - scenario: one required scenario name
@@ -127,6 +137,11 @@ Example row:
 ```json
 {"route":"local_adapter","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B...","verdict":"ok"}
 ```
+
+Do not describe a synthetic frame made with the project's checksum helper or a
+legacy sample row as an independent hardware capture. A reviewed status/settings
+pair may become an offline protocol regression vector when physical evidence is
+available; otherwise leave that requirement pending.
 
 ## 3. Execute the required scenario set
 
@@ -151,13 +166,17 @@ Recommended execution pattern:
 ## 4. Update the qualification matrix
 
 Add one run record per firmware and observed route in
-`tests/hil/qualification_matrix.json`:
+`tests/hil/qualification_matrix.json`. Prefer the archive importer for public
+guided-run evidence, then review the generated record and add only independently
+supported physical verdicts:
 
 - set `run_id`, `firmware_version`, and timezone-aware `captured_at`;
 - record the observed `route`, capture completeness, tool/integration versions,
   build verification, and sanitized evidence paths;
 - record each required scenario and write capability independently, with its
   status and evidence links;
+- leave statuses `inconclusive` when the ZIP lacks the physical observation,
+  complete capture, or verified build needed to support a verdict;
 - keep revision `privacy_review` as `pass`.
 
 ## 5. Validate matrix and fixture hygiene
@@ -177,9 +196,11 @@ The validator checks:
 - stale evidence in require-pass mode;
 - redaction failures such as raw Bluetooth MAC addresses.
 
-The default command validates structure and privacy while allowing `pending`
-results. It is not a hardware qualification pass. Use `--require-pass` to reject
-pending or failed results for all required routes, scenarios, and capabilities.
+The default command validates structure and privacy while allowing pending and
+inconclusive results. It does not qualify hardware. `--require-pass` requires
+fresh, complete, firmware- and route-scoped `pass` results, a verified build, and
+both supported routes for each qualified firmware. `not_applicable`, inconclusive,
+unknown, partial, expired, or legacy results do not satisfy that gate.
 
 ## 6. Privacy and publication rules
 
@@ -202,6 +223,38 @@ For a qualification PR, include:
 
 For stable promotion that requires strict HIL gating, ensure repository variable
 REQUIRE_HIL_STABLE_GATE is true so CI enforces require-pass mode.
+
+## Complete archive handoff example
+
+The contributor creates and attaches a public ZIP from their run directory:
+
+```bash
+python -m scripts.hil report hil-results/<run-directory>
+python -m scripts.hil export hil-results/<run-directory>
+```
+
+The ZIP is written to `hil-results/<run-directory>/hil-evidence.zip`. The
+contributor attaches that file to the qualification PR. After downloading it,
+the maintainer reviews the proposed profile, firmware, observed route, capture
+completeness, build provenance, guided step records, and evidence paths without
+changing repository files:
+
+```bash
+python -m scripts.hil import /path/to/hil-evidence.zip --dry-run
+```
+
+If the archive and proposed paths are appropriate, the maintainer explicitly
+applies the import and validates the resulting matrix:
+
+```bash
+python -m scripts.hil import /path/to/hil-evidence.zip --apply
+python scripts/validate_hil_qualification.py
+```
+
+The imported record remains `inconclusive`; current ZIP exports omit frame
+payloads and report unverified or mismatched installed-build provenance. The
+import is reviewable evidence, not a physical qualification. Only separately
+reviewed evidence can support per-route, per-firmware PASS results.
 
 ## Transaction safety regression
 

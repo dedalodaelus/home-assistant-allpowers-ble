@@ -72,13 +72,22 @@ sha256sum --check dist/allpowers_ble.zip.sha256
 - Re-test settings preservation when settings changed.
 - Re-test reconnect, Home Assistant restart, and proxy route change.
 - Run without unexplained protocol or watchdog errors for a representative period.
-- Update `tests/hil/qualification_matrix.json` for every verified hardware revision.
-- Include sanitized fixtures under `tests/hil/fixtures/<revision-id>/` for both
-  `local_adapter` and `active_proxy` lanes.
+- Keep a v2 revision record for every verified hardware revision and separate run
+  records for each firmware and observed route. Do not share results across
+  firmware versions or routes.
+- Import reviewed public guided-run evidence with
+  `python -m scripts.hil import <zip> --dry-run`, inspect the proposed profile,
+  scope, evidence paths, and limitations, then use `--apply` to write it.
+- Keep results inconclusive when the archive does not include independent
+  physical evidence. Store sanitized imported evidence under
+  `tests/hil/fixtures/<revision-id>/`.
 - Run `python scripts/validate_hil_qualification.py` before opening the release PR.
 - For stable promotion where HIL is mandatory, enforce the gate with
   `REQUIRE_HIL_STABLE_GATE=true` and run
   `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`.
+- The ordinary CI validator checks metadata offline; the strict gate requires
+  fresh, complete, verified-build PASS results for both supported routes per
+  firmware and does not accept legacy, inconclusive, or `not_applicable` results.
 
 ## Publishing
 
