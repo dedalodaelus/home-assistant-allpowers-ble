@@ -131,7 +131,7 @@ def test_blocked_output_run_is_retained_in_public_report(tmp_path: Path) -> None
     result = _execute_output_suite(
         SimpleNamespace(origin="http://home-assistant.local"),
         Namespace(
-            scenario_id="output_ac_cycle", non_interactive=True, route="local_adapter"
+            scenario_id="output_ac_cycle", non_interactive=False, route="local_adapter"
         ),
         device,
         {},

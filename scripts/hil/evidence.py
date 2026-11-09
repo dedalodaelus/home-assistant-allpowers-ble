@@ -1227,8 +1227,8 @@ def _render_report(
             or "unavailable"
         )
         read_only_text = (
-            "## Read-only observations\n\n"
-            + f"- Execution mode: `{session_data['mode']}`\n"
+            "## Initial read-only preflight snapshot\n\n"
+            + f"- Snapshot type: `{session_data['mode']}`\n"
             + f"- Requested route: `{route.get('requested', 'unavailable')}`\n"
             + f"- Preflight: `{preflight.get('overall', 'inconclusive')}`; {check_text}\n"
             + f"- Telemetry: {telemetry_text}\n"
