@@ -12,15 +12,15 @@ on:
   workflow_dispatch:
     inputs:
       require_pass:
-        description: "Require pass/na in every lane and scenario"
+        description: "Require fresh scoped passes for every firmware, route, scenario, and capability"
         type: boolean
         required: false
         default: false
       max_age_days:
         description: "Maximum evidence age in days when require_pass is true"
-        type: string
+        type: number
         required: false
-        default: "30"
+        default: 30
 
 permissions: {}
 
@@ -46,13 +46,20 @@ jobs:
           python-version: "3.14"
 
       - name: Validate HIL evidence and matrix
+        env:
+          HIL_REQUIRE_PASS: ${{ inputs.require_pass }}
+          HIL_MAX_AGE_DAYS: ${{ inputs.max_age_days }}
         run: |
           set -euo pipefail
           ARGS=(scripts/validate_hil_qualification.py)
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ "${{ inputs.require_pass }}" == "true" ]]; then
-              ARGS+=(--require-pass --max-age-days "${{ inputs.max_age_days }}")
+            if [[ "$HIL_REQUIRE_PASS" == "true" ]]; then
+              if ! [[ "$HIL_MAX_AGE_DAYS" =~ ^[0-9]+$ ]]; then
+                echo "max_age_days must be a non-negative integer" >&2
+                exit 2
+              fi
+              ARGS+=(--require-pass --max-age-days "$HIL_MAX_AGE_DAYS")
             fi
           elif [[ "${{ vars.REQUIRE_HIL_STABLE_GATE }}" == "true" ]]; then
             ARGS+=(--require-pass --max-age-days 30)

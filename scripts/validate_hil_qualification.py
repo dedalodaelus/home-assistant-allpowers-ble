@@ -46,7 +46,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--matrix", default=str(DEFAULT_MATRIX))
     parser.add_argument("--require-pass", action="store_true")
     parser.add_argument("--max-age-days", type=int, default=30)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_age_days < 0:
+        parser.error("--max-age-days must be a non-negative integer")
+    return args
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -248,6 +251,8 @@ def _validate_run(
             )
         if captured_date is not None:
             age = (datetime.now(UTC).date() - captured_date).days
+            if age < 0:
+                _error(errors, f"{context} captured_at is in the future")
             if age > max_age_days:
                 _error(
                     errors, f"{context} evidence is stale ({age}d > {max_age_days}d)"

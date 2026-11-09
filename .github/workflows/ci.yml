@@ -90,7 +90,7 @@ jobs:
           - name: Validate repository
             run: python scripts/validate_repository.py
 
-          - name: Validate HIL qualification matrix
+          - name: Validate HIL schema v2 and metadata (offline)
             run: python scripts/validate_hil_qualification.py
 
       - name: Upload coverage report
