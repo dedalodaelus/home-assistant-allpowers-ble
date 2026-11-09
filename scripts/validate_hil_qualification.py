@@ -155,14 +155,32 @@ def _has_bound_capture(
     values: Any,
     *,
     route: Any,
+    revision_id: str,
+    firmware_version: Any,
+    run_id: Any,
+    captured_at: Any,
     result_key: str,
     capability: bool,
     expected_verdict: str,
 ) -> bool:
     for row in _capture_rows(values):
         frame_hex = row.get("frame_hex")
+        row_captured_at = row.get("captured_at")
+        try:
+            capture_time = datetime.fromisoformat(
+                row_captured_at.replace("Z", "+00:00")
+            )
+            run_time = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        except AttributeError, ValueError:
+            continue
         if (
             row.get("route") != route
+            or row.get("revision_id") != revision_id
+            or row.get("firmware_version") != firmware_version
+            or row.get("run_id") != run_id
+            or capture_time.tzinfo is None
+            or run_time.tzinfo is None
+            or capture_time.astimezone(UTC) != run_time.astimezone(UTC)
             or row.get("verdict") != expected_verdict
             or row.get("physical_outcome")
             != ("not_applicable" if expected_verdict == "not_applicable" else "pass")
@@ -191,6 +209,10 @@ def _check_result_map(
     *,
     require_pass: bool,
     route: Any,
+    revision_id: str,
+    firmware_version: Any,
+    run_id: Any,
+    captured_at: Any,
     capability: bool = False,
 ) -> None:
     if not isinstance(results, dict):
@@ -228,6 +250,10 @@ def _check_result_map(
             elif not _has_bound_capture(
                 item.get("evidence"),
                 route=route,
+                revision_id=revision_id,
+                firmware_version=firmware_version,
+                run_id=run_id,
+                captured_at=captured_at,
                 result_key=key,
                 capability=capability,
                 expected_verdict="not_applicable"
@@ -247,6 +273,7 @@ def _validate_run(
     *,
     require_pass: bool,
     max_age_days: int,
+    revision_id: str,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
@@ -344,6 +371,10 @@ def _validate_run(
         errors,
         require_pass=require_pass,
         route=route,
+        revision_id=revision_id,
+        firmware_version=firmware,
+        run_id=run_id,
+        captured_at=captured_at,
     )
     _check_result_map(
         run.get("write_capabilities"),
@@ -352,6 +383,10 @@ def _validate_run(
         errors,
         require_pass=require_pass,
         route=route,
+        revision_id=revision_id,
+        firmware_version=firmware,
+        run_id=run_id,
+        captured_at=captured_at,
         capability=True,
     )
     if qualification == "pass" and (
@@ -443,6 +478,7 @@ def validate_matrix(
                 errors,
                 require_pass=False,
                 max_age_days=max_age_days,
+                revision_id=revision_id,
             )
             if run_id is not None:
                 if run_id in seen_runs:
@@ -537,6 +573,7 @@ def validate_matrix(
                         errors,
                         require_pass=True,
                         max_age_days=max_age_days,
+                        revision_id=revision_id,
                     )
         summaries.append(
             f"{revision_id}: {len(runs)} scoped run(s), "

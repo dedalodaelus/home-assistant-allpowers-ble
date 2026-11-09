@@ -27,6 +27,7 @@ An independently reviewed capture row should be a sanitized JSON object and
 include:
 
 - route (`local_adapter` or `active_proxy`)
+- revision ID, firmware version, run ID, and timezone-aware capture timestamp
 - scenario key for a scenario result
 - capability key for a write-capability result
 - direction (`write` or `notify`)
@@ -36,7 +37,8 @@ include:
 
 For a justified unsupported control, use the capability key, `direction` of
 `observe`, and `verdict` of `not_applicable`; the matrix entry must include a
-rationale. Strict validation requires a matching route and operation row for
+rationale. Strict validation requires a matching revision, firmware, run,
+timestamp, route, and operation row for
 every PASS or `not_applicable` claim, including matching
 `physical_outcome: "pass"` or `physical_outcome: "not_applicable"`. Generic
 notes and the legacy `*.sample` files do not qualify.

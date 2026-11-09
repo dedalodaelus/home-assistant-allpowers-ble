@@ -36,8 +36,8 @@ and attributed current results. It selects the newest eligible run for each
 firmware and route, so a later complete failure supersedes an older pass while
 an inconclusive archive import does not. Scenario results must pass; a write
 capability may be `not_applicable` only with scoped supporting evidence and a
-rationale. The gate checks route- and operation-bound capture records, while
-independent physical evidence review remains necessary.
+rationale. Capture records must also match the matrix revision, firmware, run
+ID, and timestamp. Independent physical evidence review remains necessary.
 
 ## Current matrix
 

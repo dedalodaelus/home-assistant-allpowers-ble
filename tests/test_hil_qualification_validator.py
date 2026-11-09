@@ -22,6 +22,8 @@ def _capture_fixture(
     route: str,
     name: str,
     *,
+    firmware_version: str,
+    captured_at: str,
     verdict: str = "ok",
     not_applicable_capability: str | None = None,
 ) -> str:
@@ -31,6 +33,10 @@ def _capture_fixture(
     rows = [
         {
             "route": route,
+            "revision_id": "r600-hw03",
+            "firmware_version": firmware_version,
+            "run_id": name,
+            "captured_at": captured_at,
             "scenario": scenario,
             "direction": "notify" if scenario == "golden_vector_replay" else "write",
             "frame_hex": "AA550E00107A0102005A6BC1000000",
@@ -44,6 +50,10 @@ def _capture_fixture(
         rows.append(
             {
                 "route": route,
+                "revision_id": "r600-hw03",
+                "firmware_version": firmware_version,
+                "run_id": name,
+                "captured_at": captured_at,
                 "capability": capability,
                 "direction": "observe" if is_na else "write",
                 "frame_hex": "AA550E00107A0102005A6BC1000000",
@@ -66,12 +76,15 @@ def _qualified_run(
     captured_at: datetime,
     *,
     qualification: str = "pass",
+    firmware_version: str = "1.0",
     not_applicable_capability: str | None = None,
 ) -> dict[str, Any]:
     evidence = _capture_fixture(
         tmp_path,
         route,
         run_id,
+        firmware_version=firmware_version,
+        captured_at=captured_at.isoformat(),
         verdict="fail" if qualification == "fail" else "ok",
         not_applicable_capability=not_applicable_capability,
     )
@@ -97,7 +110,7 @@ def _qualified_run(
         scenarios = {key: _result(evidence) for key in validator.REQUIRED_SCENARIOS}
     return {
         "run_id": run_id,
-        "firmware_version": "1.0",
+        "firmware_version": firmware_version,
         "route": route,
         "captured_at": captured_at.isoformat(),
         "tool_version": "1.0",
@@ -261,11 +274,71 @@ def test_strict_gate_rejects_note_only_or_wrong_route_evidence(
     )
     assert any("route- and operation-bound capture row" in item for item in errors)
 
+
+def test_capture_evidence_is_bound_to_revision_firmware_run_and_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    runs = [
+        _qualified_run(
+            tmp_path,
+            route,
+            f"{route}-fw-{firmware}",
+            now,
+            firmware_version=firmware,
+        )
+        for firmware in ("1.1", "1.2")
+        for route in sorted(validator.REQUIRED_ROUTES)
+    ]
+    matrix_path = tmp_path / "matrix.json"
+    matrix = _matrix(runs)
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert errors == []
+
+    source = next(run for run in runs if run["run_id"] == "local_adapter-fw-1.1")
+    target = next(run for run in runs if run["run_id"] == "local_adapter-fw-1.2")
+    target["scenarios"]["golden_vector_replay"]["evidence"] = source["evidence"]
+    matrix = _matrix(runs)
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("route- and operation-bound capture row" in item for item in errors)
+
+    target["scenarios"]["golden_vector_replay"]["evidence"] = [
+        f"tests/hil/fixtures/{target['run_id']}.jsonl"
+    ]
+    target["captured_at"] = (now + timedelta(days=1)).isoformat()
+    matrix = _matrix(runs)
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("route- and operation-bound capture row" in item for item in errors)
+
+    target["captured_at"] = now.isoformat()
+    matrix = _matrix(runs)
+    matrix["revisions"][0]["id"] = "other-revision"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("route- and operation-bound capture row" in item for item in errors)
+
     wrong_route_name = (
         "local_adapter" if runs[0]["route"] == "active_proxy" else "active_proxy"
     )
     wrong_route = _capture_fixture(
-        tmp_path, wrong_route_name, "wrong-route", verdict="ok"
+        tmp_path,
+        wrong_route_name,
+        "wrong-route",
+        firmware_version=runs[0]["firmware_version"],
+        captured_at=runs[0]["captured_at"],
+        verdict="ok",
     )
     runs[0]["scenarios"]["golden_vector_replay"]["evidence"] = [wrong_route]
     matrix = _matrix(runs)

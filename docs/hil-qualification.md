@@ -132,6 +132,7 @@ sanitized fixture files under:
 Each independently sourced JSONL row should be a sanitized object with:
 
 - route: local_adapter or active_proxy
+- revision_id, firmware_version, run_id, and timezone-aware captured_at
 - scenario: one required scenario name
 - direction: write or notify
 - frame_hex: payload bytes in hex
@@ -139,20 +140,22 @@ Each independently sourced JSONL row should be a sanitized object with:
 - physical_outcome: pass, fail, or not_applicable, based on the observed result
 - capability: required for write-capability evidence; use the matrix key
 
-For strict qualification, a scenario row must match the run's route and
-scenario key, have a `write` or `notify` direction, a valid frame, and
-`verdict: "ok"` plus `physical_outcome: "pass"`. A capability PASS row must
-match its capability key and use `direction: "write"`; a justified
+For strict qualification, each row must exactly match the matrix revision,
+firmware, run ID, and capture timestamp as well as its route. A scenario row
+must match the scenario key, have a `write` or `notify` direction, a valid
+frame, and `verdict: "ok"` plus `physical_outcome: "pass"`. A capability PASS
+row must match its capability key and use `direction: "write"`; a justified
 `not_applicable` row must use `direction: "observe"`,
 `verdict: "not_applicable"`, `physical_outcome: "not_applicable"`, and a matrix
-rationale. These checks bind a claim to a specific capture record. They do not
-cryptographically authenticate where a file came from; independent physical
-evidence review remains required.
+rationale. Changing the matrix timestamp cannot make an older capture current
+because the capture row retains its own timestamp. These checks bind a claim to
+a specific run and capture record. They do not cryptographically authenticate
+where a file came from; independent physical evidence review remains required.
 
 Example row:
 
 ```json
-{"route":"local_adapter","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
+{"route":"local_adapter","revision_id":"r600-hw03","firmware_version":"1.1","run_id":"r600-hw03-fw11-local-20261109","captured_at":"2026-11-09T12:00:00+00:00","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
 ```
 
 Do not describe a synthetic frame made with the project's checksum helper or a
