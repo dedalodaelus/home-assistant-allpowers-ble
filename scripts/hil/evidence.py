@@ -1679,6 +1679,10 @@ def verify_public_archive(
             not in {"local_adapter", "active_proxy", "unverified", "mixed"}
         ):
             raise HAAPIError("Invalid HIL archive capture counters")
+        if capture["complete"] and (
+            capture["dropped_events"] > 0 or capture["dropped_frames"] > 0
+        ):
+            raise HAAPIError("Complete HIL capture declares dropped events or frames")
     manifest_files = manifest.get("files")
     if not isinstance(manifest_files, list) or any(
         not isinstance(item, dict) or set(item) != {"name", "size", "sha256"}
@@ -2214,6 +2218,20 @@ def verify_public_archive(
         capture_id not in declared_captures for capture_id, _ in event_identity_rows
     ):
         raise HAAPIError("HIL event references undeclared capture")
+    observed_routes_by_capture: dict[str, set[str]] = {}
+    for row in event_rows:
+        observed_route = row["observed_route"]
+        if observed_route in {"local_adapter", "active_proxy"}:
+            observed_routes_by_capture.setdefault(row["capture_id"], set()).add(
+                observed_route
+            )
+    for capture in capture_rows:
+        declared_route = capture["route"]
+        observed_routes = observed_routes_by_capture.get(capture["capture_id"], set())
+        if declared_route in {"local_adapter", "active_proxy"} and (
+            observed_routes - {declared_route}
+        ):
+            raise HAAPIError("HIL capture route conflicts with route observations")
     event_references = set()
     for row in event_rows:
         per_capture_counts[row["capture_id"]] = (

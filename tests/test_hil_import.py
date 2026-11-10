@@ -81,6 +81,46 @@ def _repack_archive(
     return destination
 
 
+def _rewrite_capture_archive(
+    source: Path,
+    destination: Path,
+    *,
+    capture_updates: dict[str, dict[str, Any]],
+    member_updates: dict[str, bytes] | None = None,
+) -> Path:
+    with zipfile.ZipFile(source) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members.update(
+        {f"public/{name}": value for name, value in (member_updates or {}).items()}
+    )
+    manifest = json.loads(members["public/manifest.json"])
+    captures = manifest["captures"]
+    for capture in captures["by_capture"]:
+        capture.update(capture_updates.get(capture["capture_id"], {}))
+    captures["dropped_events"] = sum(
+        capture["dropped_events"] for capture in captures["by_capture"]
+    )
+    captures["dropped_frames"] = sum(
+        capture["dropped_frames"] for capture in captures["by_capture"]
+    )
+    manifest["files"] = [
+        {
+            "name": name.removeprefix("public/"),
+            "size": len(contents),
+            "sha256": hashlib.sha256(contents).hexdigest(),
+        }
+        for name, contents in sorted(members.items())
+        if name != "public/manifest.json"
+    ]
+    members["public/manifest.json"] = (
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, contents in members.items():
+            archive.writestr(name, contents)
+    return destination
+
+
 def _matrix(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     matrix = migrate_v1_to_v2(
@@ -340,6 +380,61 @@ def test_import_rejects_duplicate_json_keys_without_writing(
             tampered, matrix_path=matrix_path, apply=True, repo_root=tmp_path / "repo"
         )
 
+    assert matrix_path.read_bytes() == matrix_before
+    assert not fixture_tree.exists()
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_error"),
+    [
+        ("route", "HIL capture route conflicts with route observations"),
+        (
+            "dropped_events",
+            "Complete HIL capture declares dropped events or frames",
+        ),
+        (
+            "dropped_frames",
+            "Complete HIL capture declares dropped events or frames",
+        ),
+    ],
+)
+def test_import_rejects_capture_metadata_conflicts_without_writing(
+    tmp_path: Path, tamper: str, expected_error: str
+) -> None:
+    archive = _captured_archive(
+        tmp_path / "source", "local_adapter", "1.1", "abcdef0123456789"
+    )
+    tampered = tmp_path / f"capture-{tamper}-conflict.zip"
+    member_updates = None
+    if tamper == "route":
+        with zipfile.ZipFile(archive) as source:
+            report = source.read("public/report.md")
+        old_route = b"Observed GATT route: local_adapter"
+        assert old_route in report
+        member_updates = {
+            "report.md": report.replace(
+                old_route, b"Observed GATT route: active_proxy", 1
+            )
+        }
+        capture_updates = {"capture-0001": {"route": "active_proxy"}}
+    else:
+        capture_updates = {"capture-0001": {"complete": True, tamper: 1}}
+    _rewrite_capture_archive(
+        archive,
+        tampered,
+        capture_updates=capture_updates,
+        member_updates=member_updates,
+    )
+
+    repo_root = tmp_path / "repo"
+    matrix_path = _matrix(repo_root)
+    matrix_before = matrix_path.read_bytes()
+    fixture_tree = repo_root / "tests" / "hil" / "fixtures"
+    assert not fixture_tree.exists()
+    with pytest.raises(HAAPIError, match=expected_error):
+        import_archive(
+            tampered, matrix_path=matrix_path, apply=True, repo_root=repo_root
+        )
     assert matrix_path.read_bytes() == matrix_before
     assert not fixture_tree.exists()
 
