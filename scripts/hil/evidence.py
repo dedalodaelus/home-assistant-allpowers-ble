@@ -33,6 +33,21 @@ PUBLIC_NAMES = {
     "manifest.json",
     "report.md",
 }
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"Duplicate JSON object key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_public_json(raw: bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+
+
 OUTCOMES = {"pass", "fail", "inconclusive", "skipped", "not_applicable"}
 EVENT_NAMES = {
     "capture_started",
@@ -1469,8 +1484,10 @@ def _valid_public_facts(groups: dict[str, Any]) -> bool:
     return True
 
 
-def verify_public_archive(path: Path) -> dict[str, Any]:
-    """Validate archive member set and manifest digests before consumers import it."""
+def verify_public_archive(
+    path: Path, *, include_contents: bool = False
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, bytes], str]:
+    """Validate the public archive, optionally returning the verified member bytes."""
     absolute = Path(os.path.abspath(path))
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
@@ -1485,6 +1502,11 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         with os.fdopen(fd, "rb") as archive_file:
             if not stat.S_ISREG(os.fstat(archive_file.fileno()).st_mode):
                 raise HAAPIError("Invalid HIL archive file")
+            archive_bytes = archive_file.read(MAX_ARCHIVE + 1)
+            if len(archive_bytes) > MAX_ARCHIVE:
+                raise HAAPIError("Invalid HIL archive")
+            archive_digest = hashlib.sha256(archive_bytes).hexdigest()
+            archive_file.seek(0)
             with zipfile.ZipFile(archive_file) as archive:
                 infos = archive.infolist()
                 names = [i.filename for i in infos]
@@ -1515,7 +1537,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
     if "manifest.json" not in data:
         raise HAAPIError("HIL archive manifest missing")
     try:
-        manifest = json.loads(data["manifest.json"])
+        manifest = _load_public_json(data["manifest.json"])
     except (UnicodeError, ValueError) as exc:
         raise HAAPIError("Invalid HIL archive manifest") from exc
     if (
@@ -1588,7 +1610,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
     ):
         raise HAAPIError("Invalid HIL archive build provenance")
     try:
-        environment_data = json.loads(data["environment.json"]).get("data", {})
+        environment_data = _load_public_json(data["environment.json"]).get("data", {})
         integration_facts = environment_data.get("integration", {})
     except (KeyError, AttributeError, UnicodeError, ValueError) as exc:
         raise HAAPIError("HIL archive build provenance has no environment") from exc
@@ -1657,6 +1679,10 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
             not in {"local_adapter", "active_proxy", "unverified", "mixed"}
         ):
             raise HAAPIError("Invalid HIL archive capture counters")
+        if capture["complete"] and (
+            capture["dropped_events"] > 0 or capture["dropped_frames"] > 0
+        ):
+            raise HAAPIError("Complete HIL capture declares dropped events or frames")
     manifest_files = manifest.get("files")
     if not isinstance(manifest_files, list) or any(
         not isinstance(item, dict) or set(item) != {"name", "size", "sha256"}
@@ -1676,7 +1702,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
             raise HAAPIError("HIL archive digest mismatch")
         if name.endswith(".json"):
             try:
-                value = json.loads(data[name])
+                value = _load_public_json(data[name])
             except (UnicodeError, ValueError) as exc:
                 raise HAAPIError("Malformed JSON in HIL archive") from exc
             if (
@@ -2052,7 +2078,7 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         elif name.endswith(".jsonl"):
             try:
                 for line in data[name].splitlines():
-                    event = json.loads(line)
+                    event = _load_public_json(line)
                     if name == "frames.jsonl":
                         if (
                             not isinstance(event, dict)
@@ -2162,10 +2188,10 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
     ):
         raise HAAPIError("Required public archive members are missing")
     event_rows = [
-        json.loads(line) for line in data.get("events.jsonl", b"").splitlines()
+        _load_public_json(line) for line in data.get("events.jsonl", b"").splitlines()
     ]
     frame_rows = [
-        json.loads(line) for line in data.get("frames.jsonl", b"").splitlines()
+        _load_public_json(line) for line in data.get("frames.jsonl", b"").splitlines()
     ]
     capture_rows = captures["by_capture"]
     if (
@@ -2192,6 +2218,20 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         capture_id not in declared_captures for capture_id, _ in event_identity_rows
     ):
         raise HAAPIError("HIL event references undeclared capture")
+    observed_routes_by_capture: dict[str, set[str]] = {}
+    for row in event_rows:
+        observed_route = row["observed_route"]
+        if observed_route in {"local_adapter", "active_proxy"}:
+            observed_routes_by_capture.setdefault(row["capture_id"], set()).add(
+                observed_route
+            )
+    for capture in capture_rows:
+        declared_route = capture["route"]
+        observed_routes = observed_routes_by_capture.get(capture["capture_id"], set())
+        if declared_route in {"local_adapter", "active_proxy"} and (
+            observed_routes - {declared_route}
+        ):
+            raise HAAPIError("HIL capture route conflicts with route observations")
     event_references = set()
     for row in event_rows:
         per_capture_counts[row["capture_id"]] = (
@@ -2335,6 +2375,8 @@ def verify_public_archive(path: Path) -> dict[str, Any]:
         raise HAAPIError("HIL report does not match public evidence")
     if manifest.get("run_id") != session_data.get("run_id", "unavailable"):
         raise HAAPIError("HIL archive run identity mismatch")
+    if include_contents:
+        return manifest, data, archive_digest
     return manifest
 
 

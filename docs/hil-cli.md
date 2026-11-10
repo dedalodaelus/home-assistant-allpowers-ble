@@ -90,6 +90,35 @@ qualification status remains inconclusive where evidence is insufficient.
 After interruption, run `report` on the same directory; it does not resume or
 repeat HIL actions.
 
+### Review and import a public evidence ZIP
+
+An exported ZIP can be reviewed and added to the repository without upgrading
+qualification results:
+
+```bash
+python -m scripts.hil import path/to/hil-evidence.zip --dry-run
+python -m scripts.hil import path/to/hil-evidence.zip --apply
+```
+
+Import defaults to a dry run. Review the reported profile, firmware, observed
+route, capture completeness, guided scenario records, and missing qualification
+evidence before rerunning with `--apply`. The importer verifies archive members,
+schemas, privacy allowlist and file hashes, then copies only public ZIP members
+into `tests/hil/fixtures/` and records the run in the v2 matrix. Imported run,
+scenario, and write-capability results remain `inconclusive`; a guided software
+step or route trace does not become a physical qualification PASS. The original
+session run ID, scoped to the verified model/revision, firmware, and route,
+defines logical run identity; ZIP SHA-256 is retained separately as an artifact
+integrity value. Repackaging or re-exporting the same public members is
+idempotent. If a known session ID arrives with different verified member
+contents or scope, import fails without changing the matrix or fixtures. When
+the source session ID is unavailable, a canonical hash of the verified member
+names and contents supplies a deterministic fallback independent of ZIP
+timestamps and packaging. Conflicting existing evidence is rejected.
+Archives without verified model or hardware metadata are kept under an
+unattributed revision identifier. Missing capture timestamps or firmware remain
+unknown and cannot satisfy strict qualification.
+
 ### Bluetooth adapter/proxy candidates in Home Assistant 2026.10.4
 
 Home Assistant 2026.10.4 registers the **admin-only** WebSocket command `bluetooth/subscribe_scanner_details` ([server implementation](https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/bluetooth/websocket_api.py#L249-L294); [upstream tests](https://github.com/home-assistant/core/blob/2026.10.4/tests/components/bluetooth/test_websocket_api.py#L310-L373)). This is a short-lived *subscription*: it returns a command acknowledgement, then an initial `event.add` list of scanner objects, if any. That list includes **addresses, names and source IDs**. The CLI requests the initial event only when permitted, collects four **counts only** (`total_scanners`, `connectable_scanners`, `remote_scanners`, `connectable_remote_scanners`), and closes the subscription. No raw scanner record or identifier enters the JSON. With non-admin accounts, Bluetooth not loaded, unsupported API, or an absent initial event, `bluetooth_scanner_candidates` is explicitly `unknown`.

@@ -91,9 +91,19 @@ specific hardware revision.
 
 For verified write-capable profiles, also:
 
-- add sanitized HIL captures under `tests/hil/fixtures/<revision-id>/`;
-- update `tests/hil/qualification_matrix.json` for local-adapter and active-proxy
-  routes, scenarios, and write-capability status;
+- add a schema-v2 revision record and keep each HIL run scoped to the exact
+  firmware and observed route;
+- use the public archive importer in review-first mode:
+
+  ```bash
+  python -m scripts.hil import /path/to/hil-evidence.zip --dry-run
+  python -m scripts.hil import /path/to/hil-evidence.zip --apply
+  ```
+
+- review imported evidence under `tests/hil/fixtures/<revision-id>/`; archive
+  import creates inconclusive results only and cannot qualify physical behavior;
+- record each scenario and write-capability verdict with evidence for that exact
+  firmware and route. Never copy a PASS or `not_applicable` result across scopes;
 - run `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`
   before requesting stable promotion.
 

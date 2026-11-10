@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
 from .evidence import export_archive, write_report
+from .importer import DEFAULT_MATRIX, import_archive
 from .discovery import Device, choose_device, find_devices
 from .environment import (
     build_environment,
@@ -108,6 +109,22 @@ def make_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("run_directory", type=Path)
     export_parser.add_argument("--non-interactive", action="store_true")
     export_parser.add_argument("--confirm-export", action="store_true")
+    import_parser = commands.add_parser(
+        "import", help="Review and import a verified public HIL evidence ZIP"
+    )
+    import_parser.add_argument("archive", type=Path)
+    import_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    import_modes = import_parser.add_mutually_exclusive_group()
+    import_modes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without writing (default)",
+    )
+    import_modes.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write reviewed evidence and matrix changes",
+    )
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
@@ -536,6 +553,8 @@ def _execute_soak_suite(
 
 def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
+    if args.command == "import":
+        return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "report":
         write_report(args.run_directory)
         print("HIL report written to: public/report.md")

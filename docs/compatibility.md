@@ -28,9 +28,16 @@ The repository distinguishes three runtime code-profile levels:
 
 Physical HIL qualification is tracked separately in
 [`tests/hil/qualification_matrix.json`](../tests/hil/qualification_matrix.json).
-Only its route, scenario, and write-capability results describe completed
-physical qualification; a passing default matrix-validator run accepts pending
-results and does not qualify hardware.
+Schema v2 keeps results scoped to a model/hardware revision, firmware, observed
+route, and run. Only linked, independently reviewed physical evidence can
+support a `pass`; a successful default matrix-validator run checks structure and
+privacy, not qualification. The opt-in strict gate accepts only fresh, complete
+and attributed current results. It selects the newest eligible run for each
+firmware and route, so a later complete failure supersedes an older pass while
+an inconclusive archive import does not. Scenario results must pass; a write
+capability may be `not_applicable` only with scoped supporting evidence and a
+rationale. Capture records must also match the matrix revision, firmware, run
+ID, and timestamp. Independent physical evidence review remains necessary.
 
 ## Current matrix
 
@@ -80,8 +87,9 @@ change a rejected family to supported merely because it exposes one matching UUI
 
 ## Verified revision evidence lane
 
-Every profile classified as a **Verified code profile** must keep an evidence record in
-`tests/hil/qualification_matrix.json` with:
+Every profile classified as a **Verified code profile** must have a revision
+record in `tests/hil/qualification_matrix.json`. Each physical run is recorded
+separately for one firmware and one observed route, with:
 
 - a route result for `local_adapter`;
 - a route result for `active_proxy`;
@@ -90,14 +98,24 @@ Every profile classified as a **Verified code profile** must keep an evidence re
 - write-capability status for every exposed writable control.
 
 Capture artifacts must stay sanitized and stored under
-`tests/hil/fixtures/<revision-id>/`. Do not publish Bluetooth addresses, serial
-numbers, Home Assistant identifiers, or topology details.
+`tests/hil/fixtures/<revision-id>/`. Review public archives with:
+
+```bash
+python -m scripts.hil import <zip> --dry-run
+```
+
+Add one only with `--apply`. Imported archives remain inconclusive until
+physical results are independently reviewed.
+Do not publish Bluetooth addresses, serial numbers, Home Assistant identifiers,
+or topology details.
 
 The matrix records qualification progress, not the software classifier result.
-Pending routes, scenarios, or write capabilities must remain pending; do not infer
-coverage from unit tests or an undifferentiated hardware-validation report. The
-current VOLIX P1800 evidence scope and its missing route-specific captures are
-recorded under `tests/hil/fixtures/volix-p1800-hw03/`.
+Unexecuted results remain pending; missing or incomplete evidence is inconclusive.
+Neither status counts as a strict pass, and legacy v1 results remain unscoped.
+Do not infer coverage from unit tests, an undifferentiated hardware report, or a
+result for another firmware or route. The current VOLIX P1800 evidence scope and
+its missing route-specific captures are recorded under
+`tests/hil/fixtures/volix-p1800-hw03/`.
 
 Use the [HIL qualification runbook](hil-qualification.md) for the end-to-end
 capture, matrix update, and validation flow.
