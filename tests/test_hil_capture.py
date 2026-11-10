@@ -1,6 +1,8 @@
 """Bounded and privacy-preserving HIL capture unit contracts."""
 
 import asyncio
+import os
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,7 +24,10 @@ from custom_components.allpowers_ble.hil_trace import (
     ws_fetch,
     ws_start,
     ws_stop,
+    _integration_fingerprint,
+    ws_build,
 )
+from custom_components.allpowers_ble import hil_trace
 
 
 class _CaptureClient:
@@ -98,6 +103,338 @@ def test_bounded_capture_sequence_and_raw_private():
     assert capture.dropped_frames > 0
     capture.stop()
     assert capture.snapshot()["complete"] is False
+
+
+def _temporary_integration(root: Path) -> Path:
+    package = root / "custom_components" / "allpowers_ble"
+    package.mkdir(parents=True)
+    (package / "manifest.json").write_text('{"version":"0.3.0"}')
+    (package / "__init__.py").write_text("DOMAIN = 'allpowers_ble'\n")
+    return package
+
+
+def test_installed_fingerprint_matches_checkout_algorithm_and_tracks_file_set(
+    monkeypatch, tmp_path
+):
+    from scripts.hil import environment
+
+    package = _temporary_integration(tmp_path)
+    monkeypatch.setattr(environment, "ROOT", tmp_path)
+    checkout = environment.local_integration_fingerprint()
+    assert checkout is not None
+    assert _integration_fingerprint(package) == checkout
+
+    cache = package / "__pycache__"
+    cache.mkdir()
+    (cache / "module.cpython-314.pyc").write_bytes(b"generated")
+    (package / "module.pyc").write_bytes(b"generated")
+    assert _integration_fingerprint(package) == checkout
+
+    source = package / "__init__.py"
+    source.write_text("DOMAIN = 'changed'\n")
+    assert _integration_fingerprint(package) != checkout
+    source.write_text("DOMAIN = 'allpowers_ble'\n")
+    extra = package / "extra.py"
+    extra.write_text("EXTRA = True\n")
+    assert _integration_fingerprint(package) != checkout
+    extra.unlink()
+    (package / "manifest.json").unlink()
+    assert _integration_fingerprint(package) != checkout
+
+
+def test_installed_fingerprint_rejects_symlinks_and_bounded_scan_failures(
+    monkeypatch, tmp_path
+):
+    package = _temporary_integration(tmp_path)
+    target = package / "__init__.py"
+
+    monkeypatch.setattr(hil_trace, "MAX_BUILD_FILE_BYTES", 4)
+    with pytest.raises(OSError, match="size limit"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "symlink")
+    target = package / "__init__.py"
+    outside = tmp_path / "outside.py"
+    outside.write_text("PRIVATE = True")
+    try:
+        (package / "linked.py").symlink_to(outside)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    with pytest.raises(OSError, match="symlink"):
+        _integration_fingerprint(package)
+
+    (package / "linked.py").unlink()
+    real_open = os.open
+
+    def unreadable(path, flags, *args, **kwargs):
+        if Path(path) == target:
+            raise PermissionError("private path should not escape")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(hil_trace.os, "open", unreadable)
+    with pytest.raises(PermissionError):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "scan-error")
+
+    def failed_scandir(_root):
+        raise PermissionError("scan unavailable")
+
+    monkeypatch.setattr(hil_trace.os, "scandir", failed_scandir)
+    with pytest.raises(PermissionError, match="scan unavailable"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+
+def test_installed_fingerprint_rejects_invalid_and_oversized_trees(
+    monkeypatch, tmp_path
+):
+    root_file = tmp_path / "not-a-directory"
+    root_file.write_text("file")
+    with pytest.raises(OSError, match="invalid integration directory"):
+        _integration_fingerprint(root_file)
+
+    package = _temporary_integration(tmp_path / "entry-limit")
+    monkeypatch.setattr(hil_trace, "MAX_BUILD_ENTRIES", 1)
+    with pytest.raises(OSError, match="too many integration entries"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "file-limit")
+    (package / "extra.py").write_text("EXTRA = True")
+    monkeypatch.setattr(hil_trace, "MAX_BUILD_FILES", 1)
+    with pytest.raises(OSError, match="too many integration files"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "total-limit")
+    (package / "manifest.json").write_text("123")
+    (package / "__init__.py").write_text("456")
+    monkeypatch.setattr(hil_trace, "MAX_BUILD_FILE_BYTES", 4)
+    monkeypatch.setattr(hil_trace, "MAX_BUILD_TOTAL_BYTES", 5)
+    with pytest.raises(OSError, match="total size limit"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = tmp_path / "empty"
+    package.mkdir()
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "unused.pyc").write_bytes(b"cache")
+    with pytest.raises(OSError, match="empty integration"):
+        _integration_fingerprint(package)
+
+    try:
+        (tmp_path / "root-link").symlink_to(package, target_is_directory=True)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    with pytest.raises(OSError, match="invalid integration directory"):
+        _integration_fingerprint(tmp_path / "root-link")
+
+
+def test_installed_fingerprint_rejects_escaped_and_invalid_scan_entries(
+    monkeypatch, tmp_path
+):
+    package = _temporary_integration(tmp_path / "inside")
+    outside = _temporary_integration(tmp_path / "outside")
+    child = package / "nested"
+    child.mkdir()
+    (child / "module.py").write_text("VALUE = True")
+    original_resolve = Path.resolve
+
+    def escaped_resolve(path, *, strict=False):
+        if path == child:
+            return outside.resolve()
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", escaped_resolve)
+    with pytest.raises(OSError, match="escaped root"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    def failed_scandir(_path):
+        raise PermissionError("scan unavailable")
+
+    monkeypatch.setattr(hil_trace.os, "scandir", failed_scandir)
+    with pytest.raises(PermissionError, match="scan unavailable"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "special-pyc")
+    (package / "fake.pyc").unlink(missing_ok=True)
+    try:
+        os.mkfifo(package / "fake.pyc")
+        with pytest.raises(OSError, match="invalid generated integration file"):
+            _integration_fingerprint(package)
+        os.unlink(package / "fake.pyc")
+        os.mkfifo(package / "special.dat")
+        with pytest.raises(OSError, match="invalid integration file"):
+            _integration_fingerprint(package)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"named pipes unavailable: {error}")
+
+
+def test_installed_fingerprint_rejects_a_file_changed_during_read(
+    monkeypatch, tmp_path
+):
+    package = _temporary_integration(tmp_path)
+    target = package / "__init__.py"
+    real_open = os.open
+
+    def mutate_after_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if Path(path) == target:
+            target.write_text("DOMAIN = 'changed while reading'\n")
+        return descriptor
+
+    monkeypatch.setattr(hil_trace.os, "open", mutate_after_open)
+    with pytest.raises(OSError, match="changed during scan"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "changed-after-read")
+    target = package / "__init__.py"
+    original_fdopen = os.fdopen
+
+    class MutatingReader:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __enter__(self):
+            self.wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.wrapped.__exit__(*args)
+
+        def fileno(self):
+            return self.wrapped.fileno()
+
+        def read(self, limit):
+            contents = self.wrapped.read(limit)
+            target.write_text("X" * len(contents))
+            return contents
+
+    monkeypatch.setattr(
+        hil_trace.os,
+        "fdopen",
+        lambda descriptor, mode: MutatingReader(original_fdopen(descriptor, mode)),
+    )
+    with pytest.raises(OSError, match="changed during scan"):
+        _integration_fingerprint(package)
+
+
+def test_installed_fingerprint_rejects_short_read_and_tree_changes(
+    monkeypatch, tmp_path
+):
+    package = _temporary_integration(tmp_path / "short-read")
+    original_fdopen = os.fdopen
+
+    class ShortReader:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __enter__(self):
+            self.wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.wrapped.__exit__(*args)
+
+        def fileno(self):
+            return self.wrapped.fileno()
+
+        def read(self, _limit):
+            return b"x"
+
+    monkeypatch.setattr(
+        hil_trace.os,
+        "fdopen",
+        lambda descriptor, mode: ShortReader(original_fdopen(descriptor, mode)),
+    )
+    with pytest.raises(OSError, match="changed or exceeds size limit"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "post-read-change")
+    file_identity = hil_trace._file_identity
+    identity_calls = 0
+
+    def changed_after_read(metadata):
+        nonlocal identity_calls
+        identity_calls += 1
+        identity = file_identity(metadata)
+        if identity_calls == 4:
+            return (*identity[:-1], identity[-1] + 1)
+        return identity
+
+    monkeypatch.setattr(hil_trace, "_file_identity", changed_after_read)
+    with pytest.raises(OSError, match="changed during scan"):
+        _integration_fingerprint(package)
+    monkeypatch.undo()
+
+    package = _temporary_integration(tmp_path / "tree-change")
+    scan = hil_trace._scan_build_tree
+    calls = 0
+
+    def change_tree(root):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (root / "added.py").write_text("ADDED = True")
+        return scan(root)
+
+    monkeypatch.setattr(hil_trace, "_scan_build_tree", change_tree)
+    with pytest.raises(OSError, match="tree changed during scan"):
+        _integration_fingerprint(package)
+
+
+def test_ws_build_uses_executor_and_fails_closed_for_denial_and_scan_error(
+    monkeypatch, tmp_path
+):
+    import asyncio
+
+    class Connection:
+        def __init__(self, is_admin):
+            self.user = SimpleNamespace(is_admin=is_admin)
+            self.results = []
+            self.errors = []
+
+        def send_result(self, request_id, result):
+            self.results.append((request_id, result))
+
+        def send_error(self, request_id, code, message):
+            self.errors.append((request_id, code, message))
+
+    class Hass:
+        def __init__(self):
+            self.executor_calls = 0
+
+        async def async_add_executor_job(self, function, *args):
+            self.executor_calls += 1
+            return function(*args)
+
+    hass = Hass()
+    admin = Connection(True)
+    monkeypatch.setattr(hil_trace, "_integration_fingerprint", lambda: "a" * 64)
+    asyncio.run(ws_build(hass, admin, {"id": 7}))
+    assert hass.executor_calls == 1
+    assert admin.results == [(7, {"schema_version": 1, "fingerprint": "a" * 64})]
+
+    denied = Connection(False)
+    asyncio.run(ws_build(hass, denied, {"id": 8}))
+    assert denied.errors[0][1] == "unauthorized"
+    assert hass.executor_calls == 1
+
+    def fail_scan():
+        raise OSError("sensitive filesystem path")
+
+    monkeypatch.setattr(hil_trace, "_integration_fingerprint", fail_scan)
+    failed = Connection(True)
+    asyncio.run(ws_build(hass, failed, {"id": 9}))
+    assert failed.errors == [(9, "scan_failed", "Integration fingerprint unavailable")]
+    assert "sensitive" not in repr(failed.errors)
 
 
 def test_frame_oversize_and_no_capture_after_stop():

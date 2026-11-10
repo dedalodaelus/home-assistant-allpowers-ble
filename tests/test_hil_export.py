@@ -495,7 +495,9 @@ def test_archive_verifier_rejects_contradictory_manifest(
         },
     )
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
-    monkeypatch.setattr(environment, "local_integration_fingerprint", lambda: "a" * 64)
+    monkeypatch.setattr(
+        environment, "_local_integration_snapshot", lambda: ("a" * 64, [])
+    )
     monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
     env = environment.build_environment(
         {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
@@ -1175,7 +1177,9 @@ def test_real_environment_checkout_and_mismatch_facts_verify(
         lambda: {"value": "a" * 40, "source": "runner_git_checkout", "verified": True},
     )
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
-    monkeypatch.setattr(environment, "local_integration_fingerprint", lambda: "a" * 64)
+    monkeypatch.setattr(
+        environment, "_local_integration_snapshot", lambda: ("a" * 64, [])
+    )
     monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
     env = environment.build_environment(
         {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
@@ -1198,3 +1202,51 @@ def test_real_environment_checkout_and_mismatch_facts_verify(
     assert manifest["build_provenance"]["verification"] == "mismatch"
     assert manifest["build_provenance"]["checkout_fingerprint"] == "a" * 64
     assert manifest["build_provenance"]["installed_fingerprint"] == "b" * 64
+
+
+def test_verified_build_provenance_survives_report_and_public_zip(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scripts.hil import environment
+
+    fingerprint = "c" * 64
+    commit = "d" * 40
+    monkeypatch.setattr(environment, "local_manifest_version", lambda: "0.3.0")
+    monkeypatch.setattr(
+        environment, "_local_integration_snapshot", lambda: (fingerprint, [])
+    )
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
+    monkeypatch.setattr(
+        environment,
+        "local_commit",
+        lambda: environment.observed(commit, "runner_git_checkout"),
+    )
+    facts = environment.build_environment(
+        {"version": "2026.10.4", "installation_type": "Home Assistant Core"},
+        {"version": "0.3.0"},
+        remote_fingerprint=fingerprint,
+    )
+    assert facts["integration"]["build_match"] == "verified"
+    assert facts["integration"]["installed_commit"]["value"] == commit
+    assert facts["integration"]["verification_reason"] is None
+    assert facts["integration"]["qualification_allowed"] is False
+
+    run = write_run(
+        tmp_path,
+        "verified-build",
+        facts,
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+        },
+    )
+    archive = export_archive(run, confirmed=True)
+    manifest, members, _ = verify_public_archive(archive, include_contents=True)
+    assert manifest["build_provenance"]["verification"] == "verified"
+    assert manifest["build_provenance"]["installed_commit"] == commit
+    public_integration = json.loads(members["environment.json"])["data"]["integration"]
+    assert public_integration["build_match"]["verified"] is True
+    assert public_integration["installed_commit"]["value"] == commit
+    assert commit in members["report.md"].decode()
+    assert manifest["qualification_status"] == "inconclusive"

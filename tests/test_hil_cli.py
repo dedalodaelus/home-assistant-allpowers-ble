@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import subprocess
 from types import ModuleType
 from urllib.error import HTTPError
 import zipfile
@@ -409,7 +410,7 @@ def test_integration_fingerprint_is_deterministic_and_ignores_generated_files(
 def test_fingerprint_match_requires_clean_checkout_and_commit(monkeypatch):
     fingerprint = "a" * 64
     monkeypatch.setattr(
-        environment, "local_integration_fingerprint", lambda: fingerprint
+        environment, "_local_integration_snapshot", lambda: (fingerprint, [])
     )
     monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "0.3.0")
@@ -429,7 +430,18 @@ def test_fingerprint_match_requires_clean_checkout_and_commit(monkeypatch):
     dirty = environment.integration_build({"version": "0.3.0"}, fingerprint)
     assert dirty["build_match"] == "unverified"
     assert dirty["installed_commit"]["value"] is None
-    assert "modifications" in dirty["verification_reason"]
+    assert "dirty" in dirty["verification_reason"]
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
+    monkeypatch.setattr(
+        environment, "local_commit", lambda: environment.unknown("git unavailable")
+    )
+    missing_sha = environment.integration_build({"version": "0.3.0"}, fingerprint)
+    assert missing_sha["build_match"] == "unverified"
+    assert missing_sha["installed_commit"]["value"] is None
+    assert (
+        missing_sha["verification_reason"]
+        == "checkout Git commit unavailable or invalid"
+    )
 
 
 def test_fingerprint_api_fails_closed_for_unsupported_or_invalid_response(monkeypatch):
@@ -460,6 +472,68 @@ def test_fingerprint_api_fails_closed_for_unsupported_or_invalid_response(monkey
 
     monkeypatch.setattr(client, "websocket", unsupported)
     assert client.integration_build_fingerprint() is None
+
+
+def test_checkout_clean_requires_exact_tracked_integration_subtree(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "repo"
+    package = root / "custom_components" / "allpowers_ble"
+    package.mkdir(parents=True)
+    module = package / "module.py"
+    manifest = package / "manifest.json"
+    module.write_text("VALUE = 1\n")
+    manifest.write_text('{"version":"0.3.0"}')
+    (root / ".gitignore").write_text("custom_components/allpowers_ble/*.ignored\n")
+    subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Tester",
+            "-c",
+            "user.email=test@example.test",
+            "add",
+            ".",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Tester",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(environment, "ROOT", root)
+    files = [module, manifest]
+    assert environment._checkout_clean(files) is True
+
+    extra = package / "untracked.py"
+    extra.write_text("EXTRA = True\n")
+    assert environment._checkout_clean([*files, extra]) is False
+    extra.unlink()
+
+    ignored = package / "generated.ignored"
+    ignored.write_text("LOADABLE = True\n")
+    assert environment._checkout_clean([*files, ignored]) is False
+    ignored.unlink()
+
+    module.write_text("VALUE = 2\n")
+    assert environment._checkout_clean(files) is False
+    module.write_text("VALUE = 1\n")
+    manifest.unlink()
+    assert environment._checkout_clean([module]) is False
 
 
 def test_read_only_snapshot_excludes_rest_attributes_and_arbitrary_states(
@@ -497,6 +571,34 @@ def test_doctor_performs_read_only_checks_and_writes_nothing(
     assert "secret-device-id" not in captured
     assert not (tmp_path / "no-results").exists()
     assert all(call[0] in {"get", "ws"} for call in fake.calls)
+
+
+def test_doctor_prints_verified_installed_commit(
+    monkeypatch, capsys, allpowers_registry
+):
+    fingerprint = "a" * 64
+    commit = "b" * 40
+    fake = FakeHA(allpowers_registry)
+    fake.integration_build_fingerprint = lambda: fingerprint
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(
+        environment, "_local_integration_snapshot", lambda: (fingerprint, [])
+    )
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
+    monkeypatch.setattr(
+        environment,
+        "local_commit",
+        lambda: environment.observed(commit, "runner_git_checkout"),
+    )
+    monkeypatch.setenv("HA_HIL_TOKEN", "test-token")
+
+    assert (
+        cli.main(["doctor", "--ha-url", "https://example.test", "--non-interactive"])
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "Installed integration build: verified" in output
+    assert f"Installed integration commit: {commit}" in output
 
 
 def test_run_writes_private_allowlisted_json_without_identifiers(

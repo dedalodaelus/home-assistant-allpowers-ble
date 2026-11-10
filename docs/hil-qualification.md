@@ -261,6 +261,7 @@ python -m scripts.hil export hil-results/<run-directory>
 The ZIP is written to `hil-results/<run-directory>/hil-evidence.zip`. The
 contributor attaches that file to the qualification PR. After downloading it,
 the maintainer reviews the proposed profile, firmware, observed route, capture
+completeness, build provenance, guided step records, and evidence paths without
 changing repository files:
 
 ```bash

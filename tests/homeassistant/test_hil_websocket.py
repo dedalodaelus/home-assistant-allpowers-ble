@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from custom_components.allpowers_ble.hil_capabilities import (
     async_register as async_register_capabilities,
 )
+from custom_components.allpowers_ble import hil_trace
 from custom_components.allpowers_ble.hil_trace import (
     KEY,
     async_register,
@@ -167,7 +168,7 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
 
 @pytest.mark.asyncio
 async def test_installed_build_fingerprint_is_admin_only(
-    hass, hass_ws_client, hass_admin_user
+    hass, hass_ws_client, hass_admin_user, monkeypatch
 ):
     await async_register(hass)
     admin = await hass_ws_client()
@@ -187,6 +188,16 @@ async def test_installed_build_fingerprint_is_admin_only(
     assert denied["success"] is False
     assert denied["error"]["code"] == "unauthorized"
     hass_admin_user.groups = saved_groups
+
+    def fail_scan():
+        raise OSError("private path must not reach the client")
+
+    monkeypatch.setattr(hil_trace, "_integration_fingerprint", fail_scan)
+    await admin.send_json_auto_id({"type": "allpowers_ble/hil/build"})
+    failed = await admin.receive_json()
+    assert failed["success"] is False
+    assert failed["error"]["code"] == "scan_failed"
+    assert failed["error"]["message"] == "Integration fingerprint unavailable"
 
 
 @pytest.mark.asyncio

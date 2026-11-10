@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections import OrderedDict
 from datetime import UTC, datetime
+import re
+import secrets
+import stat
 from pathlib import Path
 from time import monotonic
 from typing import Any
-import re
-import secrets
-import os
 
 import probatio as vol
 
@@ -37,6 +38,10 @@ MAX_EVENTS = 256
 MAX_FRAMES = 128
 SEALED_RETRIEVAL_SECONDS = 30
 MAX_SEALED_CAPTURES = 4
+MAX_BUILD_FILES = 256
+MAX_BUILD_ENTRIES = 1024
+MAX_BUILD_FILE_BYTES = 2 * 1024 * 1024
+MAX_BUILD_TOTAL_BYTES = 8 * 1024 * 1024
 
 
 def classify_tx(frame: bytes | bytearray) -> str:
@@ -77,37 +82,106 @@ _FETCH_SCHEMA: dict[Any, Any] = {
 _BUILD_SCHEMA: dict[Any, Any] = {vol.Required("type"): "allpowers_ble/hil/build"}
 
 
-def _integration_fingerprint() -> str:
-    """Fingerprint packaged integration files without runtime-generated files."""
-    root = Path(__file__).parent
-    digest = hashlib.sha256()
-    files: list[Path] = []
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Fields that reveal replacement or mutation during a fingerprint scan."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
-    def fail_scan(error: OSError) -> None:
-        raise error
 
-    for directory, names, filenames in os.walk(
-        root, onerror=fail_scan, followlinks=False
-    ):
-        if any((Path(directory) / name).is_symlink() for name in names):
-            raise OSError("symlink in integration")
-        names[:] = sorted(name for name in names if name != "__pycache__")
-        for filename in filenames:
-            path = Path(directory) / filename
-            if path.suffix != ".pyc":
-                if path.is_symlink():
+def _scan_build_tree(
+    root: Path,
+) -> tuple[
+    dict[Path, tuple[int, ...]], dict[Path, tuple[tuple[str, tuple[int, ...]], ...]]
+]:
+    """Collect a bounded, path-safe snapshot or fail the entire scan."""
+    if root.is_symlink() or not stat.S_ISDIR(root.lstat().st_mode):
+        raise OSError("invalid integration directory")
+    resolved_root = root.resolve(strict=True)
+    files: dict[Path, tuple[int, ...]] = {}
+    directories: dict[Path, tuple[tuple[str, tuple[int, ...]], ...]] = {}
+    pending = [resolved_root]
+    entries_seen = 0
+
+    while pending:
+        current = pending.pop()
+        if current.is_symlink() or not current.resolve(strict=True).is_relative_to(
+            resolved_root
+        ):
+            raise OSError("integration path escaped root")
+        snapshot: list[tuple[str, tuple[int, ...]]] = []
+        child_directories: list[Path] = []
+        with os.scandir(current) as iterator:
+            for entry in iterator:
+                entries_seen += 1
+                if entries_seen > MAX_BUILD_ENTRIES:
+                    raise OSError("too many integration entries")
+                name = entry.name
+                path = current / name
+                metadata = entry.stat(follow_symlinks=False)
+                identity = _file_identity(metadata)
+                if stat.S_ISLNK(metadata.st_mode):
                     raise OSError("symlink in integration")
-                files.append(path)
-    files.sort()
+                if stat.S_ISDIR(metadata.st_mode):
+                    if name == "__pycache__":
+                        continue
+                    snapshot.append((name, identity))
+                    child_directories.append(path)
+                elif name.endswith(".pyc"):
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise OSError("invalid generated integration file")
+                else:
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise OSError("invalid integration file")
+                    if metadata.st_size > MAX_BUILD_FILE_BYTES:
+                        raise OSError("integration file exceeds size limit")
+                    snapshot.append((name, identity))
+                    files[path] = identity
+                    if len(files) > MAX_BUILD_FILES:
+                        raise OSError("too many integration files")
+        directories[current] = tuple(sorted(snapshot))
+        pending.extend(reversed(sorted(child_directories)))
     if not files:
         raise OSError("empty integration")
-    for path in files:
-        if path.is_symlink():
-            raise OSError("symlink in integration")
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+    if sum(identity[3] for identity in files.values()) > MAX_BUILD_TOTAL_BYTES:
+        raise OSError("integration exceeds total size limit")
+    return files, directories
+
+
+def _integration_fingerprint(root: Path | None = None) -> str:
+    """Fingerprint packaged files with bounded I/O and race/change detection."""
+    root = (root or Path(__file__).parent).absolute()
+    if root.is_symlink():
+        raise OSError("invalid integration directory")
+    root = root.resolve(strict=True)
+    files, directories = _scan_build_tree(root)
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+        expected = files[path]
+        relative = path.relative_to(root).as_posix()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            before = _file_identity(os.fstat(stream.fileno()))
+            if before != expected:
+                raise OSError("integration file changed during scan")
+            content = stream.read(MAX_BUILD_FILE_BYTES + 1)
+            after = _file_identity(os.fstat(stream.fileno()))
+        if len(content) != expected[3]:
+            raise OSError("integration file changed or exceeds size limit")
+        if after != before or _file_identity(path.lstat()) != expected:
+            raise OSError("integration file changed during scan")
+        digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(content)
         digest.update(b"\0")
+    current_files, current_directories = _scan_build_tree(root)
+    if current_files != files or current_directories != directories:
+        raise OSError("integration tree changed during scan")
     return digest.hexdigest()
 
 
@@ -115,12 +189,11 @@ def _integration_fingerprint() -> str:
 @websocket_api.async_response
 async def ws_build(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
     """Expose only the admin-authorized installed-file fingerprint."""
-    del hass
     if not _authorized(connection, msg):
         return
     try:
-        fingerprint = _integration_fingerprint()
-    except OSError:
+        fingerprint = await hass.async_add_executor_job(_integration_fingerprint)
+    except Exception:
         connection.send_error(
             msg["id"], "scan_failed", "Integration fingerprint unavailable"
         )

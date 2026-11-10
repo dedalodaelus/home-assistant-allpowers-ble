@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import re
 import secrets
+import stat
 import subprocess
 from typing import Any
 
@@ -19,6 +20,10 @@ from .discovery import BINARY_KEYS, SENSOR_KEYS, Device, safe_version
 
 ROOT = Path(__file__).resolve().parents[2]
 VALUE_LIMIT = 200
+MAX_INTEGRATION_FILES = 256
+MAX_INTEGRATION_ENTRIES = 1024
+MAX_INTEGRATION_FILE_BYTES = 2 * 1024 * 1024
+MAX_INTEGRATION_TOTAL_BYTES = 8 * 1024 * 1024
 
 
 def observed(value: str | int | float | bool, source: str) -> dict[str, Any]:
@@ -72,39 +77,114 @@ def local_manifest_version() -> str | None:
     return _safe_label(value)
 
 
-def local_integration_fingerprint() -> str | None:
-    """Hash packaged files using the same path/content stream as HA."""
+def _scan_local_tree(
+    root: Path,
+) -> tuple[
+    dict[Path, tuple[int, ...]], dict[Path, tuple[tuple[str, tuple[int, ...]], ...]]
+]:
+    """Build a bounded subtree snapshot and reject symlinks or special files."""
+    if root.is_symlink() or not stat.S_ISDIR(root.lstat().st_mode):
+        raise OSError("invalid integration directory")
+    root = root.resolve(strict=True)
+    pending = [root]
+    files: dict[Path, tuple[int, ...]] = {}
+    directories: dict[Path, tuple[tuple[str, tuple[int, ...]], ...]] = {}
+    entries_seen = 0
+    total_bytes = 0
+    while pending:
+        current = pending.pop()
+        if current.is_symlink() or not current.resolve(strict=True).is_relative_to(
+            root
+        ):
+            raise OSError("integration path escaped root")
+        snapshot: list[tuple[str, tuple[int, ...]]] = []
+        child_directories: list[Path] = []
+        with os.scandir(current) as iterator:
+            for entry in iterator:
+                entries_seen += 1
+                if entries_seen > MAX_INTEGRATION_ENTRIES:
+                    raise OSError("too many integration entries")
+                metadata = entry.stat(follow_symlinks=False)
+                identity = _file_identity(metadata)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise OSError("symlink in integration")
+                if stat.S_ISDIR(metadata.st_mode):
+                    if entry.name == "__pycache__":
+                        continue
+                    snapshot.append((entry.name, identity))
+                    child_directories.append(current / entry.name)
+                elif entry.name.endswith(".pyc"):
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise OSError("invalid generated integration file")
+                else:
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise OSError("invalid integration file")
+                    if metadata.st_size > MAX_INTEGRATION_FILE_BYTES:
+                        raise OSError("integration file exceeds size limit")
+                    total_bytes += metadata.st_size
+                    if total_bytes > MAX_INTEGRATION_TOTAL_BYTES:
+                        raise OSError("integration exceeds total size limit")
+                    files[current / entry.name] = identity
+                    if len(files) > MAX_INTEGRATION_FILES:
+                        raise OSError("too many integration files")
+                    snapshot.append((entry.name, identity))
+        directories[current] = tuple(sorted(snapshot))
+        pending.extend(reversed(sorted(child_directories)))
+    if not files:
+        raise OSError("empty integration")
+    return files, directories
+
+
+def _local_integration_snapshot() -> tuple[str, list[Path]] | None:
+    """Return one stable bounded fingerprint and its exact included file set."""
     root = ROOT / "custom_components/allpowers_ble"
     try:
-        paths: list[Path] = []
-
-        def fail_scan(error: OSError) -> None:
-            raise error
-
-        for directory, names, filenames in os.walk(
-            root, onerror=fail_scan, followlinks=False
-        ):
-            if any((Path(directory) / name).is_symlink() for name in names):
-                return None
-            names[:] = sorted(name for name in names if name != "__pycache__")
-            for filename in filenames:
-                path = Path(directory) / filename
-                if path.suffix != ".pyc":
-                    if path.is_symlink():
-                        return None
-                    paths.append(path)
-        paths.sort()
-        if not paths:
-            return None
+        files, directories = _scan_local_tree(root)
         digest = hashlib.sha256()
-        for path in paths:
+        for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+            expected = files[path]
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                before = _file_identity(os.fstat(stream.fileno()))
+                if before != expected:
+                    return None
+                content = stream.read(MAX_INTEGRATION_FILE_BYTES + 1)
+                after = _file_identity(os.fstat(stream.fileno()))
+            if (
+                len(content) != expected[3]
+                or after != before
+                or _file_identity(path.lstat()) != expected
+            ):
+                return None
             digest.update(path.relative_to(root).as_posix().encode("utf-8"))
             digest.update(b"\0")
-            digest.update(path.read_bytes())
+            digest.update(content)
             digest.update(b"\0")
-        return digest.hexdigest()
-    except OSError:
+        current_files, current_directories = _scan_local_tree(root)
+        if current_files != files or current_directories != directories:
+            return None
+        return digest.hexdigest(), sorted(
+            files, key=lambda item: item.relative_to(root).as_posix()
+        )
+    except OSError, ValueError:
         return None
+
+
+def local_integration_fingerprint() -> str | None:
+    """Hash packaged files using the same path/content stream as HA."""
+    snapshot = _local_integration_snapshot()
+    return snapshot[0] if snapshot else None
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _checkout_clean(paths: list[Path]) -> bool:
@@ -152,36 +232,46 @@ def integration_build(
     """Establish installed identity from file bytes and a clean Git checkout."""
     version = _safe_label(manifest.get("version")) if manifest else None
     checkout_version = local_manifest_version()
-    local_fingerprint = local_integration_fingerprint()
-    local_root = ROOT / "custom_components/allpowers_ble"
-    local_paths = [
-        path
-        for path in local_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    ]
+    local_snapshot = _local_integration_snapshot()
+    local_fingerprint = local_snapshot[0] if local_snapshot else None
+    local_paths = local_snapshot[1] if local_snapshot else []
     clean = _checkout_clean(local_paths)
-    same = bool(local_fingerprint and remote_fingerprint == local_fingerprint)
-    match = (
-        "verified"
-        if same and clean
-        else "mismatch"
-        if remote_fingerprint
-        and local_fingerprint
-        and remote_fingerprint != local_fingerprint
-        else "unverified"
+    checkout_commit = local_commit()
+    commit_sha = checkout_commit.get("value")
+    commit_valid = (
+        checkout_commit.get("verified") is True
+        and isinstance(commit_sha, str)
+        and re.fullmatch(r"[a-f0-9]{40}", commit_sha) is not None
     )
-    reason = (
-        "checkout has local modifications"
-        if same and not clean
-        else "installed integration files differ from checkout"
-        if match == "mismatch"
-        else "installed fingerprint endpoint unavailable or invalid"
-        if remote_fingerprint is None
-        else "checkout integration files could not be scanned"
-        if local_fingerprint is None
-        else "checkout commit unavailable"
+    remote_valid = (
+        isinstance(remote_fingerprint, str)
+        and re.fullmatch(r"[a-f0-9]{64}", remote_fingerprint) is not None
     )
-    commit = local_commit() if match == "verified" else unknown(reason)
+    same = bool(
+        local_fingerprint and remote_valid and remote_fingerprint == local_fingerprint
+    )
+    if local_fingerprint and remote_valid and remote_fingerprint != local_fingerprint:
+        match = "mismatch"
+        reason = "installed integration files differ from checkout"
+    elif not remote_valid:
+        match = "unverified"
+        reason = "installed fingerprint endpoint unavailable or invalid"
+    elif not local_fingerprint:
+        match = "unverified"
+        reason = "checkout integration files could not be scanned"
+    elif not clean:
+        match = "unverified"
+        reason = "checkout subtree is dirty or Git attribution is unavailable"
+    elif not commit_valid:
+        match = "unverified"
+        reason = "checkout Git commit unavailable or invalid"
+    elif same:
+        match = "verified"
+        reason = None
+    else:
+        match = "unverified"
+        reason = "installed integration fingerprint could not be compared"
+    commit = checkout_commit if match == "verified" else unknown(reason or "unverified")
     return {
         "installed_manifest_version": (
             observed(version, "ha_ws_manifest_get")
@@ -189,7 +279,7 @@ def integration_build(
             else unknown("manifest/get absent, unsupported, or unauthorized")
         ),
         "installed_commit": commit,
-        "runner_checkout_commit": local_commit(),
+        "runner_checkout_commit": checkout_commit,
         "runner_checkout_manifest_version": (
             observed(checkout_version, "runner_repository_manifest")
             if checkout_version

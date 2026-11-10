@@ -444,10 +444,13 @@ def _safe_fact_value(key: str, value: Any) -> bool:
     if key == "verification_reason":
         return value in {
             "checkout has local modifications",
+            "checkout subtree is dirty or Git attribution is unavailable",
             "installed integration files differ from checkout",
             "installed fingerprint endpoint unavailable or invalid",
             "checkout integration files could not be scanned",
             "checkout commit unavailable",
+            "checkout Git commit unavailable or invalid",
+            "installed integration fingerprint could not be compared",
             "installed and checkout manifest versions differ",
         }
     return False
@@ -668,7 +671,7 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                     allowed[key] = {
                         "value": item,
                         "source": "runner_build_verification",
-                        "verified": item == "mismatch",
+                        "verified": item == "verified",
                     }
                 elif key == "verification_reason" and _safe_fact_value(
                     key, group.get(key)

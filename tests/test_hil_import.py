@@ -28,21 +28,34 @@ def _public_archive(
     source_run_id: str | None = "0123456789abcdef",
     installed_version: str = "1.2.3",
     firmware_version: str = "1.1",
+    verified_build: bool = False,
 ) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     run = path / "run"
     run.mkdir(parents=True)
+    integration_facts = {
+        "installed_manifest_version": _fact(installed_version, "ha_ws_manifest_get"),
+        "build_match": _fact(
+            "verified" if verified_build else "mismatch",
+            "runner_build_verification",
+        ),
+        "runner_checkout_commit": (
+            _fact("a" * 40, "runner_git_checkout")
+            if verified_build
+            else _fact(None, "unknown", False)
+        ),
+    }
+    if verified_build:
+        integration_facts.update(
+            installed_commit=_fact("a" * 40, "runner_git_checkout"),
+            installed_fingerprint=_fact("b" * 64, "ha_ws_hil_build"),
+            checkout_fingerprint=_fact("b" * 64, "runner_integration_files"),
+        )
     environment = {
         "schema_version": 1,
         "home_assistant": {},
         "runner_host": {},
-        "integration": {
-            "installed_manifest_version": _fact(
-                installed_version, "ha_ws_manifest_get"
-            ),
-            "build_match": _fact("mismatch", "runner_repository_manifest"),
-            "runner_checkout_commit": _fact(None, "unknown", False),
-        },
+        "integration": integration_facts,
     }
     session = {
         "schema_version": 1,
@@ -337,6 +350,28 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
         import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
     assert evidence[0].read_text(encoding="utf-8") == "conflicting contents"
     assert matrix_path.read_bytes() == matrix_before_conflict
+
+
+def test_verified_build_provenance_is_retained_in_imported_matrix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+
+    archive = _public_archive(tmp_path, verified_build=True)
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    assert imported["build_verification"] == "verified"
+    assert imported["installed_commit"] == "a" * 40
+    assert imported["installed_fingerprint"] == "b" * 64
+    assert imported["checkout_fingerprint"] == "b" * 64
+    assert imported["qualification_status"] == "inconclusive"
+    assert "Imported" in capsys.readouterr().out
 
 
 def test_import_rejects_duplicate_json_keys_without_writing(
