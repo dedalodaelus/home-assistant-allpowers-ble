@@ -304,6 +304,16 @@ def _build_proposal(
         "tool_version": manifest["toolkit_version"],
         "integration_version": integration_version,
         "build_verification": manifest["build_provenance"]["verification"],
+        "installed_commit": manifest["build_provenance"].get("installed_commit"),
+        "installed_fingerprint": manifest["build_provenance"].get(
+            "installed_fingerprint"
+        ),
+        "checkout_fingerprint": manifest["build_provenance"].get(
+            "checkout_fingerprint"
+        ),
+        "build_verification_reason": manifest["build_provenance"].get(
+            "verification_reason"
+        ),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
         "evidence": evidence_paths,
