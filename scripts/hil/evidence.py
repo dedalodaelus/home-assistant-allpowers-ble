@@ -434,11 +434,22 @@ def _safe_fact_value(key: str, value: Any) -> bool:
             "Home Assistant Core",
         }
     if key == "build_match":
-        return value in {"mismatch", "unverified"}
+        return value in {"verified", "mismatch", "unverified"}
     if key in {"version", "installed_manifest_version", "python_version", "kernel"}:
         return re.fullmatch(r"[0-9][A-Za-z0-9_.+-]{0,31}", value) is not None
-    if key == "runner_checkout_commit":
+    if key in {"runner_checkout_commit", "installed_commit"}:
         return re.fullmatch(r"[a-f0-9]{40}", value) is not None
+    if key in {"installed_fingerprint", "checkout_fingerprint"}:
+        return re.fullmatch(r"[a-f0-9]{64}", value) is not None
+    if key == "verification_reason":
+        return value in {
+            "checkout has local modifications",
+            "installed integration files differ from checkout",
+            "installed fingerprint endpoint unavailable or invalid",
+            "checkout integration files could not be scanned",
+            "checkout commit unavailable",
+            "installed and checkout manifest versions differ",
+        }
     return False
 
 
@@ -623,6 +634,10 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                 "installed_manifest_version",
                 "build_match",
                 "runner_checkout_commit",
+                "installed_commit",
+                "installed_fingerprint",
+                "checkout_fingerprint",
+                "verification_reason",
             ):
                 item = group.get(key)
                 if isinstance(item, dict):
@@ -639,6 +654,8 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                                 "ha_ws_manifest_get",
                                 "runner_repository_manifest",
                                 "runner_git_checkout",
+                                "ha_ws_hil_build",
+                                "runner_integration_files",
                             }
                             else "unknown",
                             "verified": item.get("verified") is True,
@@ -646,12 +663,20 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                 elif (
                     key == "build_match"
                     and isinstance(item, str)
-                    and item in {"mismatch", "unverified"}
+                    and item in {"verified", "mismatch", "unverified"}
                 ):
                     allowed[key] = {
                         "value": item,
-                        "source": "runner_repository_manifest",
+                        "source": "runner_build_verification",
                         "verified": item == "mismatch",
+                    }
+                elif key == "verification_reason" and _safe_fact_value(
+                    key, group.get(key)
+                ):
+                    allowed[key] = {
+                        "value": group[key],
+                        "source": "runner_build_verification",
+                        "verified": False,
                     }
             result["data"][group_name] = allowed
     else:
@@ -1320,6 +1345,7 @@ def _render_report(
         + "## Environment\n\n"
         + f"- Home Assistant: {ha_facts.get('version', {}).get('value', 'unavailable')}\n"
         + f"- Integration manifest version: {integration_facts.get('installed_manifest_version', {}).get('value', 'unavailable')} (installed build identity {integration_facts.get('build_match', {}).get('value', 'unverified')})\n"
+        + f"- Installed integration commit: {integration_facts.get('installed_commit', {}).get('value') or integration_facts.get('verification_reason', {}).get('value', 'unverified')}\n"
         + f"- Device: {model}; hardware {hardware}; firmware {firmware}\n"
         + f"- Observed GATT route: {route_summary}\n\n"
         + read_only_text
@@ -1412,6 +1438,10 @@ def _write_manifest(
             "installed_manifest_version": fact_value("installed_manifest_version"),
             "verification": fact_value("build_match") or "unverified",
             "runner_checkout_commit": fact_value("runner_checkout_commit"),
+            "installed_commit": fact_value("installed_commit"),
+            "installed_fingerprint": fact_value("installed_fingerprint"),
+            "checkout_fingerprint": fact_value("checkout_fingerprint"),
+            "verification_reason": fact_value("verification_reason"),
         },
         "privacy_policy": "allowlist",
         "validation": "passed",
@@ -1452,6 +1482,10 @@ def _valid_public_facts(groups: dict[str, Any]) -> bool:
         "installed_manifest_version",
         "build_match",
         "runner_checkout_commit",
+        "installed_commit",
+        "installed_fingerprint",
+        "checkout_fingerprint",
+        "verification_reason",
     }
     sources = {
         "runner_platform",
@@ -1460,6 +1494,9 @@ def _valid_public_facts(groups: dict[str, Any]) -> bool:
         "ha_ws_manifest_get",
         "runner_repository_manifest",
         "runner_git_checkout",
+        "ha_ws_hil_build",
+        "runner_integration_files",
+        "runner_build_verification",
         "unknown",
     }
     if set(groups) - {"home_assistant", "runner_host", "integration"}:
@@ -1589,12 +1626,23 @@ def verify_public_archive(
     ):
         raise HAAPIError("Invalid HIL archive run identity")
     build = manifest.get("build_provenance")
+    legacy_build_keys = {
+        "installed_manifest_version",
+        "verification",
+        "runner_checkout_commit",
+    }
+    current_build_keys = legacy_build_keys | {
+        "installed_commit",
+        "installed_fingerprint",
+        "checkout_fingerprint",
+        "verification_reason",
+    }
     if (
         not isinstance(build, dict)
-        or set(build)
-        != {"installed_manifest_version", "verification", "runner_checkout_commit"}
+        or frozenset(build)
+        not in {frozenset(legacy_build_keys), frozenset(current_build_keys)}
         or not isinstance(build.get("verification"), str)
-        or build["verification"] not in {"unverified", "mismatch"}
+        or build["verification"] not in {"verified", "unverified", "mismatch"}
         or (
             build["installed_manifest_version"] is not None
             and not _safe_fact_value(
@@ -1605,6 +1653,18 @@ def verify_public_archive(
             build["runner_checkout_commit"] is not None
             and not _safe_fact_value(
                 "runner_checkout_commit", build["runner_checkout_commit"]
+            )
+        )
+        or any(
+            build[name] is not None and not _safe_fact_value(name, build[name])
+            for name in current_build_keys - legacy_build_keys
+            if name in build
+        )
+        or (
+            "verification_reason" in build
+            and build["verification_reason"] is not None
+            and not _safe_fact_value(
+                "verification_reason", build["verification_reason"]
             )
         )
     ):
@@ -1630,7 +1690,17 @@ def verify_public_archive(
         ),
         "verification": environment_fact_value("build_match") or "unverified",
         "runner_checkout_commit": environment_fact_value("runner_checkout_commit"),
+        "installed_commit": environment_fact_value("installed_commit"),
+        "installed_fingerprint": environment_fact_value("installed_fingerprint"),
+        "checkout_fingerprint": environment_fact_value("checkout_fingerprint"),
+        "verification_reason": integration_facts.get("verification_reason", {}).get(
+            "value"
+        )
+        if isinstance(integration_facts.get("verification_reason"), dict)
+        else None,
     }
+    if set(build) == legacy_build_keys:
+        expected_build = {key: expected_build[key] for key in legacy_build_keys}
     if build != expected_build:
         raise HAAPIError("HIL archive build provenance disagrees with environment")
     captures = manifest.get("captures")

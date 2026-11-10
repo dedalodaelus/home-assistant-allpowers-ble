@@ -166,6 +166,30 @@ async def test_hil_real_websocket_auth_schema_and_sealed_retrieval(
 
 
 @pytest.mark.asyncio
+async def test_installed_build_fingerprint_is_admin_only(
+    hass, hass_ws_client, hass_admin_user
+):
+    await async_register(hass)
+    admin = await hass_ws_client()
+    await admin.send_json_auto_id({"type": "allpowers_ble/hil/build"})
+    result = await admin.receive_json()
+    assert result["success"] is True
+    payload = result["result"]
+    assert payload["schema_version"] == 1
+    assert len(payload["fingerprint"]) == 64
+    assert set(payload) == {"schema_version", "fingerprint"}
+
+    saved_groups = hass_admin_user.groups
+    hass_admin_user.groups = []
+    denied_ws = await hass_ws_client()
+    await denied_ws.send_json_auto_id({"type": "allpowers_ble/hil/build"})
+    denied = await denied_ws.receive_json()
+    assert denied["success"] is False
+    assert denied["error"]["code"] == "unauthorized"
+    hass_admin_user.groups = saved_groups
+
+
+@pytest.mark.asyncio
 async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
     hass: HomeAssistant,
     hass_ws_client,

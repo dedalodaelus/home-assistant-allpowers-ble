@@ -436,6 +436,23 @@ class HAClient:
             ),
         }
 
+    def integration_build_fingerprint(self) -> str | None:
+        """Read the optional administrator-only integration fingerprint."""
+        try:
+            result = self.websocket([{"type": "allpowers_ble/hil/build"}])[0]
+        except HAAPIError:
+            return None
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"schema_version", "fingerprint"}
+            or type(result.get("schema_version")) is not int
+            or result["schema_version"] != 1
+            or not isinstance(result.get("fingerprint"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", result["fingerprint"]) is None
+        ):
+            return None
+        return result["fingerprint"]
+
     def discovery(
         self,
     ) -> tuple[list[Any], list[Any], dict[str, Any] | None, list[Any] | None]:

@@ -671,11 +671,19 @@ def execute(args: argparse.Namespace) -> int:
     # identifiers and BLE addresses never leave HAClient; only counts do.
     get_scanners = getattr(api, "scanner_candidates", None)
     candidates = get_scanners() if callable(get_scanners) else None
-    environment = build_environment(config, manifest, candidates)
+    get_fingerprint = getattr(api, "integration_build_fingerprint", None)
+    remote_fingerprint = get_fingerprint() if callable(get_fingerprint) else None
+    environment = build_environment(config, manifest, candidates, remote_fingerprint)
     print("Home Assistant:", environment["home_assistant"]["version"]["value"])
     installed = environment["integration"]["installed_manifest_version"]["value"]
     print("ALLPOWERS manifest version:", installed or "unknown")
-    print("Installed integration commit: unverified by the standard HA API")
+    integration = environment["integration"]
+    print("Installed integration build:", integration["build_match"])
+    installed_commit = integration["installed_commit"]["value"]
+    print(
+        "Installed integration commit:",
+        installed_commit or integration["verification_reason"],
+    )
     _device_list(devices)
     print(
         "Bluetooth route: not verified by preflight; "

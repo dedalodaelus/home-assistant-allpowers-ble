@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -71,31 +72,140 @@ def local_manifest_version() -> str | None:
     return _safe_label(value)
 
 
-def integration_build(manifest: dict[str, Any] | None) -> dict[str, Any]:
-    """A manifest version alone never proves deployed byte identity."""
+def local_integration_fingerprint() -> str | None:
+    """Hash packaged files using the same path/content stream as HA."""
+    root = ROOT / "custom_components/allpowers_ble"
+    try:
+        paths: list[Path] = []
+
+        def fail_scan(error: OSError) -> None:
+            raise error
+
+        for directory, names, filenames in os.walk(
+            root, onerror=fail_scan, followlinks=False
+        ):
+            if any((Path(directory) / name).is_symlink() for name in names):
+                return None
+            names[:] = sorted(name for name in names if name != "__pycache__")
+            for filename in filenames:
+                path = Path(directory) / filename
+                if path.suffix != ".pyc":
+                    if path.is_symlink():
+                        return None
+                    paths.append(path)
+        paths.sort()
+        if not paths:
+            return None
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _checkout_clean(paths: list[Path]) -> bool:
+    try:
+        tracked = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "ls-files",
+                "--",
+                "custom_components/allpowers_ble",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(ROOT),
+                "status",
+                "--porcelain",
+                "--",
+                "custom_components/allpowers_ble",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    expected = {path.relative_to(ROOT).as_posix() for path in paths}
+    return not result.stdout.strip() and set(tracked.stdout.splitlines()) == expected
+
+
+def integration_build(
+    manifest: dict[str, Any] | None, remote_fingerprint: str | None = None
+) -> dict[str, Any]:
+    """Establish installed identity from file bytes and a clean Git checkout."""
     version = _safe_label(manifest.get("version")) if manifest else None
     checkout_version = local_manifest_version()
-    mismatch = bool(version and checkout_version and version != checkout_version)
+    local_fingerprint = local_integration_fingerprint()
+    local_root = ROOT / "custom_components/allpowers_ble"
+    local_paths = [
+        path
+        for path in local_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    ]
+    clean = _checkout_clean(local_paths)
+    same = bool(local_fingerprint and remote_fingerprint == local_fingerprint)
+    match = (
+        "verified"
+        if same and clean
+        else "mismatch"
+        if remote_fingerprint
+        and local_fingerprint
+        and remote_fingerprint != local_fingerprint
+        else "unverified"
+    )
+    reason = (
+        "checkout has local modifications"
+        if same and not clean
+        else "installed integration files differ from checkout"
+        if match == "mismatch"
+        else "installed fingerprint endpoint unavailable or invalid"
+        if remote_fingerprint is None
+        else "checkout integration files could not be scanned"
+        if local_fingerprint is None
+        else "checkout commit unavailable"
+    )
+    commit = local_commit() if match == "verified" else unknown(reason)
     return {
         "installed_manifest_version": (
             observed(version, "ha_ws_manifest_get")
             if version
             else unknown("manifest/get absent, unsupported, or unauthorized")
         ),
-        "installed_commit": unknown("not exposed by the standard Home Assistant API"),
+        "installed_commit": commit,
         "runner_checkout_commit": local_commit(),
         "runner_checkout_manifest_version": (
             observed(checkout_version, "runner_repository_manifest")
             if checkout_version
             else unknown("runner manifest unavailable")
         ),
-        "build_match": "mismatch" if mismatch else "unverified",
+        "build_match": match,
+        "installed_fingerprint": observed(remote_fingerprint, "ha_ws_hil_build")
+        if remote_fingerprint
+        else unknown(reason),
+        "checkout_fingerprint": observed(local_fingerprint, "runner_integration_files")
+        if local_fingerprint
+        else unknown(reason),
+        "checkout_clean": clean,
+        "verification_reason": reason,
         "qualification_allowed": False,
-        "qualification_blocker": (
-            "installed and checkout manifest versions differ"
-            if mismatch
-            else "installed code fingerprint is not independently verified"
-        ),
+        "qualification_blocker": reason if match != "verified" else None,
     }
 
 
@@ -142,6 +252,7 @@ def build_environment(
     ha_config: dict[str, Any],
     manifest: dict[str, Any] | None,
     scanner_candidates: dict[str, int] | None = None,
+    remote_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Allowlist fields: never serialize the raw HA configuration/registry."""
     version = _safe_label(ha_config.get("version"))
@@ -191,7 +302,7 @@ def build_environment(
             ),
         },
         "runner_host": runner_host(),
-        "integration": integration_build(manifest),
+        "integration": integration_build(manifest, remote_fingerprint),
     }
 
 

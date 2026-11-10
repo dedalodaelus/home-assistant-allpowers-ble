@@ -304,6 +304,7 @@ def _build_proposal(
         "tool_version": manifest["toolkit_version"],
         "integration_version": integration_version,
         "build_verification": manifest["build_provenance"]["verification"],
+        "installed_commit": manifest["build_provenance"].get("installed_commit"),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
         "evidence": evidence_paths,

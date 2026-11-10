@@ -261,7 +261,6 @@ python -m scripts.hil export hil-results/<run-directory>
 The ZIP is written to `hil-results/<run-directory>/hil-evidence.zip`. The
 contributor attaches that file to the qualification PR. After downloading it,
 the maintainer reviews the proposed profile, firmware, observed route, capture
-completeness, build provenance, guided step records, and evidence paths without
 changing repository files:
 
 ```bash
@@ -360,3 +359,7 @@ retries. Its private report contains test names and outcomes only, is explicitly
 marked synthetic, and cannot qualify an integration build or hardware. Live
 transaction-safety execution and all hardware qualification remain outstanding.
 No build-level physical qualification is claimed.
+
+### Installed integration build identity
+
+`doctor`, `run`, and `trace` request the admin-only HIL WebSocket build fingerprint and compare it with the CLI checkout. The SHA-256 stream includes sorted relative paths and file bytes for the integration package, excluding `__pycache__` and `.pyc`. A matching fingerprint is `verified` only when those checkout files are clean in Git; the matching commit SHA is then recorded. Different fingerprints are `mismatch`, even when both manifests say `0.3.0`. Missing/unsupported endpoints, invalid responses, failed scans, or dirty checkouts are `unverified` with a reason. This metadata does not award a scenario PASS or prove that Home Assistant's already-loaded Python modules match its on-disk files. Install the desired development checkout and restart HA before HIL execution, then confirm the exact `Installed integration commit` reported by the CLI. The CLI does not modify installed files or restart/reload HA.

@@ -495,9 +495,12 @@ def test_archive_verifier_rejects_contradictory_manifest(
         },
     )
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
+    monkeypatch.setattr(environment, "local_integration_fingerprint", lambda: "a" * 64)
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
     env = environment.build_environment(
         {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
         {"version": "1.0.0"},
+        remote_fingerprint="b" * 64,
     )
     run = write_run(
         tmp_path,
@@ -1172,9 +1175,12 @@ def test_real_environment_checkout_and_mismatch_facts_verify(
         lambda: {"value": "a" * 40, "source": "runner_git_checkout", "verified": True},
     )
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "2.0.0")
+    monkeypatch.setattr(environment, "local_integration_fingerprint", lambda: "a" * 64)
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
     env = environment.build_environment(
         {"version": "2026.10.4", "installation_type": "Home Assistant OS"},
         {"version": "1.0.0"},
+        remote_fingerprint="b" * 64,
     )
     write_run(
         tmp_path,
@@ -1190,3 +1196,5 @@ def test_real_environment_checkout_and_mismatch_facts_verify(
     manifest = verify_public_archive(archive)
     assert manifest["build_provenance"]["runner_checkout_commit"] == "a" * 40
     assert manifest["build_provenance"]["verification"] == "mismatch"
+    assert manifest["build_provenance"]["checkout_fingerprint"] == "a" * 64
+    assert manifest["build_provenance"]["installed_fingerprint"] == "b" * 64

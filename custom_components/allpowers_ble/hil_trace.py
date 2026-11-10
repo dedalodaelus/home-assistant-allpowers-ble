@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import OrderedDict
 from datetime import UTC, datetime
+from pathlib import Path
 from time import monotonic
 from typing import Any
 import re
 import secrets
+import os
 
 import probatio as vol
 
@@ -70,6 +73,59 @@ _FETCH_SCHEMA: dict[Any, Any] = {
     vol.Required("entry_id"): str,
     vol.Required("capture_id"): str,
 }
+
+_BUILD_SCHEMA: dict[Any, Any] = {vol.Required("type"): "allpowers_ble/hil/build"}
+
+
+def _integration_fingerprint() -> str:
+    """Fingerprint packaged integration files without runtime-generated files."""
+    root = Path(__file__).parent
+    digest = hashlib.sha256()
+    files: list[Path] = []
+
+    def fail_scan(error: OSError) -> None:
+        raise error
+
+    for directory, names, filenames in os.walk(
+        root, onerror=fail_scan, followlinks=False
+    ):
+        if any((Path(directory) / name).is_symlink() for name in names):
+            raise OSError("symlink in integration")
+        names[:] = sorted(name for name in names if name != "__pycache__")
+        for filename in filenames:
+            path = Path(directory) / filename
+            if path.suffix != ".pyc":
+                if path.is_symlink():
+                    raise OSError("symlink in integration")
+                files.append(path)
+    files.sort()
+    if not files:
+        raise OSError("empty integration")
+    for path in files:
+        if path.is_symlink():
+            raise OSError("symlink in integration")
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+@websocket_api.websocket_command(_BUILD_SCHEMA)
+@websocket_api.async_response
+async def ws_build(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> None:
+    """Expose only the admin-authorized installed-file fingerprint."""
+    del hass
+    if not _authorized(connection, msg):
+        return
+    try:
+        fingerprint = _integration_fingerprint()
+    except OSError:
+        connection.send_error(
+            msg["id"], "scan_failed", "Integration fingerprint unavailable"
+        )
+        return
+    connection.send_result(msg["id"], {"schema_version": 1, "fingerprint": fingerprint})
 
 
 class Capture:
@@ -508,6 +564,7 @@ async def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_start)
     websocket_api.async_register_command(hass, ws_stop)
     websocket_api.async_register_command(hass, ws_fetch)
+    websocket_api.async_register_command(hass, ws_build)
 
 
 def clear_entry_capture(hass: HomeAssistant, entry_id: str) -> None:

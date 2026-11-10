@@ -376,18 +376,90 @@ def test_public_environment_allowlists_ha_config_and_labels():
     assert "runner_host" in payload
 
 
-def test_manifest_version_mismatch_blocks_build_proof(monkeypatch):
+def test_manifest_version_mismatch_does_not_claim_fingerprint_proof(monkeypatch):
     monkeypatch.setattr(environment, "local_manifest_version", lambda: "0.3.0")
     monkeypatch.setattr(
         environment, "local_commit", lambda: environment.unknown("test")
     )
     mismatch = environment.integration_build({"version": "1.2.0"})
-    assert mismatch["build_match"] == "mismatch"
+    assert mismatch["build_match"] == "unverified"
     assert mismatch["qualification_allowed"] is False
     same_version = environment.integration_build({"version": "0.3.0"})
     assert same_version["build_match"] == "unverified"
     assert same_version["qualification_allowed"] is False
     assert environment.integration_build(None)["installed_commit"]["value"] is None
+
+
+def test_integration_fingerprint_is_deterministic_and_ignores_generated_files(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(environment, "ROOT", tmp_path)
+    package = tmp_path / "custom_components" / "allpowers_ble"
+    package.mkdir(parents=True)
+    (package / "manifest.json").write_text('{"version":"0.3.0"}')
+    (package / "module.py").write_text("VALUE = 1")
+    first = environment.local_integration_fingerprint()
+    (package / "__pycache__").mkdir()
+    (package / "__pycache__" / "module.cpython.pyc").write_bytes(b"generated")
+    assert environment.local_integration_fingerprint() == first
+    (package / "module.py").write_text("VALUE = 2")
+    assert environment.local_integration_fingerprint() != first
+
+
+def test_fingerprint_match_requires_clean_checkout_and_commit(monkeypatch):
+    fingerprint = "a" * 64
+    monkeypatch.setattr(
+        environment, "local_integration_fingerprint", lambda: fingerprint
+    )
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: True)
+    monkeypatch.setattr(environment, "local_manifest_version", lambda: "0.3.0")
+    monkeypatch.setattr(
+        environment,
+        "local_commit",
+        lambda: environment.observed("b" * 40, "runner_git_checkout"),
+    )
+    verified = environment.integration_build({"version": "0.3.0"}, fingerprint)
+    assert verified["build_match"] == "verified"
+    assert verified["installed_commit"]["value"] == "b" * 40
+    assert (
+        environment.integration_build({"version": "0.3.0"}, "c" * 64)["build_match"]
+        == "mismatch"
+    )
+    monkeypatch.setattr(environment, "_checkout_clean", lambda paths: False)
+    dirty = environment.integration_build({"version": "0.3.0"}, fingerprint)
+    assert dirty["build_match"] == "unverified"
+    assert dirty["installed_commit"]["value"] is None
+    assert "modifications" in dirty["verification_reason"]
+
+
+def test_fingerprint_api_fails_closed_for_unsupported_or_invalid_response(monkeypatch):
+    client = api.HAClient("https://example.test", "token")
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [{"schema_version": 1, "fingerprint": "a" * 64}],
+    )
+    assert client.integration_build_fingerprint() == "a" * 64
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [{"schema_version": 1, "fingerprint": "not-a-digest"}],
+    )
+    assert client.integration_build_fingerprint() is None
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [
+            {"schema_version": 1, "fingerprint": "a" * 64, "path": "/config"}
+        ],
+    )
+    assert client.integration_build_fingerprint() is None
+
+    def unsupported(commands):
+        raise api.HAAPIError("unsupported")
+
+    monkeypatch.setattr(client, "websocket", unsupported)
+    assert client.integration_build_fingerprint() is None
 
 
 def test_read_only_snapshot_excludes_rest_attributes_and_arbitrary_states(
