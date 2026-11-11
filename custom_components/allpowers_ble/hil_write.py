@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import secrets
 from time import monotonic
+from collections.abc import Callable
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,11 @@ from .const import DOMAIN
 
 KEY = DOMAIN + "_hil_write_grants"
 TTL = 30.0
+MAX_OUTSTANDING_GRANTS = 64
+
+
+class GrantCapacityError(Exception):
+    """Raised when the bounded in-memory grant store is full."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +44,14 @@ class Grant:
 class GrantStore:
     """Ephemeral one-action grants; caller consumes synchronously before I/O."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = monotonic) -> None:
         self.grants: dict[str, Grant] = {}
+        self._clock = clock
+
+    def _prune_expired(self, now: float) -> None:
+        self.grants = {
+            token: grant for token, grant in self.grants.items() if now < grant.deadline
+        }
 
     def issue(
         self,
@@ -54,6 +66,10 @@ class GrantStore:
         feature: str,
         target: Any,
     ) -> Grant:
+        now = self._clock()
+        self._prune_expired(now)
+        if len(self.grants) >= MAX_OUTSTANDING_GRANTS:
+            raise GrantCapacityError("The HIL grant store is at capacity")
         token = secrets.token_urlsafe(32)
         grant = Grant(
             token,
@@ -66,7 +82,7 @@ class GrantStore:
             generation,
             feature,
             target,
-            monotonic() + TTL,
+            now + TTL,
         )
         self.grants[token] = grant
         return grant
@@ -85,8 +101,10 @@ class GrantStore:
         feature: str,
         target: Any,
     ) -> Grant | None:
+        now = self._clock()
+        self._prune_expired(now)
         grant = self.grants.pop(token, None)
-        if grant is None or monotonic() >= grant.deadline:
+        if grant is None or now >= grant.deadline:
             return None
         expected = (
             connection_id,
@@ -110,9 +128,12 @@ class GrantStore:
             grant.feature,
             grant.target,
         )
-        return grant if actual == expected else None
+        return (
+            grant if type(target) is type(grant.target) and actual == expected else None
+        )
 
     def revoke(self, token: str, *, connection_id: int, user_id: str) -> bool:
+        self._prune_expired(self._clock())
         grant = self.grants.get(token)
         if grant is None or (grant.connection_id, grant.user_id) != (
             connection_id,
@@ -123,6 +144,7 @@ class GrantStore:
         return True
 
     def revoke_entry(self, entry_id: str) -> None:
+        self._prune_expired(self._clock())
         self.grants = {
             token: grant
             for token, grant in self.grants.items()
