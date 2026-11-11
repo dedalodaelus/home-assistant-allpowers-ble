@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate schema-v2 HIL qualification records and privacy safeguards."""
+"""Validate schema-v3 HIL qualification records and privacy safeguards."""
 
 from __future__ import annotations
 
@@ -12,13 +12,14 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-MATRIX_SCHEMA_VERSION = 2
+MATRIX_SCHEMA_VERSION = 3
 DEFAULT_MATRIX = ROOT / "tests" / "hil" / "qualification_matrix.json"
 STATUSES = {"pass", "fail", "pending", "not_applicable", "inconclusive"}
 STRICT_SCENARIO_STATUSES = {"pass"}
 STRICT_CAPABILITY_STATUSES = {"pass", "not_applicable"}
-REQUIRED_ROUTES = {"local_adapter", "active_proxy"}
-RUN_ROUTES = REQUIRED_ROUTES | {"unverified", "mixed"}
+VERIFIED_ROUTES = {"local_adapter", "active_proxy"}
+REQUIRED_ROUTES = VERIFIED_ROUTES  # compatibility for callers using the old constant
+RUN_ROUTES = VERIFIED_ROUTES | {"unverified", "mixed", "auto"}
 CAPTURE_COMPLETENESS = {"complete", "incomplete", "unknown"}
 BUILD_VERIFICATION = {"verified", "unverified", "mismatch"}
 REQUIRED_SCENARIOS = (
@@ -46,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", default=str(DEFAULT_MATRIX))
     parser.add_argument("--require-pass", action="store_true")
+    parser.add_argument("--route", choices=sorted(VERIFIED_ROUTES))
     parser.add_argument("--max-age-days", type=int, default=30)
     args = parser.parse_args()
     if args.max_age_days < 0:
@@ -238,7 +240,8 @@ def _check_result_map(
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
         ):
             _error(errors, f"{item_context} not_applicable status requires a rationale")
-        if require_pass:
+        optional_vendor_app = not capability and key == "vendor_app_contention"
+        if require_pass and (not optional_vendor_app or status == "pass"):
             acceptable = (
                 STRICT_CAPABILITY_STATUSES if capability else STRICT_SCENARIO_STATUSES
             )
@@ -291,7 +294,7 @@ def _validate_run(
         _error(errors, f"{context} firmware_version must be a non-empty string or null")
     if (
         isinstance(route, str)
-        and route in REQUIRED_ROUTES
+        and route in VERIFIED_ROUTES
         and firmware is None
         and require_pass
     ):
@@ -346,7 +349,7 @@ def _validate_run(
     if require_pass:
         if (
             qualification != "pass"
-            or route not in REQUIRED_ROUTES
+            or route not in VERIFIED_ROUTES
             or firmware is None
             or completeness != "complete"
             or build_verification != "verified"
@@ -389,8 +392,80 @@ def _validate_run(
         captured_at=captured_at,
         capability=True,
     )
+    presence = run.get("feature_presence")
+    if not isinstance(presence, dict):
+        _error(errors, f"{context} feature_presence must be an object")
+    else:
+        for feature in REQUIRED_WRITE_CAPABILITIES:
+            item = presence.get(feature)
+            if not isinstance(item, dict) or item.get("status") not in {
+                "present",
+                "absent",
+                "unknown",
+            }:
+                _error(
+                    errors,
+                    f"{context} feature_presence {feature} status must be present, absent, or unknown",
+                )
+            elif item.get("status") == "absent":
+                _check_evidence(
+                    item.get("evidence"),
+                    f"{context} feature_presence {feature}",
+                    errors,
+                    required=True,
+                )
+                if (
+                    not isinstance(item.get("reviewed_by"), str)
+                    or not item["reviewed_by"].strip()
+                ):
+                    _error(
+                        errors,
+                        f"{context} absent feature {feature} requires reviewed_by",
+                    )
+                outcome = run.get("write_capabilities", {}).get(feature, {})
+                if isinstance(outcome, dict) and outcome.get("status") == "pass":
+                    _error(
+                        errors,
+                        f"{context} absent feature {feature} cannot have a pass outcome",
+                    )
+            elif isinstance(item, dict) and item.get("status") in {
+                "present",
+                "unknown",
+            }:
+                outcome = run.get("write_capabilities", {}).get(feature, {})
+                if (
+                    isinstance(outcome, dict)
+                    and outcome.get("status") == "not_applicable"
+                ):
+                    _error(
+                        errors,
+                        f"{context} feature {feature} cannot be not_applicable unless reviewed absent",
+                    )
+                if (
+                    item.get("status") == "unknown"
+                    and isinstance(outcome, dict)
+                    and outcome.get("status") == "pass"
+                ):
+                    _error(
+                        errors,
+                        f"{context} unknown feature {feature} cannot have a pass outcome",
+                    )
+    authorization_context = run.get("authorization_context", "production")
+    if authorization_context not in {"production", "experimental_hil"}:
+        _error(
+            errors,
+            f"{context} authorization_context must be production or experimental_hil",
+        )
+    if (
+        authorization_context == "experimental_hil"
+        and run.get("qualification_status") == "pass"
+    ):
+        _error(
+            errors,
+            f"{context} experimental_hil evidence cannot claim qualification pass",
+        )
     if qualification == "pass" and (
-        route not in REQUIRED_ROUTES
+        route not in VERIFIED_ROUTES
         or firmware is None
         or completeness != "complete"
         or build_verification != "verified"
@@ -414,7 +489,7 @@ def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
     if (
         not isinstance(firmware, str)
         or not firmware.strip()
-        or route not in REQUIRED_ROUTES
+        or route not in VERIFIED_ROUTES
         or run.get("capture_completeness") != "complete"
         or run.get("build_verification") != "verified"
         or run.get("qualification_status") not in {"pass", "fail"}
@@ -433,7 +508,12 @@ def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
 
 
 def validate_matrix(
-    payload: dict[str, Any], *, matrix_path: Path, require_pass: bool, max_age_days: int
+    payload: dict[str, Any],
+    *,
+    matrix_path: Path,
+    require_pass: bool,
+    max_age_days: int,
+    route_scope: str | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     summaries: list[str] = []
@@ -470,6 +550,17 @@ def validate_matrix(
         if not isinstance(runs, list):
             _error(errors, f"revision {revision_id} runs must be a list")
             continue
+        legacy_v2_runs = revision.get("legacy_v2_runs", [])
+        if not isinstance(legacy_v2_runs, list):
+            _error(errors, f"revision {revision_id} legacy_v2_runs must be a list")
+            legacy_v2_runs = []
+        for legacy_run in legacy_v2_runs:
+            for value in _strings(legacy_run):
+                if MAC_ADDRESS.search(value):
+                    _error(
+                        errors,
+                        f"revision {revision_id} legacy v2 history contains a Bluetooth MAC address",
+                    )
         strict_candidates: dict[tuple[str, str], list[tuple[datetime, Any]]] = {}
         firmware_scope: set[str] = set()
         for run_index, run in enumerate(runs, 1):
@@ -551,8 +642,24 @@ def validate_matrix(
                 f"revision {revision_id} has no eligible scoped runs for require-pass mode",
             )
         if require_pass:
+            if route_scope is not None and route_scope not in VERIFIED_ROUTES:
+                _error(errors, f"invalid strict route scope: {route_scope}")
             for firmware in sorted(firmware_scope):
-                for route in sorted(REQUIRED_ROUTES):
+                scoped_routes = (
+                    {route_scope}
+                    if route_scope
+                    else {
+                        route
+                        for candidate_firmware, route in strict_candidates
+                        if candidate_firmware == firmware
+                    }
+                )
+                if not scoped_routes:
+                    _error(
+                        errors,
+                        f"revision {revision_id} firmware {firmware} has no eligible observed route",
+                    )
+                for route in sorted(scoped_routes):
                     candidates = strict_candidates.get((firmware, route), [])
                     if not candidates:
                         _error(
@@ -584,11 +691,12 @@ def validate_matrix(
                     )
         summaries.append(
             f"{revision_id}: {len(runs)} scoped run(s), "
-            f"{len(legacy)} unscoped legacy record(s)"
+            f"{len(legacy)} v1 and {len(legacy_v2_runs)} v2 unqualified history record(s)"
         )
     migration = payload.get("migration")
     if migration is not None and (
-        not isinstance(migration, dict) or migration.get("from_schema_version") != 1
+        not isinstance(migration, dict)
+        or migration.get("from_schema_version") not in {1, 2}
     ):
         _error(
             errors, "migration metadata, when present, must identify v1 source history"
@@ -612,6 +720,7 @@ def main() -> int:
         matrix_path=matrix_path,
         require_pass=args.require_pass,
         max_age_days=args.max_age_days,
+        route_scope=args.route,
     )
     if errors:
         print("HIL qualification validation failed:", file=sys.stderr)

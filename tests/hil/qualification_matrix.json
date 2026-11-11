@@ -1,10 +1,10 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at": "2026-10-31",
   "retention": "Store only sanitized captures and summaries. Do not include MAC addresses, serial numbers, Home Assistant IDs, or local topology.",
   "migration": {
-    "from_schema_version": 1,
-    "policy": "historical outcomes preserved without route or firmware attribution"
+    "from_schema_version": 2,
+    "policy": "v2 records retained verbatim as unqualified history"
   },
   "revisions": [
     {
@@ -13,7 +13,6 @@
       "hardware_version": "0.3",
       "raw_hardware_version": "0x03",
       "privacy_review": "pass",
-      "runs": [],
       "legacy_results": [
         {
           "scope": "unscoped_legacy",
@@ -88,7 +87,9 @@
             }
           }
         }
-      ]
+      ],
+      "legacy_v2_runs": [],
+      "runs": []
     },
     {
       "id": "volix-p1800-hw03",
@@ -96,7 +97,6 @@
       "hardware_version": "0.3",
       "raw_hardware_version": "0x03",
       "privacy_review": "pass",
-      "runs": [],
       "legacy_results": [
         {
           "scope": "unscoped_legacy",
@@ -171,7 +171,9 @@
             }
           }
         }
-      ]
+      ],
+      "legacy_v2_runs": [],
+      "runs": []
     }
   ]
 }

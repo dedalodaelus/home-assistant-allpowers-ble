@@ -148,10 +148,10 @@ def _build_proposal(
         raise HAAPIError("Unable to read qualification matrix") from exc
     if (
         not isinstance(matrix, dict)
-        or matrix.get("schema_version") != 2
+        or matrix.get("schema_version") != 3
         or not isinstance(matrix.get("revisions"), list)
     ):
-        raise HAAPIError("Qualification matrix must use schema v2")
+        raise HAAPIError("Qualification matrix must use schema v3")
     matrix_errors, _ = validate_matrix(
         matrix,
         matrix_path=matrix_path,
@@ -316,6 +316,10 @@ def _build_proposal(
         ),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
+        "feature_presence": {
+            name: {"status": "unknown", "evidence": []} for name in CAPABILITIES
+        },
+        "authorization_context": "production",
         "evidence": evidence_paths,
         "scenarios": {
             name: {

@@ -119,6 +119,18 @@ def _qualified_run(
         "build_verification": "verified",
         "capture_completeness": "complete",
         "qualification_status": qualification,
+        "feature_presence": {
+            key: {
+                "status": "absent" if key == not_applicable_capability else "present",
+                "evidence": [evidence],
+                **(
+                    {"reviewed_by": "physical-review"}
+                    if key == not_applicable_capability
+                    else {}
+                ),
+            }
+            for key in validator.REQUIRED_WRITE_CAPABILITIES
+        },
         "evidence": [evidence],
         "scenarios": scenarios,
         "write_capabilities": capabilities,
@@ -127,7 +139,7 @@ def _qualified_run(
 
 def _matrix(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": date.today().isoformat(),
         "migration": {"from_schema_version": 1},
         "revisions": [
@@ -253,6 +265,27 @@ def test_strict_gate_uses_latest_eligible_run_and_ignores_imported_inconclusive(
     assert any("must be pass in require-pass mode" in item for item in errors)
 
 
+def test_one_verified_route_qualifies_without_the_other_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "active_proxy", "proxy-only", now)
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=True,
+        max_age_days=30,
+        route_scope="active_proxy",
+    )
+
+    assert errors == []
+
+
 def test_strict_gate_requires_routes_for_every_reported_firmware(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,9 +358,7 @@ def test_strict_gate_requires_routes_for_every_reported_firmware(
     )
     runs.append(inconclusive_1_2)
     errors = errors_for(runs)
-    assert any(
-        "firmware 1.2 missing strict route: active_proxy" in item for item in errors
-    )
+    assert any("firmware 1.2 has no eligible observed route" in item for item in errors)
 
     runs.extend(
         _qualified_run(
