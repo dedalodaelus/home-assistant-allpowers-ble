@@ -123,11 +123,7 @@ def _feature_profile(
             physical_presence=physical.get(feature, PhysicalPresence.UNKNOWN),
             production_authorized=feature in production,
             hil_candidate_eligible=False,
-            qualification=(
-                FeatureQualification.NOT_APPLICABLE
-                if physical.get(feature) is PhysicalPresence.ABSENT
-                else FeatureQualification.PENDING
-            ),
+            qualification=FeatureQualification.PENDING,
             read_authorized=feature in readable,
             evidence=evidence.get(feature, ""),
         )
@@ -187,13 +183,37 @@ MODEL_FEATURE_PROFILES: Mapping[str, ModelFeatureProfile] = MappingProxyType(
             readable=frozenset({ModelFeature.TELEMETRY}),
             evidence={
                 ModelFeature.AC_OUTPUT: (
-                    "AC off observed only; possible E2 incident; no write authorization."
+                    "AC off/on were reported in issue #248. Follow-ups also report "
+                    "about 20 seconds of telemetry silence/reconnects and an AC-off "
+                    "service call that returned success without changing the output. "
+                    "The earlier E2 was attributed to a pre-existing fault after "
+                    "restart; no write authorization."
                 ),
                 ModelFeature.DC_OUTPUT: (
-                    "DC on/off observed; maintainer review required before testing."
+                    "DC on/off were reported in issue #248. A DC write was once "
+                    "followed by about 20 seconds of telemetry silence/reconnect; "
+                    "no write authorization."
                 ),
                 ModelFeature.LIGHT_OUTPUT: (
                     "No physical light reported; echoed protocol bit 0x20 is not proof."
+                ),
+                ModelFeature.ECO_MODE: (
+                    "ECO on/off transitions were reported in issue #248. Settings "
+                    "writes were followed by telemetry silence/reconnects; no write "
+                    "authorization."
+                ),
+                ModelFeature.WORK_MODE: (
+                    "Work-mode transitions were reported in issue #248. Settings "
+                    "writes were followed by telemetry silence/reconnects; no write "
+                    "authorization."
+                ),
+                ModelFeature.ECO_TIMEOUT: (
+                    "ECO timeout 6 h to 2 h and back was reported in issue #248. "
+                    "Settings writes were followed by telemetry silence/reconnects; "
+                    "no write authorization."
+                ),
+                ModelFeature.CAR_CHARGER: (
+                    "Car-charger control was not tested in issue #248."
                 ),
             },
         )
@@ -202,11 +222,9 @@ MODEL_FEATURE_PROFILES: Mapping[str, ModelFeatureProfile] = MappingProxyType(
 
 
 def model_feature_capability(
-    profile: str | ModelSupport, feature: ModelFeature | str
+    support: ModelSupport, feature: ModelFeature | str
 ) -> ModelFeatureCapability:
-    """Return one fail-closed feature record for a resolved model profile."""
-    profile_id = profile.profile if isinstance(profile, ModelSupport) else profile
-    model = profile.model if isinstance(profile, ModelSupport) else None
+    """Return effective feature metadata for a consistent resolved device."""
     try:
         feature_id = ModelFeature(feature)
     except ValueError:
@@ -216,17 +234,83 @@ def model_feature_capability(
             physical_presence=PhysicalPresence.UNKNOWN,
             evidence="Unknown feature identifier",
         )
-    if model == "VOLIX P1800" and profile_id == "r600-hw-0.3":
+    if not isinstance(support, ModelSupport):
+        return ModelFeatureCapability(
+            feature=feature_id,
+            physical_presence=PhysicalPresence.UNKNOWN,
+            evidence="A resolved model support record is required",
+        )
+
+    profile_id = support.profile
+    profile_model: str | None = None
+    legacy_write_enabled = False
+    if (
+        support.model == "R600"
+        and profile_id == "r600-hw-0.3"
+        and support.supported
+        and support.verified
+        and support.classification == "verified"
+    ):
+        profile_model = "R600"
+        legacy_write_enabled = (
+            support.capabilities.write_output_controls
+            if feature_id
+            in {
+                ModelFeature.AC_OUTPUT,
+                ModelFeature.DC_OUTPUT,
+                ModelFeature.LIGHT_OUTPUT,
+            }
+            else support.capabilities.write_settings_controls
+        )
+    elif (
+        support.model == "VOLIX P1800"
+        and profile_id == "r600-hw-0.3"
+        and support.supported
+        and support.verified
+        and support.classification == "verified"
+    ):
+        # Keep the historical shared R600 code-profile alias for VOLIX.
         profile_id = "volix-p1800-hw-0.3"
+        profile_model = "VOLIX P1800"
+        legacy_write_enabled = (
+            support.capabilities.write_output_controls
+            if feature_id
+            in {
+                ModelFeature.AC_OUTPUT,
+                ModelFeature.DC_OUTPUT,
+                ModelFeature.LIGHT_OUTPUT,
+            }
+            else support.capabilities.write_settings_controls
+        )
+    elif (
+        support.model == "AP R1500 LITE"
+        and profile_id == "ap-r1500-lite-hw-0.1-evidence"
+        and support.supported
+        and not support.verified
+        and support.classification == "experimental_read_only"
+    ):
+        profile_model = "AP R1500 LITE"
+
     record = MODEL_FEATURE_PROFILES.get(profile_id)
-    if record is not None:
-        return record.features[feature_id]
+    if record is not None and record.model == profile_model:
+        declaration = record.features[feature_id]
+        return replace(
+            declaration,
+            production_authorized=(
+                declaration.production_authorized and legacy_write_enabled
+            ),
+            read_authorized=(
+                declaration.read_authorized and support.capabilities.read_telemetry
+            ),
+        )
     # Preserve the established telemetry-only fallback without granting writes.
     return ModelFeatureCapability(
         feature=feature_id,
         physical_presence=PhysicalPresence.UNKNOWN,
-        read_authorized=feature_id is ModelFeature.TELEMETRY,
-        evidence="No exact model/revision feature profile is available",
+        read_authorized=(
+            feature_id is ModelFeature.TELEMETRY and support.capabilities.read_telemetry
+        ),
+        evidence="No consistent exact model/revision feature profile is available",
     )
 
 

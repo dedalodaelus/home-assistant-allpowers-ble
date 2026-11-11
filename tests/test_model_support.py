@@ -1,10 +1,14 @@
 """Tests for conservative model-family detection."""
 
+from dataclasses import replace
+from typing import cast
+
 import pytest
 
 from custom_components.allpowers_ble.model_support import (
     FeatureQualification,
     ModelFeature,
+    ModelSupport,
     PhysicalPresence,
     canonical_model_identity,
     has_specific_model_identity,
@@ -203,7 +207,7 @@ def test_r1500_lite_hw_01_is_evidence_only_and_fail_closed() -> None:
     )
     assert (
         model_feature_capability(support, ModelFeature.LIGHT_OUTPUT).qualification
-        is FeatureQualification.NOT_APPLICABLE
+        is FeatureQualification.PENDING
     )
     assert (
         model_feature_capability(support, ModelFeature.DC_OUTPUT).physical_presence
@@ -258,12 +262,69 @@ def test_feature_metadata_preserves_transitional_r600_and_volix_permissions() ->
 
 
 def test_unknown_feature_profile_and_metadata_are_fail_closed_and_immutable() -> None:
-    unknown = model_feature_capability("unknown-profile", "future_control")
+    support = identify_model("Unknown")
+    unknown = model_feature_capability(support, "future_control")
     assert unknown.production_authorized is False
     assert unknown.hil_candidate_eligible is False
+
+    missing_support = model_feature_capability(
+        cast(ModelSupport, "r600-hw-0.3"), ModelFeature.AC_OUTPUT
+    )
+    assert missing_support.production_authorized is False
 
     support = identify_model("AP R600", hardware_version="0.3", raw_hardware_version=3)
     with pytest.raises((AttributeError, TypeError)):
         model_feature_capability(
             support, ModelFeature.AC_OUTPUT
         ).production_authorized = False
+
+
+def test_feature_permissions_require_consistent_verified_model_support() -> None:
+    verified = identify_model(
+        "AP R600", hardware_version="0.3", raw_hardware_version=0x03
+    )
+    readonly = replace(
+        identify_model("AP R600", hardware_version="9.9", raw_hardware_version=0x99),
+        profile="r600-hw-0.3",
+    )
+    mismatched_model = replace(verified, model="AP R1500 LITE")
+    readonly_capabilities = replace(
+        verified, capabilities=identify_model("Unknown").capabilities
+    )
+
+    for inconsistent in (readonly, mismatched_model, readonly_capabilities):
+        for feature in (ModelFeature.AC_OUTPUT, ModelFeature.ECO_MODE):
+            assert (
+                model_feature_capability(inconsistent, feature).production_authorized
+                is False
+            )
+
+
+def test_unknown_revision_and_identity_conflict_cannot_use_writable_profile() -> None:
+    unknown_revision = identify_model(
+        "AP R600", hardware_version="9.9", raw_hardware_version=0x99
+    )
+    conflicted = resolve_runtime_model_support(
+        "AP R600",
+        hardware_version="0.3",
+        raw_hardware_version=0x03,
+        identity_conflicted=True,
+    )
+
+    for unresolved in (unknown_revision, conflicted):
+        assert (
+            model_feature_capability(
+                unresolved, ModelFeature.AC_OUTPUT
+            ).production_authorized
+            is False
+        )
+
+
+def test_absent_physical_feature_does_not_assign_hil_qualification() -> None:
+    support = identify_model("AP R1500 LITE", hardware_version="0.1")
+    light = model_feature_capability(support, ModelFeature.LIGHT_OUTPUT)
+
+    assert light.physical_presence is PhysicalPresence.ABSENT
+    assert light.qualification is FeatureQualification.PENDING
+    assert light.production_authorized is False
+    assert light.hil_candidate_eligible is False
