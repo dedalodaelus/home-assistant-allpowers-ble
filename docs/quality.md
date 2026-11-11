@@ -146,14 +146,16 @@ transaction/reconnect safety checks. The complete HIL matrix, both routes, and a
 
 Canonical R600 and VOLIX P1800 hardware revision 0.3 currently retain their
 existing write-capable code profiles under a narrow transitional compatibility
-allowance. Both profiles have no scoped HIL runs; required route, scenario, and
-write-capability results remain pending. For VOLIX P1800, PR #183 reports one unit
-on firmware `0xF1` without an identified route or per-control results. This does
-not qualify every control, firmware, or route. No matrix values are changed by
-the policy decision, and pending results must not be described as physical
-qualification. The allowance does not approve new controls or a firmware
-allowlist. Follow-up evidence and implementation are tracked by #206, #227,
-#248, #266–#269, #273, and #275.
+allowance. Neither profile has independently reviewed scoped runs recorded in
+the matrix (`runs: []`); required route, scenario, and write-capability results
+remain pending. #227 reports guided R600 `active_proxy` AC on/off and ECO-timeout
+pilot runs, which remain unqualified pending review. For VOLIX P1800, PR #183
+reports one unit on firmware `0xF1` without an identified route or per-control
+results. This does not qualify every control, firmware, or route. No matrix values
+are changed by the policy decision, and pending results must not be described as
+physical qualification. The allowance does not approve new controls or a firmware
+allowlist. Follow-up evidence and implementation are tracked by #206, #227, #248,
+#266–#269, #273, and #275.
 
 Bronze is evidence-backed read-only support; Silver is physically verified
 applicable basic output control; Gold is verified declared settings/functions

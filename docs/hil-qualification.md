@@ -53,20 +53,32 @@ current results using the selection policy above.
 The runtime `verified` classification is a software model/revision decision, not a
 claim that physical qualification is complete. Track that separately in the
 qualification matrix, and leave routes, scenarios, or write capabilities pending
-until their required evidence is captured. For example, the current VOLIX P1800
-report covers one unit running firmware `0xF1`; it does not identify a Bluetooth
-route or establish results for the required scenario and write-capability set.
+until their required evidence is captured. The R600 pilot reported in #227
+includes guided `active_proxy` AC on/off and ECO-timeout runs; these have not been
+independently reviewed or entered as scoped matrix runs and do not qualify these
+controls. The current VOLIX P1800 report covers one unit running firmware `0xF1`;
+it does not identify a Bluetooth route or establish results for the required
+scenario and write-capability set.
 
 The full matrix supports hardware support-tier and release-gate decisions. It is
-not an all-or-nothing prerequisite for each individual production write. Under
-[ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md),
+not an all-or-nothing prerequisite for each individual production write. One
+verified, actually observed route is sufficient to collect operation-specific
+evidence for an individual control; record that route with the tested firmware.
+Under [ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md),
 adding or newly enabling a control requires reviewed, operation-specific physical
 evidence for its exact model/revision, firmware, and observed route. Bronze is
 evidence-backed read-only; Silver is physically verified applicable basic output
 control; Gold adds verified declared settings/functions and recovery; Platinum
 adds optional uninterrupted 24-hour reliability. These tiers classify coverage
-and never authorize writes. Candidate testing uses the separate attended,
-temporary #275 grant and does not enable normal Home Assistant controls.
+and never authorize writes. Candidate testing is intended to use a separate
+attended, temporary #275 grant and does not enable normal Home Assistant controls.
+
+These are accepted policy targets, not implemented behavior yet. The integration
+still uses grouped R600/VOLIX write flags. Follow-up work #266/#267 implements
+per-feature enforcement, #268 implements per-route qualification, #269 implements
+tier calculation, and #275 implements candidate grants. Until those changes land,
+the strict schema-v2 validator continues to require both supported routes for
+each firmware and supports the `--max-age-days 30` freshness option.
 
 ## Scope
 
@@ -76,10 +88,11 @@ Use this process when you need to:
 - refresh stale HIL evidence before a stable release;
 - qualify a new hardware revision for write-capable support.
 
-For one newly proposed control, collect the operation-specific evidence required
-by ADR 0017. The full route/scenario checklist below is for scoped matrix and
-support-tier qualification; its unrelated items are not prerequisites for every
-individual control.
+For one newly proposed control, collect operation-specific evidence on one
+verified, actually observed route as required by ADR 0017. The two-route,
+full-scenario checklist below describes the current legacy strict-v2
+matrix/release procedure pending #268. It is not a prerequisite for each
+individual control or the accepted future support tiers.
 
 Use the [guided HIL CLI](hil-cli.md) to collect a run and make a public evidence
 ZIP. Read-only snapshots and guided software steps are useful review evidence;
@@ -94,8 +107,9 @@ must not be used to mark a physical qualification result `pass`.
 ## Prerequisites
 
 - One physical ALLPOWERS device for the target revision.
-- One local Bluetooth adapter route.
-- One active ESPHome Bluetooth Proxy route.
+- For one control's evidence, one verified, actually observed route is sufficient.
+- The current legacy strict-v2 matrix/release procedure requires both a local
+  Bluetooth adapter route and an active ESPHome Bluetooth Proxy route.
 - A Home Assistant instance dedicated to testing (not production).
 - A local checkout of this repository with test dependencies installed.
 
@@ -120,9 +134,12 @@ logger:
     bleak_retry_connector: debug
 ```
 
-## 2. Capture evidence for each required route
+## 2. Capture evidence for the current strict-v2 matrix/release procedure
 
-For full matrix qualification, run the required scenario set in both lanes:
+The existing strict schema-v2 validator requires the full scenario set in both
+lanes for each firmware. This is the current matrix/release procedure pending
+#268; it does not change ADR 0017's one-observed-route evidence boundary for an
+individual write control.
 
 - local_adapter
 - active_proxy
