@@ -83,6 +83,15 @@ def _load_json(raw: bytes | str, context: str) -> Any:
         raise HAAPIError(f"Invalid JSON from {context}") from ex
 
 
+def _websocket_exception_types() -> tuple[type[BaseException], ...]:
+    """Return the optional transport exception class when installed."""
+    try:
+        from websockets.exceptions import WebSocketException
+    except ImportError:
+        return ()
+    return (WebSocketException,)
+
+
 class HAClient:
     """Session-free REST reader and short-lived WebSocket reader."""
 
@@ -367,7 +376,6 @@ class HAClient:
         ]:
             raise HAAPIError("Unsupported scanner subscription request")
         try:
-            from websockets.exceptions import WebSocketException
             from websockets.sync.client import connect
         except ImportError as ex:
             raise HAAPIError(
@@ -440,7 +448,13 @@ class HAClient:
                 return results
         except HAAPIError:
             raise
-        except (WebSocketException, OSError, TimeoutError, ValueError, EOFError) as ex:
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
             raise HAAPIError(
                 "Home Assistant WebSocket connection failed or timed out"
             ) from ex
@@ -594,7 +608,13 @@ class AuthenticatedWebSocketSession:
         except HAAPIError:
             self.close()
             raise
-        except (OSError, TimeoutError, ValueError, EOFError) as ex:
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
             self.close()
             raise HAAPIError(
                 "Home Assistant WebSocket connection failed or timed out"
@@ -612,7 +632,13 @@ class AuthenticatedWebSocketSession:
                 _load_json(self._socket.recv(timeout=timeout), "WebSocket"),
                 "command",
             )
-        except (OSError, TimeoutError, ValueError, EOFError) as ex:
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
             raise HAAPIError("Home Assistant WebSocket request failed") from ex
         if reply.get("type") != "result" or reply.get("id") != request_id:
             raise HAAPIError("Unexpected WebSocket reply order or type")
@@ -673,9 +699,10 @@ class AuthenticatedWebSocketSession:
                 not isinstance(result, dict)
                 or type(result.get("schema_version")) is not int
                 or result.get("schema_version") != 1
-                or result.get("outcome")
-                not in {"confirmed", "unchanged", "inconclusive"}
+                or not isinstance(result.get("outcome"), str)
+                or result["outcome"] not in {"confirmed", "unchanged", "inconclusive"}
                 or type(result.get("confirmed")) is not bool
+                or result["confirmed"] is not (result["outcome"] == "confirmed")
             ):
                 raise HAAPIError("Home Assistant returned an invalid HIL execution")
             return result
@@ -698,7 +725,15 @@ class AuthenticatedWebSocketSession:
         socket = self._socket
         self._socket = None
         if socket is not None:
-            socket.close()
+            try:
+                socket.close()
+            except (
+                OSError,
+                TimeoutError,
+                EOFError,
+                *_websocket_exception_types(),
+            ):
+                pass
 
     def __exit__(self, *_exc: object) -> None:
         self.close()

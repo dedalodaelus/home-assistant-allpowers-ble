@@ -757,7 +757,13 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
     assert "PRIVATE_TOKEN" not in str(exc.value)
 
 
-def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch):
+@pytest.mark.parametrize(
+    ("outcome", "confirmed"),
+    [("confirmed", True), ("unchanged", False), ("inconclusive", False)],
+)
+def test_experimental_write_sequence_reuses_one_authenticated_socket(
+    monkeypatch, outcome, confirmed
+):
     sent = []
     opened = []
     receive_timeouts = []
@@ -780,8 +786,8 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
                         "success": True,
                         "result": {
                             "schema_version": 1,
-                            "outcome": "confirmed",
-                            "confirmed": True,
+                            "outcome": outcome,
+                            "confirmed": confirmed,
                         },
                     },
                     {
@@ -827,8 +833,8 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
         )
     assert result == {
         "schema_version": 1,
-        "outcome": "confirmed",
-        "confirmed": True,
+        "outcome": outcome,
+        "confirmed": confirmed,
     }
     assert len(opened) == 1
     assert [command["id"] for command in sent[1:]] == [1, 2, 3]
@@ -839,6 +845,30 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
     ]
     assert sent[0] == {"type": "auth", "access_token": "PRIVATE_TOKEN"}
     assert receive_timeouts[3] >= 327.0
+
+
+def test_persistent_websocket_normalizes_transport_exception(monkeypatch):
+    websocket_package = ModuleType("websockets")
+    websocket_package.__path__ = []
+    exceptions_module = ModuleType("websockets.exceptions")
+    websocket_error = type("WebSocketException", (Exception,), {})
+    exceptions_module.WebSocketException = websocket_error
+    monkeypatch.setitem(sys.modules, "websockets", websocket_package)
+    monkeypatch.setitem(sys.modules, "websockets.exceptions", exceptions_module)
+
+    class BrokenSocket:
+        def send(self, _message):
+            pass
+
+        def recv(self, *, timeout):
+            raise websocket_error("synthetic transport failure")
+
+    session = api.AuthenticatedWebSocketSession(
+        api.HAClient("https://example.test", "PRIVATE_TOKEN")
+    )
+    session._socket = BrokenSocket()
+    with pytest.raises(api.HAAPIError, match="WebSocket request failed"):
+        session.command({"type": "allpowers_ble/hil/write/execute"})
 
 
 def test_mixed_case_https_never_downgrades_websocket(monkeypatch):

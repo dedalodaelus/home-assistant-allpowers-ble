@@ -20,6 +20,8 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 import voluptuous as vol
+from bleak_retry_connector import BLEAK_RETRY_EXCEPTIONS
+from bleak.exc import BleakError
 
 from .const import DOMAIN, NOTIFY_UUID, SERVICE_UUID, WRITE_UUID
 from .client import AllpowersClientError
@@ -430,9 +432,21 @@ async def ws_write_execute(
             expected_hardware=policy.hardware,
             expected_firmware=policy.firmware,
         )
-    except AllpowersClientError, StateUnavailableError, TimeoutError, ValueError:
+    except (
+        AllpowersClientError,
+        StateUnavailableError,
+        TimeoutError,
+        ValueError,
+        BleakError,
+        *BLEAK_RETRY_EXCEPTIONS,
+    ):
         connection.send_result(
-            msg["id"], {"schema_version": API_VERSION, "outcome": "inconclusive"}
+            msg["id"],
+            {
+                "schema_version": API_VERSION,
+                "outcome": "inconclusive",
+                "confirmed": False,
+            },
         )
         return
     connection.send_result(

@@ -395,11 +395,13 @@ async def test_concurrent_execute_consumes_grant_before_ble_await(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport_failure", [False, True])
 async def test_websocket_grant_executes_exact_packet_on_fake_ble(
-    notification_builder, monkeypatch: pytest.MonkeyPatch
+    notification_builder, monkeypatch: pytest.MonkeyPatch, transport_failure: bool
 ) -> None:
     """Exercise authorize, one-shot consume, fake GATT TX and readback together."""
     from time import monotonic
+    from bleak.exc import BleakError
 
     from custom_components.allpowers_ble.const import (
         NOTIFY_UUID,
@@ -475,6 +477,8 @@ async def test_websocket_grant_executes_exact_packet_on_fake_ble(
 
     async def write_and_confirm(characteristic, data, *, response):
         await original_write(characteristic, data, response=response)
+        if transport_failure:
+            raise BleakError("synthetic transport failure after write")
         client._notification_handler(FakeCharacteristic(), bytearray(packet))
 
     monkeypatch.setattr(fake_ble, "write_gatt_char", write_and_confirm)
@@ -494,8 +498,10 @@ async def test_websocket_grant_executes_exact_packet_on_fake_ble(
         hass, connection, {"id": 31, "entry_id": "entry-a", "token": token}
     )
     assert fake_ble.writes == [encode_output_control(dc=True, ac=False, light=True)]
-    assert connection.results[-1][1]["outcome"] == "confirmed"
-    assert connection.results[-1][1]["confirmed"] is True
+    assert connection.results[-1][1]["outcome"] == (
+        "inconclusive" if transport_failure else "confirmed"
+    )
+    assert connection.results[-1][1]["confirmed"] is (not transport_failure)
     assert token not in hil_write.store(hass).grants
     await hil_write.ws_write_revoke(hass, connection, {"id": 32, "token": token})
     assert connection.results[-1][1]["revoked"] is False
