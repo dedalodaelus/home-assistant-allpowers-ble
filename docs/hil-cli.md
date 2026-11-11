@@ -104,7 +104,7 @@ Import defaults to a dry run. Review the reported profile, firmware, observed
 route, capture completeness, guided scenario records, and missing qualification
 evidence before rerunning with `--apply`. The importer verifies archive members,
 schemas, privacy allowlist and file hashes, then copies only public ZIP members
-into `tests/hil/fixtures/` and records the run in the v2 matrix. Imported run,
+into `tests/hil/fixtures/` and records the run in the v3 matrix. Imported run,
 scenario, and write-capability results remain `inconclusive`; a guided software
 step or route trace does not become a physical qualification PASS. The original
 session run ID, scoped to the verified model/revision, firmware, and route,

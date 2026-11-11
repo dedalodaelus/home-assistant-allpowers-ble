@@ -523,6 +523,21 @@ def _validate_run(
         capability=True,
         strict_keys={feature_scope} if feature_scope is not None else None,
     )
+    if qualification == "pass":
+        result_maps = (run.get("scenarios"), run.get("write_capabilities"))
+        has_reviewable_pass = any(
+            isinstance(results, dict)
+            and any(
+                isinstance(item, dict) and item.get("status") == "pass"
+                for item in results.values()
+            )
+            for results in result_maps
+        )
+        if not has_reviewable_pass:
+            _error(
+                errors,
+                f"{context} qualification_status pass requires at least one reviewed scenario or capability PASS",
+            )
     presence = run.get("feature_presence")
     if not isinstance(presence, dict):
         _error(errors, f"{context} feature_presence must be an object")
