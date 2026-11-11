@@ -28,19 +28,22 @@ The repository distinguishes three runtime code-profile levels:
 
 Physical HIL qualification is tracked separately in
 [`tests/hil/qualification_matrix.json`](../tests/hil/qualification_matrix.json).
-Schema v2 keeps results scoped to a model/hardware revision, firmware, observed
+Schema v3 keeps results scoped to a model/hardware revision, firmware, observed
 route, and run. Only linked, independently reviewed physical evidence can
-support a `pass`; a successful default matrix-validator run checks structure and
-privacy, not qualification. The current opt-in strict schema-v2 gate accepts only
-fresh, complete, attributed results and requires both supported routes for each
-firmware. Strict mode enforces a 30-day maximum age by default; `--max-age-days N`
-overrides that limit. Issue #273 tracks the planned opt-in, non-expiring policy.
-It selects the newest eligible run per firmware and route, so a later complete
-failure supersedes an older pass while an inconclusive archive import does not.
-Scenario results must pass; a write capability may be `not_applicable` only with
-scoped supporting evidence and a rationale. Capture records must also match the
-matrix revision, firmware, run ID, and timestamp. Independent physical evidence
-review remains necessary.
+support a `pass`; default matrix validation checks structure, privacy, and
+review records, not physical qualification. The strict per-feature command
+qualifies one exact revision, firmware, observed route, and capability. The
+broader `--require-pass` gate checks every reported firmware and every route
+with eligible runs; it does not require both supported routes when only one has
+eligible evidence. Strict mode enforces a 30-day maximum age by default;
+`--max-age-days N` overrides that limit. Issue #273 tracks the planned opt-in,
+non-expiring policy. The gate selects the newest eligible run per firmware and
+route, so a later complete failure supersedes an older pass while an
+inconclusive archive import does not. Scenario results must pass; a write
+capability may be `not_applicable` only with reviewed absence evidence and a
+rationale. Capture records must also match the matrix revision, firmware, run,
+session, build, route, and timestamp. Independent physical evidence review
+remains necessary.
 
 ## Write authorization and hardware support tiers
 
@@ -60,17 +63,18 @@ output controls), and Gold (verified declared settings/functions and recovery).
 Platinum is an optional tier; earning it requires Gold plus a verified,
 uninterrupted 86,400-second soak. The soak is not required for Bronze or Gold, or
 for authorizing an individual control. These are the accepted support tiers;
-tier calculation is not implemented yet (#269). Per-feature
-production enforcement (#266/#267), per-route qualification (#268), and temporary
-candidate HIL grants (#275) are also follow-up implementation work. Current code
-still uses grouped R600/VOLIX write-capability flags, and the current strict
-schema-v2 validator still requires both routes per firmware. The one-route and
-tier rules above describe the accepted target policy, not current code or
-validator behavior. A support tier never grants a write capability. Candidate HIL
-experiments are intended to use a separate attended, temporary, single-use path;
-they do not expose normal Home Assistant write entities or authorize production
-writes. Unknown, absent, conflicting, or unsafe operations remain blocked. See
-accepted [ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
+tier calculation is not implemented yet (#269). The validator supports the
+per-feature, per-route evidence scope in #268; per-feature production write
+enforcement (#266/#267) and temporary candidate HIL grants (#275) remain
+separate implementation work. Current code still uses grouped R600/VOLIX
+write-capability flags. The accepted one-route-per-control evidence policy is
+implemented by the scoped validator, but it does not automatically authorize
+Home Assistant writes. A support tier never grants a write capability.
+Candidate HIL experiments are intended to use a separate attended, temporary,
+single-use path; they do not expose normal Home Assistant write entities or
+authorize production writes. Unknown, absent, conflicting, or unsafe operations
+remain blocked. See accepted
+[ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
 and [ADR 0012](architecture/decisions/0012-keep-unverified-controls-read-only-or-opt-in.md).
 
 ### Transitional inventory: currently writable code profiles

@@ -20,6 +20,8 @@ expand the physical evidence scope.
 
 The report is limited to that single unit and firmware. Do not infer qualification
 for other firmware versions, naming variants, routes, scenarios, or write
-capabilities. Both required route results, all required scenarios, and all
+capabilities. Route-specific results, all required scenarios, and all
 writable-capability results remain `pending` in
 `tests/hil/qualification_matrix.json` until runbook evidence is captured.
+The scoped validator can qualify an individual capability on one observed route;
+broader release qualification may require additional route coverage.

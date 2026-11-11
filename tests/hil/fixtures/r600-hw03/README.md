@@ -18,8 +18,8 @@ any route, scenario, write capability, or protocol golden vector.
 - `proxy-status.sample.jsonl`
 - `proxy-settings.sample.jsonl`
 
-These files predate the v2 per-run/per-firmware/per-route matrix. Do not count
-their statuses as physical qualification or transfer them into a v2 run as
+These files predate the v3 per-run/per-firmware/per-route matrix. Do not count
+their statuses as physical qualification or transfer them into a v3 run as
 `pass`. When a real sanitized capture is available, record its actual scope and
 provenance in a separate run record.
 

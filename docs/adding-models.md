@@ -105,7 +105,7 @@ specific hardware revision.
 
 For verified write-capable profiles, also:
 
-- add a schema-v2 revision record and keep each HIL run scoped to the exact
+- add a schema-v3 revision record and keep each HIL run scoped to the exact
   firmware and observed route;
 - use the public archive importer in review-first mode:
 
