@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from time import monotonic
 from types import SimpleNamespace
 
@@ -246,6 +247,49 @@ async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
     assert stale_execution["error"]["code"] == "invalid_grant"
     assert fake_gatt.writes == [encode_output_control(dc=True, ac=False, light=True)]
     await next_ws.close()
+
+    # A consumed grant still cannot transmit after its authorizing socket closes
+    # while execution is queued behind the client's operation lock.
+    race_ws = await hass_ws_client()
+    await client._operation_lock.acquire()
+    await race_ws.send_json_auto_id({**authorize, "target": False})
+    queued_grant = await race_ws.receive_json()
+    queued_token = queued_grant["result"]["token"]
+    await race_ws.send_json_auto_id(
+        {
+            "type": "allpowers_ble/hil/write/execute",
+            "version": 1,
+            "entry_id": entry.entry_id,
+            "token": queued_token,
+            "confirmed": True,
+        }
+    )
+    for _ in range(20):
+        if queued_token not in hil_write.store(hass).grants:
+            break
+        await asyncio.sleep(0.01)
+    assert queued_token not in hil_write.store(hass).grants
+    await race_ws.close()
+    client._operation_lock.release()
+    await hass.async_block_till_done()
+    assert fake_gatt.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    assert client._pending_output_transaction is None
+
+    final_ws = await hass_ws_client()
+    await final_ws.send_json_auto_id(
+        {
+            "type": "allpowers_ble/hil/write/execute",
+            "version": 1,
+            "entry_id": entry.entry_id,
+            "token": queued_token,
+            "confirmed": True,
+        }
+    )
+    replay_after_close = await final_ws.receive_json()
+    assert replay_after_close["success"] is False
+    assert replay_after_close["error"]["code"] == "invalid_grant"
+    assert fake_gatt.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    await final_ws.close()
 
 
 @pytest.mark.asyncio

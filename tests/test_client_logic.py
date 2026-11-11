@@ -294,6 +294,7 @@ async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
         "generation_shift",
         "second_validation",
         "pre_send_change",
+        "session_closed_before_send",
         "disconnect",
         "disconnect_after_send",
         "late_matching",
@@ -485,6 +486,7 @@ async def test_hil_executor_fails_closed_without_retry(
             "generation_shift",
             "second_validation",
             "pre_send_change",
+            "session_closed_before_send",
             "contradictory",
             "profile_change",
             "disconnect_after_send",
@@ -492,6 +494,11 @@ async def test_hil_executor_fails_closed_without_retry(
         else None
     )
     if expected_exception is None:
+        execution_options = {}
+        if failure in {"session_closed_before_send", "wait_confirm"}:
+            execution_options["execution_guard"] = lambda: (
+                failure != ("session_closed_before_send")
+            )
         result = await client.async_hil_set_output(
             feature,
             target,
@@ -500,6 +507,7 @@ async def test_hil_executor_fails_closed_without_retry(
             expected_model=support.model,
             expected_hardware="test-hw",
             expected_firmware="1.1",
+            **execution_options,
         )
         assert result["outcome"] == (
             "confirmed" if failure == "wait_confirm" else "unchanged"
@@ -507,6 +515,9 @@ async def test_hil_executor_fails_closed_without_retry(
         if failure == "unchanged":
             assert result["confirmed"] is False
     else:
+        execution_options = {}
+        if failure == "session_closed_before_send":
+            execution_options["execution_guard"] = lambda: False
         with pytest.raises(expected_exception):
             await client.async_hil_set_output(
                 feature,
@@ -516,6 +527,7 @@ async def test_hil_executor_fails_closed_without_retry(
                 expected_model=support.model,
                 expected_hardware="test-hw",
                 expected_firmware="1.1",
+                **execution_options,
             )
     assert len(fake.writes) <= 1
     if failure in {
@@ -526,6 +538,7 @@ async def test_hil_executor_fails_closed_without_retry(
         "generation_shift",
         "second_validation",
         "pre_send_change",
+        "session_closed_before_send",
     }:
         assert fake.writes == []
     if failure in {"disconnect_after_send", "wait_timeout", "wait_confirm"}:

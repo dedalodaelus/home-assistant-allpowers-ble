@@ -251,8 +251,14 @@ class _SessionCleanup:
 
     identifier: str
     grants: GrantStore
+    active: bool = True
+
+    def is_active(self) -> bool:
+        """Report whether the grant's authorizing WebSocket remains open."""
+        return self.active
 
     def __call__(self) -> None:
+        self.active = False
         self.grants.revoke_session(self.identifier)
 
 
@@ -270,6 +276,17 @@ def _connection_session(
     identifier = secrets.token_urlsafe(32)
     subscriptions[_SESSION_SUBSCRIPTION_KEY] = _SessionCleanup(identifier, store(hass))
     return identifier
+
+
+def _connection_session_cleanup(connection: Any) -> _SessionCleanup | None:
+    """Return the lifetime guard registered on this active WebSocket."""
+    subscriptions = getattr(connection, "subscriptions", None)
+    cleanup = (
+        subscriptions.get(_SESSION_SUBSCRIPTION_KEY)
+        if isinstance(subscriptions, dict)
+        else None
+    )
+    return cleanup if isinstance(cleanup, _SessionCleanup) else None
 
 
 def _entry_scope(
@@ -455,6 +472,10 @@ async def ws_write_execute(
     if consumed is None:
         _deny(connection, msg, "invalid_grant")
         return
+    session_cleanup = _connection_session_cleanup(connection)
+    if session_cleanup is None:
+        _deny(connection, msg, "invalid_grant")
+        return
     feature = ModelFeature(consumed.feature)
     policy = CANDIDATE_POLICIES.get((support.model, hardware, firmware, feature))
     capability = model_feature_capability(support, feature)
@@ -478,6 +499,7 @@ async def ws_write_execute(
             expected_model=policy.model,
             expected_hardware=policy.hardware,
             expected_firmware=policy.firmware,
+            execution_guard=session_cleanup.is_active,
         )
     except (
         AllpowersClientError,

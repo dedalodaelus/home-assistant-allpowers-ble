@@ -256,6 +256,37 @@ async def test_websocket_endpoints_fail_closed_without_session_cleanup_support(
     )
 
 
+@pytest.mark.asyncio
+async def test_execute_burns_grant_if_session_cleanup_record_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    connection = _Connection()
+    await hil_write.ws_write_authorize(
+        hass,
+        connection,
+        {
+            "id": 1,
+            "entry_id": "entry-a",
+            "feature": "dc_output",
+            "target": True,
+        },
+    )
+    token = connection.results[-1][1]["token"]
+    monkeypatch.setattr(hil_write, "_connection_session_cleanup", lambda _conn: None)
+    await hil_write.ws_write_execute(
+        hass, connection, {"id": 2, "entry_id": "entry-a", "token": token}
+    )
+    assert connection.errors[-1][1] == "invalid_grant"
+    assert token not in hil_write.store(hass).grants
+    assert (
+        hass.config_entries.async_get_entry(
+            "entry-a"
+        ).runtime_data.client.execution_calls
+        == 0
+    )
+
+
 def _api_harness(monkeypatch: pytest.MonkeyPatch):
     support = SimpleNamespace(model="SYNTHETIC", profile="synthetic-v1")
 
@@ -432,9 +463,12 @@ async def test_closed_connection_revokes_unused_grant_and_new_session_cannot_reu
     token = connection_a.results[-1][1]["token"]
     session_a = hil_write._connection_session(hass, connection_a, create=False)
     assert session_a is not None
+    session_cleanup = hil_write._connection_session_cleanup(connection_a)
+    assert session_cleanup is not None and session_cleanup.is_active()
     assert token in hil_write.store(hass).grants
 
     connection_a.subscriptions[hil_write._SESSION_SUBSCRIPTION_KEY]()
+    assert not session_cleanup.is_active()
     assert token not in hil_write.store(hass).grants
 
     connection_b = _Connection()

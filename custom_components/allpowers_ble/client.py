@@ -481,6 +481,7 @@ class AllpowersBLEClient:
         expected_model: str,
         expected_hardware: str,
         expected_firmware: str | None,
+        execution_guard: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Execute one exact reviewed HIL output candidate and await readback.
 
@@ -592,6 +593,7 @@ class AllpowersBLEClient:
                 or self._connected_route is None
                 or self._connected_route[0] != generation
                 or self._connected_route[1].observed_route == "unverified"
+                or (execution_guard is not None and execution_guard() is not True)
             ):
                 raise StateUnavailableError("Experimental write preconditions changed")
             await self._write_transaction_unlocked(frame, transaction)
