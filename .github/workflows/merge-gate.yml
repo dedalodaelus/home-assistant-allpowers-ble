@@ -9,6 +9,7 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+      - edited
 
 # Minimum privileges for reading PR/check state.
 permissions: {}
@@ -51,6 +52,8 @@ jobs:
             const baseRef = pr.base?.ref || "";
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
+            const titleWasEdited = Object.hasOwn(context.payload.changes || {}, "title");
+            const prUpdatedAt = new Date(pr.updated_at).getTime();
             const prAuthorLogin = pr.user?.login || "";
             const prAuthorType = pr.user?.type || "";
             const isHotfixBranch = /^hotfix\//.test(headRef);
@@ -294,6 +297,14 @@ jobs:
               const checkRuns = response.data.check_runs || [];
               const latestByName = formatRunsMap(checkRuns);
 
+              // A title edit starts a new Validate title check on the same head SHA.
+              // Ignore any older result until the run created for this edit appears.
+              const titleCheck = latestByName.get("Validate title");
+              const hasFreshTitleCheck = !titleWasEdited || (
+                titleCheck
+                && new Date(titleCheck.created_at).getTime() >= prUpdatedAt
+              );
+
               const missing = [];
               const pending = [];
               const failed = [];
@@ -301,6 +312,10 @@ jobs:
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
                 const run = latestByName.get(checkName);
+                if (checkName === "Validate title" && !hasFreshTitleCheck) {
+                  pending.push("Validate title (waiting for fresh run after title edit)");
+                  continue;
+                }
                 if (!run) {
                   missing.push(checkName);
                   continue;
@@ -341,6 +356,17 @@ jobs:
 
               // Success condition: no missing checks and no pending runs.
               if (missing.length === 0 && pending.length === 0) {
+                // Metadata can change while checks are running. Do not accept a gate
+                // decision made for an obsolete title/base/head event payload.
+                const current = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+                if (
+                  current.data.title !== pr.title
+                  || current.data.base.ref !== baseRef
+                  || current.data.head.sha !== headSha
+                ) {
+                  core.setFailed("PR title, base, or head changed while required checks were being validated; rerun the merge gate.");
+                  return;
+                }
                 core.info("All required checks completed successfully.");
                 return;
               }
