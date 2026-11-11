@@ -632,6 +632,66 @@ async def test_runtime_profile_downgrade_disables_all_switch_controls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mixed_feature_entities_register_and_recover_without_id_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import custom_components.allpowers_ble.entity as entity_module
+
+    entry, _, coordinator, _ = configured_entry()
+    original = entity_module.model_feature_capability
+    allowed = {
+        entity_module.ModelFeature.AC_OUTPUT,
+        entity_module.ModelFeature.ECO_MODE,
+        entity_module.ModelFeature.WORK_MODE,
+    }
+
+    def mixed(support, feature):
+        return replace(
+            original(support, feature),
+            production_authorized=feature in allowed,
+            physical_presence=entity_module.PhysicalPresence.PRESENT,
+        )
+
+    monkeypatch.setattr(entity_module, "model_feature_capability", mixed)
+    listeners: list[Callable[[], None]] = []
+    coordinator.async_add_listener = (  # type: ignore[attr-defined]
+        lambda callback: listeners.append(callback) or (lambda: None)
+    )
+    switches: list[Any] = []
+    selects: list[Any] = []
+    await switch.async_setup_entry(None, entry, lambda values: switches.extend(values))
+    await select.async_setup_entry(None, entry, lambda values: selects.extend(values))
+    switch_by_key = {item.entity_description.key: item for item in switches}
+    assert set(switch_by_key) == {"ac_output", "eco_mode"}
+    assert len(selects) == 1
+    assert selects[0]._attr_unique_id.endswith("_work_mode")
+    ac_id = switch_by_key["ac_output"]._attr_unique_id
+
+    allowed.remove(entity_module.ModelFeature.AC_OUTPUT)
+    allowed.remove(entity_module.ModelFeature.ECO_MODE)
+    allowed.remove(entity_module.ModelFeature.WORK_MODE)
+    for callback in listeners:
+        callback()
+    assert not switch_by_key["ac_output"].available
+    assert not switch_by_key["eco_mode"].available
+    assert not selects[0].available
+
+    allowed.update(
+        {
+            entity_module.ModelFeature.AC_OUTPUT,
+            entity_module.ModelFeature.ECO_MODE,
+            entity_module.ModelFeature.WORK_MODE,
+        }
+    )
+    for callback in listeners:
+        callback()
+    assert len(switches) == 2
+    assert switch_by_key["ac_output"].available
+    assert switch_by_key["ac_output"]._attr_unique_id == ac_id
+    assert selects[0].available
+
+
+@pytest.mark.asyncio
 async def test_selects_handle_known_unknown_and_invalid_values() -> None:
     entry, client, _, _ = configured_entry()
     entities: list[Any] = []

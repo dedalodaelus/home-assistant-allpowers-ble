@@ -143,10 +143,13 @@ async def test_base_entity_availability_and_eco_error_wrapping() -> None:
     entry, client, _, _ = configured_entry()
     assert entity.AllpowersStatusEntity(entry, "status").available
     assert entity.AllpowersSettingsEntity(entry, "settings").available
-    assert entity.AllpowersOutputControlEntity(entry, "output").available
-    assert entity.AllpowersSettingsControlEntity(entry, "control").available
+    assert entity.AllpowersOutputControlEntity(entry, "ac_output").available
+    assert entity.AllpowersSettingsControlEntity(entry, "eco_mode").available
     assert entity.feature_is_production_authorized(
         entry.runtime_data.coordinator, "settings_keepalive"
+    )
+    assert not entity.feature_is_production_authorized(
+        entry.runtime_data.coordinator, "unrecognized_feature"
     )
 
     eco = select.AllpowersEcoTimeoutSelect(entry)

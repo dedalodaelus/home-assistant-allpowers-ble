@@ -253,6 +253,7 @@ class HAClient:
         if not isinstance(model, str) or model not in {
             "R600",
             "VOLIX P1800",
+            "AP R1500 LITE",
             "S500",
             "S700",
             "BLE power station",

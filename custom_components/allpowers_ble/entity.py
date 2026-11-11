@@ -104,16 +104,12 @@ def feature_is_production_authorized(
 ) -> bool:
     """Return the fail-closed production permission for one entity key."""
     support = runtime_model_support(coordinator)
-    if key == "output":
-        return support.capabilities.write_output_controls
     if key == "settings_keepalive":
         return support.capabilities.write_settings_keepalive
     try:
         feature = ModelFeature.LIGHT_OUTPUT if key == "light" else ModelFeature(key)
     except ValueError:
-        # Generic base-class instances retain the historic group permission;
-        # platform entities use the explicit feature keys above.
-        return support.capabilities.write_settings_controls
+        return False
     capability = model_feature_capability(support, feature)
     return capability.production_authorized and (
         capability.physical_presence is not PhysicalPresence.ABSENT

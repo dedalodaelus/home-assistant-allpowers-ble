@@ -17,6 +17,7 @@ import sys
 from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
+from .capabilities import feature_write_authorized
 from .evidence import export_archive, write_report
 from .importer import DEFAULT_MATRIX, import_archive
 from .discovery import Device, choose_device, find_devices
@@ -224,14 +225,10 @@ def _scenario_controls(
         settings_key = key in settings_controls
         feature_key = "light_output" if key == "light" else key
         feature = feature_facts.get(feature_key)
-        control_capable = (
-            feature.get("production_authorized") is True
-            and feature.get("physical_presence") != "absent"
-            if isinstance(feature, dict)
-            else capability_flags.get(
-                "write_settings_controls" if settings_key else "write_output_controls",
-                False,
-            )
+        control_capable = feature_write_authorized(
+            facts,
+            key,
+            "write_settings_controls" if settings_key else "write_output_controls",
         )
         freshness = facts.get("settings_fresh" if settings_key else "status_fresh")
         runtime_ready = (

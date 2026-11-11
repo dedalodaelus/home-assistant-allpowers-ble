@@ -1011,6 +1011,8 @@ def test_scenario_selection_is_a_side_effect_free_dry_run(
         "ambiguous",
         "race_after_cleanup_trace",
         "pending_after_restore",
+        "feature_denied_before_restore",
+        "feature_denied_at_restore_write",
     ],
 )
 @pytest.mark.parametrize(
@@ -1035,12 +1037,14 @@ def test_output_scenario_restoration_requires_fresh_safe_state(
         def __init__(self):
             self.state = "off"
             self.starts = 0
+            self.capability_calls = 0
             self.actions = []
             self.pending = False
             self.off_attempts = 0
 
         def hil_capabilities(self, entry_id):
-            return {
+            self.capability_calls += 1
+            result = {
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": True,
@@ -1054,6 +1058,28 @@ def test_output_scenario_restoration_requires_fresh_safe_state(
                     "car_charger_enabled": True,
                 },
             }
+            if failure_mode in {
+                "feature_denied_before_restore",
+                "feature_denied_at_restore_write",
+            }:
+                denied_call = (
+                    5 if failure_mode == "feature_denied_before_restore" else 6
+                )
+                result.update(
+                    {
+                        "schema_version": 2,
+                        "features": {
+                            "light_output" if control_key == "light" else control_key: {
+                                "production_authorized": self.capability_calls
+                                < denied_call,
+                                "physical_presence": "present",
+                                "candidate_hil_eligible": False,
+                                "runtime_ready": True,
+                            }
+                        },
+                    }
+                )
+            return result
 
         def control_state(self, key, entity_id):
             return {"available": True, "state": self.state}
@@ -1184,6 +1210,15 @@ def test_output_scenario_restoration_requires_fresh_safe_state(
         assert cleanup["cleanup_post_state"] == "off"
         assert cleanup["cleanup_outcome"] == "inconclusive"
         assert cleanup["cleanup_status"] == "restoration_inconclusive"
+    elif failure_mode in {
+        "feature_denied_before_restore",
+        "feature_denied_at_restore_write",
+    }:
+        assert api_fake.actions == ["on"]
+        assert cleanup.get("cleanup_service_attempted") is not True
+        assert cleanup["outcome"] == "inconclusive"
+        if failure_mode == "feature_denied_at_restore_write":
+            assert cleanup["cleanup_status"] == "restoration_blocked_at_write_boundary"
     else:
         assert api_fake.actions == ["on", "off"]
         assert cleanup["service_attempted"] is True
@@ -1411,6 +1446,7 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
         ("generation", False),
         ("race_after_cleanup_trace", False),
         ("safe", True),
+        ("feature_denied", False),
     ],
 )
 def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
@@ -1429,9 +1465,11 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
             self.pending = False
             self.generation = 9
             self.captures = 0
+            self.capability_calls = 0
 
         def hil_capabilities(self, entry_id):
-            return {
+            self.capability_calls += 1
+            result = {
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": True,
@@ -1441,6 +1479,21 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
                 "session_generation": self.generation,
                 "capabilities": {"write_settings_controls": True},
             }
+            if cleanup_state == "feature_denied":
+                result.update(
+                    {
+                        "schema_version": 2,
+                        "features": {
+                            "eco_mode": {
+                                "production_authorized": self.capability_calls < 5,
+                                "physical_presence": "present",
+                                "candidate_hil_eligible": False,
+                                "runtime_ready": True,
+                            }
+                        },
+                    }
+                )
+            return result
 
         def control_state(self, key, entity_id):
             del key, entity_id
@@ -1547,7 +1600,10 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
         assert restoration["outcome"] == (
             "inconclusive" if trace_unavailable else "pass"
         )
-        assert api_fake.state == "off"
+    elif cleanup_state == "feature_denied":
+        assert api_fake.actions == [("eco_mode", "on")]
+        assert change["cleanup_status"] == "manual_inspection_required"
+        assert api_fake.state == "on"
     elif cleanup_state == "race_after_cleanup_trace":
         assert api_fake.actions == [("eco_mode", "on")]
         assert change["cleanup_status"] == "restoration_inconclusive"
@@ -1777,22 +1833,38 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         ("pending_transaction", True),
         ("settings_fresh", False),
         ("write_settings_controls", False),
+        ("feature_denied", True),
+        ("feature_absent", True),
+        ("feature_not_ready", True),
+        ("feature_denied_after_trace", True),
+        ("feature_absent_after_trace", True),
+        ("feature_not_ready_after_trace", True),
     ],
 )
 def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
     monkeypatch, tmp_path, failed_check, failed_value
 ):
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from scripts.hil.discovery import Device
+
+    base_services = cli._suite_services
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(base_services(), prompt=lambda _message: "1"),
+    )
 
     class BlockedSettingsHA:
         origin = "https://ha.example.test"
 
         def __init__(self):
             self.actions = []
+            self.capability_calls = 0
 
         def hil_capabilities(self, entry_id):
+            self.capability_calls += 1
             result = {
                 "verified": True,
                 "identity_conflicted": False,
@@ -1805,6 +1877,24 @@ def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
             }
             if failed_check == "write_settings_controls":
                 result["capabilities"][failed_check] = failed_value
+            elif failed_check.startswith("feature_"):
+                result["schema_version"] = 2
+                after_trace = failed_check.endswith("_after_trace")
+                denied = self.capability_calls >= 2 if after_trace else True
+                result["features"] = {
+                    "work_mode": {
+                        "production_authorized": (
+                            not denied or "denied" not in failed_check
+                        ),
+                        "physical_presence": (
+                            "absent"
+                            if "absent" in failed_check and denied
+                            else "present"
+                        ),
+                        "candidate_hil_eligible": False,
+                        "runtime_ready": (not ("not_ready" in failed_check and denied)),
+                    }
+                }
             else:
                 result[failed_check] = failed_value
             return result
@@ -1842,8 +1932,12 @@ def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
 
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
     assert result == 2
-    assert checkpoint["steps"][0]["outcome"] == "not_applicable"
     assert api_fake.actions == []
+    if failed_check.endswith("_after_trace"):
+        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+        assert checkpoint["steps"][0].get("service_attempted") is not True
+    else:
+        assert checkpoint["steps"][0]["outcome"] == "not_applicable"
 
 
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
@@ -3269,7 +3363,17 @@ def test_soak_requires_a_verified_normalized_telemetry_value():
     )
 
 
-@pytest.mark.parametrize("failure", ["changed_state", "capabilities", "control_state"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "changed_state",
+        "capabilities",
+        "control_state",
+        "feature_denied",
+        "feature_absent",
+        "feature_not_ready",
+    ],
+)
 def test_output_suite_rechecks_pre_state_after_authorization(
     monkeypatch, tmp_path, failure
 ):
@@ -3298,7 +3402,7 @@ def test_output_suite_rechecks_pre_state_after_authorization(
             self.capability_calls += 1
             if failure == "capabilities" and self.capability_calls > 1:
                 raise cli.HAAPIError("capability snapshot unavailable")
-            return {
+            result = {
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": True,
@@ -3307,6 +3411,32 @@ def test_output_suite_rechecks_pre_state_after_authorization(
                 "session_generation": 3,
                 "capabilities": {"write_output_controls": True},
             }
+            if failure.startswith("feature_"):
+                authorized = self.capability_calls == 1
+                result.update(
+                    {
+                        "schema_version": 2,
+                        "features": {
+                            "ac_output": {
+                                "production_authorized": authorized
+                                if failure == "feature_denied"
+                                else True,
+                                "physical_presence": "absent"
+                                if failure == "feature_absent"
+                                and self.capability_calls > 1
+                                else "present",
+                                "candidate_hil_eligible": False,
+                                "runtime_ready": (
+                                    False
+                                    if failure == "feature_not_ready"
+                                    and self.capability_calls > 1
+                                    else True
+                                ),
+                            }
+                        },
+                    }
+                )
+            return result
 
         def control_state(self, _key, _entity):
             self.control_calls += 1
@@ -3694,3 +3824,57 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
     monkeypatch.setattr(client, "websocket", lambda _commands: [response])
     normalized = client.hil_capabilities("entry-123")
     assert normalized["features"]["ac_output"]["runtime_ready"] is True
+
+
+def test_capability_snapshot_accepts_r1500_lite_and_redacts_identity(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    names = (
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+        "car_charger",
+        "telemetry",
+    )
+    response = {
+        "schema_version": 2,
+        "model": "AP R1500 LITE",
+        "profile": "ap-r1500-lite-hw-0.1-evidence",
+        "classification": "experimental_read_only",
+        "verified": False,
+        "identity_conflicted": False,
+        "hardware_revision": "0.1",
+        "raw_hardware_revision": 1,
+        "firmware_revision": None,
+        "raw_firmware_revision": None,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": False,
+            "write_settings_controls": False,
+            "write_settings_keepalive": False,
+            "car_charger_enabled": False,
+        },
+        "features": {
+            name: {
+                "physical_presence": "absent" if name == "light_output" else "present",
+                "production_authorized": False,
+                "candidate_hil_eligible": False,
+                "runtime_ready": True,
+            }
+            for name in names
+        },
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 1,
+        "pending_transaction": False,
+        "raw_address": "AA:BB:CC:DD:EE:FF",
+    }
+    monkeypatch.setattr(client, "websocket", lambda _commands: [response])
+    normalized = client.hil_capabilities("entry-123")
+    assert normalized["model"] == "AP R1500 LITE"
+    assert normalized["features"]["light_output"]["physical_presence"] == "absent"
+    assert not normalized["features"]["ac_output"]["production_authorized"]
+    assert "raw_address" not in normalized
