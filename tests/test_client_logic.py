@@ -329,6 +329,11 @@ async def test_hil_executor_fails_closed_without_retry(
     client._runtime_model_support = lambda: support
     client._settings = _settings(firmware_version="1.1")
     client._settings_monotonic = monotonic()
+    if failure in {"late_matching", "timeout", "wait_timeout", "wait_confirm"}:
+        # Reproduce the old mixed-clock fixture deterministically: these
+        # timestamps are stale once the affected cases switch to time 100.0.
+        client._status_monotonic = 50.0
+        client._settings_monotonic = 50.0
     validator_calls = 0
 
     def validator(_profile: str, status: object) -> bool:
@@ -549,7 +554,13 @@ async def test_hil_executor_fails_closed_without_retry(
         "session_closed_before_send",
     }:
         assert fake.writes == []
-    if failure in {"disconnect_after_send", "wait_timeout", "wait_confirm"}:
+    if failure in {
+        "disconnect_after_send",
+        "late_matching",
+        "timeout",
+        "wait_timeout",
+        "wait_confirm",
+    }:
         assert len(fake.writes) == 1
 
 
