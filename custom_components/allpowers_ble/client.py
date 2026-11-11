@@ -979,9 +979,14 @@ class AllpowersBLEClient:
             else "settings"
         )
         self._observe_rejection(group, "unsupported_capability")
+        if group == "output":
+            raise StateUnavailableError(
+                f"Unsupported output command for active model profile: "
+                f"{support.profile} ({feature.value})"
+            )
         raise StateUnavailableError(
-            f"Unsupported {feature.value} command for active model profile: "
-            f"{support.profile}"
+            f"Unsupported settings command for active model profile: "
+            f"{support.profile} ({feature.value})"
         )
 
     def _require_settings_write_capability_unlocked(self) -> None:
