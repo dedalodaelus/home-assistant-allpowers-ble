@@ -38,8 +38,9 @@ class RepairFakeClient:
         options: ConnectionOptions,
         identity_conflicted: bool = False,
         identity_conflict_callback: Callable[[bool], None] | None = None,
+        config_entry_id: str | None = None,
     ) -> None:
-        del hass
+        del hass, config_entry_id
         self.address = address
         self.options = options
         self._snapshot = replace(

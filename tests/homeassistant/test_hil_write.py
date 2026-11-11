@@ -69,12 +69,14 @@ class _FakeGatt:
 @pytest.mark.asyncio
 async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
     hass: HomeAssistant,
+    enable_custom_integrations,
     hass_ws_client,
     hass_admin_user,
     notification_builder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A synthetic exact-profile candidate completes one confirmed action."""
+    del enable_custom_integrations
     support = SimpleNamespace(
         model="SYNTHETIC TEST MODEL", profile="synthetic-output-v1"
     )
@@ -227,11 +229,13 @@ async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
 @pytest.mark.asyncio
 async def test_unauthorized_candidate_denial_has_zero_ble_tx(
     hass: HomeAssistant,
+    enable_custom_integrations,
     hass_ws_client,
     hass_admin_user,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Production candidate policy stays empty and denial never touches BLE."""
+    del enable_custom_integrations
     monkeypatch.setattr(hil_write, "CANDIDATE_POLICIES", {})
     fake_gatt = SimpleNamespace(writes=[])
     client = SimpleNamespace(
