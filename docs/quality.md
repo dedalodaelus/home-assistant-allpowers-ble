@@ -134,14 +134,31 @@ Critical sequence scenarios include:
 - independent clients for separate config entries.
 
 Automated tests cannot prove radio behavior or command safety on an untested
-hardware revision. Software code-profile classification and physical HIL
-qualification are separate. On `devel`, R600 and canonical VOLIX P1800 hardware
-revision 0.3 receive write-capable code profiles while the required route,
-scenario, and write-capability results in the matrix remain pending. This is an
-unresolved conformance gap with accepted [ADR 0008](architecture/decisions/0008-authorize-writes-with-verified-capabilities-and-semantic-state.md),
-whose fitness functions require HIL validation before a profile gains write
-capabilities. No exception is accepted by this documentation. Proposed [ADR
-0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
-tracks the policy resolution; until a decision is accepted, ADR 0008 remains
-unchanged and authoritative. Do not describe pending profiles as physically
-HIL-qualified.
+hardware revision. Software code-profile classification, per-control production
+authorization, attended HIL candidate testing, and physical support-tier
+qualification are separate. Accepted [ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
+supersedes [ADR 0008](architecture/decisions/0008-authorize-writes-with-verified-capabilities-and-semantic-state.md)
+while retaining its five runtime safety gates. Before adding or newly enabling an
+individual production control, require operation-specific reviewed physical
+evidence, regression tests, fresh pre/post observations, preservation checks, and
+transaction/reconnect safety checks. The complete HIL matrix, both routes, and a
+24-hour soak are not prerequisites for each individual control.
+
+Canonical R600 and VOLIX P1800 hardware revision 0.3 currently retain their
+existing write-capable code profiles under a narrow transitional compatibility
+allowance. Both profiles have no scoped HIL runs; required route, scenario, and
+write-capability results remain pending. For VOLIX P1800, PR #183 reports one unit
+on firmware `0xF1` without an identified route or per-control results. This does
+not qualify every control, firmware, or route. No matrix values are changed by
+the policy decision, and pending results must not be described as physical
+qualification. The allowance does not approve new controls or a firmware
+allowlist. Follow-up evidence and implementation are tracked by #206, #227,
+#248, #266–#269, #273, and #275.
+
+Bronze is evidence-backed read-only support; Silver is physically verified
+applicable basic output control; Gold is verified declared settings/functions
+and recovery; Platinum is Gold plus optional uninterrupted 24-hour reliability.
+These tiers classify support evidence and never grant writes. First-time
+experiments require a separately reviewed candidate and the temporary, attended,
+single-use HIL-only authorization implemented under #275; they never expose
+normal Home Assistant write controls.

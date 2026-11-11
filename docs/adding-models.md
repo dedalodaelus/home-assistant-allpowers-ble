@@ -66,11 +66,25 @@ values observable for diagnostics while denying writes that depend on them.
 
 Do not add a guessed default frame as a fallback.
 
+Before adding or newly enabling an individual production control, require
+maintainer-reviewed evidence for the exact model/revision and operation:
+understood frame and masks; representative read/write vectors and negative tests;
+fresh pre/post GATT observations; operator-confirmed physical effect in both
+directions or a safe reversible change and restoration; preservation of unknown
+bits; and transaction/reconnect checks. Record tested firmware and observed BLE
+route. Require a reviewed equivalence rationale before generalizing to another
+firmware or route. Completing both routes, vendor-app contention, the full HIL
+scenario set, or a 24-hour soak is not a prerequisite for each individual
+control.
+
 ## 6. Extend model policy
 
-Update `model_support.py` only after protocol evidence exists. Keep explicit
-rejections ahead of broad family matches. Add tests for capitalization, missing
-names, exact rejected revisions, and generic service-UUID candidates.
+Update `model_support.py` only after protocol evidence exists and the individual
+control's production evidence has been reviewed. Keep explicit rejections ahead
+of broad family matches. Add tests for capitalization, missing names, exact
+rejected revisions, and generic service-UUID candidates. Candidate HIL eligibility
+and temporary authorization are separate follow-up work in #266 and #275; they
+must not enable normal HA controls.
 
 ## 7. Add Home Assistant entities
 
@@ -103,7 +117,9 @@ For verified write-capable profiles, also:
 - review imported evidence under `tests/hil/fixtures/<revision-id>/`; archive
   import creates inconclusive results only and cannot qualify physical behavior;
 - record each scenario and write-capability verdict with evidence for that exact
-  firmware and route. Never copy a PASS or `not_applicable` result across scopes;
+  firmware and observed route. Never copy a PASS or `not_applicable` result across
+  scopes. Matrix/tier qualification is distinct from authorizing one individual
+  production control;
 - run `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`
   before requesting stable promotion.
 

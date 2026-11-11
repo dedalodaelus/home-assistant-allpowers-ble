@@ -57,6 +57,17 @@ until their required evidence is captured. For example, the current VOLIX P1800
 report covers one unit running firmware `0xF1`; it does not identify a Bluetooth
 route or establish results for the required scenario and write-capability set.
 
+The full matrix supports hardware support-tier and release-gate decisions. It is
+not an all-or-nothing prerequisite for each individual production write. Under
+[ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md),
+adding or newly enabling a control requires reviewed, operation-specific physical
+evidence for its exact model/revision, firmware, and observed route. Bronze is
+evidence-backed read-only; Silver is physically verified applicable basic output
+control; Gold adds verified declared settings/functions and recovery; Platinum
+adds optional uninterrupted 24-hour reliability. These tiers classify coverage
+and never authorize writes. Candidate testing uses the separate attended,
+temporary #275 grant and does not enable normal Home Assistant controls.
+
 ## Scope
 
 Use this process when you need to:
@@ -64,6 +75,11 @@ Use this process when you need to:
 - promote or keep a profile in the verified lane;
 - refresh stale HIL evidence before a stable release;
 - qualify a new hardware revision for write-capable support.
+
+For one newly proposed control, collect the operation-specific evidence required
+by ADR 0017. The full route/scenario checklist below is for scoped matrix and
+support-tier qualification; its unrelated items are not prerequisites for every
+individual control.
 
 Use the [guided HIL CLI](hil-cli.md) to collect a run and make a public evidence
 ZIP. Read-only snapshots and guided software steps are useful review evidence;
@@ -106,7 +122,7 @@ logger:
 
 ## 2. Capture evidence for each required route
 
-Run every scenario in both lanes:
+For full matrix qualification, run the required scenario set in both lanes:
 
 - local_adapter
 - active_proxy

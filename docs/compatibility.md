@@ -39,6 +39,42 @@ capability may be `not_applicable` only with scoped supporting evidence and a
 rationale. Capture records must also match the matrix revision, firmware, run
 ID, and timestamp. Independent physical evidence review remains necessary.
 
+## Write authorization and hardware support tiers
+
+Production write authorization is reviewed per model/revision and individual
+control. Before adding or newly enabling a control, require an understood command
+frame and masks, representative read/write vectors and negative regression tests,
+fresh pre/post GATT observations, operator-confirmed physical effect in both
+directions (or a safe reversible change and restoration), preservation of
+unrelated/unknown bits, and transaction/reconnect checks. Record the tested
+firmware and observed BLE route. Evidence does not automatically generalize to
+other firmware or routes; maintainers must review an equivalence rationale.
+Full matrix completion, both routes, vendor-app contention, and a 24-hour soak
+are not prerequisites for each individual control.
+
+Bronze (evidence-backed read-only), Silver (physically verified applicable basic
+output controls), Gold (verified declared settings/functions and recovery), and
+Platinum (Gold plus optional uninterrupted 24-hour reliability) describe reviewed
+support evidence. A support tier never grants a write capability. Candidate HIL
+experiments are a separate attended, temporary, single-use path under #275; they
+do not expose normal Home Assistant write entities or authorize production writes.
+Unknown, absent, conflicting, or unsafe operations remain blocked. See accepted
+[ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
+and [ADR 0012](architecture/decisions/0012-keep-unverified-controls-read-only-or-opt-in.md).
+
+### Transitional inventory: currently writable code profiles
+
+| Profile | Current code permissions | Evidence status and compatibility impact |
+|---|---|---|
+| Canonical R600, hardware 0.3 / raw `0x03` | Output and settings controls enabled; settings keepalive supported; experimental car-charger control is separately opt-in and defaults off. | No scoped HIL runs. Routes, scenarios, and all matrix write capabilities remain pending. Existing controls remain enabled under a documented transitional allowance while targeted review is outstanding. |
+| Canonical VOLIX P1800, hardware 0.3 / raw `0x03` | Same R600 profile permissions. | PR #183 reports one unit on firmware `0xF1`, without observed route or per-control results. All scoped routes, scenarios, and write capabilities remain pending. Current access remains transitional; the report does not qualify every control, firmware, or route. |
+
+This allowance describes current shipped behavior; it is not a HIL PASS, does not
+qualify the profiles physically, and does not approve additional write
+capabilities. Runtime authorization still applies the five safety gates in ADR
+0008/0017. The matrix stays unchanged until independently reviewed evidence
+supports a scoped result. Follow-up: #206, #227, #248, #266–#269, #273, and #275.
+
 ## Current matrix
 
 | Model or advertised family | Level | Setup behavior |
@@ -89,10 +125,13 @@ change a rejected family to supported merely because it exposes one matching UUI
 
 Every profile classified as a **Verified code profile** must have a revision
 record in `tests/hil/qualification_matrix.json`. Each physical run is recorded
-separately for one firmware and one observed route, with:
+separately for one firmware and one observed route. The matrix supports scoped
+support-tier and release-gate decisions; it is not an all-or-nothing prerequisite
+for each individual production write authorization. A newly enabled control
+instead requires the operation-specific evidence above. A run records:
 
-- a route result for `local_adapter`;
-- a route result for `active_proxy`;
+- route results for the routes actually observed (`local_adapter` and/or
+  `active_proxy`);
 - scenario status for replay, reconnect/failover, rapid writes, stale/timeout,
   upgrade/reload, vendor-app contention, and soak;
 - write-capability status for every exposed writable control.
@@ -202,10 +241,10 @@ authentication. Write authorization therefore depends on:
 
 For VOLIX P1800, the only reported physical evidence is one unit running firmware
 `0xF1` (PR #183). Other firmware versions are not physically qualified by that
-report, but they are not automatically read-only: the current code may grant the
-write-capable profile when canonical identity and the current-session hardware
-revision match. This is an evidence-scope limitation, not a firmware authorization
-gate.
+report, but the current code does not enforce a firmware allowlist: the shipped
+transitional profile may grant existing writes when canonical identity and the
+current-session hardware revision match. This is an evidence-scope limitation,
+not evidence that other firmware is qualified or a newly approved firmware policy.
 
 ### Read-only mode for experimental devices
 
@@ -222,15 +261,24 @@ monitoring and data gathering to support future hardware verification.
 
 ### Adding a new profile with write capabilities
 
-To enable write controls for a new hardware model requires:
+To add or newly enable an individual production write control requires:
 
 1. Capturing representative traffic from the exact hardware revision on your
    physical device.
 2. Documenting all behavior: status flag bit meanings, settings byte layout,
    output command encoding.
 3. Adding regression tests that validate the protocol behavior for that revision.
-4. Explicitly merging a model profile change to the integration with a `verified`
-   classification.
+4. Fresh pre/post GATT observations and operator-confirmed physical effect for
+   both directions (or a safe reversible change and restoration), preserving
+   unrelated and unknown bits.
+5. Recording tested firmware and observed route, with an explicit reviewed
+   rationale before generalizing to other firmware or routes.
+6. Explicit maintainer review of the evidence, profile policy, and regression
+   tests before enabling the control.
+
+Completing every HIL route, scenario, or 24-hour soak is not required to authorize
+one individually evidenced control. Qualification and support-tier claims remain
+separately scoped to the matrix.
 
 Contributing a new unverified device that merely exposes the FFF0 service will
 not enable writes. The integration distinguishes between "device is working" and

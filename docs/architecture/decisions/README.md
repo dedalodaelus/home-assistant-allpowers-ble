@@ -23,7 +23,7 @@ decision date.
 | [0005](0005-keep-the-protocol-core-in-repository-and-home-assistant-independent.md) | Accepted | 2026-07-26 | Keep the protocol core in the repository and independent from Home Assistant. |
 | [0006](0006-decode-notifications-with-a-bounded-incremental-stream-parser.md) | Accepted | 2026-07-26 | Decode notifications with a bounded incremental stream parser. |
 | [0007](0007-publish-immutable-snapshots-and-gate-operations-by-freshness.md) | Accepted | 2026-07-26 | Publish immutable snapshots and gate operations by freshness. |
-| [0008](0008-authorize-writes-with-verified-capabilities-and-semantic-state.md) | Accepted | 2026-07-26 | Authorize writes with verified capability profiles and semantic state. |
+| [0008](0008-authorize-writes-with-verified-capabilities-and-semantic-state.md) | Superseded by 0017 | 2026-07-26 | Preserve runtime safety gates for writes. |
 | [0009](0009-preserve-unrelated-and-unknown-protocol-bits.md) | Accepted | 2026-07-26 | Preserve unrelated and unknown protocol bits. |
 | [0010](0010-re-resolve-routes-and-isolate-session-generations.md) | Accepted | 2026-07-26 | Re-resolve BLE routes and isolate GATT session generations. |
 | [0011](0011-serialize-writes-and-require-device-confirmation.md) | Accepted | 2026-07-26 | Serialize writes and require device confirmation. |
@@ -32,7 +32,7 @@ decision date.
 | [0014](0014-apply-runtime-options-without-reloading-the-entry.md) | Accepted | 2026-07-26 | Apply runtime options without reloading the config entry. |
 | [0015](0015-redact-device-identifiers-from-diagnostics.md) | Accepted | 2026-07-26 | Redact device identifiers from exported diagnostics. |
 | [0016](0016-emit-persistent-repairs-only-for-actionable-failures.md) | Accepted | 2026-07-28 | Emit persistent Repairs only for actionable failures. |
-| [0017](0017-reconcile-hil-qualification-with-write-capability-policy.md) | Proposed | 2026-10-31 | Reconcile HIL qualification requirements with write-capable code profiles. |
+| [0017](0017-reconcile-hil-qualification-with-write-capability-policy.md) | Accepted | 2026-11-11 | Separate operation-level production authorization, candidate HIL testing, and support tiers. |
 
 ## Relationship map
 
@@ -55,7 +55,7 @@ flowchart TB
     A14[0014 Live option application]
     A15[0015 Diagnostic redaction]
     A16[0016 Persistent actionable Repairs]
-    A17[0017 HIL and write-capability policy gap, proposed]
+    A17[0017 operation authorization and HIL support tiers, accepted]
 
     A0 --> A1
     A0 --> A5
@@ -81,6 +81,7 @@ flowchart TB
     A14 --> A16
     A15 --> A16
     A8 --> A17
+    A17 -. supersedes .-> A8
 ```
 
 ## Governance
