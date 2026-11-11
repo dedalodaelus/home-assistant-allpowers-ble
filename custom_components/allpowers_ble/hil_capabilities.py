@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 from .entity import runtime_model_support
+from .model_support import ModelFeature, model_feature_capability
 
 _SCHEMA: dict[Any, Any] = {
     vol.Required("type"): DOMAIN + "/hil/capabilities",
@@ -74,8 +75,32 @@ async def ws_capabilities(
         generation = None
 
     capability_flags = support.capabilities
+    feature_snapshots = {}
+    for feature in ModelFeature:
+        fact = model_feature_capability(support, feature)
+        feature_snapshots[feature.value] = {
+            "physical_presence": fact.physical_presence.value,
+            "production_authorized": bool(fact.production_authorized),
+            "candidate_hil_eligible": bool(fact.hil_candidate_eligible),
+            "runtime_ready": bool(
+                coordinator.connected
+                and not data.identity_conflicted
+                and not runtime.client.has_pending_transaction
+                and (
+                    coordinator.status_is_fresh
+                    if feature
+                    in {
+                        ModelFeature.AC_OUTPUT,
+                        ModelFeature.DC_OUTPUT,
+                        ModelFeature.LIGHT_OUTPUT,
+                        ModelFeature.TELEMETRY,
+                    }
+                    else settings_fresh
+                )
+            ),
+        }
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model": support.model,
         "profile": support.profile,
         "classification": support.classification,
@@ -100,6 +125,7 @@ async def ws_capabilities(
             "write_settings_keepalive": bool(capability_flags.write_settings_keepalive),
             "car_charger_enabled": bool(options.enable_car_charger),
         },
+        "features": feature_snapshots,
         "connected": bool(coordinator.connected),
         "status_fresh": bool(coordinator.status_is_fresh),
         "settings_fresh": bool(settings_fresh),

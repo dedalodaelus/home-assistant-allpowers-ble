@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .api import HAAPIError, HAClient
+from .capabilities import feature_write_authorized
 from .discovery import Device
 from .suite_runtime import SuiteServices
 from .storage import run_root
@@ -104,7 +105,7 @@ def _execute_output_suite(
                 or caps["pending_transaction"]
                 or caps[freshness_key] is not True
                 or type(generation) is not int
-                or caps["capabilities"][capability_key] is not True
+                or not feature_write_authorized(caps, key, capability_key)
                 or (
                     key == "car_charger"
                     and caps["capabilities"]["car_charger_enabled"] is not True
@@ -177,7 +178,7 @@ def _execute_output_suite(
                 or recheck_caps.get("pending_transaction")
                 or recheck_caps.get(freshness_key) is not True
                 or recheck_caps.get("session_generation") != generation
-                or recheck_caps.get("capabilities", {}).get(capability_key) is not True
+                or not feature_write_authorized(recheck_caps, key, capability_key)
                 or (
                     key == "car_charger"
                     and recheck_caps.get("capabilities", {}).get("car_charger_enabled")
@@ -380,8 +381,9 @@ def _execute_output_suite(
                     and offer_caps.get("pending_transaction") is False
                     and offer_caps.get("session_generation")
                     == cleanup.get("session_generation")
-                    and offer_caps.get("capabilities", {}).get(restore_capability_key)
-                    is True
+                    and feature_write_authorized(
+                        offer_caps, restore_key, restore_capability_key
+                    )
                     and (
                         restore_key != "car_charger"
                         or offer_caps.get("capabilities", {}).get("car_charger_enabled")
@@ -445,8 +447,9 @@ def _execute_output_suite(
                     or current_caps.get("pending_transaction") is not False
                     or current_caps.get("session_generation")
                     != cleanup.get("session_generation")
-                    or current_caps.get("capabilities", {}).get(restore_capability_key)
-                    is not True
+                    or not feature_write_authorized(
+                        current_caps, restore_key, restore_capability_key
+                    )
                     or (
                         restore_key == "car_charger"
                         and current_caps.get("capabilities", {}).get(
@@ -500,10 +503,9 @@ def _execute_output_suite(
                                 or write_caps.get(restore_freshness_key) is not True
                                 or write_caps.get("session_generation")
                                 != cleanup.get("session_generation")
-                                or write_caps.get("capabilities", {}).get(
-                                    restore_capability_key
+                                or not feature_write_authorized(
+                                    write_caps, restore_key, restore_capability_key
                                 )
-                                is not True
                                 or (
                                     restore_key == "car_charger"
                                     and write_caps.get("capabilities", {}).get(

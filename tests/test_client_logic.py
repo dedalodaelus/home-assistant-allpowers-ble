@@ -526,6 +526,64 @@ async def test_sequential_output_commands_use_confirmed_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_mixed_feature_profile_guards_writes_and_preserves_sibling_bits(
+    monkeypatch: pytest.MonkeyPatch,
+    notification_builder,
+) -> None:
+    client, fake = _connected_client()
+    now = asyncio.get_running_loop().time()
+    client._status = _status(raw_flags=0x10)
+    client._status_monotonic = now
+    client._settings = _settings(raw_flags=0xA0)
+    client._settings_monotonic = now
+    original_capability = client_module.model_feature_capability
+    allowed = {
+        client_module.ModelFeature.AC_OUTPUT,
+        client_module.ModelFeature.ECO_MODE,
+    }
+
+    def mixed_capability(support, feature):
+        capability = original_capability(support, feature)
+        return replace(
+            capability,
+            production_authorized=feature in allowed,
+            physical_presence=client_module.PhysicalPresence.PRESENT,
+        )
+
+    monkeypatch.setattr(client_module, "model_feature_capability", mixed_capability)
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_dc(False)  # Denied no-op must be checked before no-op.
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_dc(True)
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_work_mode(WorkMode.MUTE)
+    assert fake.writes == []
+
+    await client.async_set_ac(True)
+    assert fake.writes[-1][7] == 0x22  # Preserve the echoed light bit 0x20.
+    pending = client._pending_output_transaction
+    assert pending is not None
+    assert pending.phase is client_module.TransactionPhase.AWAITING_CONFIRMATION
+    output_confirmation = notification_builder(
+        0x01, bytes((0x12, 50, 0, 100, 0, 25, 0, 0x12))
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(output_confirmation))
+    assert client._pending_output_transaction is None
+    client._status = _status(ac_enabled=False, raw_flags=0x10)
+    client._status_monotonic = asyncio.get_running_loop().time()
+    await client.async_set_eco(True)
+    assert fake.writes[-1][7] == 0xA1  # Preserve unrelated settings bits.
+    pending = client._pending_settings_transaction
+    assert pending is not None
+    assert pending.phase is client_module.TransactionPhase.AWAITING_CONFIRMATION
+    settings_confirmation = notification_builder(
+        0x03, bytes((0xA1, 2, 0, 0, 0x03, 0x11))
+    )
+    client._notification_handler(FakeCharacteristic(), bytearray(settings_confirmation))
+    assert client._pending_settings_transaction is None
+
+
+@pytest.mark.asyncio
 async def test_stale_status_notification_does_not_clear_pending_output_transaction(
     status_frame: bytes,
 ) -> None:

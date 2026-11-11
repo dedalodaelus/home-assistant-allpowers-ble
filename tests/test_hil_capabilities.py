@@ -107,6 +107,13 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert connection.errors == []
     assert connection.results[0][0] == 12
     result = connection.results[0][1]
+    assert result["schema_version"] == 2
+    assert result["features"]["ac_output"] == {
+        "physical_presence": "unknown",
+        "production_authorized": True,
+        "candidate_hil_eligible": False,
+        "runtime_ready": False,
+    }
     assert result["hardware_revision"] == "0.3"
     assert result["raw_hardware_revision"] == 3
     assert result["firmware_revision"] == "2.1"

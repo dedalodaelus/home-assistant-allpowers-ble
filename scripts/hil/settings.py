@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
+from .capabilities import feature_write_authorized
 from .discovery import Device
 from .suite_runtime import SuiteServices
 
@@ -56,7 +57,7 @@ def _execute_settings_write(
         or caps.get("settings_fresh") is not True
         or caps.get("pending_transaction") is not False
         or caps.get("session_generation") != generation
-        or caps.get("capabilities", {}).get("write_settings_controls") is not True
+        or not feature_write_authorized(caps, key, "write_settings_controls")
         or current.get("available") is not True
         or current.get("state") != expected_pre_state
         or not services.control_value_available(key, current, target)
@@ -103,8 +104,7 @@ def _execute_settings_write(
             or write_caps.get("settings_fresh") is not True
             or write_caps.get("pending_transaction") is not False
             or write_caps.get("session_generation") != generation
-            or write_caps.get("capabilities", {}).get("write_settings_controls")
-            is not True
+            or not feature_write_authorized(write_caps, key, "write_settings_controls")
             or write_state.get("available") is not True
             or write_state.get("state") != expected_pre_state
             or not services.control_value_available(key, write_state, target)
@@ -341,7 +341,7 @@ def _execute_settings_suite(
         or caps.get("connected") is not True
         or caps.get("pending_transaction") is not False
         or caps.get("settings_fresh") is not True
-        or caps.get("capabilities", {}).get("write_settings_controls") is not True
+        or not feature_write_authorized(caps, key, "write_settings_controls")
         or type(caps.get("session_generation")) is not int
         or state.get("available") is not True
         or not services.control_value_available(key, state, target)
@@ -426,8 +426,9 @@ def _execute_settings_suite(
                 and cleanup_caps.get("settings_fresh") is True
                 and cleanup_caps.get("pending_transaction") is False
                 and cleanup_caps.get("session_generation") == caps["session_generation"]
-                and cleanup_caps.get("capabilities", {}).get("write_settings_controls")
-                is True
+                and feature_write_authorized(
+                    cleanup_caps, key, "write_settings_controls"
+                )
                 and cleanup_state.get("available") is True
             )
             if can_restore and cleanup_state.get("state") == initial:

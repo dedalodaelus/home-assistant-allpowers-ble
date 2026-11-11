@@ -16,7 +16,7 @@ from .entity import (
     AllpowersOutputControlEntity,
     AllpowersSettingsControlEntity,
     raise_command_error,
-    runtime_model_support,
+    feature_is_production_authorized,
 )
 
 
@@ -118,16 +118,11 @@ async def async_setup_entry(
 
     @callback
     def _async_add_supported_switches() -> None:
-        support = runtime_model_support(coordinator)
         new_descriptions = tuple(
             description
             for description in SWITCH_DESCRIPTIONS
             if description.key not in added_keys
-            and (
-                support.capabilities.write_settings_controls
-                if description.settings_control
-                else support.capabilities.write_output_controls
-            )
+            and feature_is_production_authorized(coordinator, description.key)
         )
         if not new_descriptions:
             return
