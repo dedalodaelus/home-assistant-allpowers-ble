@@ -144,28 +144,52 @@ def _check_evidence(
             _error(errors, f"{value} contains a Bluetooth MAC address")
 
 
-def _capture_rows(values: Any) -> list[dict[str, Any]]:
-    """Load explicitly scoped JSONL capture rows, excluding legacy examples."""
+def _capture_rows(values: Any) -> list[dict[str, Any]] | None:
+    """Load scoped JSONL rows, returning None if any capture is malformed."""
     if not isinstance(values, list):
         return []
     rows: list[dict[str, Any]] = []
     for value in values:
-        if not isinstance(value, str) or ".sample." in Path(value).name:
+        if (
+            not isinstance(value, str)
+            or not value.endswith(".jsonl")
+            or ".sample." in Path(value).name
+        ):
             continue
         path = (ROOT / value).resolve()
         try:
             path.relative_to(ROOT)
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError, UnicodeError, ValueError:
-            continue
+            return None
         for line in lines:
+            if not line.strip():
+                continue
             try:
                 row = json.loads(line)
             except ValueError, TypeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
+                return None
+            if not isinstance(row, dict):
+                return None
+            rows.append(row)
     return rows
+
+
+def _evidence_digests(references: Any) -> dict[str, str] | None:
+    """Return a stable path-to-SHA256 manifest for every referenced file."""
+    if not isinstance(references, list) or not references:
+        return None
+    digests: dict[str, str] = {}
+    for value in references:
+        if not isinstance(value, str) or not value:
+            return None
+        path = (ROOT / value).resolve()
+        try:
+            path.relative_to(ROOT)
+            digests[value] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError, ValueError:
+            return None
+    return dict(sorted(digests.items()))
 
 
 def _has_bound_capture(
@@ -182,7 +206,10 @@ def _has_bound_capture(
     capability: bool,
     expected_verdict: str,
 ) -> bool:
-    for row in _capture_rows(values):
+    rows = _capture_rows(values)
+    if rows is None:
+        return False
+    for row in rows:
         frame_hex = row.get("frame_hex")
         row_captured_at = row.get("captured_at")
         try:
@@ -239,20 +266,14 @@ def _check_physical_review(
         parsed = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
     except AttributeError, ValueError:
         parsed = None
-    references = item.get("evidence")
-    digest = None
-    if isinstance(references, list) and references and isinstance(references[0], str):
-        try:
-            digest = hashlib.sha256((ROOT / references[0]).read_bytes()).hexdigest()
-        except OSError:
-            pass
+    digest_manifest = _evidence_digests(item.get("evidence"))
     if (
         review.get("outcome") != expected
         or not isinstance(review.get("reviewed_by"), str)
         or not review["reviewed_by"].strip()
         or parsed is None
         or parsed.tzinfo is None
-        or review.get("evidence_sha256") != digest
+        or review.get("evidence_sha256") != digest_manifest
     ):
         _error(
             errors,
@@ -267,21 +288,9 @@ def _valid_reviewed_absence(item: dict[str, Any]) -> bool:
         parsed = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
     except AttributeError, ValueError:
         return False
-    references = item.get("evidence")
-    if (
-        not isinstance(reviewer, str)
-        or not reviewer.strip()
-        or parsed.tzinfo is None
-        or not isinstance(references, list)
-        or not references
-        or not isinstance(references[0], str)
-    ):
+    if not isinstance(reviewer, str) or not reviewer.strip() or parsed.tzinfo is None:
         return False
-    try:
-        digest = hashlib.sha256((ROOT / references[0]).read_bytes()).hexdigest()
-    except OSError:
-        return False
-    return item.get("evidence_sha256") == digest
+    return item.get("evidence_sha256") == _evidence_digests(item.get("evidence"))
 
 
 def _check_result_map(
@@ -320,6 +329,8 @@ def _check_result_map(
             required=status == "pass"
             or (require_pass and capability and status == "not_applicable"),
         )
+        if status == "pass":
+            _check_physical_review(item, status, item_context, errors)
         if status == "not_applicable" and not (
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
         ):
@@ -362,7 +373,7 @@ def _check_result_map(
                     errors,
                     f"{item_context} evidence must contain a route- and operation-bound capture row",
                 )
-            if status in {"pass", "fail"}:
+            if status == "fail":
                 _check_physical_review(item, status, item_context, errors)
 
 

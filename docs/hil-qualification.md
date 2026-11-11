@@ -9,8 +9,10 @@ verified profiles.
 model and exact hardware revision; each run records firmware, observed BLE
 route, run and session IDs, timestamp, verified build fingerprints, evidence,
 and authorization provenance. `feature_presence` records `present`, `absent`,
-or `unknown` separately from each write capability's outcome. A feature's
-physical PASS/FAIL also requires a reviewer record bound to the evidence digest.
+or `unknown` separately from each write capability's outcome. Every declared
+physical PASS requires a reviewer record, including during default structural
+validation. PASS/FAIL review records and reviewed absence bind a deterministic
+`evidence_sha256` mapping from every referenced evidence path to its SHA-256.
 An absent feature requires a reviewer and physical evidence; it does not require
 a GATT operation for a control that is not present.
 
@@ -38,7 +40,8 @@ later reviewed FAIL supersedes an earlier PASS for the same feature/scope.
 Experimental HIL authorization and unknown provenance cannot qualify production
 results. PASS evidence must bind route, firmware, run, session, timestamp, and
 verified build fingerprint, and carry an independent physical-review record
-whose digest matches the referenced evidence. A ZIP import remains inconclusive.
+whose digest manifest matches every referenced evidence file. Malformed JSONL
+capture lines invalidate strict qualification. A ZIP import remains inconclusive.
 The no-scope `--require-pass` command remains the broader release gate.
 
 The v1/v2 migration preserves prior outcomes verbatim as unqualified history.

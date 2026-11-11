@@ -14,10 +14,17 @@ import pytest
 from scripts import validate_hil_qualification as validator
 
 
+def _digest_manifest(root: Path, evidence: list[str]) -> dict[str, str]:
+    return {
+        item: hashlib.sha256((root / item).read_bytes()).hexdigest()
+        for item in sorted(evidence)
+    }
+
+
 def _result(
     evidence: str, tmp_path: Path, captured_at: datetime, *, status: str = "pass"
 ) -> dict[str, Any]:
-    digest = hashlib.sha256((tmp_path / evidence).read_bytes()).hexdigest()
+    evidence_paths = [evidence]
     return {
         "status": status,
         "evidence": [evidence],
@@ -25,7 +32,7 @@ def _result(
             "outcome": "confirmed_pass" if status == "pass" else "confirmed_fail",
             "reviewed_by": "independent-reviewer",
             "reviewed_at": captured_at.isoformat(),
-            "evidence_sha256": digest,
+            "evidence_sha256": _digest_manifest(tmp_path, evidence_paths),
         },
     }
 
@@ -172,11 +179,10 @@ def _qualified_run(
                     {
                         "reviewed_by": "physical-review",
                         "reviewed_at": captured_at.isoformat(),
-                        "evidence_sha256": hashlib.sha256(
-                            (
-                                tmp_path / f"tests/hil/fixtures/{run_id}-absence.md"
-                            ).read_bytes()
-                        ).hexdigest(),
+                        "evidence_sha256": _digest_manifest(
+                            tmp_path,
+                            [f"tests/hil/fixtures/{run_id}-absence.md"],
+                        ),
                     }
                     if key == not_applicable_capability
                     else {}
@@ -539,6 +545,80 @@ def test_feature_scope_rejects_unverified_provenance_and_crossed_capture_binding
         "requires an independent physical_review" in error
         for error in errors_for(unreviewed)
     )
+
+
+def test_default_validation_rejects_unreviewed_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "active_proxy", "unreviewed-default", now)
+    run["write_capabilities"]["ac_output"].pop("physical_review")
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(_matrix([run])), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        _matrix([run]), matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+
+    assert any(
+        "ac_output requires an independent physical_review" in error for error in errors
+    )
+
+
+def test_physical_review_binds_every_evidence_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "active_proxy", "multi-evidence", now)
+    result = run["write_capabilities"]["ac_output"]
+    second_evidence = "tests/hil/fixtures/second-evidence.md"
+    second_path = tmp_path / second_evidence
+    second_path.write_text("reviewed physical observation\n", encoding="utf-8")
+    result["evidence"].append(second_evidence)
+    result["physical_review"]["evidence_sha256"] = _digest_manifest(
+        tmp_path, result["evidence"]
+    )
+    second_path.write_text("changed after review\n", encoding="utf-8")
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+
+    assert any(
+        "physical_review must independently confirm" in error for error in errors
+    )
+
+
+def test_strict_qualification_rejects_malformed_capture_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "active_proxy", "truncated-capture", now)
+    capture = tmp_path / run["evidence"][0]
+    with capture.open("a", encoding="utf-8") as stream:
+        stream.write('{"truncated":\n')
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=True,
+        max_age_days=30,
+        route_scope="active_proxy",
+        revision_scope="r600-hw03",
+        firmware_scope="1.0",
+        feature_scope="ac_output",
+    )
+
+    assert any("route- and operation-bound capture row" in error for error in errors)
 
 
 def test_scoped_route_mismatch_does_not_qualify_feature(
