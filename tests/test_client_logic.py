@@ -110,6 +110,148 @@ async def test_noop_confirmed_control_does_not_block_real_change(control: str) -
     assert len(fake.writes) == 1
 
 
+@pytest.mark.asyncio
+async def test_hil_candidate_uses_known_encoder_and_waits_for_same_session_readback(
+    notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Synthetic test policy exercises HIL TX without enabling production writes."""
+    from custom_components.allpowers_ble import hil_write
+    from custom_components.allpowers_ble.const import (
+        NOTIFY_UUID,
+        SERVICE_UUID,
+        WRITE_UUID,
+    )
+    from custom_components.allpowers_ble.model_support import (
+        ModelFeature,
+        PhysicalPresence,
+    )
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from custom_components.allpowers_ble.protocol import encode_output_control
+
+    client, fake = _connected_client()
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    client._session_hardware_revision = ("test-hw", 1)
+    client._connected_route = (
+        1,
+        ConnectedRoute("local_adapter", "bluez", "bluez_device_path"),
+    )
+    support = SimpleNamespace(
+        model="SYNTHETIC TEST MODEL",
+        profile="synthetic-v1",
+        capabilities=SimpleNamespace(write_output_controls=False),
+    )
+    client._runtime_model_support = lambda: support
+
+    def validator(profile: str, status: object) -> bool:
+        return profile == "synthetic-v1" and isinstance(status, StatusData)
+
+    policy = hil_write.CandidatePolicy(
+        support.model,
+        "test-hw",
+        "1.1",
+        "synthetic-v1",
+        ModelFeature.DC_OUTPUT,
+        (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        PhysicalPresence.PRESENT,
+        validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {(support.model, "test-hw", "1.1", ModelFeature.DC_OUTPUT): policy},
+    )
+    client._settings = _settings(firmware_version="1.1")
+    client._settings_monotonic = monotonic()
+    notification = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+    original_write = fake.write_gatt_char
+
+    async def write_and_notify(characteristic, data, *, response):
+        await original_write(characteristic, data, response=response)
+        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+
+    monkeypatch.setattr(fake, "write_gatt_char", write_and_notify)
+    client._schedule_status_refresh = lambda: None
+    result = await client.async_hil_set_output(
+        ModelFeature.DC_OUTPUT,
+        True,
+        expected_generation=1,
+        semantic_validator=validator,
+        expected_model=support.model,
+        expected_hardware="test-hw",
+        expected_firmware="1.1",
+    )
+    assert result["outcome"] == "confirmed"
+    assert fake.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    assert client._pending_output_transaction is None
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_set_dc(False)
+
+
+@pytest.mark.asyncio
+async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.allpowers_ble import hil_write
+    from custom_components.allpowers_ble.const import (
+        NOTIFY_UUID,
+        SERVICE_UUID,
+        WRITE_UUID,
+    )
+    from custom_components.allpowers_ble.model_support import (
+        ModelFeature,
+        PhysicalPresence,
+    )
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    client, fake = _connected_client()
+    client._status = _status(raw_flags=0x91)
+    client._status_monotonic = monotonic()
+    client._session_hardware_revision = ("test-hw", 1)
+    client._connected_route = (
+        1,
+        ConnectedRoute("local_adapter", "bluez", "bluez_device_path"),
+    )
+    support = SimpleNamespace(
+        model="SYNTHETIC TEST MODEL",
+        profile="synthetic-v1",
+        capabilities=SimpleNamespace(write_output_controls=False),
+    )
+    client._runtime_model_support = lambda: support
+
+    def validator(_profile: str, status: object) -> bool:
+        return isinstance(status, StatusData) and status.raw_flags & ~0x11 == 0
+
+    policy = hil_write.CandidatePolicy(
+        support.model,
+        "test-hw",
+        "1.1",
+        "synthetic-v1",
+        ModelFeature.DC_OUTPUT,
+        (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        PhysicalPresence.PRESENT,
+        validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {(support.model, "test-hw", "1.1", ModelFeature.DC_OUTPUT): policy},
+    )
+    client._settings = _settings(firmware_version="1.1")
+    client._settings_monotonic = monotonic()
+    with pytest.raises(client_module.StateUnavailableError):
+        await client.async_hil_set_output(
+            ModelFeature.DC_OUTPUT,
+            True,
+            expected_generation=1,
+            semantic_validator=validator,
+            expected_model=support.model,
+            expected_hardware="test-hw",
+            expected_firmware="1.1",
+        )
+    assert fake.writes == []
+
+
 def test_client_exposes_session_generation_and_pending_transaction_state() -> None:
     client, _ = _connected_client()
     assert client.active_session_generation == 1

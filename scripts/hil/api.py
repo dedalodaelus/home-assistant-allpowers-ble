@@ -442,6 +442,10 @@ class HAClient:
                 "Home Assistant WebSocket connection failed or timed out"
             ) from ex
 
+    def websocket_session(self) -> "AuthenticatedWebSocketSession":
+        """Open one authenticated socket for related HIL grant operations."""
+        return AuthenticatedWebSocketSession(self)
+
     def scanner_candidates(self) -> dict[str, int] | None:
         """Read an optional, privacy-safe scanner inventory (not route proof).
 
@@ -540,3 +544,145 @@ class _NoRedirectHandler(request.HTTPRedirectHandler):
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
         return None
+
+
+class AuthenticatedWebSocketSession:
+    """Persistent authenticated websocket for one HIL authorization sequence."""
+
+    def __init__(self, client: HAClient) -> None:
+        self._client = client
+        self._socket: Any = None
+        self._next_id = 1
+
+    def __enter__(self) -> "AuthenticatedWebSocketSession":
+        try:
+            from websockets.sync.client import connect
+        except ImportError as ex:
+            raise HAAPIError(
+                "Missing HIL dependency; install requirements_hil.txt"
+            ) from ex
+        origin = parse.urlsplit(self._client.origin)
+        scheme = "wss" if origin.scheme == "https" else "ws"
+        url = f"{scheme}://{origin.netloc}/api/websocket"
+        try:
+            self._socket = connect(
+                url,
+                open_timeout=API_TIMEOUT,
+                close_timeout=2,
+                max_size=MAX_JSON_BYTES,
+                proxy=None,
+            )
+            hello = _json_object(
+                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                "handshake",
+            )
+            if hello.get("type") != "auth_required":
+                raise HAAPIError("Unexpected Home Assistant WebSocket handshake")
+            self._socket.send(
+                json.dumps({"type": "auth", "access_token": self._client._token})
+            )
+            auth = _json_object(
+                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                "authentication",
+            )
+            if auth.get("type") != "auth_ok":
+                raise HAAPIError("Home Assistant WebSocket authentication failed")
+            return self
+        except HAAPIError:
+            self.close()
+            raise
+        except (OSError, TimeoutError, ValueError, EOFError) as ex:
+            self.close()
+            raise HAAPIError(
+                "Home Assistant WebSocket connection failed or timed out"
+            ) from ex
+
+    def command(self, command: dict[str, Any]) -> Any:
+        """Send one command over this authenticated connection."""
+        if self._socket is None:
+            raise HAAPIError("WebSocket session is not open")
+        request_id = self._next_id
+        self._next_id += 1
+        try:
+            self._socket.send(json.dumps({"id": request_id, **command}))
+            reply = _json_object(
+                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                "command",
+            )
+        except (OSError, TimeoutError, ValueError, EOFError) as ex:
+            raise HAAPIError("Home Assistant WebSocket request failed") from ex
+        if reply.get("type") != "result" or reply.get("id") != request_id:
+            raise HAAPIError("Unexpected WebSocket reply order or type")
+        if reply.get("success") is not True:
+            error_data = reply.get("error")
+            code = error_data.get("code") if isinstance(error_data, dict) else None
+            safe_code = (
+                code
+                if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,40}", code)
+                else "unsupported_or_denied"
+            )
+            raise HAAPIError(f"Home Assistant WebSocket command rejected ({safe_code})")
+        return reply.get("result")
+
+    def experimental_output(
+        self,
+        entry_id: str,
+        feature: str,
+        target: bool,
+        *,
+        authorization_confirmed: bool,
+        execution_confirmed: bool,
+    ) -> dict[str, Any]:
+        """Run one attended grant/execute/revoke sequence on this same socket."""
+        if (
+            type(target) is not bool
+            or not authorization_confirmed
+            or not execution_confirmed
+        ):
+            raise HAAPIError("Attended confirmation is required for each HIL action")
+        authorized = self.command(
+            {
+                "type": "allpowers_ble/hil/write/authorize",
+                "version": 1,
+                "entry_id": entry_id,
+                "feature": feature,
+                "target": target,
+                "confirmed": authorization_confirmed,
+            }
+        )
+        if not isinstance(authorized, dict) or not isinstance(
+            authorized.get("token"), str
+        ):
+            raise HAAPIError("Home Assistant returned an invalid HIL grant")
+        token = authorized["token"]
+        try:
+            result = self.command(
+                {
+                    "type": "allpowers_ble/hil/write/execute",
+                    "version": 1,
+                    "entry_id": entry_id,
+                    "token": token,
+                    "confirmed": execution_confirmed,
+                }
+            )
+            if not isinstance(result, dict):
+                raise HAAPIError("Home Assistant returned an invalid HIL execution")
+            return result
+        finally:
+            self.command(
+                {
+                    "type": "allpowers_ble/hil/write/revoke",
+                    "version": 1,
+                    "token": token,
+                }
+            )
+
+    def close(self) -> None:
+        """Close the persistent connection and erase its local handle."""
+        socket = self._socket
+        self._socket = None
+        if socket is not None:
+            socket.close()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()

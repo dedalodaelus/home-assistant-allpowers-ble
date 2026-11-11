@@ -757,6 +757,80 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
     assert "PRIVATE_TOKEN" not in str(exc.value)
 
 
+def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch):
+    sent = []
+    opened = []
+
+    class PersistentWS:
+        def __init__(self):
+            self.replies = iter(
+                [
+                    {"type": "auth_required"},
+                    {"type": "auth_ok"},
+                    {
+                        "id": 1,
+                        "type": "result",
+                        "success": True,
+                        "result": {"token": "opaque-token"},
+                    },
+                    {
+                        "id": 2,
+                        "type": "result",
+                        "success": True,
+                        "result": {"outcome": "confirmed"},
+                    },
+                    {
+                        "id": 3,
+                        "type": "result",
+                        "success": True,
+                        "result": {"revoked": False},
+                    },
+                ]
+            )
+
+        def recv(self, timeout):
+            del timeout
+            return json.dumps(next(self.replies))
+
+        def send(self, message):
+            sent.append(json.loads(message))
+
+        def close(self):
+            pass
+
+    def connect(url, **kwargs):
+        opened.append((url, kwargs))
+        return PersistentWS()
+
+    websocket_package = ModuleType("websockets")
+    websocket_package.__path__ = []
+    sync_package = ModuleType("websockets.sync")
+    sync_package.__path__ = []
+    client_module = ModuleType("websockets.sync.client")
+    client_module.connect = connect
+    monkeypatch.setitem(sys.modules, "websockets", websocket_package)
+    monkeypatch.setitem(sys.modules, "websockets.sync", sync_package)
+    monkeypatch.setitem(sys.modules, "websockets.sync.client", client_module)
+    ha = api.HAClient("https://example.test", "PRIVATE_TOKEN")
+    with ha.websocket_session() as session:
+        result = session.experimental_output(
+            "entry-a",
+            "dc_output",
+            True,
+            authorization_confirmed=True,
+            execution_confirmed=True,
+        )
+    assert result == {"outcome": "confirmed"}
+    assert len(opened) == 1
+    assert [command["id"] for command in sent[1:]] == [1, 2, 3]
+    assert [command["type"] for command in sent[1:]] == [
+        "allpowers_ble/hil/write/authorize",
+        "allpowers_ble/hil/write/execute",
+        "allpowers_ble/hil/write/revoke",
+    ]
+    assert sent[0] == {"type": "auth", "access_token": "PRIVATE_TOKEN"}
+
+
 def test_mixed_case_https_never_downgrades_websocket(monkeypatch):
     """Regression: validated HTTPS origins must never send a token over ws://."""
     attempted_urls = []
