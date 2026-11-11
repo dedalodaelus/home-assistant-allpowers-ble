@@ -240,7 +240,7 @@ class HAClient:
         if (
             not isinstance(result, dict)
             or type(result.get("schema_version")) is not int
-            or result.get("schema_version") != 1
+            or result.get("schema_version") not in {1, 2}
             or result.get("model") is None
             or not isinstance(result.get("profile"), str)
             or re.fullmatch(r"[a-z0-9.-]{1,80}", result["profile"]) is None
@@ -305,6 +305,45 @@ class HAClient:
             raise HAAPIError("Malformed HIL session generation")
         normalized["session_generation"] = generation
         normalized["capabilities"] = dict(capabilities)
+        if result["schema_version"] == 2:
+            features = result.get("features")
+            allowed_features = {
+                "ac_output",
+                "dc_output",
+                "light_output",
+                "eco_mode",
+                "work_mode",
+                "eco_timeout",
+                "car_charger",
+                "telemetry",
+            }
+            if not isinstance(features, dict) or set(features) != allowed_features:
+                raise HAAPIError("Malformed HIL feature snapshot")
+            normalized_features = {}
+            for name, facts in features.items():
+                if (
+                    not isinstance(facts, dict)
+                    or set(facts)
+                    != {
+                        "physical_presence",
+                        "production_authorized",
+                        "candidate_hil_eligible",
+                        "runtime_ready",
+                    }
+                    or facts["physical_presence"]
+                    not in {"present", "absent", "unknown"}
+                    or any(
+                        type(facts[key]) is not bool
+                        for key in (
+                            "production_authorized",
+                            "candidate_hil_eligible",
+                            "runtime_ready",
+                        )
+                    )
+                ):
+                    raise HAAPIError("Malformed HIL feature facts")
+                normalized_features[name] = dict(facts)
+            normalized["features"] = normalized_features
         return normalized
 
     def websocket(

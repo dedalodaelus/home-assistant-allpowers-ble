@@ -11,7 +11,7 @@ from .coordinator import AllpowersConfigEntry
 from .entity import (
     AllpowersSettingsControlEntity,
     raise_command_error,
-    runtime_model_support,
+    feature_is_production_authorized,
 )
 from .protocol import WorkMode
 
@@ -45,15 +45,15 @@ async def async_setup_entry(
 
     @callback
     def _async_add_supported_selects() -> None:
-        support = runtime_model_support(coordinator)
-        if not support.capabilities.write_settings_controls:
-            return
-
         entities: list[SelectEntity] = []
-        if "work_mode" not in added_keys:
+        if "work_mode" not in added_keys and feature_is_production_authorized(
+            coordinator, "work_mode"
+        ):
             added_keys.add("work_mode")
             entities.append(AllpowersWorkModeSelect(entry))
-        if "eco_timeout" not in added_keys:
+        if "eco_timeout" not in added_keys and feature_is_production_authorized(
+            coordinator, "eco_timeout"
+        ):
             added_keys.add("eco_timeout")
             entities.append(AllpowersEcoTimeoutSelect(entry))
         if entities:

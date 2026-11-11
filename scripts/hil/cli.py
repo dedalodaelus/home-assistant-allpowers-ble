@@ -220,12 +220,23 @@ def _scenario_controls(
                 observed = {"available": False, "state": None, "options": []}
         facts = capabilities or {}
         capability_flags = facts.get("capabilities", {})
+        feature_facts = facts.get("features", {})
         settings_key = key in settings_controls
-        control_capable = capability_flags.get(
-            "write_settings_controls" if settings_key else "write_output_controls",
-            False,
+        feature_key = "light_output" if key == "light" else key
+        feature = feature_facts.get(feature_key)
+        control_capable = (
+            feature.get("production_authorized") is True
+            and feature.get("physical_presence") != "absent"
+            if isinstance(feature, dict)
+            else capability_flags.get(
+                "write_settings_controls" if settings_key else "write_output_controls",
+                False,
+            )
         )
         freshness = facts.get("settings_fresh" if settings_key else "status_fresh")
+        runtime_ready = (
+            feature.get("runtime_ready") is True if isinstance(feature, dict) else True
+        )
         if key == "car_charger":
             control_capable = control_capable and capability_flags.get(
                 "car_charger_enabled", False
@@ -236,6 +247,7 @@ def _scenario_controls(
                 facts.get("connected") is True
                 and facts.get("pending_transaction") is False
                 and freshness is True
+                and runtime_ready
                 and control_capable is True
                 and observed["available"] is True
             ),

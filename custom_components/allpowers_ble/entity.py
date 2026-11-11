@@ -15,7 +15,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .client import AllpowersClientError, NotConnectedError
 from .const import CONF_ENTITY_ID_PREFIX, CONF_REGISTRY_ID, DOMAIN, MANUFACTURER
 from .coordinator import AllpowersConfigEntry, AllpowersCoordinator
-from .model_support import ModelSupport, resolve_runtime_model_support
+from .model_support import (
+    ModelFeature,
+    ModelSupport,
+    PhysicalPresence,
+    model_feature_capability,
+    resolve_runtime_model_support,
+)
 from .protocol import StateUnavailableError
 
 
@@ -93,6 +99,20 @@ def runtime_model_support(coordinator: AllpowersCoordinator) -> ModelSupport:
     )
 
 
+def feature_is_production_authorized(
+    coordinator: AllpowersCoordinator, key: str
+) -> bool:
+    """Return the fail-closed production permission for one entity key."""
+    try:
+        feature = ModelFeature.LIGHT_OUTPUT if key == "light" else ModelFeature(key)
+    except ValueError:
+        return False
+    capability = model_feature_capability(runtime_model_support(coordinator), feature)
+    return capability.production_authorized and (
+        capability.physical_presence is not PhysicalPresence.ABSENT
+    )
+
+
 class AllpowersEntity(CoordinatorEntity[AllpowersCoordinator]):
     """Base entity tied to one ALLPOWERS power station."""
 
@@ -154,9 +174,8 @@ class AllpowersOutputControlEntity(AllpowersEntity):
     @property
     def available(self) -> bool:
         """Return whether a safe combined output command can be built."""
-        support = runtime_model_support(self.coordinator)
         return (
-            support.capabilities.write_output_controls
+            feature_is_production_authorized(self.coordinator, self._key)
             and self.coordinator.controls_available
         )
 
@@ -167,8 +186,7 @@ class AllpowersSettingsControlEntity(AllpowersEntity):
     @property
     def available(self) -> bool:
         """Return whether a safe settings command can be built."""
-        support = runtime_model_support(self.coordinator)
         return (
-            support.capabilities.write_settings_controls
+            feature_is_production_authorized(self.coordinator, self._key)
             and self.coordinator.settings_controls_available
         )

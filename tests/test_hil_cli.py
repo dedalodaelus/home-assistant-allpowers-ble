@@ -3645,3 +3645,52 @@ def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
 
     with pytest.raises(api.HAAPIError):
         client.hil_capabilities("entry-123")
+
+
+def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    response = {
+        "schema_version": 2,
+        "model": "R600",
+        "profile": "r600-hw-0.3",
+        "classification": "verified",
+        "verified": True,
+        "identity_conflicted": False,
+        "hardware_revision": "0.3",
+        "raw_hardware_revision": 3,
+        "firmware_revision": None,
+        "raw_firmware_revision": None,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 1,
+        "pending_transaction": False,
+        "features": {
+            name: {
+                "physical_presence": "unknown",
+                "production_authorized": True,
+                "candidate_hil_eligible": False,
+                "runtime_ready": True,
+            }
+            for name in (
+                "ac_output",
+                "dc_output",
+                "light_output",
+                "eco_mode",
+                "work_mode",
+                "eco_timeout",
+                "car_charger",
+                "telemetry",
+            )
+        },
+    }
+    monkeypatch.setattr(client, "websocket", lambda _commands: [response])
+    normalized = client.hil_capabilities("entry-123")
+    assert normalized["features"]["ac_output"]["runtime_ready"] is True

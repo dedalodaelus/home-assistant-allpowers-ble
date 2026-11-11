@@ -32,10 +32,13 @@ from .const import (
 from .client_observer import ClientObserver, ObserverSlot, TransactionObservation
 from .route_attribution import ConnectedRoute, connected_route
 from .model_support import (
+    ModelFeature,
     ModelSupport,
     canonical_model_identity,
     has_specific_model_identity,
     identify_model,
+    model_feature_capability,
+    PhysicalPresence,
     resolve_runtime_model_support,
 )
 from .models import AllpowersSnapshot, ConnectionStatistics
@@ -394,25 +397,26 @@ class AllpowersBLEClient:
 
     async def async_set_ac(self, enabled: bool) -> None:
         """Set AC output while preserving DC and light state."""
-        await self._async_set_output(ac=enabled)
+        await self._async_set_output(ModelFeature.AC_OUTPUT, ac=enabled)
 
     async def async_set_dc(self, enabled: bool) -> None:
         """Set DC output while preserving AC and light state."""
-        await self._async_set_output(dc=enabled)
+        await self._async_set_output(ModelFeature.DC_OUTPUT, dc=enabled)
 
     async def async_set_light(self, enabled: bool) -> None:
         """Set light output while preserving AC and DC state."""
-        await self._async_set_output(light=enabled)
+        await self._async_set_output(ModelFeature.LIGHT_OUTPUT, light=enabled)
 
     async def _async_set_output(
         self,
+        feature: ModelFeature,
         *,
         dc: bool | None = None,
         ac: bool | None = None,
         light: bool | None = None,
     ) -> None:
         async with self._operation_lock:
-            self._require_output_write_capability_unlocked()
+            self._require_feature_write_capability_unlocked(feature)
             current_dc, current_ac, current_light = self._safe_output_snapshot()
             target_dc = current_dc if dc is None else dc
             target_ac = current_ac if ac is None else ac
@@ -446,15 +450,17 @@ class AllpowersBLEClient:
 
     async def async_set_eco(self, enabled: bool) -> None:
         """Set ECO mode while preserving every unrelated settings bit."""
-        await self._async_update_settings(eco_enabled=enabled)
+        await self._async_update_settings(ModelFeature.ECO_MODE, eco_enabled=enabled)
 
     async def async_set_work_mode(self, mode: WorkMode) -> None:
         """Set charging work mode while preserving every unrelated setting."""
-        await self._async_update_settings(work_mode=mode)
+        await self._async_update_settings(ModelFeature.WORK_MODE, work_mode=mode)
 
     async def async_set_eco_timeout(self, hours: int) -> None:
         """Set ECO shutdown timeout."""
-        await self._async_update_settings(eco_timeout_hours=hours)
+        await self._async_update_settings(
+            ModelFeature.ECO_TIMEOUT, eco_timeout_hours=hours
+        )
 
     async def async_set_car_charger(self, enabled: bool) -> None:
         """Set the optional car-charger bit when explicitly enabled by the user."""
@@ -463,10 +469,13 @@ class AllpowersBLEClient:
             raise StateUnavailableError(
                 "Car charger control is disabled in integration options"
             )
-        await self._async_update_settings(car_charger_enabled=enabled)
+        await self._async_update_settings(
+            ModelFeature.CAR_CHARGER, car_charger_enabled=enabled
+        )
 
     async def _async_update_settings(
         self,
+        feature: ModelFeature,
         *,
         eco_enabled: bool | None = None,
         work_mode: WorkMode | None = None,
@@ -474,7 +483,7 @@ class AllpowersBLEClient:
         eco_timeout_hours: int | None = None,
     ) -> None:
         async with self._operation_lock:
-            self._require_settings_write_capability_unlocked()
+            self._require_feature_write_capability_unlocked(feature)
             current = self._safe_settings_snapshot()
             try:
                 target = updated_settings(
@@ -948,6 +957,31 @@ class AllpowersBLEClient:
         self._observe_rejection("output", "unsupported_capability")
         raise StateUnavailableError(
             f"Unsupported output command for active model profile: {support.profile}"
+        )
+
+    def _require_feature_write_capability_unlocked(self, feature: ModelFeature) -> None:
+        """Reject a write unless its exact feature is authorized by the profile."""
+        support = self._runtime_model_support()
+        capability = model_feature_capability(support, feature)
+        if (
+            capability.production_authorized
+            and capability.physical_presence is not PhysicalPresence.ABSENT
+        ):
+            return
+        group = (
+            "output"
+            if feature
+            in {
+                ModelFeature.AC_OUTPUT,
+                ModelFeature.DC_OUTPUT,
+                ModelFeature.LIGHT_OUTPUT,
+            }
+            else "settings"
+        )
+        self._observe_rejection(group, "unsupported_capability")
+        raise StateUnavailableError(
+            f"Unsupported {feature.value} command for active model profile: "
+            f"{support.profile}"
         )
 
     def _require_settings_write_capability_unlocked(self) -> None:
