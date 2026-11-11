@@ -234,7 +234,7 @@ def model_feature_capability(
             physical_presence=PhysicalPresence.UNKNOWN,
             evidence="Unknown feature identifier",
         )
-    if not isinstance(support, ModelSupport):
+    if not _is_model_support(support):
         return ModelFeatureCapability(
             feature=feature_id,
             physical_presence=PhysicalPresence.UNKNOWN,
@@ -315,6 +315,11 @@ def model_feature_capability(
         ),
         evidence="No consistent exact model/revision feature profile is available",
     )
+
+
+def _is_model_support(value: object) -> bool:
+    """Keep the runtime guard meaningful even when static callers are typed."""
+    return isinstance(value, ModelSupport)
 
 
 def canonical_model_identity(name: str | None) -> str | None:
