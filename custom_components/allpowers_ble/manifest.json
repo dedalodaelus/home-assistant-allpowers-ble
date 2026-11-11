@@ -25,6 +25,10 @@
     "@dedalodaelus"
   ],
   "config_flow": true,
+  "categories": [
+    "energy.solar_batteries",
+    "energy.backup_power"
+  ],
   "dependencies": [
     "bluetooth_adapters"
   ],
