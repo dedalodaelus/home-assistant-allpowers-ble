@@ -325,6 +325,8 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
     assert imported["route"] == "unverified"
     assert imported["capture_completeness"] == "unknown"
     assert imported["build_verification"] == "mismatch"
+    assert imported["authorization_context"] == "unknown"
+    assert imported["authorization_context_source"] == "archive_unverified"
     assert imported["installed_commit"] is None
     assert all(
         result["status"] == "inconclusive" for result in imported["scenarios"].values()

@@ -15,7 +15,10 @@ from typing import Any
 from .api import HAAPIError
 from .discovery import safe_model, safe_version
 from .evidence import PUBLIC_NAMES, verify_public_archive
-from scripts.validate_hil_qualification import validate_matrix
+from scripts.validate_hil_qualification import (
+    REQUIRED_WRITE_CAPABILITIES,
+    validate_matrix,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MATRIX = ROOT / "tests" / "hil" / "qualification_matrix.json"
@@ -28,15 +31,7 @@ SCENARIOS = (
     "upgrade_reload",
     "vendor_app_contention",
 )
-CAPABILITIES = (
-    "ac_output",
-    "dc_output",
-    "light_output",
-    "eco_mode",
-    "work_mode",
-    "eco_timeout",
-    "car_charger",
-)
+CAPABILITIES = REQUIRED_WRITE_CAPABILITIES
 
 
 def _json_file(content: bytes, name: str) -> dict[str, Any]:
@@ -316,10 +311,14 @@ def _build_proposal(
         ),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
+        "session_id": session.get("session_id", "unknown"),
+        "build_fingerprint": manifest["build_provenance"].get("checkout_fingerprint")
+        or "unknown",
         "feature_presence": {
             name: {"status": "unknown", "evidence": []} for name in CAPABILITIES
         },
-        "authorization_context": "production",
+        "authorization_context": "unknown",
+        "authorization_context_source": "archive_unverified",
         "evidence": evidence_paths,
         "scenarios": {
             name: {

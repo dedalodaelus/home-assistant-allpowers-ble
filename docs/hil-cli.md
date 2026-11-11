@@ -261,7 +261,7 @@ ruff format --check scripts tests
 ruff check scripts tests
 ```
 
-See [the full qualification runbook](hil-qualification.md). Do not update `qualification_matrix.json` or mark any control/route passed based on the read-only preflight alone.
+See [the full qualification runbook](hil-qualification.md) for matrix schema v3. A strict feature verdict selects one exact scope, for example `python scripts/validate_hil_qualification.py --require-pass --revision r600-hw03 --firmware 1.1 --route active_proxy --feature ac_output`. Do not mark a control or route passed based on a read-only preflight alone.
 
 
 ## Experimental private GATT trace (#229)
