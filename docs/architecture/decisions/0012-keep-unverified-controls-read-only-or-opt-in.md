@@ -18,10 +18,15 @@ outputs.
 
 ## Decision
 
-Expose unverified model profiles as read-only and omit their writable entities.
-Reject known incompatible model families. Keep settings keepalive and the
-experimental car-charger control disabled by default and require explicit user
-opt-in where the verified profile permits them.
+Expose unverified model profiles as read-only in production and omit their
+writable entities. Reject known incompatible model families. Keep settings
+keepalive and the experimental car-charger control disabled by default and
+require explicit user opt-in where the verified profile permits them. A
+separately reviewed candidate may be eligible for a temporary, attended,
+single-use HIL candidate grant under ADR 0017; that grant never creates normal
+Home Assistant write access or changes this production read-only rule.
+Production write authorization is operation-specific, and support tiers never
+grant writes.
 
 ## Alternatives considered
 
@@ -75,8 +80,10 @@ harder.
 - Entity tests assert write entities are absent or unavailable when a capability is
   false.
 - Defaults tests assert keepalive and car-charger options are off.
-- Hardware-in-the-loop validation is required before changing a profile from
-  read-only to writable.
+- Before changing an individual production control from read-only to writable,
+  satisfy ADR 0017's operation-specific evidence and review requirements. HIL
+  candidate authorization is a distinct test-only path; support tier and consent
+  do not authorize production writes.
 
 ## Review triggers
 
@@ -89,4 +96,5 @@ harder.
 
 - [0004](0004-require-an-active-protocol-probe-before-setup.md)
 - [0008](0008-authorize-writes-with-verified-capabilities-and-semantic-state.md)
+- [0017](0017-reconcile-hil-qualification-with-write-capability-policy.md)
 - [0014](0014-apply-runtime-options-without-reloading-the-entry.md)

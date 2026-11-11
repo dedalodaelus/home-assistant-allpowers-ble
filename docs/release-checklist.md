@@ -75,6 +75,10 @@ sha256sum --check dist/allpowers_ble.zip.sha256
 - Keep a v2 revision record for every verified hardware revision and separate run
   records for each firmware and observed route. Do not share results across
   firmware versions or routes.
+- Review new or newly enabled production controls against ADR 0017's per-control
+  physical evidence and runtime safety requirements. A support tier never grants
+  write access; the complete matrix and 24-hour soak are separate release/support
+  evidence gates.
 - Import reviewed public guided-run evidence with
   `python -m scripts.hil import <zip> --dry-run`, inspect the proposed profile,
   scope, evidence paths, and limitations, then use `--apply` to write it.

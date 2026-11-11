@@ -1,10 +1,10 @@
 # 0008. Authorize writes with verified capabilities and semantic state
 
-- Status: Accepted
+- Status: Superseded by 0017
 - Recorded: 2026-07-26
 - Decision state in code: Implemented
 - Supersedes: None
-- Superseded by: None
+- Superseded by: [0017](0017-reconcile-hil-qualification-with-write-capability-policy.md)
 - Provenance: Retrospective reconstruction from model policy, semantics, and client write gates.
 
 ## Context
@@ -30,6 +30,8 @@ Authorize each write only when all of the following are true:
 
 Keep capability flags in immutable model-profile data. Continue exposing decoded
 invalid or unknown values to diagnostics while denying dependent writes.
+These five runtime gates remain mandatory under the replacement policy in ADR
+0017.
 
 ## Alternatives considered
 
@@ -61,8 +63,9 @@ revision or device fault.
 
 ### Negative and trade-offs
 
-- New writable profiles require hardware evidence, policy changes, semantic rules,
-  and regression tests.
+- New or newly enabled individual write capabilities require operation-specific
+  reviewed physical evidence, policy changes, semantic rules, and regression tests
+  as defined by ADR 0017.
 - Users may see telemetry for a candidate device while controls remain absent.
 - Conservative rejection can block a command that the device might have accepted.
 
@@ -82,8 +85,10 @@ revision or device fault.
   ECO timeout values for the verified profile.
 - Entity and client tests confirm that capability-denied controls are unavailable
   and cannot write.
-- Hardware-in-the-loop validation remains mandatory before a profile gains write
-  capabilities.
+- Runtime authorization always requires the five gates above. ADR 0017 defines
+  the operation-specific physical evidence required before adding or newly
+  enabling an individual production write capability, separately from HIL support
+  tier qualification and the transitional allowance for already-shipped profiles.
 
 ## Review triggers
 
