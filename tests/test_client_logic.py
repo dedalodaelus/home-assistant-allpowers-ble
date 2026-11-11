@@ -252,6 +252,232 @@ async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
     assert fake.writes == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "invalid_target",
+        "missing_policy",
+        "no_status",
+        "unchanged",
+        "generation_shift",
+        "second_validation",
+        "pre_send_change",
+        "disconnect",
+        "disconnect_after_send",
+        "contradictory",
+        "timeout",
+        "wait_timeout",
+        "wait_confirm",
+    ],
+)
+async def test_hil_executor_fails_closed_without_retry(
+    failure: str, notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_components.allpowers_ble import hil_write
+    from custom_components.allpowers_ble.const import (
+        NOTIFY_UUID,
+        SERVICE_UUID,
+        WRITE_UUID,
+    )
+    from custom_components.allpowers_ble.model_support import (
+        ModelFeature,
+        PhysicalPresence,
+    )
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    client, fake = _connected_client()
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    client._session_hardware_revision = ("test-hw", 1)
+    client._connected_route = (1, ConnectedRoute("local_adapter", "bluez", "path"))
+    support = SimpleNamespace(model="SYNTHETIC TEST MODEL", profile="synthetic-v1")
+    client._runtime_model_support = lambda: support
+    client._settings = _settings(firmware_version="1.1")
+    client._settings_monotonic = monotonic()
+    validator_calls = 0
+
+    def validator(_profile: str, status: object) -> bool:
+        nonlocal validator_calls
+        validator_calls += 1
+        return isinstance(status, StatusData) and not (
+            failure == "second_validation" and validator_calls > 1
+        )
+
+    policy = hil_write.CandidatePolicy(
+        support.model,
+        "test-hw",
+        "1.1",
+        support.profile,
+        ModelFeature.DC_OUTPUT,
+        (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        PhysicalPresence.PRESENT,
+        validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {(support.model, "test-hw", "1.1", ModelFeature.DC_OUTPUT): policy},
+    )
+    if failure == "missing_policy":
+        monkeypatch.setattr(hil_write, "CANDIDATE_POLICIES", {})
+    if failure == "no_status":
+        client._status = None
+    if failure == "unchanged":
+        client._status = _status(dc_enabled=True)
+    if failure == "generation_shift":
+        original_snapshot = client._safe_output_snapshot
+
+        def shift_generation():
+            snapshot = original_snapshot()
+            client._active_session_generation = 2
+            return snapshot
+
+        monkeypatch.setattr(client, "_safe_output_snapshot", shift_generation)
+    if failure == "pre_send_change":
+
+        def mutate_before_send(**_kwargs):
+            client._status_version += 1
+            return b"synthetic"
+
+        monkeypatch.setattr(client_module, "encode_output_control", mutate_before_send)
+    if failure == "disconnect":
+        original_write = fake.write_gatt_char
+
+        async def disconnect_after_write(characteristic, data, *, response):
+            await original_write(characteristic, data, response=response)
+            fake.is_connected = False
+
+        monkeypatch.setattr(fake, "write_gatt_char", disconnect_after_write)
+    if failure == "disconnect_after_send":
+        original_transaction = client._write_transaction_unlocked
+
+        async def disconnect_after_transaction(frame, transaction):
+            await original_transaction(frame, transaction)
+            client._disconnect_event.set()
+
+        monkeypatch.setattr(
+            client, "_write_transaction_unlocked", disconnect_after_transaction
+        )
+    if failure == "contradictory":
+        notification = notification_builder(
+            0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90))
+        )
+        original_write = fake.write_gatt_char
+
+        async def write_contradictory(characteristic, data, *, response):
+            await original_write(characteristic, data, response=response)
+            client._notification_handler(FakeCharacteristic(), bytearray(notification))
+
+        monkeypatch.setattr(fake, "write_gatt_char", write_contradictory)
+    if failure == "timeout":
+        client._loop_time = lambda: 100.0
+        client._options = replace(client._options, stale_timeout=0)
+    if failure in {"wait_timeout", "wait_confirm"}:
+        client._loop_time = lambda: 100.0
+        client._options = replace(client._options, stale_timeout=5)
+        if failure == "wait_timeout":
+
+            async def wait_timeout(_awaitable, _timeout):
+                _awaitable.close()
+                raise TimeoutError
+
+            monkeypatch.setattr(client_module.asyncio, "wait_for", wait_timeout)
+        else:
+
+            class ConfirmingEvent:
+                def clear(self):
+                    pass
+
+                async def wait(self):
+                    client._status = _status(dc_enabled=True)
+                    client._status_version += 1
+
+            client._hil_status_event = ConfirmingEvent()
+
+    feature = ModelFeature.DC_OUTPUT
+    target = 1 if failure == "invalid_target" else True
+    expected_exception = (
+        TimeoutError
+        if failure in {"timeout", "wait_timeout"}
+        else NotConnectedError
+        if failure in {"disconnect", "disconnect_after_send"}
+        else client_module.StateUnavailableError
+        if failure
+        in {
+            "invalid_target",
+            "missing_policy",
+            "no_status",
+            "generation_shift",
+            "second_validation",
+            "pre_send_change",
+            "contradictory",
+            "disconnect_after_send",
+        }
+        else None
+    )
+    if expected_exception is None:
+        result = await client.async_hil_set_output(
+            feature,
+            target,
+            expected_generation=1,
+            semantic_validator=validator,
+            expected_model=support.model,
+            expected_hardware="test-hw",
+            expected_firmware="1.1",
+        )
+        assert result["outcome"] == (
+            "confirmed" if failure == "wait_confirm" else "unchanged"
+        )
+    else:
+        with pytest.raises(expected_exception):
+            await client.async_hil_set_output(
+                feature,
+                target,
+                expected_generation=1,
+                semantic_validator=validator,
+                expected_model=support.model,
+                expected_hardware="test-hw",
+                expected_firmware="1.1",
+            )
+    assert len(fake.writes) <= 1
+    if failure in {
+        "invalid_target",
+        "missing_policy",
+        "no_status",
+        "generation_shift",
+        "second_validation",
+        "pre_send_change",
+    }:
+        assert fake.writes == []
+    if failure in {"disconnect_after_send", "wait_timeout", "wait_confirm"}:
+        assert len(fake.writes) == 1
+
+
+def test_hil_client_revokes_entry_grants() -> None:
+    from custom_components.allpowers_ble.hil_write import KEY, GrantStore
+
+    client, _fake = _connected_client()
+    client._config_entry_id = "entry-a"
+    grants = GrantStore()
+    grants.issue(
+        connection_id=1,
+        user_id="admin",
+        entry_id="entry-a",
+        identity="SYNTHETIC",
+        hardware="test-hw",
+        firmware="1.1",
+        generation=1,
+        feature="dc_output",
+        target=True,
+    )
+    client._hass = SimpleNamespace(data={KEY: grants})
+    client._revoke_hil_grants()
+    assert grants.grants == {}
+    client._hass = SimpleNamespace(data={})
+    client._revoke_hil_grants()
+
+
 def test_client_exposes_session_generation_and_pending_transaction_state() -> None:
     client, _ = _connected_client()
     assert client.active_session_generation == 1

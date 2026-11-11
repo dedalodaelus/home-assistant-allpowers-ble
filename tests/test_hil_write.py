@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 
+from custom_components.allpowers_ble import hil_write
+from custom_components.allpowers_ble.const import NOTIFY_UUID, SERVICE_UUID, WRITE_UUID
+from custom_components.allpowers_ble.model_support import ModelFeature, PhysicalPresence
 from custom_components.allpowers_ble.hil_write import (
     MAX_OUTSTANDING_GRANTS,
     TTL,
@@ -13,6 +20,33 @@ from custom_components.allpowers_ble.hil_write import (
     GrantStore,
 )
 from custom_components.allpowers_ble.hil_write import store as grant_store
+
+
+class _Connection:
+    def __init__(self, *, admin: bool = True) -> None:
+        self.user = SimpleNamespace(is_admin=admin, id="admin-user")
+        self.errors: list[tuple[Any, ...]] = []
+        self.results: list[tuple[Any, ...]] = []
+
+    def send_error(self, *args: Any) -> None:
+        self.errors.append(args)
+
+    def send_result(self, *args: Any) -> None:
+        self.results.append(args)
+
+
+class _FakeHass:
+    def __init__(self, runtime: Any = None, *, state=ConfigEntryState.LOADED):
+        self.data: dict[str, Any] = {}
+        entry = SimpleNamespace(
+            entry_id="entry-a",
+            domain="allpowers_ble",
+            state=state,
+            runtime_data=runtime,
+        )
+        self.config_entries = SimpleNamespace(
+            async_get_entry=lambda entry_id: entry if entry_id == "entry-a" else None
+        )
 
 
 def _issue(store: GrantStore) -> str:
@@ -155,3 +189,485 @@ def test_store_reuses_process_local_store() -> None:
     hass = SimpleNamespace(data={})
     first = grant_store(hass)  # type: ignore[arg-type]
     assert grant_store(hass) is first  # type: ignore[arg-type]
+
+
+def _api_harness(monkeypatch: pytest.MonkeyPatch):
+    support = SimpleNamespace(model="SYNTHETIC", profile="synthetic-v1")
+
+    class Client:
+        active_session_generation = 5
+        is_connected = True
+        has_pending_transaction = False
+        _connected_route = (5, SimpleNamespace(observed_route="local_adapter"))
+        execution_calls = 0
+
+        async def async_hil_set_output(self, feature, target, **kwargs):
+            self.execution_calls += 1
+            return {
+                "outcome": "confirmed",
+                "feature": feature.value,
+                "source": False,
+                "target": target,
+                "confirmed": True,
+            }
+
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            session_hardware_version="9.1",
+            settings=SimpleNamespace(
+                hardware_version="9.1", firmware_version="test-fw"
+            ),
+            identity_conflicted=False,
+        ),
+        settings_are_fresh=True,
+        status_is_fresh=True,
+    )
+    hass = _FakeHass(SimpleNamespace(client=Client(), coordinator=coordinator))
+    monkeypatch.setattr(
+        hil_write, "runtime_model_support", lambda _coordinator: support
+    )
+
+    def validator(_profile, _status):
+        return True
+
+    policy = hil_write.CandidatePolicy(
+        model="SYNTHETIC",
+        hardware="9.1",
+        firmware="test-fw",
+        profile="synthetic-v1",
+        feature=ModelFeature.DC_OUTPUT,
+        gatt_contract=(SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        physical_presence=PhysicalPresence.PRESENT,
+        semantic_validator=validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): policy},
+    )
+    return hass, support, policy
+
+
+@pytest.mark.asyncio
+async def test_websocket_authorize_execute_replay_revoke_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    support = SimpleNamespace(model="SYNTHETIC", profile="synthetic-v1")
+    calls = []
+
+    class Client:
+        active_session_generation = 5
+        is_connected = True
+        has_pending_transaction = False
+        _connected_route = (5, SimpleNamespace(observed_route="local_adapter"))
+
+        async def async_hil_set_output(self, feature, target, **kwargs):
+            calls.append((feature, target, kwargs))
+            return {
+                "outcome": "confirmed",
+                "feature": feature.value,
+                "source": False,
+                "target": target,
+                "confirmed": True,
+            }
+
+    settings = SimpleNamespace(hardware_version="9.1", firmware_version="test-fw")
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            session_hardware_version="9.1",
+            settings=settings,
+            identity_conflicted=False,
+        ),
+        settings_are_fresh=True,
+        status_is_fresh=True,
+    )
+    hass = _FakeHass(SimpleNamespace(client=Client(), coordinator=coordinator))
+    monkeypatch.setattr(
+        hil_write, "runtime_model_support", lambda _coordinator: support
+    )
+
+    def validator(_profile, _status):
+        return True
+
+    policy = hil_write.CandidatePolicy(
+        model="SYNTHETIC",
+        hardware="9.1",
+        firmware="test-fw",
+        profile="synthetic-v1",
+        feature=ModelFeature.DC_OUTPUT,
+        gatt_contract=(SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        physical_presence=PhysicalPresence.PRESENT,
+        semantic_validator=validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): policy},
+    )
+    connection = _Connection()
+    authorize = {
+        "id": 1,
+        "entry_id": "entry-a",
+        "feature": "dc_output",
+        "target": True,
+    }
+    await hil_write.ws_write_authorize(hass, connection, authorize)
+    token = connection.results[-1][1]["token"]
+    await hil_write.ws_write_execute(
+        hass,
+        connection,
+        {"id": 2, "entry_id": "entry-a", "token": token},
+    )
+    assert connection.results[-1][1]["outcome"] == "confirmed"
+    assert calls and calls[0][0] is ModelFeature.DC_OUTPUT
+    assert not hil_write.store(hass).grants
+
+    await hil_write.ws_write_execute(
+        hass,
+        connection,
+        {"id": 3, "entry_id": "entry-a", "token": token},
+    )
+    assert connection.errors[-1][1] == "invalid_grant"
+
+    await hil_write.ws_write_authorize(hass, connection, authorize)
+    unused = connection.results[-1][1]["token"]
+    await hil_write.ws_write_revoke(hass, connection, {"id": 4, "token": unused})
+    assert connection.results[-1][1]["revoked"] is True
+    await hil_write.ws_write_revoke(hass, connection, {"id": 5, "token": unused})
+    assert connection.results[-1][1]["revoked"] is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_consumes_grant_before_ble_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    entry = hass.config_entries.async_get_entry("entry-a")
+    client = entry.runtime_data.client
+    connection = _Connection()
+    grant = hil_write.store(hass).issue(
+        connection_id=id(connection),
+        user_id=connection.user.id,
+        entry_id="entry-a",
+        identity="SYNTHETIC",
+        hardware="9.1",
+        firmware="test-fw",
+        generation=5,
+        feature="dc_output",
+        target=True,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def delayed_execute(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return {"outcome": "confirmed", "feature": "dc_output", "confirmed": True}
+
+    client.async_hil_set_output = delayed_execute
+    message = {"id": 22, "entry_id": "entry-a", "token": grant.token}
+    first = asyncio.create_task(hil_write.ws_write_execute(hass, connection, message))
+    await started.wait()
+    await hil_write.ws_write_execute(hass, connection, {**message, "id": 23})
+    assert calls == 1
+    assert connection.errors[-1][1] == "invalid_grant"
+    release.set()
+    await first
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "non_admin",
+        "bad_entry_id",
+        "not_ready",
+        "empty_policy",
+        "disconnected",
+        "identity_conflict",
+        "stale_status",
+        "pending_transaction",
+        "missing_generation",
+        "missing_route",
+        "wrong_route_generation",
+        "unverified_route",
+        "invalid_target",
+        "wrong_presence",
+        "wrong_gatt",
+        "wrong_policy_identity",
+        "non_boolean_target",
+        "capacity",
+    ],
+)
+async def test_authorize_denials_are_fail_closed(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass, _support, policy = _api_harness(monkeypatch)
+    entry = hass.config_entries.async_get_entry("entry-a")
+    client = entry.runtime_data.client
+    client = entry.runtime_data.client
+    message = {
+        "id": 17,
+        "entry_id": "entry-a",
+        "feature": "dc_output",
+        "target": True,
+    }
+    connection = _Connection(admin=failure != "non_admin")
+
+    if failure == "bad_entry_id":
+        message["entry_id"] = "bad/id"
+    elif failure == "not_ready":
+        hass.config_entries.async_get_entry = lambda _entry_id: None
+    elif failure == "empty_policy":
+        monkeypatch.setattr(hil_write, "CANDIDATE_POLICIES", {})
+    elif failure == "disconnected":
+        client.is_connected = False
+    elif failure == "identity_conflict":
+        entry.runtime_data.coordinator.data.identity_conflicted = True
+    elif failure == "stale_status":
+        entry.runtime_data.coordinator.status_is_fresh = False
+    elif failure == "pending_transaction":
+        client.has_pending_transaction = True
+    elif failure == "missing_generation":
+        client.active_session_generation = None
+    elif failure == "missing_route":
+        client._connected_route = None
+    elif failure == "wrong_route_generation":
+        client._connected_route = (3, SimpleNamespace(observed_route="local_adapter"))
+    elif failure == "unverified_route":
+        client._connected_route = (5, SimpleNamespace(observed_route="unverified"))
+    elif failure == "invalid_target":
+        message["target"] = {"enabled": True}
+    elif failure == "wrong_presence":
+        monkeypatch.setattr(
+            hil_write,
+            "CANDIDATE_POLICIES",
+            {
+                ("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): replace(
+                    policy, physical_presence=PhysicalPresence.UNKNOWN
+                )
+            },
+        )
+    elif failure == "wrong_gatt":
+        monkeypatch.setattr(
+            hil_write,
+            "CANDIDATE_POLICIES",
+            {
+                ("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): replace(
+                    policy, gatt_contract=("wrong", "wrong", "wrong")
+                )
+            },
+        )
+    elif failure == "wrong_policy_identity":
+        monkeypatch.setattr(
+            hil_write,
+            "CANDIDATE_POLICIES",
+            {
+                ("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): replace(
+                    policy, profile="another-profile"
+                )
+            },
+        )
+    elif failure == "non_boolean_target":
+        message["target"] = 1
+    elif failure == "capacity":
+        store = hil_write.store(hass)
+        for _ in range(hil_write.MAX_OUTSTANDING_GRANTS):
+            _issue(store)
+
+    await hil_write.ws_write_authorize(hass, connection, message)
+    assert connection.results == []
+    assert connection.errors
+    assert (
+        not any(
+            grant.entry_id == "entry-a"
+            for grant in hil_write.store(hass).grants.values()
+        )
+        or failure == "capacity"
+    )
+    assert client.execution_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_scope_helpers_and_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    entry = hass.config_entries.async_get_entry("entry-a")
+    assert hil_write._entry_scope(hass, "entry-a") is not None
+    assert hil_write._entry_scope(hass, "missing") is None
+    entry.domain = "other"
+    assert hil_write._entry_scope(hass, "entry-a") is None
+    entry.domain = "allpowers_ble"
+    entry.state = ConfigEntryState.NOT_LOADED
+    assert hil_write._entry_scope(hass, "entry-a") is None
+    entry.state = ConfigEntryState.LOADED
+    entry.runtime_data = None
+    assert hil_write._entry_scope(hass, "entry-a") is None
+    assert hil_write.data_conflicted(SimpleNamespace(identity_conflicted=True))
+    assert hil_write.data_conflicted(SimpleNamespace())
+    assert not hil_write.data_conflicted(SimpleNamespace(identity_conflicted=False))
+    connection = _Connection(admin=False)
+    assert not hil_write._admin(connection, {"id": 8})
+    assert connection.errors[-1][1] == "unauthorized"
+    registered = []
+    monkeypatch.setattr(
+        hil_write.websocket_api,
+        "async_register_command",
+        lambda _hass, handler: registered.append(handler),
+    )
+    await hil_write.async_register(hass)
+    assert registered == [
+        hil_write.ws_write_authorize,
+        hil_write.ws_write_execute,
+        hil_write.ws_write_revoke,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "non_admin",
+        "bad_scope",
+        "not_ready",
+        "stale_generation",
+        "missing_grant",
+        "wrong_connection",
+        "candidate_missing",
+        "wrong_presence",
+        "wrong_gatt",
+        "executor_error",
+        "executor_timeout",
+        "executor_value_error",
+        "no_route",
+    ],
+)
+async def test_execute_denials_and_inconclusive_results(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hass, _support, policy = _api_harness(monkeypatch)
+    entry = hass.config_entries.async_get_entry("entry-a")
+    client = entry.runtime_data.client
+    connection = _Connection(admin=failure != "non_admin")
+    token = "A" * 43
+    if failure not in {
+        "non_admin",
+        "bad_scope",
+        "not_ready",
+        "stale_generation",
+        "missing_grant",
+    }:
+        scope_connection = id(connection) if failure != "wrong_connection" else 55
+        hil_write.store(hass).issue(
+            connection_id=scope_connection,
+            user_id=connection.user.id,
+            entry_id="entry-a",
+            identity="SYNTHETIC",
+            hardware="9.1",
+            firmware="test-fw",
+            generation=5,
+            feature="dc_output",
+            target=True,
+        )
+        token = next(iter(hil_write.store(hass).grants))
+    if failure == "bad_scope":
+        msg_entry = "bad/id"
+    else:
+        msg_entry = "entry-a"
+    if failure == "not_ready":
+        hass.config_entries.async_get_entry = lambda _entry_id: None
+    elif failure == "stale_generation":
+        client.active_session_generation = None
+    elif failure == "candidate_missing":
+        monkeypatch.setattr(hil_write, "CANDIDATE_POLICIES", {})
+    elif failure == "wrong_presence":
+        monkeypatch.setattr(
+            hil_write,
+            "CANDIDATE_POLICIES",
+            {
+                ("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): replace(
+                    policy, physical_presence=PhysicalPresence.UNKNOWN
+                )
+            },
+        )
+    elif failure == "wrong_gatt":
+        monkeypatch.setattr(
+            hil_write,
+            "CANDIDATE_POLICIES",
+            {
+                ("SYNTHETIC", "9.1", "test-fw", ModelFeature.DC_OUTPUT): replace(
+                    policy, gatt_contract=("wrong", "wrong", "wrong")
+                )
+            },
+        )
+    elif failure in {"executor_error", "executor_timeout", "executor_value_error"}:
+        error = {
+            "executor_error": hil_write.AllpowersClientError("denied"),
+            "executor_timeout": TimeoutError("late"),
+            "executor_value_error": ValueError("invalid"),
+        }[failure]
+
+        async def fail_execute(*_args, **_kwargs):
+            raise error
+
+        client.async_hil_set_output = fail_execute
+    elif failure == "no_route":
+        client._connected_route = None
+
+        async def reject_unrouted_execute(*_args, **_kwargs):
+            raise hil_write.StateUnavailableError("route unavailable")
+
+        client.async_hil_set_output = reject_unrouted_execute
+
+    await hil_write.ws_write_execute(
+        hass,
+        connection,
+        {"id": 21, "entry_id": msg_entry, "token": token},
+    )
+    if failure in {
+        "executor_error",
+        "executor_timeout",
+        "executor_value_error",
+        "no_route",
+    }:
+        assert connection.results[-1][1]["outcome"] == "inconclusive"
+    else:
+        assert connection.errors
+    assert client.execution_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_revoke_rejects_non_admin_and_malformed_token() -> None:
+    hass = _FakeHass()
+    connection = _Connection(admin=False)
+    await hil_write.ws_write_revoke(hass, connection, {"id": 1, "token": "x" * 43})
+    assert connection.errors[-1][1] == "unauthorized"
+    connection = _Connection()
+    await hil_write.ws_write_revoke(hass, connection, {"id": 2, "token": "short"})
+    assert connection.errors[-1][1] == "invalid_scope"
+
+
+def test_entry_scope_rejects_missing_model_and_hardware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    coordinator = hass.config_entries.async_get_entry(
+        "entry-a"
+    ).runtime_data.coordinator
+    monkeypatch.setattr(
+        hil_write,
+        "runtime_model_support",
+        lambda _coordinator: SimpleNamespace(model=None, profile="synthetic-v1"),
+    )
+    assert hil_write._entry_scope(hass, "entry-a") is None
+    monkeypatch.setattr(
+        hil_write,
+        "runtime_model_support",
+        lambda _coordinator: SimpleNamespace(model="SYNTHETIC", profile="synthetic-v1"),
+    )
+    coordinator.data.session_hardware_version = None
+    coordinator.data.settings = None
+    assert hil_write._entry_scope(hass, "entry-a") is None
