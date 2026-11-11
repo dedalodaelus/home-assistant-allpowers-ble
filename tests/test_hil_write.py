@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from custom_components.allpowers_ble.hil_write import GrantStore
+from custom_components.allpowers_ble.hil_write import store as grant_store
 
 
 def _issue(store: GrantStore) -> str:
@@ -58,3 +61,9 @@ def test_grant_revoke_and_entry_cleanup() -> None:
     _issue(store)
     store.revoke_entry("entry-a")
     assert not store.grants
+
+
+def test_store_reuses_process_local_store() -> None:
+    hass = SimpleNamespace(data={})
+    first = grant_store(hass)  # type: ignore[arg-type]
+    assert grant_store(hass) is first  # type: ignore[arg-type]
