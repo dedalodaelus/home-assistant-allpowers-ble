@@ -65,6 +65,35 @@ def test_grant_target_requires_exact_type_and_value() -> None:
     assert store.consume(token, **_scope()) is None
 
 
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("connection_id", 8),
+        ("user_id", "other-user"),
+        ("entry_id", "entry-b"),
+        ("identity", "OTHER MODEL"),
+        ("hardware", "1.1"),
+        ("firmware", "2.1"),
+        ("generation", 5),
+        ("feature", "ac_output"),
+        ("target", False),
+    ],
+)
+def test_scope_mismatch_denies_and_burns_token(field: str, wrong_value: object) -> None:
+    store = GrantStore()
+    token = _issue(store)
+    wrong_scope = _scope() | {field: wrong_value}
+    assert store.consume(token, **wrong_scope) is None
+    assert store.consume(token, **_scope()) is None
+
+
+@pytest.mark.parametrize("target", [{"enabled": True}, [True], (True,)])
+def test_mutable_or_compound_target_is_rejected(target: object) -> None:
+    store = GrantStore()
+    with pytest.raises(ValueError, match="bool, int, or str scalars"):
+        store.issue(**(_scope() | {"target": target}))
+
+
 def test_expired_grants_are_pruned_on_issue_and_access() -> None:
     now = [10.0]
     store = GrantStore(clock=lambda: now[0])
@@ -98,12 +127,15 @@ def test_grant_revoke_and_entry_cleanup() -> None:
     store = GrantStore()
     token = _issue(store)
     assert not store.revoke(token, connection_id=8, user_id="admin-user")
+    assert not store.revoke(token, connection_id=7, user_id="other-user")
+    assert token in store.grants
     assert store.revoke(token, connection_id=7, user_id="admin-user")
     assert store.consume(token, **_scope()) is None
 
     _issue(store)
+    other_entry = store.issue(**(_scope() | {"entry_id": "entry-b"}))
     store.revoke_entry("entry-a")
-    assert not store.grants
+    assert list(store.grants) == [other_entry.token]
 
 
 def test_store_reuses_process_local_store() -> None:

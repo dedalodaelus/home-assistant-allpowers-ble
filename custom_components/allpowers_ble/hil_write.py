@@ -53,6 +53,14 @@ class GrantStore:
             token: grant for token, grant in self.grants.items() if now < grant.deadline
         }
 
+    @staticmethod
+    def _validate_target(target: Any) -> None:
+        """Allow only immutable scalar targets with exact built-in types."""
+        if type(target) not in {bool, int, str}:
+            raise ValueError("HIL grant targets must be bool, int, or str scalars")
+        if type(target) is str and len(target) > 128:
+            raise ValueError("HIL grant string targets are limited to 128 characters")
+
     def issue(
         self,
         *,
@@ -66,6 +74,7 @@ class GrantStore:
         feature: str,
         target: Any,
     ) -> Grant:
+        self._validate_target(target)
         now = self._clock()
         self._prune_expired(now)
         if len(self.grants) >= MAX_OUTSTANDING_GRANTS:
@@ -101,6 +110,10 @@ class GrantStore:
         feature: str,
         target: Any,
     ) -> Grant | None:
+        try:
+            self._validate_target(target)
+        except ValueError:
+            return None
         now = self._clock()
         self._prune_expired(now)
         grant = self.grants.pop(token, None)
@@ -128,9 +141,12 @@ class GrantStore:
             grant.feature,
             grant.target,
         )
-        return (
-            grant if type(target) is type(grant.target) and actual == expected else None
-        )
+        if any(
+            type(wanted) is not type(saved)
+            for wanted, saved in zip(expected, actual, strict=True)
+        ):
+            return None
+        return grant if actual == expected else None
 
     def revoke(self, token: str, *, connection_id: int, user_id: str) -> bool:
         self._prune_expired(self._clock())
