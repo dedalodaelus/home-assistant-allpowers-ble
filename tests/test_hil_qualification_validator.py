@@ -167,7 +167,7 @@ def test_max_age_days_rejects_negative_values(monkeypatch: pytest.MonkeyPatch) -
     assert error.value.code == 2
 
 
-def test_require_pass_rejects_future_and_missing_firmware_route_evidence(
+def test_require_pass_rejects_future_run_without_requiring_second_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(validator, "ROOT", tmp_path)
@@ -189,7 +189,7 @@ def test_require_pass_rejects_future_and_missing_firmware_route_evidence(
         max_age_days=30,
     )
     assert any("captured_at is in the future" in item for item in errors)
-    assert any("missing strict route" in item for item in errors)
+    assert not any("missing strict route" in item for item in errors)
 
 
 def test_strict_gate_uses_latest_eligible_run_and_ignores_imported_inconclusive(
