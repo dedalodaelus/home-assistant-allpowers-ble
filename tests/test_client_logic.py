@@ -532,7 +532,7 @@ async def test_mixed_feature_profile_guards_writes_and_preserves_sibling_bits(
 ) -> None:
     client, fake = _connected_client()
     now = asyncio.get_running_loop().time()
-    client._status = _status(raw_flags=0x20)
+    client._status = _status(raw_flags=0x10)
     client._status_monotonic = now
     client._settings = _settings(raw_flags=0xA0)
     client._settings_monotonic = now
@@ -551,11 +551,6 @@ async def test_mixed_feature_profile_guards_writes_and_preserves_sibling_bits(
         )
 
     monkeypatch.setattr(client_module, "model_feature_capability", mixed_capability)
-    # Simulate a future exact profile whose own semantic validator approves
-    # the echoed-but-physically-absent light bit for AC/DC read-modify-write.
-    monkeypatch.setattr(
-        client_module, "status_write_validation_errors", lambda *_args: []
-    )
     with pytest.raises(client_module.StateUnavailableError):
         await client.async_set_dc(False)  # Denied no-op must be checked before no-op.
     with pytest.raises(client_module.StateUnavailableError):
@@ -570,11 +565,11 @@ async def test_mixed_feature_profile_guards_writes_and_preserves_sibling_bits(
     assert pending is not None
     assert pending.phase is client_module.TransactionPhase.AWAITING_CONFIRMATION
     output_confirmation = notification_builder(
-        0x01, bytes((0x12, 50, 0, 100, 0, 25, 0, 0x22))
+        0x01, bytes((0x12, 50, 0, 100, 0, 25, 0, 0x12))
     )
     client._notification_handler(FakeCharacteristic(), bytearray(output_confirmation))
     assert client._pending_output_transaction is None
-    client._status = _status(ac_enabled=False, raw_flags=0x20)
+    client._status = _status(ac_enabled=False, raw_flags=0x10)
     client._status_monotonic = asyncio.get_running_loop().time()
     await client.async_set_eco(True)
     assert fake.writes[-1][7] == 0xA1  # Preserve unrelated settings bits.

@@ -250,14 +250,18 @@ class HAClient:
         ):
             raise HAAPIError("Malformed HIL capability snapshot")
         model = result["model"]
-        if not isinstance(model, str) or model not in {
+        canonical_models = {
             "R600",
             "VOLIX P1800",
             "AP R1500 LITE",
             "S500",
             "S700",
             "BLE power station",
-        }:
+        }
+        if not isinstance(model, str) or (
+            model not in canonical_models
+            and re.fullmatch(r"S[0-9]{3,4}", model) is None
+        ):
             raise HAAPIError("Malformed HIL model identity")
         capabilities = result.get("capabilities")
         capability_keys = {

@@ -3826,7 +3826,16 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
     assert normalized["features"]["ac_output"]["runtime_ready"] is True
 
 
-def test_capability_snapshot_accepts_r1500_lite_and_redacts_identity(monkeypatch):
+@pytest.mark.parametrize(
+    ("model", "profile"),
+    [
+        ("AP R1500 LITE", "ap-r1500-lite-hw-0.1-evidence"),
+        ("S300", "ap-s300-evidence"),
+    ],
+)
+def test_capability_snapshot_accepts_read_only_models_and_redacts_identity(
+    monkeypatch, model, profile
+):
     client = api.HAClient("http://127.0.0.1:8123", "token")
     names = (
         "ac_output",
@@ -3840,8 +3849,8 @@ def test_capability_snapshot_accepts_r1500_lite_and_redacts_identity(monkeypatch
     )
     response = {
         "schema_version": 2,
-        "model": "AP R1500 LITE",
-        "profile": "ap-r1500-lite-hw-0.1-evidence",
+        "model": model,
+        "profile": profile,
         "classification": "experimental_read_only",
         "verified": False,
         "identity_conflicted": False,
@@ -3874,7 +3883,7 @@ def test_capability_snapshot_accepts_r1500_lite_and_redacts_identity(monkeypatch
     }
     monkeypatch.setattr(client, "websocket", lambda _commands: [response])
     normalized = client.hil_capabilities("entry-123")
-    assert normalized["model"] == "AP R1500 LITE"
+    assert normalized["model"] == model
     assert normalized["features"]["light_output"]["physical_presence"] == "absent"
     assert not normalized["features"]["ac_output"]["production_authorized"]
     assert not normalized["features"]["dc_output"]["production_authorized"]
