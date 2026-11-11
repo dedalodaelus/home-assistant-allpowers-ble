@@ -103,11 +103,14 @@ def feature_is_production_authorized(
     coordinator: AllpowersCoordinator, key: str
 ) -> bool:
     """Return the fail-closed production permission for one entity key."""
+    support = runtime_model_support(coordinator)
+    if key == "settings_keepalive":
+        return support.capabilities.write_settings_keepalive
     try:
         feature = ModelFeature.LIGHT_OUTPUT if key == "light" else ModelFeature(key)
     except ValueError:
         return False
-    capability = model_feature_capability(runtime_model_support(coordinator), feature)
+    capability = model_feature_capability(support, feature)
     return capability.production_authorized and (
         capability.physical_presence is not PhysicalPresence.ABSENT
     )

@@ -272,7 +272,7 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
     assert response["success"] is True
     result = response["result"]
     assert result == {
-        "schema_version": 1,
+        "schema_version": 2,
         "model": "R600",
         "profile": "r600-hw-0.3",
         "classification": "verified",
@@ -288,6 +288,24 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
             "write_settings_controls": True,
             "write_settings_keepalive": True,
             "car_charger_enabled": False,
+        },
+        "features": {
+            feature: {
+                "physical_presence": "unknown",
+                "production_authorized": feature != "telemetry",
+                "candidate_hil_eligible": False,
+                "runtime_ready": True,
+            }
+            for feature in (
+                "ac_output",
+                "dc_output",
+                "light_output",
+                "eco_mode",
+                "work_mode",
+                "eco_timeout",
+                "car_charger",
+                "telemetry",
+            )
         },
         "connected": True,
         "status_fresh": True,
