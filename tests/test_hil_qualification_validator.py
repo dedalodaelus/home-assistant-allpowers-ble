@@ -589,6 +589,44 @@ def test_default_validation_rejects_unreviewed_fail(
     )
 
 
+def test_default_validation_rejects_reviewed_fail_without_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(
+        tmp_path,
+        "active_proxy",
+        "empty-evidence-fail",
+        now,
+        qualification="inconclusive",
+    )
+    result = run["write_capabilities"]["ac_output"]
+    result["status"] = "fail"
+    result["evidence"] = []
+    result["physical_review"] = {
+        "outcome": "confirmed_fail",
+        "reviewed_by": "independent-reviewer",
+        "reviewed_at": now.isoformat(),
+    }
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+
+    assert any(
+        "write capability ac_output evidence must be a non-empty list" in error
+        for error in errors
+    )
+    assert any(
+        "write capability ac_output physical_review must independently confirm" in error
+        for error in errors
+    )
+
+
 def test_default_validation_rejects_overall_pass_without_result_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

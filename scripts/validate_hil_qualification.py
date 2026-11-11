@@ -273,6 +273,7 @@ def _check_physical_review(
         or not review["reviewed_by"].strip()
         or parsed is None
         or parsed.tzinfo is None
+        or digest_manifest is None
         or review.get("evidence_sha256") != digest_manifest
     ):
         _error(
@@ -290,7 +291,10 @@ def _valid_reviewed_absence(item: dict[str, Any]) -> bool:
         return False
     if not isinstance(reviewer, str) or not reviewer.strip() or parsed.tzinfo is None:
         return False
-    return item.get("evidence_sha256") == _evidence_digests(item.get("evidence"))
+    digest_manifest = _evidence_digests(item.get("evidence"))
+    return (
+        digest_manifest is not None and item.get("evidence_sha256") == digest_manifest
+    )
 
 
 def _check_result_map(
@@ -326,7 +330,7 @@ def _check_result_map(
             item.get("evidence"),
             item_context,
             errors,
-            required=status == "pass"
+            required=status in {"pass", "fail"}
             or (require_pass and capability and status == "not_applicable"),
         )
         if status in {"pass", "fail"}:
