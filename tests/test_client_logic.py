@@ -329,6 +329,11 @@ async def test_hil_executor_fails_closed_without_retry(
     client._runtime_model_support = lambda: support
     client._settings = _settings(firmware_version="1.1")
     client._settings_monotonic = monotonic()
+    if failure in {"late_matching", "timeout", "wait_timeout", "wait_confirm"}:
+        # Reproduce the old mixed-clock fixture deterministically: these
+        # timestamps are stale once the affected cases switch to time 100.0.
+        client._status_monotonic = 50.0
+        client._settings_monotonic = 50.0
     validator_calls = 0
 
     def validator(_profile: str, status: object) -> bool:
@@ -414,6 +419,10 @@ async def test_hil_executor_fails_closed_without_retry(
         packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
         now = [100.0]
         client._loop_time = lambda: now[0]
+        # Keep the freshness timestamps in the same clock domain as execution.
+        # The real monotonic clock may be either side of this synthetic value.
+        client._status_monotonic = client._loop_time()
+        client._settings_monotonic = client._loop_time()
         client._options = replace(client._options, stale_timeout=1)
         original_write = fake.write_gatt_char
 
@@ -446,9 +455,13 @@ async def test_hil_executor_fails_closed_without_retry(
         monkeypatch.setattr(fake, "write_gatt_char", write_contradictory)
     if failure == "timeout":
         client._loop_time = lambda: 100.0
+        client._status_monotonic = client._loop_time()
+        client._settings_monotonic = client._loop_time()
         client._options = replace(client._options, stale_timeout=0)
     if failure in {"wait_timeout", "wait_confirm"}:
         client._loop_time = lambda: 100.0
+        client._status_monotonic = client._loop_time()
+        client._settings_monotonic = client._loop_time()
         client._options = replace(client._options, stale_timeout=5)
         if failure == "wait_timeout":
 
@@ -541,7 +554,13 @@ async def test_hil_executor_fails_closed_without_retry(
         "session_closed_before_send",
     }:
         assert fake.writes == []
-    if failure in {"disconnect_after_send", "wait_timeout", "wait_confirm"}:
+    if failure in {
+        "disconnect_after_send",
+        "late_matching",
+        "timeout",
+        "wait_timeout",
+        "wait_confirm",
+    }:
         assert len(fake.writes) == 1
 
 
