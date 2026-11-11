@@ -33,8 +33,9 @@ route, and run. Only linked, independently reviewed physical evidence can
 support a `pass`; a successful default matrix-validator run checks structure and
 privacy, not qualification. The current opt-in strict schema-v2 gate accepts only
 fresh, complete, attributed results and requires both supported routes for each
-firmware (with optional freshness enforcement such as `--max-age-days 30`). It
-selects the newest eligible run per firmware and route, so a later complete
+firmware. Strict mode enforces a 30-day maximum age by default; `--max-age-days N`
+overrides that limit. Issue #273 tracks the planned opt-in, non-expiring policy.
+It selects the newest eligible run per firmware and route, so a later complete
 failure supersedes an older pass while an inconclusive archive import does not.
 Scenario results must pass; a write capability may be `not_applicable` only with
 scoped supporting evidence and a rationale. Capture records must also match the
@@ -55,9 +56,11 @@ Full matrix completion, both routes, vendor-app contention, and a 24-hour soak
 are not prerequisites for each individual control.
 
 Bronze (evidence-backed read-only), Silver (physically verified applicable basic
-output controls), Gold (verified declared settings/functions and recovery), and
-Platinum (Gold plus optional uninterrupted 24-hour reliability) are the accepted
-support policy; tier calculation is not implemented yet (#269). Per-feature
+output controls), and Gold (verified declared settings/functions and recovery).
+Platinum is an optional tier; earning it requires Gold plus a verified,
+uninterrupted 86,400-second soak. The soak is not required for Bronze or Gold, or
+for authorizing an individual control. These are the accepted support tiers;
+tier calculation is not implemented yet (#269). Per-feature
 production enforcement (#266/#267), per-route qualification (#268), and temporary
 candidate HIL grants (#275) are also follow-up implementation work. Current code
 still uses grouped R600/VOLIX write-capability flags, and the current strict

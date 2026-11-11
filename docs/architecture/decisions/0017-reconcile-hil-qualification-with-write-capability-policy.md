@@ -65,11 +65,12 @@ are independent decisions:
 4. **HIL support tier.** Independently classify evidence coverage: Bronze means
    evidence-backed read-only support; Silver means physically verified applicable
    basic output controls; Gold means verified declared settings/functions and
-   recovery; Platinum means Gold plus optional uninterrupted 24-hour reliability.
-   Tiers describe evidence and never grant production writes. One observed route
-   may qualify that route; both routes, vendor-app contention, the full scenario
-   matrix, and a 24-hour soak are not prerequisites for each individual safe
-   control.
+   recovery. Platinum is an optional tier; earning it requires Gold plus a
+   verified, uninterrupted 86,400-second soak. The soak is not required for
+   Bronze or Gold, or for authorizing an individual control. Tiers describe
+   evidence and never grant production writes. One observed route may qualify
+   that route; both routes, vendor-app contention, and the full scenario matrix
+   are not prerequisites for each individual safe control.
 
 The five runtime safety invariants from ADR 0008 remain mandatory for every
 production write and HIL candidate action:

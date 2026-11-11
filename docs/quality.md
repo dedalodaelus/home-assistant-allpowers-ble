@@ -158,9 +158,11 @@ allowlist. Follow-up evidence and implementation are tracked by #206, #227, #248
 #266–#269, #273, and #275.
 
 Bronze is evidence-backed read-only support; Silver is physically verified
-applicable basic output control; Gold is verified declared settings/functions
-and recovery; Platinum is Gold plus optional uninterrupted 24-hour reliability.
-These tiers classify support evidence and never grant writes. First-time
+applicable basic output controls; Gold is verified declared settings/functions
+and recovery. Platinum is an optional tier; earning it requires Gold plus a
+verified, uninterrupted 86,400-second soak. The soak is not required for Bronze
+or Gold, or for authorizing an individual control. These tiers classify support
+evidence and never grant writes. First-time
 experiments require a separately reviewed candidate and the temporary, attended,
 single-use HIL-only authorization implemented under #275; they never expose
 normal Home Assistant write controls.

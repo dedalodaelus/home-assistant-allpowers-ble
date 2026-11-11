@@ -47,8 +47,9 @@ python -m scripts.migrate_hil_qualification old-matrix.json migrated-matrix.json
 ```
 
 The default validator checks structure and privacy while allowing unfinished
-runs. Add `--require-pass --max-age-days 30` to require fresh, fully scoped
-current results using the selection policy above.
+runs. `--require-pass` requires fresh, fully scoped current results and enforces
+a 30-day maximum age by default; `--max-age-days N` overrides that limit. Issue
+#273 tracks the planned opt-in, non-expiring qualification policy.
 
 The runtime `verified` classification is a software model/revision decision, not a
 claim that physical qualification is complete. Track that separately in the
@@ -68,9 +69,11 @@ Under [ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-wr
 adding or newly enabling a control requires reviewed, operation-specific physical
 evidence for its exact model/revision, firmware, and observed route. Bronze is
 evidence-backed read-only; Silver is physically verified applicable basic output
-control; Gold adds verified declared settings/functions and recovery; Platinum
-adds optional uninterrupted 24-hour reliability. These tiers classify coverage
-and never authorize writes. Candidate testing is intended to use a separate
+control; Gold adds verified declared settings/functions and recovery. Platinum
+is an optional tier; earning it requires Gold plus a verified, uninterrupted
+86,400-second soak. The soak is not required for Bronze or Gold, or for
+authorizing an individual control. These tiers classify coverage and never
+authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
 These are accepted policy targets, not implemented behavior yet. The integration
@@ -78,7 +81,8 @@ still uses grouped R600/VOLIX write flags. Follow-up work #266/#267 implements
 per-feature enforcement, #268 implements per-route qualification, #269 implements
 tier calculation, and #275 implements candidate grants. Until those changes land,
 the strict schema-v2 validator continues to require both supported routes for
-each firmware and supports the `--max-age-days 30` freshness option.
+each firmware and enforces a 30-day maximum age by default. `--max-age-days N`
+overrides the default. Issue #273 tracks the planned opt-in, non-expiring policy.
 
 ## Scope
 
