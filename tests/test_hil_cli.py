@@ -778,7 +778,7 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(
                         "id": 1,
                         "type": "result",
                         "success": True,
-                        "result": {"token": "opaque-token"},
+                        "result": {"schema_version": 1, "token": "opaque-token"},
                     },
                     {
                         "id": 2,
@@ -869,6 +869,70 @@ def test_persistent_websocket_normalizes_transport_exception(monkeypatch):
     session._socket = BrokenSocket()
     with pytest.raises(api.HAAPIError, match="WebSocket request failed"):
         session.command({"type": "allpowers_ble/hil/write/execute"})
+
+
+@pytest.mark.parametrize("schema_version", [2, None])
+def test_authorize_response_schema_mismatch_never_executes(monkeypatch, schema_version):
+    sent = []
+
+    class PersistentWS:
+        def __init__(self):
+            self.replies = iter(
+                [
+                    {"type": "auth_required"},
+                    {"type": "auth_ok"},
+                    {
+                        "id": 1,
+                        "type": "result",
+                        "success": True,
+                        "result": {
+                            "schema_version": schema_version,
+                            "token": "opaque-token",
+                        },
+                    },
+                    {
+                        "id": 2,
+                        "type": "result",
+                        "success": True,
+                        "result": {"revoked": True},
+                    },
+                ]
+            )
+
+        def recv(self, timeout):
+            del timeout
+            return json.dumps(next(self.replies))
+
+        def send(self, message):
+            sent.append(json.loads(message))
+
+        def close(self):
+            pass
+
+    websocket_package = ModuleType("websockets")
+    websocket_package.__path__ = []
+    sync_package = ModuleType("websockets.sync")
+    sync_package.__path__ = []
+    client_module = ModuleType("websockets.sync.client")
+    client_module.connect = lambda *_args, **_kwargs: PersistentWS()
+    monkeypatch.setitem(sys.modules, "websockets", websocket_package)
+    monkeypatch.setitem(sys.modules, "websockets.sync", sync_package)
+    monkeypatch.setitem(sys.modules, "websockets.sync.client", client_module)
+
+    ha = api.HAClient("https://example.test", "PRIVATE_TOKEN")
+    with ha.websocket_session() as session:
+        with pytest.raises(api.HAAPIError, match="invalid HIL grant"):
+            session.experimental_output(
+                "entry-a",
+                "dc_output",
+                True,
+                authorization_confirmed=True,
+                execution_confirmed=True,
+            )
+    assert [command["type"] for command in sent[1:]] == [
+        "allpowers_ble/hil/write/authorize",
+        "allpowers_ble/hil/write/revoke",
+    ]
 
 
 def test_mixed_case_https_never_downgrades_websocket(monkeypatch):

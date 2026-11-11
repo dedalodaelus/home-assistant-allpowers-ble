@@ -685,6 +685,11 @@ class AuthenticatedWebSocketSession:
             raise HAAPIError("Home Assistant returned an invalid HIL grant")
         token = authorized["token"]
         try:
+            if (
+                type(authorized.get("schema_version")) is not int
+                or authorized["schema_version"] != 1
+            ):
+                raise HAAPIError("Home Assistant returned an invalid HIL grant")
             result = self.command(
                 {
                     "type": "allpowers_ble/hil/write/execute",

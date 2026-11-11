@@ -85,7 +85,7 @@ _REVOKE_SCHEMA: dict[Any, Any] = {
 @dataclass(frozen=True, slots=True)
 class Grant:
     token: str
-    connection_id: int
+    connection_id: str
     user_id: str
     entry_id: str
     identity: str
@@ -120,7 +120,7 @@ class GrantStore:
     def issue(
         self,
         *,
-        connection_id: int,
+        connection_id: str,
         user_id: str,
         entry_id: str,
         identity: str,
@@ -156,7 +156,7 @@ class GrantStore:
         self,
         token: str,
         *,
-        connection_id: int,
+        connection_id: str,
         user_id: str,
         entry_id: str,
         identity: str,
@@ -204,7 +204,7 @@ class GrantStore:
             return None
         return grant if actual == expected else None
 
-    def revoke(self, token: str, *, connection_id: int, user_id: str) -> bool:
+    def revoke(self, token: str, *, connection_id: str, user_id: str) -> bool:
         self._prune_expired(self._clock())
         grant = self.grants.get(token)
         if grant is None or (grant.connection_id, grant.user_id) != (
@@ -214,6 +214,15 @@ class GrantStore:
             return False
         del self.grants[token]
         return True
+
+    def revoke_session(self, connection_id: str) -> None:
+        """Revoke every still-unused grant owned by a closed WS session."""
+        self._prune_expired(self._clock())
+        self.grants = {
+            token: grant
+            for token, grant in self.grants.items()
+            if grant.connection_id != connection_id
+        }
 
     def revoke_entry(self, entry_id: str) -> None:
         self._prune_expired(self._clock())
@@ -231,6 +240,36 @@ def store(hass: HomeAssistant) -> GrantStore:
         value = GrantStore()
         hass.data[KEY] = value
     return value
+
+
+_SESSION_SUBSCRIPTION_KEY = (DOMAIN, "hil_write_session_cleanup")
+
+
+@dataclass(slots=True)
+class _SessionCleanup:
+    """Unique connection scope and ActiveConnection close callback."""
+
+    identifier: str
+    grants: GrantStore
+
+    def __call__(self) -> None:
+        self.grants.revoke_session(self.identifier)
+
+
+def _connection_session(
+    hass: HomeAssistant, connection: Any, *, create: bool
+) -> str | None:
+    subscriptions = getattr(connection, "subscriptions", None)
+    if not isinstance(subscriptions, dict):
+        return None
+    cleanup = subscriptions.get(_SESSION_SUBSCRIPTION_KEY)
+    if isinstance(cleanup, _SessionCleanup):
+        return cleanup.identifier
+    if cleanup is not None or not create:
+        return None
+    identifier = secrets.token_urlsafe(32)
+    subscriptions[_SESSION_SUBSCRIPTION_KEY] = _SessionCleanup(identifier, store(hass))
+    return identifier
 
 
 def _entry_scope(
@@ -282,6 +321,10 @@ async def ws_write_authorize(
 ) -> None:
     """Issue an ephemeral grant only for an exact reviewed candidate policy."""
     if not _admin(connection, msg):
+        return
+    connection_id = _connection_session(hass, connection, create=True)
+    if connection_id is None:
+        _deny(connection, msg, "invalid_session")
         return
     if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", msg["entry_id"]) is None:
         _deny(connection, msg, "invalid_scope")
@@ -341,7 +384,7 @@ async def ws_write_authorize(
         return
     try:
         grant = store(hass).issue(
-            connection_id=id(connection),
+            connection_id=connection_id,
             user_id=connection.user.id,
             entry_id=entry.entry_id,
             identity=support.model,
@@ -384,6 +427,10 @@ async def ws_write_execute(
         return
     entry, runtime, (support, hardware, firmware) = scope
     client = runtime.client
+    connection_id = _connection_session(hass, connection, create=True)
+    if connection_id is None:
+        _deny(connection, msg, "invalid_grant")
+        return
     generation = client.active_session_generation
     if type(generation) is not int:
         _deny(connection, msg, "stale_session")
@@ -395,7 +442,7 @@ async def ws_write_execute(
         return
     consumed = store(hass).consume(
         token,
-        connection_id=id(connection),
+        connection_id=connection_id,
         user_id=connection.user.id,
         entry_id=entry.entry_id,
         identity=support.model,
@@ -475,8 +522,13 @@ async def ws_write_revoke(
     if re.fullmatch(r"[A-Za-z0-9_-]{32,128}", msg["token"]) is None:
         _deny(connection, msg, "invalid_scope")
         return
-    revoked = store(hass).revoke(
-        msg["token"], connection_id=id(connection), user_id=connection.user.id
+    connection_id = _connection_session(hass, connection, create=False)
+    revoked = (
+        store(hass).revoke(
+            msg["token"], connection_id=connection_id, user_id=connection.user.id
+        )
+        if connection_id is not None
+        else False
     )
     connection.send_result(
         msg["id"], {"schema_version": API_VERSION, "revoked": revoked}

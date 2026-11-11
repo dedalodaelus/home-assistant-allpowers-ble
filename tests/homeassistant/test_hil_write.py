@@ -223,7 +223,29 @@ async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
     revoked = await ws.receive_json()
     assert revoked["success"] is True
     assert revoked["result"]["revoked"] is False
+
+    await ws.send_json_auto_id(authorize)
+    unconsumed = await ws.receive_json()
+    stale_token = unconsumed["result"]["token"]
+    assert stale_token in hil_write.store(hass).grants
     await ws.close()
+    assert stale_token not in hil_write.store(hass).grants
+
+    next_ws = await hass_ws_client()
+    await next_ws.send_json_auto_id(
+        {
+            "type": "allpowers_ble/hil/write/execute",
+            "version": 1,
+            "entry_id": entry.entry_id,
+            "token": stale_token,
+            "confirmed": True,
+        }
+    )
+    stale_execution = await next_ws.receive_json()
+    assert stale_execution["success"] is False
+    assert stale_execution["error"]["code"] == "invalid_grant"
+    assert fake_gatt.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    await next_ws.close()
 
 
 @pytest.mark.asyncio

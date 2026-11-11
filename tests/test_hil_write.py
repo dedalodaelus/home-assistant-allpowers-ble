@@ -28,6 +28,7 @@ class _Connection:
         self.user = SimpleNamespace(is_admin=admin, id="admin-user")
         self.errors: list[tuple[Any, ...]] = []
         self.results: list[tuple[Any, ...]] = []
+        self.subscriptions: dict[Any, Any] = {}
 
     def send_error(self, *args: Any) -> None:
         self.errors.append(args)
@@ -52,7 +53,7 @@ class _FakeHass:
 
 def _issue(store: GrantStore) -> str:
     return store.issue(
-        connection_id=7,
+        connection_id="session-a",
         user_id="admin-user",
         entry_id="entry-a",
         identity="TEST SYNTHETIC",
@@ -66,7 +67,7 @@ def _issue(store: GrantStore) -> str:
 
 def _scope() -> dict[str, object]:
     return {
-        "connection_id": 7,
+        "connection_id": "session-a",
         "user_id": "admin-user",
         "entry_id": "entry-a",
         "identity": "TEST SYNTHETIC",
@@ -174,10 +175,10 @@ def test_grant_store_capacity_fails_closed_and_prunes_expired() -> None:
 def test_grant_revoke_and_entry_cleanup() -> None:
     store = GrantStore()
     token = _issue(store)
-    assert not store.revoke(token, connection_id=8, user_id="admin-user")
-    assert not store.revoke(token, connection_id=7, user_id="other-user")
+    assert not store.revoke(token, connection_id="session-b", user_id="admin-user")
+    assert not store.revoke(token, connection_id="session-a", user_id="other-user")
     assert token in store.grants
-    assert store.revoke(token, connection_id=7, user_id="admin-user")
+    assert store.revoke(token, connection_id="session-a", user_id="admin-user")
     assert store.consume(token, **_scope()) is None
 
     _issue(store)
@@ -190,6 +191,69 @@ def test_store_reuses_process_local_store() -> None:
     hass = SimpleNamespace(data={})
     first = grant_store(hass)  # type: ignore[arg-type]
     assert grant_store(hass) is first  # type: ignore[arg-type]
+
+
+def test_connection_session_requires_manageable_close_subscription() -> None:
+    hass = SimpleNamespace(data={})
+    assert (
+        hil_write._connection_session(
+            hass,
+            SimpleNamespace(),
+            create=True,  # type: ignore[arg-type]
+        )
+        is None
+    )
+    connection = SimpleNamespace(subscriptions={})
+    assert (
+        hil_write._connection_session(
+            hass,
+            connection,
+            create=False,  # type: ignore[arg-type]
+        )
+        is None
+    )
+    connection.subscriptions[hil_write._SESSION_SUBSCRIPTION_KEY] = lambda: None
+    assert (
+        hil_write._connection_session(
+            hass,
+            connection,
+            create=True,  # type: ignore[arg-type]
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_websocket_endpoints_fail_closed_without_session_cleanup_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    connection = _Connection()
+    del connection.subscriptions
+    await hil_write.ws_write_authorize(
+        hass,
+        connection,
+        {
+            "id": 1,
+            "entry_id": "entry-a",
+            "feature": "dc_output",
+            "target": True,
+        },
+    )
+    assert connection.errors[-1][1] == "invalid_session"
+
+    await hil_write.ws_write_execute(
+        hass,
+        connection,
+        {"id": 2, "entry_id": "entry-a", "token": "A" * 43},
+    )
+    assert connection.errors[-1][1] == "invalid_grant"
+    assert (
+        hass.config_entries.async_get_entry(
+            "entry-a"
+        ).runtime_data.client.execution_calls
+        == 0
+    )
 
 
 def _api_harness(monkeypatch: pytest.MonkeyPatch):
@@ -353,6 +417,45 @@ async def test_websocket_authorize_execute_replay_revoke_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_closed_connection_revokes_unused_grant_and_new_session_cannot_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass, _support, _policy = _api_harness(monkeypatch)
+    authorize = {
+        "id": 1,
+        "entry_id": "entry-a",
+        "feature": "dc_output",
+        "target": True,
+    }
+    connection_a = _Connection()
+    await hil_write.ws_write_authorize(hass, connection_a, authorize)
+    token = connection_a.results[-1][1]["token"]
+    session_a = hil_write._connection_session(hass, connection_a, create=False)
+    assert session_a is not None
+    assert token in hil_write.store(hass).grants
+
+    connection_a.subscriptions[hil_write._SESSION_SUBSCRIPTION_KEY]()
+    assert token not in hil_write.store(hass).grants
+
+    connection_b = _Connection()
+    session_b = hil_write._connection_session(hass, connection_b, create=True)
+    assert session_b is not None
+    assert session_b != session_a
+    await hil_write.ws_write_execute(
+        hass,
+        connection_b,
+        {"id": 2, "entry_id": "entry-a", "token": token},
+    )
+    assert connection_b.errors[-1][1] == "invalid_grant"
+    assert (
+        hass.config_entries.async_get_entry(
+            "entry-a"
+        ).runtime_data.client.execution_calls
+        == 0
+    )
+
+
+@pytest.mark.asyncio
 async def test_concurrent_execute_consumes_grant_before_ble_await(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,8 +463,10 @@ async def test_concurrent_execute_consumes_grant_before_ble_await(
     entry = hass.config_entries.async_get_entry("entry-a")
     client = entry.runtime_data.client
     connection = _Connection()
+    session_id = hil_write._connection_session(hass, connection, create=True)
+    assert session_id is not None
     grant = hil_write.store(hass).issue(
-        connection_id=id(connection),
+        connection_id=session_id,
         user_id=connection.user.id,
         entry_id="entry-a",
         identity="SYNTHETIC",
@@ -699,7 +804,12 @@ async def test_execute_denials_and_inconclusive_results(
         "stale_generation",
         "missing_grant",
     }:
-        scope_connection = id(connection) if failure != "wrong_connection" else 55
+        scope_connection = (
+            hil_write._connection_session(hass, connection, create=True)
+            if failure != "wrong_connection"
+            else "different-session"
+        )
+        assert scope_connection is not None
         hil_write.store(hass).issue(
             connection_id=scope_connection,
             user_id=connection.user.id,
