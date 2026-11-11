@@ -64,16 +64,15 @@ Platinum is an optional tier; earning it requires Gold plus a verified,
 uninterrupted 86,400-second soak. The soak is not required for Bronze or Gold, or
 for authorizing an individual control. These are the accepted support tiers;
 tier calculation is not implemented yet (#269). The validator supports the
-per-feature, per-route evidence scope in #268; per-feature production write
-enforcement (#266/#267) and temporary candidate HIL grants (#275) remain
-separate implementation work. Current code still uses grouped R600/VOLIX
-write-capability flags. The accepted one-route-per-control evidence policy is
-implemented by the scoped validator, but it does not automatically authorize
-Home Assistant writes. A support tier never grants a write capability.
-Candidate HIL experiments are intended to use a separate attended, temporary,
-single-use path; they do not expose normal Home Assistant write entities or
-authorize production writes. Unknown, absent, conflicting, or unsafe operations
-remain blocked. See accepted
+per-feature, per-route evidence scope in #268. The per-feature production
+authorization guards (#266/#267) and experimental HIL grant infrastructure
+(#275) are implemented. Legacy grouped R600/VOLIX flags remain in the code for
+compatibility; their presence does not mean individual authorization checks are
+missing. Experimental grants use a separate attended, temporary path and do not
+expose normal Home Assistant write entities or authorize production writes.
+The scoped qualification validator does not itself authorize Home Assistant
+writes. A support tier never grants a write capability. Unknown, absent,
+conflicting, or unsafe operations remain blocked. See accepted
 [ADR 0017](architecture/decisions/0017-reconcile-hil-qualification-with-write-capability-policy.md)
 and [ADR 0012](architecture/decisions/0012-keep-unverified-controls-read-only-or-opt-in.md).
 
