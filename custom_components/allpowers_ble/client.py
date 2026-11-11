@@ -949,16 +949,6 @@ class AllpowersBLEClient:
         ):
             self._model_identity_callback(self._device_identity)
 
-    def _require_output_write_capability_unlocked(self) -> None:
-        """Reject output writes when the active model profile is read-only."""
-        support = self._runtime_model_support()
-        if support.capabilities.write_output_controls:
-            return
-        self._observe_rejection("output", "unsupported_capability")
-        raise StateUnavailableError(
-            f"Unsupported output command for active model profile: {support.profile}"
-        )
-
     def _require_feature_write_capability_unlocked(self, feature: ModelFeature) -> None:
         """Reject a write unless its exact feature is authorized by the profile."""
         support = self._runtime_model_support()
@@ -987,16 +977,6 @@ class AllpowersBLEClient:
         raise StateUnavailableError(
             f"Unsupported settings command for active model profile: "
             f"{support.profile} ({feature.value})"
-        )
-
-    def _require_settings_write_capability_unlocked(self) -> None:
-        """Reject settings writes when the active model profile is read-only."""
-        support = self._runtime_model_support()
-        if support.capabilities.write_settings_controls:
-            return
-        self._observe_rejection("settings", "unsupported_capability")
-        raise StateUnavailableError(
-            f"Unsupported settings command for active model profile: {support.profile}"
         )
 
     def _require_settings_keepalive_capability_unlocked(self) -> None:

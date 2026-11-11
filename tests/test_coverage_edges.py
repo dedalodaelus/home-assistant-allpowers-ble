@@ -145,6 +145,9 @@ async def test_base_entity_availability_and_eco_error_wrapping() -> None:
     assert entity.AllpowersSettingsEntity(entry, "settings").available
     assert entity.AllpowersOutputControlEntity(entry, "output").available
     assert entity.AllpowersSettingsControlEntity(entry, "control").available
+    assert entity.feature_is_production_authorized(
+        entry.runtime_data.coordinator, "settings_keepalive"
+    )
 
     eco = select.AllpowersEcoTimeoutSelect(entry)
     client.errors["set_eco_timeout"] = StateUnavailableError("stale settings")
