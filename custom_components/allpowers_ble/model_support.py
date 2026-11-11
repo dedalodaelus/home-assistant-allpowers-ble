@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import StrEnum
+from types import MappingProxyType
 import re
+from typing import Mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +48,186 @@ _VOLIX_P1800_IDENTITY_RE = re.compile(
 _AP_S_IDENTITY_RE = re.compile(
     rf"^AP\s+(S\d{{3,4}})(?:\s+V\d+(?:\.\d+)*)?{_DEVICE_SUFFIX}$"
 )
+_AP_R1500_LITE_IDENTITY_RE = re.compile(
+    rf"^AP\s+R1500\s+LITE(?:\s+V\d+(?:\.\d+)*)?{_DEVICE_SUFFIX}$"
+)
+
+
+class ModelFeature(StrEnum):
+    """Stable feature identifiers shared with the HIL evidence matrix."""
+
+    AC_OUTPUT = "ac_output"
+    DC_OUTPUT = "dc_output"
+    LIGHT_OUTPUT = "light_output"
+    ECO_MODE = "eco_mode"
+    WORK_MODE = "work_mode"
+    ECO_TIMEOUT = "eco_timeout"
+    CAR_CHARGER = "car_charger"
+    TELEMETRY = "telemetry"
+
+
+class PhysicalPresence(StrEnum):
+    """Evidence-backed physical presence; protocol bits do not establish it."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"
+
+
+class FeatureQualification(StrEnum):
+    """Evidence-matrix state, kept separate from either authorization."""
+
+    PENDING = "pending"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFeatureCapability:
+    """Immutable metadata for one feature in an exact model profile."""
+
+    feature: ModelFeature | str
+    physical_presence: PhysicalPresence
+    production_authorized: bool = False
+    hil_candidate_eligible: bool = False
+    qualification: FeatureQualification = FeatureQualification.PENDING
+    read_authorized: bool = False
+    evidence: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFeatureProfile:
+    """Immutable feature inventory scoped to a model and hardware revision."""
+
+    profile: str
+    model: str
+    hardware_revision: str
+    firmware_evidence: str | None
+    features: Mapping[ModelFeature, ModelFeatureCapability]
+
+
+def _feature_profile(
+    profile: str,
+    model: str,
+    hardware_revision: str,
+    *,
+    physical: Mapping[ModelFeature, PhysicalPresence],
+    production: frozenset[ModelFeature] = frozenset(),
+    readable: frozenset[ModelFeature] = frozenset(),
+    evidence: Mapping[ModelFeature, str] | None = None,
+    firmware_evidence: str | None = None,
+) -> ModelFeatureProfile:
+    evidence = evidence or {}
+    features = {
+        feature: ModelFeatureCapability(
+            feature=feature,
+            physical_presence=physical.get(feature, PhysicalPresence.UNKNOWN),
+            production_authorized=feature in production,
+            hil_candidate_eligible=False,
+            qualification=(
+                FeatureQualification.NOT_APPLICABLE
+                if physical.get(feature) is PhysicalPresence.ABSENT
+                else FeatureQualification.PENDING
+            ),
+            read_authorized=feature in readable,
+            evidence=evidence.get(feature, ""),
+        )
+        for feature in ModelFeature
+    }
+    return ModelFeatureProfile(
+        profile=profile,
+        model=model,
+        hardware_revision=hardware_revision,
+        firmware_evidence=firmware_evidence,
+        features=MappingProxyType(features),
+    )
+
+
+_R600_FEATURE_PRODUCTION = frozenset(
+    {
+        ModelFeature.AC_OUTPUT,
+        ModelFeature.DC_OUTPUT,
+        ModelFeature.LIGHT_OUTPUT,
+        ModelFeature.ECO_MODE,
+        ModelFeature.WORK_MODE,
+        ModelFeature.ECO_TIMEOUT,
+        ModelFeature.CAR_CHARGER,
+    }
+)
+MODEL_FEATURE_PROFILES: Mapping[str, ModelFeatureProfile] = MappingProxyType(
+    {
+        profile: _feature_profile(
+            profile,
+            model,
+            "0.3",
+            physical={},
+            production=_R600_FEATURE_PRODUCTION,
+            readable=frozenset({ModelFeature.TELEMETRY}),
+            evidence={
+                feature: "Transitional production allowance from ADR 0017; "
+                "physical qualification remains pending."
+                for feature in _R600_FEATURE_PRODUCTION
+            },
+        )
+        for profile, model in (
+            ("r600-hw-0.3", "R600"),
+            ("volix-p1800-hw-0.3", "VOLIX P1800"),
+        )
+    }
+    | {
+        "ap-r1500-lite-hw-0.1-evidence": _feature_profile(
+            "ap-r1500-lite-hw-0.1-evidence",
+            "AP R1500 LITE",
+            "0.1",
+            firmware_evidence="0.6 reported in issue #248; provenance only",
+            physical={
+                ModelFeature.AC_OUTPUT: PhysicalPresence.PRESENT,
+                ModelFeature.DC_OUTPUT: PhysicalPresence.PRESENT,
+                ModelFeature.LIGHT_OUTPUT: PhysicalPresence.ABSENT,
+            },
+            readable=frozenset({ModelFeature.TELEMETRY}),
+            evidence={
+                ModelFeature.AC_OUTPUT: (
+                    "AC off observed only; possible E2 incident; no write authorization."
+                ),
+                ModelFeature.DC_OUTPUT: (
+                    "DC on/off observed; maintainer review required before testing."
+                ),
+                ModelFeature.LIGHT_OUTPUT: (
+                    "No physical light reported; echoed protocol bit 0x20 is not proof."
+                ),
+            },
+        )
+    }
+)
+
+
+def model_feature_capability(
+    profile: str | ModelSupport, feature: ModelFeature | str
+) -> ModelFeatureCapability:
+    """Return one fail-closed feature record for a resolved model profile."""
+    profile_id = profile.profile if isinstance(profile, ModelSupport) else profile
+    model = profile.model if isinstance(profile, ModelSupport) else None
+    try:
+        feature_id = ModelFeature(feature)
+    except ValueError:
+        # Unknown feature IDs have no permission and no physical inference.
+        return ModelFeatureCapability(
+            feature=str(feature),
+            physical_presence=PhysicalPresence.UNKNOWN,
+            evidence="Unknown feature identifier",
+        )
+    if model == "VOLIX P1800" and profile_id == "r600-hw-0.3":
+        profile_id = "volix-p1800-hw-0.3"
+    record = MODEL_FEATURE_PROFILES.get(profile_id)
+    if record is not None:
+        return record.features[feature_id]
+    # Preserve the established telemetry-only fallback without granting writes.
+    return ModelFeatureCapability(
+        feature=feature_id,
+        physical_presence=PhysicalPresence.UNKNOWN,
+        read_authorized=feature_id is ModelFeature.TELEMETRY,
+        evidence="No exact model/revision feature profile is available",
+    )
 
 
 def canonical_model_identity(name: str | None) -> str | None:
@@ -54,6 +237,8 @@ def canonical_model_identity(name: str | None) -> str | None:
         return "R600"
     if _VOLIX_P1800_IDENTITY_RE.fullmatch(normalized):
         return "VOLIX P1800"
+    if _AP_R1500_LITE_IDENTITY_RE.fullmatch(normalized):
+        return "AP R1500 LITE"
     match = _AP_S_IDENTITY_RE.fullmatch(normalized)
     if match:
         return f"AP {match.group(1)}"
@@ -120,6 +305,32 @@ def identify_model(
             evidence=(
                 "Verified R600 profile matched by model family and hardware revision"
             ),
+        )
+
+    if identity == "AP R1500 LITE":
+        if normalized_hw == "0.1":
+            return ModelSupport(
+                model="AP R1500 LITE",
+                supported=True,
+                verified=False,
+                classification="experimental_read_only",
+                profile="ap-r1500-lite-hw-0.1-evidence",
+                capabilities=READ_ONLY_CAPABILITIES,
+                evidence=(
+                    "Exact AP R1500 LITE hardware 0.1 evidence profile; firmware 0.6 "
+                    "is provenance only and grants no write authorization"
+                ),
+                reason="Physical controls remain read-only pending maintainer review",
+            )
+        return ModelSupport(
+            model="AP R1500 LITE",
+            supported=True,
+            verified=False,
+            classification="experimental_read_only",
+            profile="ap-r1500-lite-unverified-revision",
+            capabilities=READ_ONLY_CAPABILITIES,
+            evidence="AP R1500 LITE identity without the exact hardware 0.1 revision",
+            reason="Only the documented hardware 0.1 evidence profile is known",
         )
 
     if identity == "R600":
