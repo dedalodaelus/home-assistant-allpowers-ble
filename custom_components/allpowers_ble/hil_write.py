@@ -24,7 +24,7 @@ import voluptuous as vol
 from .const import DOMAIN, NOTIFY_UUID, SERVICE_UUID, WRITE_UUID
 from .client import AllpowersClientError
 from .entity import runtime_model_support
-from .model_support import ModelFeature, PhysicalPresence
+from .model_support import ModelFeature, PhysicalPresence, model_feature_capability
 from .protocol import StateUnavailableError
 
 KEY = DOMAIN + "_hil_write_grants"
@@ -291,6 +291,7 @@ async def ws_write_authorize(
     entry, runtime, (support, hardware, firmware) = scope
     feature = ModelFeature(msg["feature"])
     policy = CANDIDATE_POLICIES.get((support.model, hardware, firmware, feature))
+    capability = model_feature_capability(support, feature)
     client = runtime.client
     generation = client.active_session_generation
     route = getattr(client, "_connected_route", None)
@@ -314,6 +315,8 @@ async def ws_write_authorize(
         return
     if (
         not isinstance(policy, CandidatePolicy)
+        or capability.hil_candidate_eligible is not True
+        or capability.physical_presence is not PhysicalPresence.PRESENT
         or policy.physical_presence is not PhysicalPresence.PRESENT
         or policy.gatt_contract != (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID)
         or (
@@ -405,8 +408,11 @@ async def ws_write_execute(
         return
     feature = ModelFeature(consumed.feature)
     policy = CANDIDATE_POLICIES.get((support.model, hardware, firmware, feature))
+    capability = model_feature_capability(support, feature)
     if (
         not isinstance(policy, CandidatePolicy)
+        or capability.hil_candidate_eligible is not True
+        or capability.physical_presence is not PhysicalPresence.PRESENT
         or policy.physical_presence is not PhysicalPresence.PRESENT
         or policy.gatt_contract != (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID)
     ):

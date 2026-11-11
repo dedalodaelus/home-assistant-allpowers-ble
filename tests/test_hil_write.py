@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntryState
 
 from custom_components.allpowers_ble import hil_write
 from custom_components.allpowers_ble.const import NOTIFY_UUID, SERVICE_UUID, WRITE_UUID
+from custom_components.allpowers_ble import client as client_module
 from custom_components.allpowers_ble.model_support import ModelFeature, PhysicalPresence
 from custom_components.allpowers_ble.hil_write import (
     MAX_OUTSTANDING_GRANTS,
@@ -226,6 +227,13 @@ def _api_harness(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         hil_write, "runtime_model_support", lambda _coordinator: support
     )
+    monkeypatch.setattr(
+        hil_write,
+        "model_feature_capability",
+        lambda _support, feature: SimpleNamespace(
+            hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+        ),
+    )
 
     def validator(_profile, _status):
         return True
@@ -284,6 +292,13 @@ async def test_websocket_authorize_execute_replay_revoke_lifecycle(
     hass = _FakeHass(SimpleNamespace(client=Client(), coordinator=coordinator))
     monkeypatch.setattr(
         hil_write, "runtime_model_support", lambda _coordinator: support
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "model_feature_capability",
+        lambda _support, feature: SimpleNamespace(
+            hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+        ),
     )
 
     def validator(_profile, _status):
@@ -422,6 +437,20 @@ async def test_websocket_grant_executes_exact_packet_on_fake_ble(
     monkeypatch.setattr(
         hil_write, "runtime_model_support", lambda _coordinator: support
     )
+    monkeypatch.setattr(
+        hil_write,
+        "model_feature_capability",
+        lambda _support, feature: SimpleNamespace(
+            hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+        ),
+    )
+    monkeypatch.setattr(
+        client_module,
+        "model_feature_capability",
+        lambda _support, feature: SimpleNamespace(
+            hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+        ),
+    )
 
     def validator(profile, status):
         return profile == "synthetic-v1" and isinstance(status, type(_status()))
@@ -492,6 +521,7 @@ async def test_websocket_grant_executes_exact_packet_on_fake_ble(
         "wrong_presence",
         "wrong_gatt",
         "wrong_policy_identity",
+        "catalog_ineligible",
         "non_boolean_target",
         "capacity",
     ],
@@ -565,6 +595,15 @@ async def test_authorize_denials_are_fail_closed(
                 )
             },
         )
+    elif failure == "catalog_ineligible":
+        monkeypatch.setattr(
+            hil_write,
+            "model_feature_capability",
+            lambda _support, _feature: SimpleNamespace(
+                hil_candidate_eligible=False,
+                physical_presence=PhysicalPresence.PRESENT,
+            ),
+        )
     elif failure == "non_boolean_target":
         message["target"] = 1
     elif failure == "capacity":
@@ -632,6 +671,7 @@ async def test_scope_helpers_and_registration(monkeypatch: pytest.MonkeyPatch) -
         "candidate_missing",
         "wrong_presence",
         "wrong_gatt",
+        "catalog_ineligible",
         "executor_error",
         "executor_timeout",
         "executor_value_error",
@@ -695,6 +735,15 @@ async def test_execute_denials_and_inconclusive_results(
                     policy, gatt_contract=("wrong", "wrong", "wrong")
                 )
             },
+        )
+    elif failure == "catalog_ineligible":
+        monkeypatch.setattr(
+            hil_write,
+            "model_feature_capability",
+            lambda _support, _feature: SimpleNamespace(
+                hil_candidate_eligible=False,
+                physical_presence=PhysicalPresence.PRESENT,
+            ),
         )
     elif failure in {"executor_error", "executor_timeout", "executor_value_error"}:
         error = {

@@ -12,8 +12,11 @@ import socket
 from typing import Any
 from urllib import error, parse, request
 
+from custom_components.allpowers_ble.const import MAX_STALE_TIMEOUT, WRITE_TIMEOUT
+
 MAX_JSON_BYTES = 16 * 1024 * 1024
 API_TIMEOUT = 12.0
+HIL_EXECUTE_TIMEOUT = API_TIMEOUT + MAX_STALE_TIMEOUT + WRITE_TIMEOUT + 5.0
 _CONTROL_DOMAINS = {
     "ac_output": "switch",
     "dc_output": "switch",
@@ -597,7 +600,7 @@ class AuthenticatedWebSocketSession:
                 "Home Assistant WebSocket connection failed or timed out"
             ) from ex
 
-    def command(self, command: dict[str, Any]) -> Any:
+    def command(self, command: dict[str, Any], *, timeout: float = API_TIMEOUT) -> Any:
         """Send one command over this authenticated connection."""
         if self._socket is None:
             raise HAAPIError("WebSocket session is not open")
@@ -606,7 +609,7 @@ class AuthenticatedWebSocketSession:
         try:
             self._socket.send(json.dumps({"id": request_id, **command}))
             reply = _json_object(
-                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                _load_json(self._socket.recv(timeout=timeout), "WebSocket"),
                 "command",
             )
         except (OSError, TimeoutError, ValueError, EOFError) as ex:
@@ -663,19 +666,32 @@ class AuthenticatedWebSocketSession:
                     "entry_id": entry_id,
                     "token": token,
                     "confirmed": execution_confirmed,
-                }
+                },
+                timeout=HIL_EXECUTE_TIMEOUT,
             )
-            if not isinstance(result, dict):
+            if (
+                not isinstance(result, dict)
+                or type(result.get("schema_version")) is not int
+                or result.get("schema_version") != 1
+                or result.get("outcome")
+                not in {"confirmed", "unchanged", "inconclusive"}
+                or type(result.get("confirmed")) is not bool
+            ):
                 raise HAAPIError("Home Assistant returned an invalid HIL execution")
             return result
         finally:
-            self.command(
-                {
-                    "type": "allpowers_ble/hil/write/revoke",
-                    "version": 1,
-                    "token": token,
-                }
-            )
+            try:
+                self.command(
+                    {
+                        "type": "allpowers_ble/hil/write/revoke",
+                        "version": 1,
+                        "token": token,
+                    }
+                )
+            except HAAPIError:
+                # Consumption happens before BLE I/O. If execution was
+                # ambiguous, preserve that result; any unused token expires.
+                pass
 
     def close(self) -> None:
         """Close the persistent connection and erase its local handle."""

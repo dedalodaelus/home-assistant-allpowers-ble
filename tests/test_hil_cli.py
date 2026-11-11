@@ -760,6 +760,7 @@ def test_websocket_auth_and_command_protocol_never_echo_sensitive_error(monkeypa
 def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch):
     sent = []
     opened = []
+    receive_timeouts = []
 
     class PersistentWS:
         def __init__(self):
@@ -777,19 +778,23 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
                         "id": 2,
                         "type": "result",
                         "success": True,
-                        "result": {"outcome": "confirmed"},
+                        "result": {
+                            "schema_version": 1,
+                            "outcome": "confirmed",
+                            "confirmed": True,
+                        },
                     },
                     {
                         "id": 3,
                         "type": "result",
-                        "success": True,
-                        "result": {"revoked": False},
+                        "success": False,
+                        "error": {"code": "invalid_grant"},
                     },
                 ]
             )
 
         def recv(self, timeout):
-            del timeout
+            receive_timeouts.append(timeout)
             return json.dumps(next(self.replies))
 
         def send(self, message):
@@ -820,7 +825,11 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
             authorization_confirmed=True,
             execution_confirmed=True,
         )
-    assert result == {"outcome": "confirmed"}
+    assert result == {
+        "schema_version": 1,
+        "outcome": "confirmed",
+        "confirmed": True,
+    }
     assert len(opened) == 1
     assert [command["id"] for command in sent[1:]] == [1, 2, 3]
     assert [command["type"] for command in sent[1:]] == [
@@ -829,6 +838,7 @@ def test_experimental_write_sequence_reuses_one_authenticated_socket(monkeypatch
         "allpowers_ble/hil/write/revoke",
     ]
     assert sent[0] == {"type": "auth", "access_token": "PRIVATE_TOKEN"}
+    assert receive_timeouts[3] >= 327.0
 
 
 def test_mixed_case_https_never_downgrades_websocket(monkeypatch):

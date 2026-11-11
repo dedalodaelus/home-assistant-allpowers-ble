@@ -514,9 +514,12 @@ class AllpowersBLEClient:
                 if isinstance(hardware, str)
                 else None
             )
+            capability = model_feature_capability(support, feature)
             route = self._connected_route
             if (
                 not isinstance(policy, CandidatePolicy)
+                or capability.hil_candidate_eligible is not True
+                or capability.physical_presence is not PhysicalPresence.PRESENT
                 or policy.semantic_validator is not semantic_validator
                 or policy.profile != support.profile
                 or policy.gatt_contract != (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID)
@@ -549,7 +552,7 @@ class AllpowersBLEClient:
                     "feature": feature.value,
                     "source": current[feature],
                     "target": target,
-                    "confirmed": True,
+                    "confirmed": False,
                 }
 
             next_dc = target if feature is ModelFeature.DC_OUTPUT else current_dc
@@ -592,46 +595,79 @@ class AllpowersBLEClient:
             ):
                 raise StateUnavailableError("Experimental write preconditions changed")
             await self._write_transaction_unlocked(frame, transaction)
-            self._schedule_status_refresh()
+        # Poll only after releasing the operation lock: async_request_status also
+        # owns it, and the pending transaction prevents overlapping writes.
+        self._schedule_status_refresh()
+        while True:
+            if not self.is_connected or self._active_session_generation != generation:
+                raise NotConnectedError("BLE disconnected during HIL execution")
+            final_support = self._runtime_model_support()
+            final_hardware = (
+                self._session_hardware_revision[0]
+                if self._session_hardware_revision is not None
+                else None
+            )
+            final_firmware = (
+                self._settings.firmware_version
+                if self._settings_are_fresh() and self._settings
+                else None
+            )
+            final_route = self._connected_route
+            from .hil_write import CANDIDATE_POLICIES
 
-            deadline = self._loop_time() + self._options.stale_timeout
-            while True:
-                if (
-                    not self.is_connected
-                    or self._active_session_generation != generation
-                ):
-                    raise NotConnectedError("BLE disconnected during HIL execution")
-                observed = self._status
-                if (
-                    self._status_version > status_version
-                    and observed is not None
-                    and semantic_validator(support.profile, observed) is True
-                ):
-                    actual = (
-                        observed.dc_enabled,
-                        observed.ac_enabled,
-                        observed.light_enabled,
+            final_capability = model_feature_capability(final_support, feature)
+            if (
+                self._identity_conflicted
+                or (final_support.model, final_support.profile)
+                != (expected_model, support.profile)
+                or final_hardware != expected_hardware
+                or final_firmware != expected_firmware
+                or CANDIDATE_POLICIES.get(
+                    (final_support.model, final_hardware, final_firmware, feature)
+                )
+                is not policy
+                or final_capability.hil_candidate_eligible is not True
+                or final_capability.physical_presence is not PhysicalPresence.PRESENT
+                or final_route is None
+                or final_route[0] != generation
+                or final_route[1].observed_route == "unverified"
+            ):
+                raise StateUnavailableError(
+                    "HIL device identity changed during execution"
+                )
+            observed = self._status
+            if (
+                self._status_version > status_version
+                and observed is not None
+                and semantic_validator(support.profile, observed) is True
+            ):
+                actual = (
+                    observed.dc_enabled,
+                    observed.ac_enabled,
+                    observed.light_enabled,
+                )
+                wanted = (next_dc, next_ac, next_light)
+                if actual != wanted:
+                    raise StateUnavailableError(
+                        "Contradictory telemetry; outcome inconclusive"
                     )
-                    wanted = (next_dc, next_ac, next_light)
-                    if actual != wanted:
-                        raise StateUnavailableError(
-                            "Contradictory telemetry; outcome inconclusive"
-                        )
-                    return {
-                        "outcome": "confirmed",
-                        "feature": feature.value,
-                        "source": current[feature],
-                        "target": target,
-                        "confirmed": True,
-                    }
-                remaining = deadline - self._loop_time()
-                if remaining <= 0:
-                    raise TimeoutError("HIL output confirmation timed out")
-                try:
-                    await asyncio.wait_for(self._hil_status_event.wait(), remaining)
-                except TimeoutError:
-                    raise TimeoutError("HIL output confirmation timed out") from None
-                self._hil_status_event.clear()
+                if self._loop_time() > transaction.confirm_deadline_monotonic:
+                    raise TimeoutError("HIL output confirmation arrived after deadline")
+                return {
+                    "outcome": "confirmed",
+                    "feature": feature.value,
+                    "source": current[feature],
+                    "target": target,
+                    "confirmed": True,
+                }
+            remaining = transaction.confirm_deadline_monotonic - self._loop_time()
+            if remaining <= 0:
+                raise TimeoutError("HIL output confirmation timed out")
+            try:
+                await asyncio.wait_for(self._hil_status_event.wait(), remaining)
+            except TimeoutError:
+                raise TimeoutError("HIL output confirmation timed out") from None
+            self._hil_status_event.clear()
 
     async def async_set_eco(self, enabled: bool) -> None:
         """Set ECO mode while preserving every unrelated settings bit."""

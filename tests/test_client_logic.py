@@ -126,7 +126,20 @@ async def test_hil_candidate_uses_known_encoder_and_waits_for_same_session_readb
         PhysicalPresence,
     )
     from custom_components.allpowers_ble.route_attribution import ConnectedRoute
-    from custom_components.allpowers_ble.protocol import encode_output_control
+    from custom_components.allpowers_ble.protocol import (
+        encode_output_control,
+        encode_status_request,
+    )
+
+    monkeypatch.setattr(
+        client_module,
+        "model_feature_capability",
+        lambda _support, _feature: SimpleNamespace(
+            hil_candidate_eligible=True,
+            physical_presence=PhysicalPresence.PRESENT,
+            production_authorized=False,
+        ),
+    )
 
     client, fake = _connected_client()
     client._status = _status()
@@ -166,12 +179,17 @@ async def test_hil_candidate_uses_known_encoder_and_waits_for_same_session_readb
     notification = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
     original_write = fake.write_gatt_char
 
-    async def write_and_notify(characteristic, data, *, response):
+    async def write_and_notify_on_poll(characteristic, data, *, response):
         await original_write(characteristic, data, response=response)
-        client._notification_handler(FakeCharacteristic(), bytearray(notification))
+        if bytes(data) == encode_status_request():
+            client._notification_handler(FakeCharacteristic(), bytearray(notification))
 
-    monkeypatch.setattr(fake, "write_gatt_char", write_and_notify)
-    client._schedule_status_refresh = lambda: None
+    monkeypatch.setattr(fake, "write_gatt_char", write_and_notify_on_poll)
+
+    def schedule_refresh():
+        asyncio.get_running_loop().create_task(client.async_request_status())
+
+    client._schedule_status_refresh = schedule_refresh
     result = await client.async_hil_set_output(
         ModelFeature.DC_OUTPUT,
         True,
@@ -182,7 +200,10 @@ async def test_hil_candidate_uses_known_encoder_and_waits_for_same_session_readb
         expected_firmware="1.1",
     )
     assert result["outcome"] == "confirmed"
-    assert fake.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    assert fake.writes == [
+        encode_output_control(dc=True, ac=False, light=True),
+        encode_status_request(),
+    ]
     assert client._pending_output_transaction is None
     with pytest.raises(client_module.StateUnavailableError):
         await client.async_set_dc(False)
@@ -203,6 +224,15 @@ async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
         PhysicalPresence,
     )
     from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    monkeypatch.setattr(
+        client_module,
+        "model_feature_capability",
+        lambda _support, _feature: SimpleNamespace(
+            hil_candidate_eligible=True,
+            physical_presence=PhysicalPresence.PRESENT,
+        ),
+    )
 
     client, fake = _connected_client()
     client._status = _status(raw_flags=0x91)
@@ -258,6 +288,7 @@ async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
     [
         "invalid_target",
         "missing_policy",
+        "catalog_ineligible",
         "no_status",
         "unchanged",
         "generation_shift",
@@ -265,6 +296,8 @@ async def test_hil_candidate_semantic_denial_has_zero_gatt_tx(
         "pre_send_change",
         "disconnect",
         "disconnect_after_send",
+        "late_matching",
+        "profile_change",
         "contradictory",
         "timeout",
         "wait_timeout",
@@ -319,6 +352,23 @@ async def test_hil_executor_fails_closed_without_retry(
         "CANDIDATE_POLICIES",
         {(support.model, "test-hw", "1.1", ModelFeature.DC_OUTPUT): policy},
     )
+    monkeypatch.setattr(
+        client_module,
+        "model_feature_capability",
+        lambda _support, _feature: SimpleNamespace(
+            hil_candidate_eligible=True,
+            physical_presence=PhysicalPresence.PRESENT,
+        ),
+    )
+    if failure == "catalog_ineligible":
+        monkeypatch.setattr(
+            client_module,
+            "model_feature_capability",
+            lambda _support, _feature: SimpleNamespace(
+                hil_candidate_eligible=False,
+                physical_presence=PhysicalPresence.PRESENT,
+            ),
+        )
     if failure == "missing_policy":
         monkeypatch.setattr(hil_write, "CANDIDATE_POLICIES", {})
     if failure == "no_status":
@@ -359,6 +409,29 @@ async def test_hil_executor_fails_closed_without_retry(
         monkeypatch.setattr(
             client, "_write_transaction_unlocked", disconnect_after_transaction
         )
+    if failure == "late_matching":
+        packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+        now = [100.0]
+        client._loop_time = lambda: now[0]
+        client._options = replace(client._options, stale_timeout=1)
+        original_write = fake.write_gatt_char
+
+        async def write_late_confirmation(characteristic, data, *, response):
+            await original_write(characteristic, data, response=response)
+            now[0] = 102.0
+            client._notification_handler(FakeCharacteristic(), bytearray(packet))
+
+        monkeypatch.setattr(fake, "write_gatt_char", write_late_confirmation)
+    if failure == "profile_change":
+        packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+        original_write = fake.write_gatt_char
+
+        async def write_after_profile_change(characteristic, data, *, response):
+            await original_write(characteristic, data, response=response)
+            support.model = "DIFFERENT SYNTHETIC MODEL"
+            client._notification_handler(FakeCharacteristic(), bytearray(packet))
+
+        monkeypatch.setattr(fake, "write_gatt_char", write_after_profile_change)
     if failure == "contradictory":
         notification = notification_builder(
             0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90))
@@ -399,7 +472,7 @@ async def test_hil_executor_fails_closed_without_retry(
     target = 1 if failure == "invalid_target" else True
     expected_exception = (
         TimeoutError
-        if failure in {"timeout", "wait_timeout"}
+        if failure in {"timeout", "wait_timeout", "late_matching"}
         else NotConnectedError
         if failure in {"disconnect", "disconnect_after_send"}
         else client_module.StateUnavailableError
@@ -407,11 +480,13 @@ async def test_hil_executor_fails_closed_without_retry(
         in {
             "invalid_target",
             "missing_policy",
+            "catalog_ineligible",
             "no_status",
             "generation_shift",
             "second_validation",
             "pre_send_change",
             "contradictory",
+            "profile_change",
             "disconnect_after_send",
         }
         else None
@@ -429,6 +504,8 @@ async def test_hil_executor_fails_closed_without_retry(
         assert result["outcome"] == (
             "confirmed" if failure == "wait_confirm" else "unchanged"
         )
+        if failure == "unchanged":
+            assert result["confirmed"] is False
     else:
         with pytest.raises(expected_exception):
             await client.async_hil_set_output(
@@ -444,6 +521,7 @@ async def test_hil_executor_fails_closed_without_retry(
     if failure in {
         "invalid_target",
         "missing_policy",
+        "catalog_ineligible",
         "no_status",
         "generation_shift",
         "second_validation",

@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
+import custom_components.allpowers_ble as integration
 from custom_components.allpowers_ble import hil_write
+from custom_components.allpowers_ble import client as client_module
 from custom_components.allpowers_ble.client import AllpowersBLEClient
 from custom_components.allpowers_ble.const import NOTIFY_UUID, SERVICE_UUID, WRITE_UUID
 from custom_components.allpowers_ble.model_support import ModelFeature, PhysicalPresence
@@ -19,6 +20,20 @@ from custom_components.allpowers_ble.options import ConnectionOptions
 from custom_components.allpowers_ble.protocol import StatusData, encode_output_control
 
 pytestmark = pytest.mark.homeassistant
+
+
+async def _load_entry(hass, monkeypatch, runtime):
+    """Load a controlled runtime through HA's config-entry lifecycle."""
+
+    async def setup_entry(_hass, entry):
+        entry.runtime_data = runtime
+        return True
+
+    monkeypatch.setattr(integration, "async_setup_entry", setup_entry)
+    entry = MockConfigEntry(domain="allpowers_ble", data={})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    return entry
 
 
 def _candidate_status(enabled: bool) -> StatusData:
@@ -89,6 +104,15 @@ async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
     monkeypatch.setattr(
         hil_write, "runtime_model_support", lambda _coordinator: support
     )
+    eligible = SimpleNamespace(
+        hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+    )
+    monkeypatch.setattr(
+        hil_write, "model_feature_capability", lambda _support, _feature: eligible
+    )
+    monkeypatch.setattr(
+        client_module, "model_feature_capability", lambda _support, _feature: eligible
+    )
 
     client = AllpowersBLEClient(
         hass=hass,
@@ -126,10 +150,9 @@ async def test_admin_websocket_grant_execute_confirm_revoke_fake_ble(
         status_is_fresh=True,
         connected=True,
     )
-    entry = MockConfigEntry(domain="allpowers_ble", data={})
-    entry.add_to_hass(hass)
-    entry.state = ConfigEntryState.LOADED
-    entry.runtime_data = SimpleNamespace(client=client, coordinator=coordinator)
+    entry = await _load_entry(
+        hass, monkeypatch, SimpleNamespace(client=client, coordinator=coordinator)
+    )
 
     await hil_write.async_register(hass)
     ws = await hass_ws_client()
@@ -226,10 +249,9 @@ async def test_unauthorized_candidate_denial_has_zero_ble_tx(
         status_is_fresh=True,
         connected=True,
     )
-    entry = MockConfigEntry(domain="allpowers_ble", data={})
-    entry.add_to_hass(hass)
-    entry.state = ConfigEntryState.LOADED
-    entry.runtime_data = SimpleNamespace(client=client, coordinator=coordinator)
+    entry = await _load_entry(
+        hass, monkeypatch, SimpleNamespace(client=client, coordinator=coordinator)
+    )
     monkeypatch.setattr(
         hil_write,
         "runtime_model_support",
