@@ -380,6 +380,99 @@ async def test_concurrent_execute_consumes_grant_before_ble_await(
 
 
 @pytest.mark.asyncio
+async def test_websocket_grant_executes_exact_packet_on_fake_ble(
+    notification_builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise authorize, one-shot consume, fake GATT TX and readback together."""
+    from time import monotonic
+
+    from custom_components.allpowers_ble.const import (
+        NOTIFY_UUID,
+        SERVICE_UUID,
+        WRITE_UUID,
+    )
+    from custom_components.allpowers_ble.protocol import encode_output_control
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from tests.test_client_logic import _connected_client, _settings, _status
+    from tests.ha_stubs import FakeCharacteristic
+
+    client, fake_ble = _connected_client()
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    client._settings = _settings(firmware_version="test-fw")
+    client._settings_monotonic = monotonic()
+    client._session_hardware_revision = ("test-hw", 1)
+    client._connected_route = (
+        1,
+        ConnectedRoute("local_adapter", "bluez", "synthetic-device-path"),
+    )
+    client._schedule_status_refresh = lambda: None
+    support = SimpleNamespace(model="SYNTHETIC TEST MODEL", profile="synthetic-v1")
+    client._runtime_model_support = lambda: support
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            session_hardware_version="test-hw",
+            settings=_settings(firmware_version="test-fw"),
+            identity_conflicted=False,
+        ),
+        settings_are_fresh=True,
+        status_is_fresh=True,
+    )
+    hass = _FakeHass(SimpleNamespace(client=client, coordinator=coordinator))
+    monkeypatch.setattr(
+        hil_write, "runtime_model_support", lambda _coordinator: support
+    )
+
+    def validator(profile, status):
+        return profile == "synthetic-v1" and isinstance(status, type(_status()))
+
+    policy = hil_write.CandidatePolicy(
+        model=support.model,
+        hardware="test-hw",
+        firmware="test-fw",
+        profile=support.profile,
+        feature=ModelFeature.DC_OUTPUT,
+        gatt_contract=(SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        physical_presence=PhysicalPresence.PRESENT,
+        semantic_validator=validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {(support.model, "test-hw", "test-fw", ModelFeature.DC_OUTPUT): policy},
+    )
+    packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+    original_write = fake_ble.write_gatt_char
+
+    async def write_and_confirm(characteristic, data, *, response):
+        await original_write(characteristic, data, response=response)
+        client._notification_handler(FakeCharacteristic(), bytearray(packet))
+
+    monkeypatch.setattr(fake_ble, "write_gatt_char", write_and_confirm)
+    connection = _Connection()
+    await hil_write.ws_write_authorize(
+        hass,
+        connection,
+        {
+            "id": 30,
+            "entry_id": "entry-a",
+            "feature": "dc_output",
+            "target": True,
+        },
+    )
+    token = connection.results[-1][1]["token"]
+    await hil_write.ws_write_execute(
+        hass, connection, {"id": 31, "entry_id": "entry-a", "token": token}
+    )
+    assert fake_ble.writes == [encode_output_control(dc=True, ac=False, light=True)]
+    assert connection.results[-1][1]["outcome"] == "confirmed"
+    assert connection.results[-1][1]["confirmed"] is True
+    assert token not in hil_write.store(hass).grants
+    await hil_write.ws_write_revoke(hass, connection, {"id": 32, "token": token})
+    assert connection.results[-1][1]["revoked"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
