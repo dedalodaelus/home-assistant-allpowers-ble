@@ -94,6 +94,19 @@ def test_mutable_or_compound_target_is_rejected(target: object) -> None:
         store.issue(**(_scope() | {"target": target}))
 
 
+def test_compound_consume_target_denies_and_burns_grant() -> None:
+    store = GrantStore()
+    token = _issue(store)
+    assert store.consume(token, **(_scope() | {"target": {"enabled": True}})) is None
+    assert store.consume(token, **_scope()) is None
+
+
+def test_long_string_target_is_rejected() -> None:
+    store = GrantStore()
+    with pytest.raises(ValueError, match="limited to 128 characters"):
+        store.issue(**(_scope() | {"target": "x" * 129}))
+
+
 def test_expired_grants_are_pruned_on_issue_and_access() -> None:
     now = [10.0]
     store = GrantStore(clock=lambda: now[0])

@@ -110,14 +110,14 @@ class GrantStore:
         feature: str,
         target: Any,
     ) -> Grant | None:
-        try:
-            self._validate_target(target)
-        except ValueError:
-            return None
         now = self._clock()
         self._prune_expired(now)
         grant = self.grants.pop(token, None)
         if grant is None or now >= grant.deadline:
+            return None
+        try:
+            self._validate_target(target)
+        except ValueError:
             return None
         expected = (
             connection_id,
