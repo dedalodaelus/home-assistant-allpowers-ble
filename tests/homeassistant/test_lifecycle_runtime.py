@@ -63,8 +63,9 @@ class StatefulFakeClient:
         identity_conflicted: bool = False,
         model_identity_callback: Callable[[str], None] | None = None,
         identity_conflict_callback: Callable[[bool], None] | None = None,
+        config_entry_id: str | None = None,
     ) -> None:
-        del hass
+        del hass, config_entry_id
         self.address = address.upper()
         self.options = options
         self.identity_conflicted = identity_conflicted

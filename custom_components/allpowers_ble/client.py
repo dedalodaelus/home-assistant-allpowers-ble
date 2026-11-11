@@ -157,8 +157,10 @@ class AllpowersBLEClient:
         model_identity_callback: Callable[[str], None] | None = None,
         identity_conflict_callback: Callable[[bool], None] | None = None,
         options: ConnectionOptions,
+        config_entry_id: str | None = None,
     ) -> None:
         self._hass = hass
+        self._config_entry_id = config_entry_id
         self.address = address.upper()
         self._advertised_name = advertised_name
         canonical_identity = canonical_model_identity(device_identity)
@@ -191,6 +193,7 @@ class AllpowersBLEClient:
         self._disconnect_event = asyncio.Event()
         self._advertisement_event = asyncio.Event()
         self._ready_event = asyncio.Event()
+        self._hil_status_event = asyncio.Event()
         self._maintenance_wakeup = asyncio.Event()
         # One lock owns every operation that mutates or uses the active client.
         self._operation_lock = asyncio.Lock()
@@ -241,12 +244,32 @@ class AllpowersBLEClient:
         return self._active_session_generation
 
     @property
+    def is_connected(self) -> bool:
+        """Return whether a live GATT session is available."""
+        return bool(
+            self._connected
+            and not self._disconnect_event.is_set()
+            and self._client is not None
+            and self._client.is_connected
+        )
+
+    @property
     def has_pending_transaction(self) -> bool:
         """Return whether any control transaction still awaits a safe outcome."""
         return (
             self._pending_output_transaction is not None
             or self._pending_settings_transaction is not None
         )
+
+    def _revoke_hil_grants(self) -> None:
+        """Invalidate this entry's ephemeral grants on identity/session changes."""
+        if self._config_entry_id is None:
+            return
+        from .hil_write import KEY, GrantStore
+
+        grants = self._hass.data.get(KEY)
+        if isinstance(grants, GrantStore):
+            grants.revoke_entry(self._config_entry_id)
 
     @property
     def advertised_name(self) -> str:
@@ -447,6 +470,206 @@ class AllpowersBLEClient:
             )
             await self._write_transaction_unlocked(frame, transaction)
         self._schedule_status_refresh()
+
+    async def async_hil_set_output(
+        self,
+        feature: ModelFeature,
+        target: bool,
+        *,
+        expected_generation: int,
+        semantic_validator: Callable[[str, StatusData], bool],
+        expected_model: str,
+        expected_hardware: str,
+        expected_firmware: str | None,
+        execution_guard: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one exact reviewed HIL output candidate and await readback.
+
+        This path has no production authorization effect. It is usable only
+        while the exact candidate remains in the deliberately empty-by-default
+        HIL policy registry.
+        """
+        if type(target) is not bool or feature not in {
+            ModelFeature.AC_OUTPUT,
+            ModelFeature.DC_OUTPUT,
+            ModelFeature.LIGHT_OUTPUT,
+        }:
+            raise StateUnavailableError("Unsupported experimental output target")
+
+        async with self._operation_lock:
+            from .hil_write import CANDIDATE_POLICIES, CandidatePolicy
+
+            support = self._runtime_model_support()
+            hardware = (
+                self._session_hardware_revision[0]
+                if self._session_hardware_revision is not None
+                else None
+            )
+            firmware = (
+                self._settings.firmware_version
+                if self._settings_are_fresh() and self._settings
+                else None
+            )
+            policy = (
+                CANDIDATE_POLICIES.get((support.model, hardware, firmware, feature))
+                if isinstance(hardware, str)
+                else None
+            )
+            capability = model_feature_capability(support, feature)
+            route = self._connected_route
+            if (
+                not isinstance(policy, CandidatePolicy)
+                or capability.hil_candidate_eligible is not True
+                or capability.physical_presence is not PhysicalPresence.PRESENT
+                or policy.semantic_validator is not semantic_validator
+                or policy.profile != support.profile
+                or policy.gatt_contract != (SERVICE_UUID, WRITE_UUID, NOTIFY_UUID)
+                or (support.model, hardware, firmware)
+                != (expected_model, expected_hardware, expected_firmware)
+                or self._identity_conflicted
+                or self._active_session_generation != expected_generation
+                or not self.is_connected
+                or route is None
+                or route[0] != expected_generation
+                or route[1].observed_route == "unverified"
+                or self.has_pending_transaction
+            ):
+                raise StateUnavailableError("Experimental candidate preflight failed")
+
+            current_dc, current_ac, current_light = self._safe_output_snapshot()
+            current = {
+                ModelFeature.DC_OUTPUT: current_dc,
+                ModelFeature.AC_OUTPUT: current_ac,
+                ModelFeature.LIGHT_OUTPUT: current_light,
+            }
+            if (
+                self._status is None
+                or semantic_validator(support.profile, self._status) is not True
+            ):
+                raise StateUnavailableError("Candidate semantic validation failed")
+            if current[feature] == target:
+                return {
+                    "outcome": "unchanged",
+                    "feature": feature.value,
+                    "source": current[feature],
+                    "target": target,
+                    "confirmed": False,
+                }
+
+            next_dc = target if feature is ModelFeature.DC_OUTPUT else current_dc
+            next_ac = target if feature is ModelFeature.AC_OUTPUT else current_ac
+            next_light = (
+                target if feature is ModelFeature.LIGHT_OUTPUT else current_light
+            )
+            generation = self._active_session_generation
+            if generation != expected_generation:
+                raise StateUnavailableError("BLE session changed before transmission")
+            status = self._status
+            status_version = self._status_version
+            if (
+                status is None
+                or semantic_validator(support.profile, status) is not True
+            ):
+                raise StateUnavailableError("Candidate semantic validation failed")
+            frame = encode_output_control(dc=next_dc, ac=next_ac, light=next_light)
+            now = self._loop_time()
+            transaction = PendingOutputTransaction(
+                session_generation=generation,
+                source_version=status_version,
+                target_dc=next_dc,
+                target_ac=next_ac,
+                target_light=next_light,
+                sent_monotonic=now,
+                confirm_deadline_monotonic=now + self._options.stale_timeout,
+                phase=TransactionPhase.SENDING,
+            )
+            self._hil_status_event.clear()
+            # Last synchronous pre-send check under the operation lock.
+            if (
+                not self.is_connected
+                or self._active_session_generation != generation
+                or self._status_version != status_version
+                or self.has_pending_transaction
+                or self._connected_route is None
+                or self._connected_route[0] != generation
+                or self._connected_route[1].observed_route == "unverified"
+                or (execution_guard is not None and execution_guard() is not True)
+            ):
+                raise StateUnavailableError("Experimental write preconditions changed")
+            await self._write_transaction_unlocked(frame, transaction)
+        # Poll only after releasing the operation lock: async_request_status also
+        # owns it, and the pending transaction prevents overlapping writes.
+        self._schedule_status_refresh()
+        while True:
+            if not self.is_connected or self._active_session_generation != generation:
+                raise NotConnectedError("BLE disconnected during HIL execution")
+            final_support = self._runtime_model_support()
+            final_hardware = (
+                self._session_hardware_revision[0]
+                if self._session_hardware_revision is not None
+                else None
+            )
+            final_firmware = (
+                self._settings.firmware_version
+                if self._settings_are_fresh() and self._settings
+                else None
+            )
+            final_route = self._connected_route
+            from .hil_write import CANDIDATE_POLICIES
+
+            final_capability = model_feature_capability(final_support, feature)
+            if (
+                self._identity_conflicted
+                or (final_support.model, final_support.profile)
+                != (expected_model, support.profile)
+                or final_hardware != expected_hardware
+                or final_firmware != expected_firmware
+                or CANDIDATE_POLICIES.get(
+                    (final_support.model, final_hardware, final_firmware, feature)
+                )
+                is not policy
+                or final_capability.hil_candidate_eligible is not True
+                or final_capability.physical_presence is not PhysicalPresence.PRESENT
+                or final_route is None
+                or final_route[0] != generation
+                or final_route[1].observed_route == "unverified"
+            ):
+                raise StateUnavailableError(
+                    "HIL device identity changed during execution"
+                )
+            observed = self._status
+            if (
+                self._status_version > status_version
+                and observed is not None
+                and semantic_validator(support.profile, observed) is True
+            ):
+                actual = (
+                    observed.dc_enabled,
+                    observed.ac_enabled,
+                    observed.light_enabled,
+                )
+                wanted = (next_dc, next_ac, next_light)
+                if actual != wanted:
+                    raise StateUnavailableError(
+                        "Contradictory telemetry; outcome inconclusive"
+                    )
+                if self._loop_time() > transaction.confirm_deadline_monotonic:
+                    raise TimeoutError("HIL output confirmation arrived after deadline")
+                return {
+                    "outcome": "confirmed",
+                    "feature": feature.value,
+                    "source": current[feature],
+                    "target": target,
+                    "confirmed": True,
+                }
+            remaining = transaction.confirm_deadline_monotonic - self._loop_time()
+            if remaining <= 0:
+                raise TimeoutError("HIL output confirmation timed out")
+            try:
+                await asyncio.wait_for(self._hil_status_event.wait(), remaining)
+            except TimeoutError:
+                raise TimeoutError("HIL output confirmation timed out") from None
+            self._hil_status_event.clear()
 
     async def async_set_eco(self, enabled: bool) -> None:
         """Set ECO mode while preserving every unrelated settings bit."""
@@ -891,6 +1114,7 @@ class AllpowersBLEClient:
 
         previous_identity = self._device_identity
         previous_conflict = self._identity_conflicted
+        self._revoke_hil_grants()
         self._pending_model_identity = observed_identity
         self._pending_model_identity_generation = self._active_session_generation
         if not self._identity_conflicted:
@@ -1241,6 +1465,7 @@ class AllpowersBLEClient:
         async with self._operation_lock:
             client = self._client
             was_connected = self._connected
+            self._revoke_hil_grants()
             old_generation = self._active_session_generation
             if old_generation is None and was_connected and client is failed_client:
                 old_generation = failed_generation
@@ -1250,6 +1475,7 @@ class AllpowersBLEClient:
             self._active_session_generation = None
             self._connected_route = None
             self._ready_event.clear()
+            self._hil_status_event.set()
             self._client = None
             self._write_characteristic = None
             self._connected = False
@@ -1328,6 +1554,7 @@ class AllpowersBLEClient:
 
     def _activate_session_generation(self) -> int:
         """Bind pre-connect candidates forward and discard prior-session candidates."""
+        self._revoke_hil_grants()
         if self._pending_model_identity is not None:
             if self._pending_model_identity_generation is None:
                 self._pending_model_identity_generation = (
@@ -1493,7 +1720,18 @@ class AllpowersBLEClient:
                             reason="unconfirmed_or_contradictory",
                         )
                 self._ready_event.set()
+                self._hil_status_event.set()
             elif isinstance(packet, SettingsData):
+                previous_settings = self._settings
+                if previous_settings is not None and (
+                    previous_settings.hardware_version != packet.hardware_version
+                    or previous_settings.raw_hardware_version
+                    != packet.raw_hardware_version
+                    or previous_settings.firmware_version != packet.firmware_version
+                    or previous_settings.raw_firmware_version
+                    != packet.raw_firmware_version
+                ):
+                    self._revoke_hil_grants()
                 self._settings = packet
                 self._settings_monotonic = now
                 self._session_hardware_revision = (

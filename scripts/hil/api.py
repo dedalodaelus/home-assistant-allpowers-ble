@@ -12,8 +12,11 @@ import socket
 from typing import Any
 from urllib import error, parse, request
 
+from custom_components.allpowers_ble.const import MAX_STALE_TIMEOUT, WRITE_TIMEOUT
+
 MAX_JSON_BYTES = 16 * 1024 * 1024
 API_TIMEOUT = 12.0
+HIL_EXECUTE_TIMEOUT = API_TIMEOUT + MAX_STALE_TIMEOUT + WRITE_TIMEOUT + 5.0
 _CONTROL_DOMAINS = {
     "ac_output": "switch",
     "dc_output": "switch",
@@ -78,6 +81,15 @@ def _load_json(raw: bytes | str, context: str) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError) as ex:
         raise HAAPIError(f"Invalid JSON from {context}") from ex
+
+
+def _websocket_exception_types() -> tuple[type[BaseException], ...]:
+    """Return the optional transport exception class when installed."""
+    try:
+        from websockets.exceptions import WebSocketException
+    except ImportError:
+        return ()
+    return (WebSocketException,)
 
 
 class HAClient:
@@ -364,7 +376,6 @@ class HAClient:
         ]:
             raise HAAPIError("Unsupported scanner subscription request")
         try:
-            from websockets.exceptions import WebSocketException
             from websockets.sync.client import connect
         except ImportError as ex:
             raise HAAPIError(
@@ -437,10 +448,20 @@ class HAClient:
                 return results
         except HAAPIError:
             raise
-        except (WebSocketException, OSError, TimeoutError, ValueError, EOFError) as ex:
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
             raise HAAPIError(
                 "Home Assistant WebSocket connection failed or timed out"
             ) from ex
+
+    def websocket_session(self) -> "AuthenticatedWebSocketSession":
+        """Open one authenticated socket for related HIL grant operations."""
+        return AuthenticatedWebSocketSession(self)
 
     def scanner_candidates(self) -> dict[str, int] | None:
         """Read an optional, privacy-safe scanner inventory (not route proof).
@@ -540,3 +561,184 @@ class _NoRedirectHandler(request.HTTPRedirectHandler):
     def redirect_request(self, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
         return None
+
+
+class AuthenticatedWebSocketSession:
+    """Persistent authenticated websocket for one HIL authorization sequence."""
+
+    def __init__(self, client: HAClient) -> None:
+        self._client = client
+        self._socket: Any = None
+        self._next_id = 1
+
+    def __enter__(self) -> "AuthenticatedWebSocketSession":
+        try:
+            from websockets.sync.client import connect
+        except ImportError as ex:
+            raise HAAPIError(
+                "Missing HIL dependency; install requirements_hil.txt"
+            ) from ex
+        origin = parse.urlsplit(self._client.origin)
+        scheme = "wss" if origin.scheme == "https" else "ws"
+        url = f"{scheme}://{origin.netloc}/api/websocket"
+        try:
+            self._socket = connect(
+                url,
+                open_timeout=API_TIMEOUT,
+                close_timeout=2,
+                max_size=MAX_JSON_BYTES,
+                proxy=None,
+            )
+            hello = _json_object(
+                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                "handshake",
+            )
+            if hello.get("type") != "auth_required":
+                raise HAAPIError("Unexpected Home Assistant WebSocket handshake")
+            self._socket.send(
+                json.dumps({"type": "auth", "access_token": self._client._token})
+            )
+            auth = _json_object(
+                _load_json(self._socket.recv(timeout=API_TIMEOUT), "WebSocket"),
+                "authentication",
+            )
+            if auth.get("type") != "auth_ok":
+                raise HAAPIError("Home Assistant WebSocket authentication failed")
+            return self
+        except HAAPIError:
+            self.close()
+            raise
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
+            self.close()
+            raise HAAPIError(
+                "Home Assistant WebSocket connection failed or timed out"
+            ) from ex
+
+    def command(self, command: dict[str, Any], *, timeout: float = API_TIMEOUT) -> Any:
+        """Send one command over this authenticated connection."""
+        if self._socket is None:
+            raise HAAPIError("WebSocket session is not open")
+        request_id = self._next_id
+        self._next_id += 1
+        try:
+            self._socket.send(json.dumps({"id": request_id, **command}))
+            reply = _json_object(
+                _load_json(self._socket.recv(timeout=timeout), "WebSocket"),
+                "command",
+            )
+        except (
+            OSError,
+            TimeoutError,
+            ValueError,
+            EOFError,
+            *_websocket_exception_types(),
+        ) as ex:
+            raise HAAPIError("Home Assistant WebSocket request failed") from ex
+        if reply.get("type") != "result" or reply.get("id") != request_id:
+            raise HAAPIError("Unexpected WebSocket reply order or type")
+        if reply.get("success") is not True:
+            error_data = reply.get("error")
+            code = error_data.get("code") if isinstance(error_data, dict) else None
+            safe_code = (
+                code
+                if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,40}", code)
+                else "unsupported_or_denied"
+            )
+            raise HAAPIError(f"Home Assistant WebSocket command rejected ({safe_code})")
+        return reply.get("result")
+
+    def experimental_output(
+        self,
+        entry_id: str,
+        feature: str,
+        target: bool,
+        *,
+        authorization_confirmed: bool,
+        execution_confirmed: bool,
+    ) -> dict[str, Any]:
+        """Run one attended grant/execute/revoke sequence on this same socket."""
+        if (
+            type(target) is not bool
+            or not authorization_confirmed
+            or not execution_confirmed
+        ):
+            raise HAAPIError("Attended confirmation is required for each HIL action")
+        authorized = self.command(
+            {
+                "type": "allpowers_ble/hil/write/authorize",
+                "version": 1,
+                "entry_id": entry_id,
+                "feature": feature,
+                "target": target,
+                "confirmed": authorization_confirmed,
+            }
+        )
+        if not isinstance(authorized, dict) or not isinstance(
+            authorized.get("token"), str
+        ):
+            raise HAAPIError("Home Assistant returned an invalid HIL grant")
+        token = authorized["token"]
+        try:
+            if (
+                type(authorized.get("schema_version")) is not int
+                or authorized["schema_version"] != 1
+            ):
+                raise HAAPIError("Home Assistant returned an invalid HIL grant")
+            result = self.command(
+                {
+                    "type": "allpowers_ble/hil/write/execute",
+                    "version": 1,
+                    "entry_id": entry_id,
+                    "token": token,
+                    "confirmed": execution_confirmed,
+                },
+                timeout=HIL_EXECUTE_TIMEOUT,
+            )
+            if (
+                not isinstance(result, dict)
+                or type(result.get("schema_version")) is not int
+                or result.get("schema_version") != 1
+                or not isinstance(result.get("outcome"), str)
+                or result["outcome"] not in {"confirmed", "unchanged", "inconclusive"}
+                or type(result.get("confirmed")) is not bool
+                or result["confirmed"] is not (result["outcome"] == "confirmed")
+            ):
+                raise HAAPIError("Home Assistant returned an invalid HIL execution")
+            return result
+        finally:
+            try:
+                self.command(
+                    {
+                        "type": "allpowers_ble/hil/write/revoke",
+                        "version": 1,
+                        "token": token,
+                    }
+                )
+            except HAAPIError:
+                # Consumption happens before BLE I/O. If execution was
+                # ambiguous, preserve that result; any unused token expires.
+                pass
+
+    def close(self) -> None:
+        """Close the persistent connection and erase its local handle."""
+        socket = self._socket
+        self._socket = None
+        if socket is not None:
+            try:
+                socket.close()
+            except (
+                OSError,
+                TimeoutError,
+                EOFError,
+                *_websocket_exception_types(),
+            ):
+                pass
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()

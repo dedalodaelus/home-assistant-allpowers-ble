@@ -49,11 +49,13 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     del config
     from .hil_probe import async_register as async_register_probe
     from .hil_capabilities import async_register as async_register_capabilities
+    from .hil_write import async_register as async_register_write
     from .hil_trace import async_register
 
     await async_register(hass)
     await async_register_probe(hass)
     await async_register_capabilities(hass)
+    await async_register_write(hass)
     return True
 
 
@@ -268,6 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) ->
             model_identity_callback=_persist_model_identity,
             identity_conflict_callback=_persist_identity_conflict,
             options=options,
+            config_entry_id=entry.entry_id,
         )
         coordinator = AllpowersCoordinator(hass, entry, client)
         initial_snapshot = client.snapshot()
@@ -414,8 +417,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: AllpowersConfigEntry) -
         raise
     finally:
         from .hil_trace import clear_entry_capture
+        from .hil_write import store as hil_write_store
 
         clear_entry_capture(hass, entry.entry_id)
+        hil_write_store(hass).revoke_entry(entry.entry_id)
     if not unloaded:
         _LOGGER.error(
             "Platform unload failed for config entry %s; restart Home Assistant "
