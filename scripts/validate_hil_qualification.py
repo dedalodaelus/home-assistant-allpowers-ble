@@ -329,7 +329,7 @@ def _check_result_map(
             required=status == "pass"
             or (require_pass and capability and status == "not_applicable"),
         )
-        if status == "pass":
+        if status in {"pass", "fail"}:
             _check_physical_review(item, status, item_context, errors)
         if status == "not_applicable" and not (
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
@@ -373,8 +373,6 @@ def _check_result_map(
                     errors,
                     f"{item_context} evidence must contain a route- and operation-bound capture row",
                 )
-            if status == "fail":
-                _check_physical_review(item, status, item_context, errors)
 
 
 def _validate_run(

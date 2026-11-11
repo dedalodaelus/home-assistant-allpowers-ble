@@ -566,6 +566,29 @@ def test_default_validation_rejects_unreviewed_pass(
     )
 
 
+def test_default_validation_rejects_unreviewed_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    now = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(
+        tmp_path, "active_proxy", "unreviewed-fail", now, qualification="inconclusive"
+    )
+    run["write_capabilities"]["ac_output"]["status"] = "fail"
+    run["write_capabilities"]["ac_output"].pop("physical_review")
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+
+    assert any(
+        "ac_output requires an independent physical_review" in error for error in errors
+    )
+
+
 def test_default_validation_rejects_overall_pass_without_result_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
