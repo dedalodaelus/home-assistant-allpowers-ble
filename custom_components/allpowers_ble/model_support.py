@@ -308,7 +308,10 @@ def model_feature_capability(
         feature=feature_id,
         physical_presence=PhysicalPresence.UNKNOWN,
         read_authorized=(
-            feature_id is ModelFeature.TELEMETRY and support.capabilities.read_telemetry
+            feature_id is ModelFeature.TELEMETRY
+            and support.capabilities.read_telemetry
+            and support.supported
+            and support.classification != "rejected"
         ),
         evidence="No consistent exact model/revision feature profile is available",
     )
@@ -392,7 +395,7 @@ def identify_model(
         )
 
     if identity == "AP R1500 LITE":
-        if normalized_hw == "0.1":
+        if normalized_hw == "0.1" and raw_hardware_version in (None, 0x01):
             return ModelSupport(
                 model="AP R1500 LITE",
                 supported=True,

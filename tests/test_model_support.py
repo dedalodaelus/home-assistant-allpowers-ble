@@ -103,6 +103,10 @@ def test_s500_and_s700_are_rejected() -> None:
         assert support.verified is False
         assert support.classification == "rejected"
         assert "different protocol" in (support.reason or "")
+        assert (
+            model_feature_capability(support, ModelFeature.TELEMETRY).read_authorized
+            is False
+        )
 
 
 def test_ap_s_family_is_unverified() -> None:
@@ -132,6 +136,10 @@ def test_service_uuid_only_candidate_requires_probe() -> None:
     assert support.verified is False
     assert support.classification == "experimental_read_only"
     assert "service UUID" in (support.reason or "")
+    assert (
+        model_feature_capability(support, ModelFeature.TELEMETRY).read_authorized
+        is True
+    )
 
 
 def test_unnamed_candidate_requires_probe() -> None:
@@ -225,6 +233,17 @@ def test_r1500_lite_other_revision_and_conflict_do_not_match_evidence_profile() 
     assert (
         model_feature_capability(
             other_revision, ModelFeature.DC_OUTPUT
+        ).production_authorized
+        is False
+    )
+
+    contradictory_revision = identify_model(
+        "AP R1500 LITE", hardware_version="0.1", raw_hardware_version=0x02
+    )
+    assert contradictory_revision.profile == "ap-r1500-lite-unverified-revision"
+    assert (
+        model_feature_capability(
+            contradictory_revision, ModelFeature.AC_OUTPUT
         ).production_authorized
         is False
     )
