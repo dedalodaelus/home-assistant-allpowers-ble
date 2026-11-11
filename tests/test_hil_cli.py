@@ -3877,4 +3877,5 @@ def test_capability_snapshot_accepts_r1500_lite_and_redacts_identity(monkeypatch
     assert normalized["model"] == "AP R1500 LITE"
     assert normalized["features"]["light_output"]["physical_presence"] == "absent"
     assert not normalized["features"]["ac_output"]["production_authorized"]
+    assert not normalized["features"]["dc_output"]["production_authorized"]
     assert "raw_address" not in normalized
