@@ -89,7 +89,7 @@ jobs:
             env:
               USE_REAL_HOMEASSISTANT: "1"
             run: >-
-              pytest tests/homeassistant
+              pytest -n 2 --dist=loadfile tests/homeassistant
               --basetemp=.pytest-tmp-homeassistant
               -o cache_dir=.pytest_cache-homeassistant
 
