@@ -77,6 +77,23 @@ def _connected_client(options: ConnectionOptions | None = None):
     return client, fake
 
 
+def test_output_freshness_uses_the_execution_clock_domain() -> None:
+    client, _fake = _connected_client()
+    client._status = _status()
+    client._options = replace(client._options, stale_timeout=1)
+    client._loop_time = lambda: 100.0
+
+    for timestamp in (100.0, 99.0):
+        client._status_monotonic = timestamp
+        client._settings_monotonic = timestamp
+        assert client._safe_output_snapshot() == (False, False, True)
+
+    client._status_monotonic = 98.999
+    client._settings_monotonic = 98.999
+    with pytest.raises(client_module.StateUnavailableError):
+        client._safe_output_snapshot()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "control", ["ac", "dc", "light", "eco", "work_mode", "eco_timeout", "car_charger"]
