@@ -32,11 +32,33 @@ jobs:
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate edited PR title
+        if: github.event.action == 'edited' && github.event.changes.title != null
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            test
+
       - name: Wait for required checks on PR head
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const { spawnSync } = require("node:child_process");
             // Resolve repository/PR context from the event payload.
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -53,18 +75,6 @@ jobs:
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
             const titleWasEdited = Object.hasOwn(context.payload.changes || {}, "title");
-            const conventionalTypes = new Set([
-              "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "test",
-            ]);
-            const titleMatch = /^(\w+)(?:\(([^\r\n()]+)\))?(!)?: (.+\S)$/u.exec(pr.title || "");
-            const currentTitleIsValid = Boolean(titleMatch && conventionalTypes.has(titleMatch[1]));
-
-            // Check-runs have no created_at field. Their IDs increase as runs are
-            // created, including queued runs whose started_at is still null.
-            if (titleWasEdited && !currentTitleIsValid) {
-              core.setFailed(`Invalid pull request title: '${pr.title || ""}'. Use a Conventional Commit title.`);
-              return;
-            }
             const prAuthorLogin = pr.user?.login || "";
             const prAuthorType = pr.user?.type || "";
             const isHotfixBranch = /^hotfix\//.test(headRef);
@@ -277,19 +287,6 @@ jobs:
             const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
-            // Keep only the latest run per check name (re-runs may create duplicates).
-            function formatRunsMap(checkRuns) {
-              const map = new Map();
-              for (const run of checkRuns) {
-                const previous = map.get(run.name);
-                // IDs order runs even when a new queued run has no started_at.
-                if (!previous || Number(run.id) > Number(previous.id)) {
-                  map.set(run.name, run);
-                }
-              }
-              return map;
-            }
-
             // Poll until all required checks are completed/accepted, or fail fast on policy.
             while (true) {
               const elapsed = Date.now() - start;
@@ -307,7 +304,16 @@ jobs:
               });
 
               const checkRuns = response.data.check_runs || [];
-              const latestByName = formatRunsMap(checkRuns);
+              const policyProcess = spawnSync(
+                "python3",
+                ["scripts/merge_gate_policy.py"],
+                { input: JSON.stringify({ check_runs: checkRuns, title_was_edited: titleWasEdited }), encoding: "utf8" }
+              );
+              if (policyProcess.status !== 0) {
+                core.setFailed(`Merge-gate Python policy failed: ${policyProcess.stderr || "unknown error"}`);
+                return;
+              }
+              const { latest_by_name: latestByName, title_state: titleState } = JSON.parse(policyProcess.stdout);
 
               const missing = [];
               const pending = [];
@@ -315,17 +321,15 @@ jobs:
 
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
-                const run = latestByName.get(checkName);
+                const run = latestByName[checkName];
                 if (!run) {
                   missing.push(checkName);
                   continue;
                 }
 
-                // On title edits the event payload is validated above, since a
-                // check-run on the same SHA cannot prove which title it evaluated.
-                // Still wait if the newest title check is queued or in progress.
-                if (checkName === "Validate title" && titleWasEdited) {
-                  if (run.status !== "completed") pending.push(`${checkName} (${run.status})`);
+                if (checkName === "Validate title") {
+                  if (titleState === "pending") pending.push(`${checkName} (${run.status})`);
+                  if (titleState === "failed") failed.push(`${checkName} (${run.conclusion || "unknown"})`);
                   continue;
                 }
 
@@ -353,7 +357,7 @@ jobs:
 
               // Fail early with actionable context when expected checks do not appear.
               if (missing.length && elapsed >= missingChecksGraceMs) {
-                const discoveredChecks = [...latestByName.keys()].sort();
+                const discoveredChecks = Object.keys(latestByName).sort();
                 core.setFailed(
                   `Missing required checks after ${Math.floor(missingChecksGraceMs / 60000)} minutes: `
                   + `${missing.join(", ")}. Discovered checks: ${discoveredChecks.join(", ") || "none"}. `
