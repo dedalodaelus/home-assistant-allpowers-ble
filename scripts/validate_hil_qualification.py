@@ -44,9 +44,15 @@ REQUIRED_WRITE_CAPABILITIES = (
 MAC_ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
 PROTOCOL_HEADER = bytes((0xA5, 0x65))
 STATUS_REQUEST = bytes.fromhex("A5 65 B1 00 01 06 01 00 00 00 00 00")
+VALID_ECO_TIMEOUTS = frozenset((1, 2, 4, 6))
 
 
-def _valid_protocol_frame(frame_hex: str, direction: Any, operation: str) -> bool:
+def _valid_protocol_frame(
+    frame_hex: str,
+    direction: Any,
+    operation: str,
+    requested_state: Any = None,
+) -> bool:
     """Validate documented R600 notification and outbound GATT frame forms."""
     try:
         frame = bytes.fromhex(frame_hex)
@@ -95,32 +101,59 @@ def _valid_protocol_frame(frame_hex: str, direction: Any, operation: str) -> boo
     if command == 0x01:
         # Combined output control has an empty encoded payload length and one
         # flags byte, as documented by encode_output_control().
-        return (
+        if not (
             len(frame) == 9
             and payload_length == 0
             and len(payload) == 1
-            and operation
-            in {
-                "rapid_consecutive_writes",
-                "ac_output",
-                "dc_output",
-                "light_output",
-            }
+            and payload[0] & ~0x23 == 0
+        ):
+            return False
+        if operation not in {
+            "rapid_consecutive_writes",
+            "ac_output",
+            "dc_output",
+            "light_output",
+        }:
+            return False
+        if operation == "rapid_consecutive_writes":
+            return True
+        mask = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[operation]
+        return (
+            type(requested_state) is bool and bool(payload[0] & mask) is requested_state
         )
     if command == 0x02:
-        return (
+        if not (
             len(frame) == 8 + payload_length
             and payload_length == 2
             and len(payload) == 2
-            and operation
-            in {
-                "rapid_consecutive_writes",
-                "eco_mode",
-                "work_mode",
-                "eco_timeout",
-                "car_charger",
-            }
-        )
+            and ((payload[0] & 0x06) >> 1) != 0x03
+            and payload[1] in VALID_ECO_TIMEOUTS
+        ):
+            return False
+        if operation == "rapid_consecutive_writes":
+            return True
+        if operation == "eco_mode":
+            return (
+                type(requested_state) is bool
+                and bool(payload[0] & 0x01) is requested_state
+            )
+        if operation == "car_charger":
+            return (
+                type(requested_state) is bool
+                and bool(payload[0] & 0x10) is requested_state
+            )
+        if operation == "work_mode":
+            return (
+                type(requested_state) is int
+                and requested_state in {0, 1, 2}
+                and ((payload[0] & 0x06) >> 1) == requested_state
+            )
+        if operation == "eco_timeout":
+            return (
+                type(requested_state) is int
+                and requested_state in VALID_ECO_TIMEOUTS
+                and payload[1] == requested_state
+            )
     return False
 
 
@@ -325,6 +358,7 @@ def _has_bound_capture(
                 frame_hex,
                 row.get("direction"),
                 row.get("capability") if capability else row.get("scenario"),
+                row.get("requested_state") if capability else None,
             )
         ):
             continue

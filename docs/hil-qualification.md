@@ -181,13 +181,25 @@ Each independently sourced JSONL row should be a sanitized object with:
 - verdict: ok, timeout, reconnect, or rejected
 - physical_outcome: pass or fail for the captured operation
 - capability: required for write-capability evidence; use the matrix key
+- requested_state: required for capability writes; the requested boolean or
+  numeric state that must match the corresponding frame bits/value
+
+Use booleans for `ac_output`, `dc_output`, `light_output`, `eco_mode`, and
+`car_charger`; use 0, 1, or 2 for `work_mode`; and 1, 2, 4, or 6 for
+`eco_timeout`.
 
 For strict qualification, each row must exactly match the matrix revision,
 firmware, run ID, session ID, build fingerprint, capture timestamp, and observed
 route. `operation_id` must match the scenario or capability key. A scenario row
 must have a `write` or `notify` direction, a protocol-valid frame, and `verdict: "ok"`
 plus `physical_outcome: "pass"`. A capability PASS row must match its
-capability key and use `direction: "write"`. A physically absent capability
+capability key, use `direction: "write"`, and include a `requested_state` that
+matches the relevant field in the frame. The validator checks supported
+work-mode values and ECO timeouts while allowing preserved unknown settings
+flag bits. This binds the requested state to the frame, but does not prove a
+transition or physical effect: independent physical review remains authoritative
+for the specific capability result and must examine the cited evidence. A
+physically absent capability
 does not need a GATT capture: record `feature_presence: "absent"` with reviewed
 physical evidence, and cite that evidence from the `not_applicable` capability
 result with a rationale. Changing the matrix timestamp cannot make an older
@@ -203,8 +215,11 @@ known status (`0x01`), settings (`0x03`), or device-name (`0x35`) forms. Writes
 use the documented outbound envelope for output control (`0x01`) and settings
 control (`0x02`); the observed status request is checked against its exact known
 bytes because that request form does not use the notification XOR envelope.
-These checks do not authenticate physical provenance or replace independent
-physical evidence review.
+Capability writes must also carry a requested state that matches the relevant
+frame bit/value. Output writes may set only the documented AC/DC/light bits;
+settings writes may preserve unknown flag bits but cannot request reserved work
+mode 3 or an unsupported ECO timeout. These checks do not authenticate physical
+provenance or replace independent physical evidence review.
 
 Example row with a documented output-control write frame:
 

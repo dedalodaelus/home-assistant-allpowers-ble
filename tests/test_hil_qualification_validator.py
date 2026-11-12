@@ -60,7 +60,20 @@ def _capture_fixture(
         elif operation in {"stale_timeout_recovery", "reconnect_failover"}:
             return validator.STATUS_REQUEST.hex()
         elif operation in {"eco_mode", "work_mode", "eco_timeout", "car_charger"}:
-            data = bytes.fromhex("A5 65 00 B1 01 02 02 01 01 00")
+            setting_flags = {
+                "eco_mode": 0x01,
+                "work_mode": 0x00,
+                "eco_timeout": 0x00,
+                "car_charger": 0x00,
+            }[operation]
+            data = bytes(
+                (0xA5, 0x65, 0x00, 0xB1, 0x01, 0x02, 0x02, setting_flags, 0x01, 0x00)
+            )
+        elif operation in {"ac_output", "dc_output", "light_output"}:
+            output_flag = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[
+                operation
+            ]
+            data = bytes((0xA5, 0x65, 0x00, 0xB1, 0x01, 0x01, 0x00, output_flag, 0x00))
         else:
             data = bytes.fromhex("A5 65 00 B1 01 01 00 03 00")
         checksum = 0
@@ -118,6 +131,15 @@ def _capture_fixture(
                 "operation_id": capability,
                 "captured_at": captured_at,
                 "capability": capability,
+                "requested_state": {
+                    "ac_output": True,
+                    "dc_output": True,
+                    "light_output": True,
+                    "eco_mode": True,
+                    "work_mode": 0,
+                    "eco_timeout": 1,
+                    "car_charger": False,
+                }[capability],
                 "direction": "observe" if is_na else "write",
                 "frame_hex": frame_for(capability, "write"),
                 "verdict": "not_applicable" if is_na else verdict,
@@ -139,7 +161,21 @@ def test_protocol_capture_validation_checks_documented_frames() -> None:
     assert validator._valid_protocol_frame(
         "a565b10001080100640000000000001d", "notify", "golden_vector_replay"
     )
-    assert validator._valid_protocol_frame("a56500b1010202010170", "write", "eco_mode")
+    assert validator._valid_protocol_frame(
+        "a56500b1010202010170", "write", "eco_mode", requested_state=True
+    )
+    preserved_unknown_bit = _with_xor_checksum(
+        bytes.fromhex("A5 65 00 B1 01 02 02 81 01")
+    ).hex()
+    assert validator._valid_protocol_frame(
+        preserved_unknown_bit, "write", "eco_mode", requested_state=True
+    )
+    reserved_mode = _with_xor_checksum(
+        bytes.fromhex("A5 65 00 B1 01 02 02 06 01")
+    ).hex()
+    assert not validator._valid_protocol_frame(
+        reserved_mode, "write", "work_mode", requested_state=3
+    )
     assert not validator._valid_protocol_frame(
         "AA550E00107A0102005A6BC1000000", "notify", "golden_vector_replay"
     )
@@ -158,6 +194,58 @@ def test_protocol_capture_validation_checks_documented_frames() -> None:
     assert not validator._valid_protocol_frame(
         "a56500b10101000372", "write", "soak_24h"
     )  # unrelated operation
+
+
+@pytest.mark.parametrize(
+    "capability,mutation",
+    [
+        ("eco_mode", "mislabeled"),
+        ("eco_timeout", "unsupported_timeout"),
+        ("ac_output", "unsupported_transition"),
+    ],
+)
+def test_strict_gate_rejects_capability_frame_false_positives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+    mutation: str,
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "local_adapter", f"invalid-{mutation}", captured_at)
+    capture_path = tmp_path / run["evidence"][0]
+    rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
+    row = next(item for item in rows if item.get("capability") == capability)
+    if mutation == "mislabeled":
+        row["capability"] = "work_mode"
+    elif mutation == "unsupported_timeout":
+        data = bytes.fromhex("A5 65 00 B1 01 02 02 00 03")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
+    else:
+        data = bytes.fromhex("A5 65 00 B1 01 01 00 01")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
+    capture_path.write_text(
+        "".join(json.dumps(item) + "\n" for item in rows), encoding="utf-8"
+    )
+    digest = _digest_manifest(tmp_path, run["evidence"])
+    for result in [*run["scenarios"].values(), *run["write_capabilities"].values()]:
+        result["physical_review"]["evidence_sha256"] = digest
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix = _matrix([run])
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+
+    assert any(capability in error and "capture row" in error for error in errors)
+
+
+def _with_xor_checksum(data: bytes) -> bytes:
+    checksum = 0
+    for byte in data:
+        checksum ^= byte
+    return data + bytes((checksum,))
 
 
 def test_strict_pass_rejects_scoped_reviewed_aa55_capture(
