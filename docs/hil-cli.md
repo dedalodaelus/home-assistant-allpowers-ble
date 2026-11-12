@@ -183,7 +183,7 @@ python3.14 -m venv .venv-hil
 source .venv-hil/bin/activate
 python -m pip install -r requirements_hil.txt
 export HA_HIL_URL=https://home-assistant.example:8123
-read -rs -p "HA long-lived token: " HA_HIL_TOKEN; echo
+HA_HIL_TOKEN="$(python -c 'import getpass; print(getpass.getpass("HA long-lived token: "))')"
 export HA_HIL_TOKEN
 python -m scripts.hil run --non-interactive --device 1 --suite soak-24h
 unset HA_HIL_TOKEN
@@ -249,7 +249,7 @@ enter the token again without echo or shell history, then explicitly resume:
 
 ```bash
 export HA_HIL_URL=https://home-assistant.example:8123
-read -rs -p "HA long-lived token: " HA_HIL_TOKEN; echo
+HA_HIL_TOKEN="$(python -c 'import getpass; print(getpass.getpass("HA long-lived token: "))')"
 export HA_HIL_TOKEN
 python -m scripts.hil run --non-interactive --device 1 --suite soak-24h --resume hil-results/<run-name>/private
 unset HA_HIL_TOKEN
