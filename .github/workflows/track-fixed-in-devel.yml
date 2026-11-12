@@ -1,0 +1,38 @@
+name: Track issues fixed in devel
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+permissions: {}
+
+concurrency:
+  group: track-fixed-in-devel-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  mark-issues:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'devel'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: devel
+          persist-credentials: false
+
+      - name: Mark explicitly resolved issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: python3 scripts/track_fixed_in_devel.py

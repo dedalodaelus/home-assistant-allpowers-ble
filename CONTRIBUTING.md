@@ -15,6 +15,9 @@ explicit.
   initially select `main` as the base branch.
 - Check for an existing issue and pull request before starting, then link the
   issue in your PR description.
+- Check for the `status: fixed-in-devel` label before starting work. It means a
+  merged PR addressed the issue in `devel`, but the fix is not yet in a stable
+  release. Keep the issue open while it is pending release.
 - Use a Conventional Commits PR title, such as
   `test: cover status freshness timeout boundary`.
 - Descriptive source branch names such as `fix/issue-123-description`,
@@ -103,6 +106,9 @@ The repository uses an explicit promotion model:
 - Direct commits into `devel` and `main` are not permitted.
 - Urgent production fixes may target `main` only from a `hotfix/*` branch cut
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.
+- When a fix tracked by `status: fixed-in-devel` reaches `main`, a maintainer
+  must confirm the fix is present, remove that label, and close the issue. A
+  merge into `devel` alone does not mean the fix has been released.
 - Rulesets require a single status check: `Merge gate`. That workflow enforces
   downstream validation checks transitively.
 
