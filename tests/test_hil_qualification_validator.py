@@ -417,7 +417,7 @@ def _matrix(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "revisions": [
             {
                 "id": "r600-hw03",
-                "model": "R600",
+                "model": "ALLPOWERS R600",
                 "hardware_version": "0.3",
                 "raw_hardware_version": "0x03",
                 "privacy_review": "pass",

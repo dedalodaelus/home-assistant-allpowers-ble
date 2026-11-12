@@ -46,7 +46,7 @@ PROTOCOL_HEADER = bytes((0xA5, 0x65))
 STATUS_REQUEST = bytes.fromhex("A5 65 B1 00 01 06 01 00 00 00 00 00")
 VALID_ECO_TIMEOUTS = frozenset((1, 2, 4, 6))
 SUPPORTED_PROTOCOL_PROFILES = {
-    ("R600", "r600-hw03", "0.3", "0x03"),
+    ("ALLPOWERS R600", "r600-hw03", "0.3", "0x03"),
     ("VOLIX P1800", "volix-p1800-hw03", "0.3", "0x03"),
 }
 
