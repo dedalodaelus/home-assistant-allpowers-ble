@@ -347,6 +347,53 @@ def test_environment_export_omits_sensitive_and_unknown_source_fields(
     verify_public_archive(archive)
 
 
+def test_tier_plan_export_drops_unrecognized_sensitive_reason(tmp_path: Path) -> None:
+    sensitive_reason = "blocked for 192.0.2.123 at AA:BB:CC:DD:EE:FF"
+    run = write_run(
+        tmp_path,
+        "sensitive-tier-plan",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+            "test_plan": {
+                "schema_version": 1,
+                "requested_tier": "bronze",
+                "attained_tier": None,
+                "review_state": "pending",
+                "device": {
+                    "model": "R600",
+                    "hardware_revision": "0.3",
+                    "firmware_revision": "1.1",
+                    "verified_route": None,
+                },
+                "operator_actions_estimate": 1,
+                "steps": [
+                    {
+                        "id": "read_only_probe",
+                        "feature": "telemetry",
+                        "eligibility": "blocked",
+                        "outcome": "pending",
+                        "reasons": [sensitive_reason],
+                        "human_review": "pending",
+                    }
+                ],
+            },
+        },
+    )
+
+    archive = export_archive(run, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        members = {name: exported.read(name) for name in exported.namelist()}
+    session = json.loads(members["public/session.json"])
+    combined = b"".join(members.values())
+
+    assert sensitive_reason.encode() not in combined
+    assert "test_plan" not in session["data"]
+    verify_public_archive(archive)
+
+
 def test_environment_export_rejects_embedded_ip_and_hostname_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

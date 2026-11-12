@@ -274,6 +274,55 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
 
+def test_tier_plan_is_persisted_and_privacy_safe_on_export(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / "guided-tier"
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--tier",
+                "bronze",
+                "--route",
+                "active_proxy",
+                "--ha-url",
+                "https://example.test",
+                "--non-interactive",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 0
+    )
+
+    (run_dir,) = tuple(output_root.iterdir())
+    private_session = json.loads((run_dir / "private" / "session.json").read_text())
+    assert private_session["test_plan"]["requested_tier"] == "bronze"
+    assert private_session["test_plan"]["attained_tier"] is None
+
+    from scripts.hil.evidence import export_archive, verify_public_archive
+
+    archive = export_archive(run_dir, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        public = {name: exported.read(name) for name in exported.namelist()}
+    session = json.loads(public["public/session.json"])
+    combined = b"".join(public.values())
+    tier_plan = session["data"]["test_plan"]
+    assert tier_plan["requested_tier"] == "bronze"
+    assert tier_plan["attained_tier"] is None
+    assert tier_plan["device"]["verified_route"] is None
+    assert session["data"]["route"]["requested"] == "active_proxy"
+    assert b"secret-device-id-012345" not in combined
+    assert b"secret-entry-1" not in combined
+    assert b"PRIVATE_TOKEN" not in combined
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
 def test_discovery_without_optional_config_entries(allpowers_registry):
     entities, devices, _ = allpowers_registry
     choices = discovery.find_devices(entities, devices, None)

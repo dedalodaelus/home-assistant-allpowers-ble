@@ -827,6 +827,33 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
 
 def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
     """Project guided plans through a narrow public evidence allowlist."""
+    safe_reasons = {
+        "runtime profile substantiates physical absence",
+        "physical presence is unknown or unreviewed",
+        "read-only telemetry capability is unavailable",
+        "fresh connected telemetry preflight is not ready",
+        "no production write authorization or reviewed HIL candidate",
+        "candidate needs a fresh, single-use backend HIL grant",
+        "control state is unavailable",
+        "fresh same-session capability preflight is not ready",
+        "connected GATT route has not been verified",
+        "no basic physical output applies to this profile",
+        "at least one present, authorized basic output is required",
+    }
+    safe_step_ids = {
+        "read_only_probe",
+        "physical_plausibility_observation",
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+        "basic_reconnect",
+        "eco_mode_reversal",
+        "work_mode_reversal",
+        "eco_timeout_reversal",
+        "car_charger_reversal",
+        "guarded_recovery",
+        "minimum_output_requirement",
+    }
     if (
         value.get("schema_version") != 1
         or value.get("requested_tier") not in {"bronze", "silver", "gold"}
@@ -848,17 +875,17 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
     steps = []
     for step in value["steps"]:
         if not isinstance(step, dict):
-            continue
+            return None
         if (
             not isinstance(step.get("id"), str)
-            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", step["id"]) is None
+            or step["id"] not in safe_step_ids
             or step.get("eligibility") not in {"eligible", "blocked", "not_applicable"}
             or step.get("outcome")
             not in {"pending", "pass", "fail", "inconclusive", "not_applicable"}
             or step.get("human_review") not in {"pending", "accepted", "rejected"}
             or not isinstance(step.get("reasons"), list)
             or not all(
-                isinstance(reason, str) and len(reason) <= 180
+                isinstance(reason, str) and reason in safe_reasons
                 for reason in step["reasons"]
             )
         ):

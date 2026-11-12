@@ -29,6 +29,8 @@ def build_tier_plan(
     snapshot = capabilities if isinstance(capabilities, dict) else {}
     feature_map = snapshot.get("features", {})
     feature_map = feature_map if isinstance(feature_map, dict) else {}
+    capability_flags = snapshot.get("capabilities", {})
+    capability_flags = capability_flags if isinstance(capability_flags, dict) else {}
     controls = controls if isinstance(controls, dict) else {}
     model = snapshot.get("model")
     if not isinstance(model, str):
@@ -43,10 +45,26 @@ def build_tier_plan(
         control = controls.get(control_key, {})
         control = control if isinstance(control, dict) else {}
         reasons: list[str] = []
-        status = "eligible"
-        if presence == "absent":
-            status = "not_applicable"
+        absent = presence == "absent"
+        status = "not_applicable" if absent else "eligible"
+        if absent:
             reasons.append("runtime profile substantiates physical absence")
+            action = "not_applicable"
+        if presence == "absent":
+            pass
+        elif feature == "telemetry":
+            if capability_flags.get("read_telemetry") is not True:
+                status = "blocked"
+                reasons.append("read-only telemetry capability is unavailable")
+            if (
+                snapshot.get("identity_conflicted") is not False
+                or snapshot.get("connected") is not True
+                or snapshot.get("status_fresh") is not True
+                or snapshot.get("pending_transaction") is not False
+                or facts.get("runtime_ready") is False
+            ):
+                status = "blocked"
+                reasons.append("fresh connected telemetry preflight is not ready")
         elif presence != "present":
             status = "blocked"
             reasons.append("physical presence is unknown or unreviewed")
@@ -67,7 +85,11 @@ def build_tier_plan(
             if control.get("eligible") is not True:
                 status = "blocked"
                 reasons.append("fresh same-session capability preflight is not ready")
-        if observed_route not in {"local_adapter", "active_proxy"}:
+        route_required = action == "write" or step_id in {
+            "basic_reconnect",
+            "guarded_recovery",
+        }
+        if route_required and observed_route not in {"local_adapter", "active_proxy"}:
             if status == "eligible":
                 status = "blocked"
             reasons.append("connected GATT route has not been verified")
@@ -77,7 +99,7 @@ def build_tier_plan(
                 "id": step_id,
                 "feature": feature,
                 "action": action,
-                "original_state": original,
+                "original_state": None if absent else original,
                 "target_state": (
                     "temporary alternate value, then restore original"
                     if action == "write"
@@ -96,6 +118,12 @@ def build_tier_plan(
         "telemetry",
         "read_only",
         ["fresh telemetry", "physical plausibility"],
+    )
+    add(
+        "physical_plausibility_observation",
+        "telemetry",
+        "manual",
+        ["separate operator observation", "fresh telemetry context"],
     )
     if tier in {"silver", "gold"}:
         for feature in _OUTPUTS:
@@ -142,6 +170,11 @@ def build_tier_plan(
         if step["feature"] in _OUTPUTS and step["eligibility"] == "eligible"
     ]
     if tier in {"silver", "gold"} and not present_outputs:
+        output_presence = [
+            (feature_map.get(feature) or {}).get("physical_presence", "unknown")
+            for feature in _OUTPUTS
+        ]
+        all_absent = all(value == "absent" for value in output_presence)
         steps.append(
             {
                 "id": "minimum_output_requirement",
@@ -149,10 +182,14 @@ def build_tier_plan(
                 "action": "requirement",
                 "original_state": None,
                 "target_state": None,
-                "eligibility": "blocked",
+                "eligibility": "not_applicable" if all_absent else "blocked",
                 "outcome": "pending",
                 "reasons": [
-                    "at least one physically present, authorized basic output is required"
+                    (
+                        "no basic physical output applies to this profile"
+                        if all_absent
+                        else "at least one present, authorized basic output is required"
+                    )
                 ],
                 "required_evidence": [],
                 "human_review": "pending",
