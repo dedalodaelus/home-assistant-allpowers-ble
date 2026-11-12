@@ -22,6 +22,16 @@ explicit.
   `main` through the normal `devel` to `main` promotion. Until then, maintainers
   must apply the label and add the pending-release comment manually for fixes
   merged into `devel`.
+- Before treating it as operational, check Actions workflow execution policies
+  and Insights after both the workflow and script reach `main`. GitHub plans to
+  block `pull_request_target` by default in public repositories from December
+  2, 2026, with a brownout on November 16, 2026 from 16:00 to 18:00 UTC. If the
+  default policy applies, explicitly allow this event only for
+  `.github/workflows/track-fixed-in-devel.yml`; do not allow privileged PR
+  workflows globally. Verify that a real PR merged into `devel` creates exactly
+  one label and one pending-release comment. Continue manual labeling until
+  that verification succeeds. See GitHub's [announcement about the
+  `pull_request_target` policy](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/).
 - Use a Conventional Commits PR title, such as
   `test: cover status freshness timeout boundary`.
 - Descriptive source branch names such as `fix/issue-123-description`,
