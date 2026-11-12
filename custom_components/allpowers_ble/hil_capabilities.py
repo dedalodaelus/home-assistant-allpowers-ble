@@ -118,6 +118,11 @@ async def ws_capabilities(
             if type(raw_firmware) is int and 0 <= raw_firmware <= 255
             else None
         ),
+        "settings_options": {
+            "keepalive_enabled": bool(options.settings_keepalive),
+            "keepalive_interval_seconds": options.settings_keepalive_interval,
+            "stale_timeout_seconds": options.settings_stale_timeout,
+        },
         "capabilities": {
             "read_telemetry": bool(capability_flags.read_telemetry),
             "write_output_controls": bool(capability_flags.write_output_controls),

@@ -227,7 +227,12 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
         connected=True,
     )
     client = SimpleNamespace(
-        options=SimpleNamespace(enable_car_charger=False),
+        options=SimpleNamespace(
+            enable_car_charger=False,
+            settings_keepalive=False,
+            settings_keepalive_interval=540,
+            settings_stale_timeout=600,
+        ),
         active_session_generation=7,
         has_pending_transaction=False,
     )
@@ -282,6 +287,11 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
         "raw_hardware_revision": 0x03,
         "firmware_revision": "0.2",
         "raw_firmware_revision": 0x02,
+        "settings_options": {
+            "keepalive_enabled": False,
+            "keepalive_interval_seconds": 540,
+            "stale_timeout_seconds": 600,
+        },
         "capabilities": {
             "read_telemetry": True,
             "write_output_controls": True,

@@ -3689,6 +3689,12 @@ def test_soak_without_numeric_measurements_cannot_start_a_passing_segment(
                 "session_generation": 1,
                 "model": "R600",
                 "profile": "r600-hw-0.3",
+                "settings_options": {
+                    "keepalive_enabled": True,
+                    "keepalive_interval_seconds": 540,
+                    "stale_timeout_seconds": 600,
+                },
+                "capabilities": {"write_settings_keepalive": True},
             }
 
     def interrupt_sleep(_seconds):
@@ -3766,6 +3772,12 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
                 "session_generation": 1,
                 "model": "R600",
                 "profile": "r600-hw-0.3",
+                "settings_options": {
+                    "keepalive_enabled": True,
+                    "keepalive_interval_seconds": 540,
+                    "stale_timeout_seconds": 600,
+                },
+                "capabilities": {"write_settings_keepalive": True},
             }
 
         def websocket(self, commands):

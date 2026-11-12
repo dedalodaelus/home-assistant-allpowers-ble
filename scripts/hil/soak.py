@@ -103,7 +103,68 @@ def _execute_soak_suite(
             raise HAAPIError("Soak checkpoint sample rotation state is invalid")
         sample_file_index = stored_index
     segment_number = 1 + max((int(step.get("segment", 0)) for step in steps), default=0)
-    baseline = api.hil_capabilities(entry_id)
+    try:
+        baseline = api.hil_capabilities(entry_id)
+    except HAAPIError:
+        print("Cannot verify settings keepalive; soak not started")
+        return 2
+
+    settings_options = baseline.get("settings_options")
+    if settings_options is None:
+        print("Cannot verify settings keepalive; soak not started")
+        return 2
+    if not baseline["capabilities"]["write_settings_keepalive"]:
+        print("Settings keepalive is not supported for this device; soak not started")
+        return 2
+
+    while not settings_options["keepalive_enabled"]:
+        interval = settings_options["keepalive_interval_seconds"]
+        stale_timeout = settings_options["stale_timeout_seconds"]
+        print(
+            "Settings keepalive is disabled. The soak may be interrupted if the "
+            "station powers off."
+        )
+        print(
+            "Enable it in Home Assistant: Settings → Devices & services → "
+            "Integrations → ALLPOWERS BLE → Configure → Advanced timing → "
+            "Enable settings keepalive."
+        )
+        print(
+            f"Current interval: {interval:g}s; settings-stale timeout: "
+            f"{stale_timeout:g}s. Keep the interval below the timeout; shorter "
+            "intervals increase BLE traffic."
+        )
+        if getattr(args, "allow_keepalive_disabled", False):
+            print(
+                "Proceeding with keepalive disabled by explicit override; a "
+                "station cutoff can interrupt this soak."
+            )
+            break
+        if args.non_interactive:
+            print("Activate keepalive, then run soak-24h again.")
+            return 2
+        try:
+            services.prompt(
+                "After enabling settings keepalive in Home Assistant, press Enter to check again: "
+            )
+        except KeyboardInterrupt, EOFError:
+            print("Soak not started; settings keepalive is still unverified.")
+            return 2
+        try:
+            baseline = api.hil_capabilities(entry_id)
+        except HAAPIError:
+            print("Cannot verify settings keepalive; soak not started")
+            return 2
+        settings_options = baseline.get("settings_options")
+        if settings_options is None:
+            print("Cannot verify settings keepalive; soak not started")
+            return 2
+        if not baseline["capabilities"]["write_settings_keepalive"]:
+            print(
+                "Settings keepalive is not supported for this device; soak not started"
+            )
+            return 2
+
     if (
         baseline["verified"] is not True
         or baseline["identity_conflicted"]
