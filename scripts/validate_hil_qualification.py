@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -452,6 +453,7 @@ def _check_result_map(
     build_fingerprint: Any,
     capability: bool = False,
     strict_keys: set[str] | None = None,
+    tier_evidence: bool = False,
 ) -> None:
     if not isinstance(results, dict):
         _error(errors, f"{context} must be an object")
@@ -478,6 +480,29 @@ def _check_result_map(
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
         ):
             _error(errors, f"{item_context} not_applicable status requires a rationale")
+        if tier_evidence and status == "pass":
+            item_scope = {
+                "route": route,
+                "revision_id": revision_id,
+                "firmware_version": firmware_version,
+                "run_id": run_id,
+                "captured_at": captured_at,
+                "session_id": session_id,
+                "build_fingerprint": build_fingerprint,
+            }
+            if capability and key in {"ac_output", "dc_output", "light_output"}:
+                _check_output_transitions(
+                    item, item_context, key, errors, scope=item_scope
+                )
+            elif capability:
+                _check_feature_restoration(
+                    item, item_context, key, errors, scope=item_scope
+                )
+            elif key == "soak_24h" and not _valid_tier_soak(item, item_scope):
+                _error(
+                    errors,
+                    f"{item_context} PASS requires a complete uninterrupted 24-hour soak artifact",
+                )
         optional_vendor_app = not capability and key == "vendor_app_contention"
         key_is_strict = strict_keys is None or key in strict_keys
         if (
@@ -526,6 +551,8 @@ def _validate_run(
     require_pass: bool,
     max_age_days: int | None,
     revision_id: str,
+    revision_model: str,
+    hardware_revision: str,
     protocol_profile_supported: bool,
     feature_scope: str | None = None,
 ) -> str | None:
@@ -655,6 +682,7 @@ def _validate_run(
         session_id=session_id,
         build_fingerprint=build_fingerprint,
         strict_keys=set() if feature_scope is not None else None,
+        tier_evidence=isinstance(run.get("bronze_evidence"), dict),
     )
     _check_result_map(
         run.get("write_capabilities"),
@@ -671,6 +699,7 @@ def _validate_run(
         build_fingerprint=build_fingerprint,
         capability=True,
         strict_keys={feature_scope} if feature_scope is not None else None,
+        tier_evidence=isinstance(run.get("bronze_evidence"), dict),
     )
     if qualification == "pass":
         result_maps = (run.get("scenarios"), run.get("write_capabilities"))
@@ -762,20 +791,12 @@ def _validate_run(
             errors,
             f"{context} authorization_context must be unknown, production, or experimental_hil",
         )
-    has_feature_pass = (
-        any(
-            isinstance(item, dict) and item.get("status") == "pass"
-            for item in run.get("write_capabilities", {}).values()
-        )
-        if isinstance(run.get("write_capabilities"), dict)
-        else False
-    )
     if authorization_context == "experimental_hil" and (
-        run.get("qualification_status") == "pass" or has_feature_pass
+        run.get("qualification_status") == "pass"
     ):
         _error(
             errors,
-            f"{context} experimental_hil evidence cannot claim qualification pass",
+            f"{context} experimental_hil run cannot claim production qualification pass",
         )
     if require_pass and authorization_context != "production":
         _error(
@@ -804,7 +825,485 @@ def _validate_run(
             errors,
             f"{context} cannot claim pass without complete, dated, firmware- and route-attributed evidence",
         )
+    _check_bronze_evidence(
+        run, context, revision_id, revision_model, hardware_revision, errors
+    )
     return run_id if isinstance(run_id, str) else None
+
+
+def _check_bronze_evidence(
+    run: dict[str, Any],
+    context: str,
+    revision_id: str,
+    revision_model: str,
+    hardware_revision: str,
+    errors: list[str],
+) -> None:
+    records = run.get("bronze_evidence")
+    if records is None:
+        return
+    required = {"identity", "protocol_probe", "fresh_telemetry"}
+    if not isinstance(records, dict) or set(records) != required:
+        _error(
+            errors,
+            f"{context} bronze_evidence must define identity, protocol_probe, and fresh_telemetry",
+        )
+        return
+    scope = {
+        "revision_id": revision_id,
+        "model": revision_model,
+        "hardware_revision": hardware_revision,
+        "firmware_version": run.get("firmware_version"),
+        "route": run.get("route"),
+        "run_id": run.get("run_id"),
+        "session_id": run.get("session_id"),
+        "build_fingerprint": run.get("build_fingerprint"),
+        "captured_at": run.get("captured_at"),
+    }
+    for claim, item in records.items():
+        claim_context = f"{context} bronze_evidence {claim}"
+        if not isinstance(item, dict):
+            _error(errors, f"{claim_context} must be an object")
+            continue
+        status = item.get("status")
+        if status != "pass":
+            if status not in STATUSES:
+                _error(
+                    errors, f"{claim_context} status must be one of {sorted(STATUSES)}"
+                )
+            continue
+        _check_evidence(item.get("evidence"), claim_context, errors, required=True)
+        _check_physical_review(item, status, claim_context, errors)
+        paths = item.get("evidence")
+        artifact_path = item.get("claim_artifact")
+        if not isinstance(paths, list) or artifact_path not in paths:
+            _error(
+                errors,
+                f"{claim_context} must cite its scoped claim_artifact in evidence",
+            )
+            continue
+        try:
+            artifact = json.loads((ROOT / artifact_path).read_text(encoding="utf-8"))
+        except OSError, UnicodeError, ValueError, TypeError:
+            _error(errors, f"{claim_context} claim_artifact must be valid JSON")
+            continue
+        if (
+            not isinstance(artifact, dict)
+            or artifact.get("artifact_type") != "bronze_evidence"
+            or artifact.get("claim") != claim
+            or any(artifact.get(key) != value for key, value in scope.items())
+        ):
+            _error(
+                errors,
+                f"{claim_context} claim_artifact must bind claim and exact run scope",
+            )
+            continue
+        if claim == "identity" and artifact.get("identity_confirmed") is not True:
+            _error(errors, f"{claim_context} must confirm model and revision identity")
+        elif claim == "fresh_telemetry" and not (
+            artifact.get("fresh") is True
+            and artifact.get("plausible") is True
+            and type(artifact.get("sample_age_seconds")) is int
+            and 0 <= artifact["sample_age_seconds"] <= 60
+        ):
+            _error(errors, f"{claim_context} must establish fresh plausible telemetry")
+        elif claim == "protocol_probe":
+            capture_path = item.get("capture_evidence")
+            if capture_path not in paths or not _has_bound_capture(
+                [capture_path],
+                route=run.get("route"),
+                revision_id=revision_id,
+                firmware_version=run.get("firmware_version"),
+                run_id=run.get("run_id"),
+                captured_at=run.get("captured_at"),
+                session_id=run.get("session_id"),
+                build_fingerprint=run.get("build_fingerprint"),
+                result_key="golden_vector_replay",
+                capability=False,
+                expected_verdict="ok",
+            ):
+                _error(
+                    errors,
+                    f"{claim_context} requires a bound active protocol probe capture",
+                )
+
+
+def _check_feature_contract(
+    revision: dict[str, Any], context: str, errors: list[str]
+) -> None:
+    contracts = revision.get("feature_contract")
+    if contracts is None:
+        return
+    advanced = set(REQUIRED_WRITE_CAPABILITIES) - {
+        "ac_output",
+        "dc_output",
+        "light_output",
+    }
+    if not isinstance(contracts, dict) or not set(contracts).issubset(advanced):
+        _error(
+            errors,
+            f"{context} feature_contract may only exclude optional advanced features",
+        )
+        return
+    for feature, item in contracts.items():
+        item_context = f"{context} feature_contract {feature}"
+        if not isinstance(item, dict) or (
+            item.get("status") != "excluded"
+            or item.get("safely_disabled") is not True
+            or not isinstance(item.get("rationale"), str)
+            or not item["rationale"].strip()
+        ):
+            _error(
+                errors,
+                f"{item_context} requires reviewed unavailable and safely-disabled declaration",
+            )
+            continue
+        _check_evidence(item.get("evidence"), item_context, errors, required=True)
+        review_subject = {
+            "status": "pass",
+            "evidence": item.get("evidence"),
+            "physical_review": item.get("physical_review"),
+        }
+        _check_physical_review(review_subject, "pass", item_context, errors)
+        paths = item.get("evidence")
+        if not isinstance(paths, list) or len(paths) != 1:
+            _error(errors, f"{item_context} must cite one contract artifact")
+            continue
+        try:
+            artifact = json.loads((ROOT / paths[0]).read_text(encoding="utf-8"))
+        except OSError, UnicodeError, ValueError, TypeError:
+            _error(errors, f"{item_context} artifact must be valid JSON")
+            continue
+        if not isinstance(artifact, dict) or any(
+            artifact.get(key) != value
+            for key, value in {
+                "artifact_type": "feature_contract",
+                "revision_id": revision.get("id"),
+                "model": revision.get("model"),
+                "hardware_revision": revision.get("hardware_version"),
+                "feature": feature,
+                "safely_disabled": True,
+                "rationale": item["rationale"],
+            }.items()
+        ):
+            _error(
+                errors,
+                f"{item_context} artifact does not verify the declared exclusion",
+            )
+
+
+def _tier_artifact(
+    path: Any, evidence: Any, artifact_type: str, scope: dict[str, Any]
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(path, str)
+        or not isinstance(evidence, list)
+        or path not in evidence
+    ):
+        return None
+    target = (ROOT / path).resolve()
+    try:
+        target.relative_to(ROOT)
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, ValueError:
+        return None
+    if not isinstance(value, dict) or value.get("artifact_type") != artifact_type:
+        return None
+    return (
+        value
+        if all(value.get(key) == expected for key, expected in scope.items())
+        else None
+    )
+
+
+def _valid_tier_capture_row(
+    row: Any,
+    scope: dict[str, Any],
+    feature: str,
+    requested_state: Any,
+    action_stage: str,
+) -> bool:
+    """Validate one physical write row, including its encoded target state."""
+    if not isinstance(row, dict):
+        return False
+    return bool(
+        all(row.get(key) == value for key, value in scope.items())
+        and row.get("capability") == feature
+        and row.get("operation_id") == feature
+        and row.get("action_stage") == action_stage
+        and type(row.get("requested_state")) is type(requested_state)
+        and row.get("requested_state") == requested_state
+        and row.get("direction") == "write"
+        and row.get("verdict") == "ok"
+        and row.get("physical_outcome") == "pass"
+        and isinstance(row.get("frame_hex"), str)
+        and _valid_protocol_frame(row["frame_hex"], "write", feature, requested_state)
+    )
+
+
+def _check_output_transitions(
+    item: dict[str, Any],
+    context: str,
+    feature: str,
+    errors: list[str],
+    *,
+    scope: dict[str, Any],
+) -> None:
+    review = item.get("physical_review")
+    transitions = review.get("output_transitions") if isinstance(review, dict) else None
+    if not isinstance(transitions, list) or len(transitions) != 2:
+        _error(errors, f"{context} requires reviewed on and off transition evidence")
+        return
+    states: set[str] = set()
+    for transition in transitions:
+        if not isinstance(transition, dict) or transition.get("state") not in {
+            "on",
+            "off",
+        }:
+            _error(errors, f"{context} has an invalid output transition record")
+            continue
+        state = transition["state"]
+        artifact = _tier_artifact(
+            transition.get("evidence"), item.get("evidence"), "output_transition", scope
+        )
+        capture = transition.get("capture_evidence")
+        rows = _capture_rows([capture]) if isinstance(capture, str) else None
+        expected_request = state == "on"
+        bound_capture = bool(
+            isinstance(capture, str)
+            and capture in item.get("evidence", [])
+            and rows
+            and _has_bound_capture(
+                [capture],
+                route=scope["route"],
+                revision_id=scope["revision_id"],
+                firmware_version=scope["firmware_version"],
+                run_id=scope["run_id"],
+                captured_at=scope["captured_at"],
+                session_id=scope["session_id"],
+                build_fingerprint=scope["build_fingerprint"],
+                result_key=feature,
+                capability=True,
+                expected_verdict="ok",
+            )
+            and any(
+                _valid_tier_capture_row(
+                    row, scope, feature, expected_request, "transition"
+                )
+                for row in rows
+            )
+        )
+        initial = "off" if state == "on" else "on"
+        if (
+            state in states
+            or artifact is None
+            or artifact.get("feature") != feature
+            or artifact.get("requested_state") != state
+            or artifact.get("observed_state") != state
+            or artifact.get("initial_state") != initial
+            or artifact.get("restored") is not True
+            or artifact.get("restored_state") != initial
+            or not bound_capture
+            or not _valid_restoration_capture(
+                transition.get("restoration_capture"),
+                item,
+                scope,
+                feature,
+                initial == "on",
+            )
+        ):
+            _error(
+                errors,
+                f"{context} {state} transition lacks bound observation and restoration",
+            )
+        states.add(state)
+    if states != {"on", "off"}:
+        _error(errors, f"{context} requires both on and off transition evidence")
+
+
+def _check_feature_restoration(
+    item: dict[str, Any],
+    context: str,
+    feature: str,
+    errors: list[str],
+    *,
+    scope: dict[str, Any],
+) -> None:
+    review = item.get("physical_review")
+    path = review.get("restoration_evidence") if isinstance(review, dict) else None
+    artifact = _tier_artifact(path, item.get("evidence"), "feature_restoration", scope)
+    if not artifact or (
+        artifact.get("feature") != feature
+        or artifact.get("restored") is not True
+        or artifact.get("pre_state") is None
+        or artifact.get("restored_state") != artifact.get("pre_state")
+        or not _valid_restoration_capture(
+            review.get("restoration_capture") if isinstance(review, dict) else None,
+            item,
+            scope,
+            feature,
+            artifact.get("pre_state"),
+        )
+    ):
+        _error(errors, f"{context} requires scope-bound safe-restoration evidence")
+
+
+def _valid_restoration_capture(
+    capture: Any,
+    item: dict[str, Any],
+    scope: dict[str, Any],
+    feature: str,
+    restored_state: Any,
+) -> bool:
+    if not isinstance(capture, str) or capture not in item.get("evidence", []):
+        return False
+    rows = _capture_rows([capture])
+    return bool(
+        rows
+        and _has_bound_capture(
+            [capture],
+            route=scope["route"],
+            revision_id=scope["revision_id"],
+            firmware_version=scope["firmware_version"],
+            run_id=scope["run_id"],
+            captured_at=scope["captured_at"],
+            session_id=scope["session_id"],
+            build_fingerprint=scope["build_fingerprint"],
+            result_key=feature,
+            capability=True,
+            expected_verdict="ok",
+        )
+        and any(
+            _valid_tier_capture_row(row, scope, feature, restored_state, "restoration")
+            for row in rows
+        )
+    )
+
+
+def _valid_tier_soak(item: dict[str, Any], scope: dict[str, Any]) -> bool:
+    review = item.get("physical_review")
+    path = review.get("soak_artifact") if isinstance(review, dict) else None
+    if not isinstance(path, str) or path not in item.get("evidence", []):
+        return False
+    target = (ROOT / path).resolve()
+    try:
+        target.relative_to(ROOT)
+        rows = [
+            json.loads(line)
+            for line in target.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError, UnicodeError, ValueError, TypeError:
+        return False
+    if not rows or any(not isinstance(row, dict) for row in rows):
+        return False
+    summaries = [row for row in rows if row.get("event") == "segment_summary"]
+    if len(summaries) != 1:
+        return False
+    summary = summaries[0]
+    if not isinstance(summary, dict) or any(
+        summary.get(key) != value for key, value in scope.items()
+    ):
+        return False
+    samples = [row for row in rows if row.get("event") == "sample"]
+    traces = [row for row in rows if row.get("event") == "trace_window"]
+    try:
+        started = datetime.fromisoformat(
+            summary["segment_started_utc"].replace("Z", "+00:00")
+        )
+        ended = datetime.fromisoformat(
+            summary["segment_ended_utc"].replace("Z", "+00:00")
+        )
+    except KeyError, AttributeError, ValueError:
+        return False
+    elapsed = [
+        row.get("elapsed_seconds")
+        for row in samples
+        if type(row.get("elapsed_seconds")) in (int, float)
+        and math.isfinite(row.get("elapsed_seconds"))
+    ]
+    elapsed.sort()
+    gap = summary.get("allowed_gap_seconds")
+    max_gap = summary.get("maximum_gap_seconds")
+    measured = summary.get("measured_seconds")
+    trace_times: list[datetime] = []
+    for row in traces:
+        try:
+            trace_time = datetime.fromisoformat(
+                row.get("utc", "").replace("Z", "+00:00")
+            )
+        except AttributeError, ValueError:
+            return False
+        if trace_time.tzinfo is None:
+            return False
+        trace_times.append(trace_time.astimezone(UTC))
+    trace_times.sort()
+    return bool(
+        started.tzinfo is not None
+        and ended.tzinfo is not None
+        and type(gap) in (int, float)
+        and 0 < gap <= 600
+        and type(max_gap) in (int, float)
+        and math.isfinite(max_gap)
+        and max_gap <= gap
+        and type(measured) in (int, float)
+        and math.isfinite(measured)
+        and measured >= 86400
+        and len(samples) >= 289
+        and type(summary.get("sample_count")) is int
+        and len(samples) == summary.get("sample_count")
+        and len(elapsed) == len(samples)
+        and elapsed[0] <= 1
+        and elapsed[-1] >= 86400
+        and all(b - a <= gap for a, b in zip(elapsed, elapsed[1:], strict=False))
+        and all(
+            row.get("status_fresh") is True
+            and isinstance(row.get("telemetry"), dict)
+            and any(
+                isinstance(value, dict) and value.get("verified") is True
+                for value in row["telemetry"].values()
+            )
+            for row in samples
+        )
+        and len(traces) >= 24
+        and type(summary.get("trace_count")) is int
+        and len(traces) == summary.get("trace_count")
+        and type(summary.get("minimum_samples")) is int
+        and summary["minimum_samples"] >= 289
+        and type(summary.get("minimum_traces")) is int
+        and summary["minimum_traces"] >= 24
+        and all(
+            row.get("saved") is True
+            and row.get("complete") is True
+            and row.get("capture_id_present") is True
+            and row.get("observed_route") == scope["route"]
+            for row in traces
+        )
+        and len(trace_times) == len(traces)
+        and trace_times[0] >= started.astimezone(UTC)
+        and trace_times[-1] <= ended.astimezone(UTC)
+        and trace_times[0] - started.astimezone(UTC) <= timedelta(seconds=4500)
+        and ended.astimezone(UTC) - trace_times[-1] <= timedelta(seconds=4500)
+        and all(
+            b - a <= timedelta(seconds=4500)
+            for a, b in zip(trace_times, trace_times[1:], strict=False)
+        )
+        and summary.get("outcome") == "pass"
+        and summary.get("resumed") is False
+        and summary.get("interrupted") is False
+        and summary.get("uninterrupted") is True
+        and ended.astimezone(UTC) - started.astimezone(UTC) >= timedelta(seconds=86400)
+        and ended.astimezone(UTC) - started.astimezone(UTC) >= timedelta(seconds=86400)
+        and type(summary.get("dropped_traces")) is int
+        and summary["dropped_traces"] == 0
+        and type(summary.get("clock_discontinuities")) is int
+        and summary["clock_discontinuities"] == 0
+        and not any(
+            row.get("event")
+            in {"sample_gap", "clock_discontinuity", "session_generation_change"}
+            for row in rows
+        )
+    )
 
 
 def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
@@ -895,6 +1394,7 @@ def validate_matrix(
                 )
         if revision.get("privacy_review") != "pass":
             _error(errors, f"revision {revision_id} privacy_review must be pass")
+        _check_feature_contract(revision, f"revision {revision_id}", errors)
         runs = revision.get("runs")
         if not isinstance(runs, list):
             _error(errors, f"revision {revision_id} runs must be a list")
@@ -920,6 +1420,8 @@ def validate_matrix(
                 require_pass=False,
                 max_age_days=max_age_days,
                 revision_id=revision_id,
+                revision_model=revision.get("model", ""),
+                hardware_revision=revision.get("hardware_version", ""),
                 protocol_profile_supported=protocol_profile_supported,
             )
             if run_id is not None:
@@ -1053,6 +1555,8 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            revision_model=revision.get("model", ""),
+                            hardware_revision=revision.get("hardware_version", ""),
                             protocol_profile_supported=protocol_profile_supported,
                             feature_scope=feature_scope,
                         )
@@ -1112,6 +1616,8 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            revision_model=revision.get("model", ""),
+                            hardware_revision=revision.get("hardware_version", ""),
                             protocol_profile_supported=protocol_profile_supported,
                         )
         summaries.append(

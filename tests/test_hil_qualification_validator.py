@@ -815,7 +815,7 @@ def test_feature_scope_rejects_unverified_provenance_and_crossed_capture_binding
     experimental["authorization_context"] = "experimental_hil"
     experimental["authorization_context_source"] = "experimental_hil_grant"
     assert any(
-        "experimental_hil evidence cannot claim" in error
+        "experimental_hil run cannot claim production qualification pass" in error
         for error in errors_for(experimental)
     )
 

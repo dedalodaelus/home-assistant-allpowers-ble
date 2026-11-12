@@ -100,8 +100,9 @@ authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
 The v3 validator implements per-feature, per-revision, per-firmware, and
-per-observed-route results. Tier arithmetic remains tracked by #269. Evidence
-age is an optional audit and does not revoke a stable support qualification.
+per-observed-route results. Run `python -m scripts.hil tiers` to calculate
+evidence-backed tiers. Evidence age is an optional audit and does not revoke a
+stable support qualification.
 
 ## Scope
 
@@ -446,3 +447,64 @@ No build-level physical qualification is claimed.
 ### Installed integration build identity
 
 `doctor`, `run`, and `trace` request the admin-only HIL WebSocket build fingerprint and compare it with the CLI checkout. The SHA-256 stream includes sorted relative paths and file bytes for the integration package, excluding `__pycache__` and `.pyc`. A matching fingerprint is `verified` only when those checkout files are clean in Git; the matching commit SHA is then recorded. Different fingerprints are `mismatch`, even when both manifests say `0.3.0`. Missing/unsupported endpoints, invalid responses, failed scans, or dirty checkouts are `unverified` with a reason. This metadata does not award a scenario PASS or prove that Home Assistant's already-loaded Python modules match its on-disk files. Install the desired development checkout and restart HA before HIL execution, then confirm the exact `Installed integration commit` reported by the CLI. The CLI does not modify installed files or restart/reload HA.
+
+## Calculated hardware support tiers
+
+The project-specific Bronze, Silver, Gold, and Platinum tiers classify reviewed
+physical evidence. They are separate from Home Assistant's Integration Quality
+Scale and never authorize runtime writes. Calculate the current result as stable
+JSON with:
+
+```bash
+python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json
+```
+
+Each result is isolated to one canonical model, exact hardware revision,
+firmware, and actually observed BLE route. Runs on different devices, firmware,
+or routes are never combined. The output includes `tier` (`unqualified` when no
+scoped production evidence exists), evidence links, qualified features,
+exclusions, feature presence, and unmet requirements. A later independently
+reviewed failure supersedes an earlier PASS for that feature in that scope.
+
+Bronze requires three file-hash-bound claims: confirmed identity, a
+route/session/build-bound active protocol probe, and fresh plausible telemetry.
+All three may come from one captured session and be covered by one independent
+review; they do not require separate runs or reviews. The evidence records must
+match the run's exact model/revision,
+firmware, route, session, build fingerprint, and timestamp. The run itself must
+have complete capture provenance and a verified matching installed/checkout
+build. Incomplete captures and unverified builds cannot advance a tier.
+
+Silver adds a reviewed reconnect and two separate AC/DC/light observations: each
+output must be requested and physically observed both on and off, with each
+action restored to its recorded initial state. A one-direction capture cannot
+be promoted by a matrix checkbox. A reviewed absent feature is excluded;
+unknown presence blocks advancement. At least one physical basic output must
+pass.
+
+Gold adds a reviewed feature inventory, a reviewed PASS for every declared
+supported function or setting, safe restoration evidence for each, and the
+relevant reconnect, transaction-safety, and recovery checks. An optional
+advanced feature can be excluded only through a reviewed revision-level
+`feature_contract` artifact that documents it as unavailable and safely
+disabled. Unknown inventory and free-form exclusion flags do not qualify.
+
+Platinum adds only a reviewed `soak_24h` evidence artifact containing one
+continuous, uninterrupted 86,400-second segment, at least 289 fresh telemetry
+samples, at least 24 complete saved route traces, allowed sample gaps, and no
+dropped traces, clock discontinuities, or restart. The runner stores the
+checkpoint in `checkpoint.json`, samples and trace-window outcomes in
+`soak_samples_*.jsonl`, and each saved trace under
+`traces/soak_trace_*/trace.json`. Prepare the reviewed artifact with
+`scripts.hil.tiers.normalize_soak_evidence(scope, checkpoint, sample_rows,
+trace_windows, saved_traces)`, where the three row/metadata collections are
+parsed from those runner files. It accepts only one completed passing segment
+and returns JSONL rows for the existing tier validator. Include the source
+runner files and normalized JSONL in the reviewed result's evidence and digest.
+Short observations, resumed segments, and values copied only into matrix
+`details` do not qualify.
+
+An independently reviewed physical result from an `experimental_hil` run may
+contribute to the scoped evidence after review. The temporary grant itself does
+not count, cannot claim production qualification, and never authorizes normal
+Home Assistant writes.

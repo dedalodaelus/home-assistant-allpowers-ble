@@ -126,6 +126,10 @@ def make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write reviewed evidence and matrix changes",
     )
+    tiers_parser = commands.add_parser(
+        "tiers", help="Calculate evidence-backed hardware support tiers as JSON"
+    )
+    tiers_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
@@ -564,6 +568,26 @@ def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
+    if args.command == "tiers":
+        from .tiers import evaluate_tiers
+        from scripts.validate_hil_qualification import validate_matrix
+
+        try:
+            payload = json.loads(args.matrix.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as ex:
+            raise HAAPIError("Unable to read qualification matrix") from ex
+        errors, _ = validate_matrix(
+            payload,
+            matrix_path=args.matrix,
+            require_pass=False,
+            max_age_days=None,
+        )
+        if errors:
+            raise HAAPIError(
+                "Qualification matrix validation failed: " + "; ".join(errors)
+            )
+        print(json.dumps(evaluate_tiers(payload), indent=2, sort_keys=True))
+        return 0
     if args.command == "report":
         write_report(args.run_directory)
         print("HIL report written to: public/report.md")
