@@ -453,8 +453,6 @@ def _bound_capture(
                 {
                     "route": run["route"],
                     "revision_id": revision["id"],
-                    "model": revision["model"],
-                    "hardware_revision": revision["hardware_version"],
                     "firmware_version": run["firmware_version"],
                     "run_id": run["run_id"],
                     "session_id": run["session_id"],

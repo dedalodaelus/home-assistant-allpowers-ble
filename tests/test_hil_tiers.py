@@ -566,6 +566,29 @@ def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(
     assert "light_output" in result["tiers"][0]["exclusions"]
 
 
+def test_v3_capture_scope_does_not_require_model_or_hardware_revision_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "silver")
+    run = matrix["revisions"][0]["runs"][0]
+    capture = run["evidence"][0]
+    path = tmp_path / capture
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        row.pop("model", None)
+        row.pop("hardware_revision", None)
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    for section in ("bronze_evidence", "scenarios", "write_capabilities"):
+        for item in run[section].values():
+            if capture in item.get("evidence", []):
+                item["physical_review"]["evidence_sha256"] = _digest(
+                    tmp_path, item["evidence"]
+                )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors == []
+    assert result["tiers"][0]["tier"] == "silver"
+
+
 def test_off_only_capture_does_not_satisfy_output_transition_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
