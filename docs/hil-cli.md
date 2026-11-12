@@ -176,7 +176,7 @@ production client. A failing assertion reports `fail`; missing, skipped or
 unavailable cases report `inconclusive`. This simulation does not contact HA,
 write to hardware, or qualify a build. The ordinary `run` command remains the
 #228 read-only snapshot. Run the bounded 24-hour observer explicitly with
-`python -m scripts.hil --device 1 run --suite soak-24h`.
+`python -m scripts.hil run --device 1 --suite soak-24h`.
 It samples every five minutes, allows at most a ten-minute observation gap,
 collects an hourly 15-second route trace, and caps private run data at 10 MiB.
 Only a full uninterrupted 24-hour segment can pass; a process restart starts a
@@ -198,7 +198,7 @@ the soak. The default is disabled. Keepalive is not proven to prevent a
 physical station cutoff around ten minutes.
 
 ```bash
-python -m scripts.hil --non-interactive --device 1 run --suite soak-24h \
+python -m scripts.hil run --device 1 --suite soak-24h --non-interactive \
   --allow-keepalive-disabled
 ```
 
@@ -286,20 +286,20 @@ confirmation remains inconclusive. The evidence is not build-level HIL
 qualification.
 
 ```bash
-python -m scripts.hil --device 1 run --suite recovery
-python -m scripts.hil --device 1 run --suite outputs
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_car_charger_cycle
-python -m scripts.hil --device 1 run --suite settings --scenario-id settings_work_mode
-python -m scripts.hil --device 1 run --suite settings --scenario-id settings_eco_timeout
+python -m scripts.hil run --device 1 --suite recovery
+python -m scripts.hil run --device 1 --suite outputs
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_dc_cycle
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_light_cycle
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_car_charger_cycle
+python -m scripts.hil run --device 1 --suite settings --scenario-id settings_work_mode
+python -m scripts.hil run --device 1 --suite settings --scenario-id settings_eco_timeout
 ```
 
 Each guided run writes private `scenarios.json` and `checkpoint.json` files
 after steps. To resume a recovery observation, pass the existing run folder:
 
 ```bash
-python -m scripts.hil --device 1 run --suite recovery \
+python -m scripts.hil run --device 1 --suite recovery \
   --resume hil-results/2026-11-07T01-00-00Z_0123456789abcdef
 ```
 
