@@ -1,3 +1,9 @@
+## Before submitting
+
+- [ ] For normal changes, the base branch is `devel` (`main` is release-only). If this PR comes from a fork, confirm the base repository and branch before submitting; GitHub may default to `main`.
+- [ ] The PR title uses Conventional Commits syntax, for example `docs: clarify contributor workflow` or `test: cover status freshness timeout boundary`.
+- [ ] The related issue is linked, and existing issues and PRs were checked before starting duplicate work.
+
 ## Summary
 
 <!-- What changes and why? -->
