@@ -140,6 +140,11 @@ def make_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--suite", choices=(*SUITES, "all"))
     run_parser.add_argument(
+        "--tier",
+        choices=("bronze", "silver", "gold"),
+        help="Build and persist a capability-aware guided tier plan",
+    )
+    run_parser.add_argument(
         "--scenario-id",
         help="Select one declared scenario for outputs or settings",
     )
@@ -621,6 +626,10 @@ def execute(args: argparse.Namespace) -> int:
         print("HIL evidence archive written to: hil-evidence.zip")
         return 0
     if args.command == "run":
+        if args.tier is not None and args.suite not in (None, "read-only"):
+            raise HAAPIError(
+                "--tier currently accompanies the read-only evidence capture"
+            )
         if args.list_suites:
             print("Available HIL suites:")
             for suite in SUITES:
@@ -818,7 +827,7 @@ def execute(args: argparse.Namespace) -> int:
         environment=environment,
         sample=sample,
     )
-    if args.command == "run" and args.suite == "read-only":
+    if args.command == "run" and (args.suite == "read-only" or args.tier is not None):
         capabilities: dict[str, Any] | None = None
         unavailable_reason = "no unique loaded integration entry found"
         if selected.config_entry_id is not None:
@@ -830,6 +839,42 @@ def execute(args: argparse.Namespace) -> int:
             capabilities if capabilities is not None else unknown(unavailable_reason)
         )
         session["controls"] = _scenario_controls(api, selected, capabilities)
+        if args.tier is not None:
+            from .guided import build_tier_plan
+
+            # The requested route is not route evidence. The plan remains
+            # blocked until a connected backend has been attributed by trace.
+            test_plan = build_tier_plan(
+                args.tier,
+                capabilities,
+                session["controls"],
+                observed_route=None,
+                build_provenance={
+                    "checkout_commit": integration.get(
+                        "runner_checkout_commit", {}
+                    ).get("value"),
+                    "installed_commit": integration.get("installed_commit", {}).get(
+                        "value"
+                    ),
+                    "build_match": integration.get("build_match"),
+                },
+            )
+            session["test_plan"] = test_plan
+            print(
+                f"Guided {args.tier.title()} plan for {test_plan['device']['model']} "
+                f"(hardware {test_plan['device']['hardware_revision'] or 'unknown'}, "
+                f"firmware {test_plan['device']['firmware_revision'] or 'unknown'})"
+            )
+            print("Verified route:", test_plan["device"]["verified_route"] or "unknown")
+            print("Estimated operator actions:", test_plan["operator_actions_estimate"])
+            for step in test_plan["steps"]:
+                reasons = (
+                    "; ".join(step["reasons"]) or "ready for the existing guided suite"
+                )
+                print(
+                    f"  {step['eligibility']}: {step['id']} ({step['feature']}) — {reasons}"
+                )
+            print("Restoration:", test_plan["restoration_plan"])
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     if resume_state is not None:
         if resume_dir is None:

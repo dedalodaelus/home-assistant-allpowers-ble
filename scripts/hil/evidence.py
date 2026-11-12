@@ -692,6 +692,7 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
             "preflight",
             "telemetry",
             "runtime_capabilities",
+            "test_plan",
             "started_at",
         ):
             value = source.get(key)
@@ -781,6 +782,10 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                     else None,
                     "capabilities": capabilities,
                 }
+            elif key == "test_plan" and isinstance(value, dict):
+                projected = _public_tier_plan(value)
+                if projected is not None:
+                    result["data"][key] = projected
             elif key == "started_at" and isinstance(value, str):
                 try:
                     timestamp = datetime.fromisoformat(value)
@@ -818,6 +823,83 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
             result["data"]["device"] = projected_device
         result["data"].setdefault("qualification_status", "inconclusive")
     return result
+
+
+def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
+    """Project guided plans through a narrow public evidence allowlist."""
+    if (
+        value.get("schema_version") != 1
+        or value.get("requested_tier") not in {"bronze", "silver", "gold"}
+        or value.get("attained_tier") is not None
+        or value.get("review_state") != "pending"
+        or not isinstance(value.get("steps"), list)
+        or len(value["steps"]) > 32
+        or type(value.get("operator_actions_estimate")) is not int
+        or not 0 <= value["operator_actions_estimate"] <= 128
+    ):
+        return None
+    device = value.get("device")
+    if not isinstance(device, dict):
+        return None
+    model = safe_model(device.get("model")) or "unknown"
+    route = device.get("verified_route")
+    if route not in {None, "local_adapter", "active_proxy"}:
+        route = None
+    steps = []
+    for step in value["steps"]:
+        if not isinstance(step, dict):
+            continue
+        if (
+            not isinstance(step.get("id"), str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", step["id"]) is None
+            or step.get("eligibility") not in {"eligible", "blocked", "not_applicable"}
+            or step.get("outcome")
+            not in {"pending", "pass", "fail", "inconclusive", "not_applicable"}
+            or step.get("human_review") not in {"pending", "accepted", "rejected"}
+            or not isinstance(step.get("reasons"), list)
+            or not all(
+                isinstance(reason, str) and len(reason) <= 180
+                for reason in step["reasons"]
+            )
+        ):
+            return None
+        steps.append(
+            {
+                "id": step["id"],
+                "feature": step.get("feature")
+                if step.get("feature")
+                in {
+                    "telemetry",
+                    "ac_output",
+                    "dc_output",
+                    "light_output",
+                    "eco_mode",
+                    "work_mode",
+                    "eco_timeout",
+                    "car_charger",
+                    "output",
+                }
+                else "unknown",
+                "eligibility": step["eligibility"],
+                "outcome": step["outcome"],
+                "reasons": step["reasons"],
+                "human_review": step["human_review"],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "requested_tier": value["requested_tier"],
+        "attained_tier": None,
+        "review_state": "pending",
+        "device": {
+            "model": model,
+            "hardware_revision": safe_version(device.get("hardware_revision")),
+            "firmware_revision": safe_version(device.get("firmware_revision")),
+            "verified_route": route,
+        },
+        "operator_actions_estimate": value["operator_actions_estimate"],
+        "steps": steps,
+    }
 
 
 def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]]:
@@ -1809,6 +1891,7 @@ def verify_public_archive(
                         "preflight",
                         "telemetry",
                         "runtime_capabilities",
+                        "test_plan",
                         "started_at",
                         "device",
                     }
@@ -1967,6 +2050,12 @@ def verify_public_archive(
                             )
                         ):
                             raise HAAPIError("Invalid public runtime capabilities")
+                    if (
+                        "test_plan" in public_session
+                        and _public_tier_plan(public_session["test_plan"])
+                        != public_session["test_plan"]
+                    ):
+                        raise HAAPIError("Invalid public guided tier plan")
                     device = public_session.get("device", {})
                     if set(device) - {"model", "hardware_version", "firmware_version"}:
                         raise HAAPIError("Unexpected public device metadata")

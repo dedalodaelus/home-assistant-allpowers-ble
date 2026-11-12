@@ -661,6 +661,8 @@ def install() -> None:
     """Install all dependency stubs into ``sys.modules``."""
     bleak = ModuleType("bleak")
     bleak.BleakClient = FakeClient
+    bleak_exc = ModuleType("bleak.exc")
+    bleak_exc.BleakError = FakeBleakError
     backends = ModuleType("bleak.backends")
     characteristic = ModuleType("bleak.backends.characteristic")
     characteristic.BleakGATTCharacteristic = FakeCharacteristic
@@ -854,6 +856,7 @@ def install() -> None:
     sys.modules.update(
         {
             "bleak": bleak,
+            "bleak.exc": bleak_exc,
             "bleak.backends": backends,
             "bleak.backends.characteristic": characteristic,
             "bleak.backends.device": device,
