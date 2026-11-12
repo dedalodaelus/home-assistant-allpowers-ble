@@ -47,7 +47,7 @@ notes and the legacy `*.sample` files do not qualify.
 
 ```bash
 python scripts/validate_hil_qualification.py
-python scripts/validate_hil_qualification.py --require-pass --max-age-days 30
+python scripts/validate_hil_qualification.py --require-pass
 ```
 
 The matrix validator confirms metadata and redaction. It cannot turn these
