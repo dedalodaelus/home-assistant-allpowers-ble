@@ -45,6 +45,10 @@ MAC_ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
 PROTOCOL_HEADER = bytes((0xA5, 0x65))
 STATUS_REQUEST = bytes.fromhex("A5 65 B1 00 01 06 01 00 00 00 00 00")
 VALID_ECO_TIMEOUTS = frozenset((1, 2, 4, 6))
+SUPPORTED_PROTOCOL_PROFILES = {
+    ("R600", "r600-hw03", "0.3", "0x03"),
+    ("VOLIX P1800", "volix-p1800-hw03", "0.3", "0x03"),
+}
 
 
 def _valid_protocol_frame(
@@ -513,11 +517,17 @@ def _validate_run(
     require_pass: bool,
     max_age_days: int,
     revision_id: str,
+    protocol_profile_supported: bool,
     feature_scope: str | None = None,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
         return None
+    if require_pass and not protocol_profile_supported:
+        _error(
+            errors,
+            f"{context} uses an unsupported protocol profile; strict PASS supports only documented R600/VOLIX P1800 HW 0.3 profiles",
+        )
     run_id = run.get("run_id")
     if not isinstance(run_id, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id
@@ -822,6 +832,15 @@ def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
     return firmware, route, parsed.astimezone(UTC)
 
 
+def _supports_documented_protocol(revision: dict[str, Any]) -> bool:
+    return (
+        revision.get("model"),
+        revision.get("id"),
+        revision.get("hardware_version"),
+        revision.get("raw_hardware_version"),
+    ) in SUPPORTED_PROTOCOL_PROFILES
+
+
 def validate_matrix(
     payload: dict[str, Any],
     *,
@@ -857,6 +876,7 @@ def validate_matrix(
         if revision_id in seen_revisions:
             _error(errors, f"duplicate revision id: {revision_id}")
         seen_revisions.add(revision_id)
+        protocol_profile_supported = _supports_documented_protocol(revision)
         for field in ("model", "hardware_version", "raw_hardware_version"):
             if not isinstance(revision.get(field), str) or not revision[field].strip():
                 _error(
@@ -889,6 +909,7 @@ def validate_matrix(
                 require_pass=False,
                 max_age_days=max_age_days,
                 revision_id=revision_id,
+                protocol_profile_supported=protocol_profile_supported,
             )
             if run_id is not None:
                 if run_id in seen_runs:
@@ -1021,6 +1042,7 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            protocol_profile_supported=protocol_profile_supported,
                             feature_scope=feature_scope,
                         )
             else:
@@ -1079,6 +1101,7 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            protocol_profile_supported=protocol_profile_supported,
                         )
         summaries.append(
             f"{revision_id}: {len(runs)} scoped run(s), "

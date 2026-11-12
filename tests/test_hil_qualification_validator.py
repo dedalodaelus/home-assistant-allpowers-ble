@@ -199,7 +199,7 @@ def test_protocol_capture_validation_checks_documented_frames() -> None:
 @pytest.mark.parametrize(
     "capability,mutation",
     [
-        ("eco_mode", "mislabeled"),
+        ("eco_mode", "frame_targets_other_field"),
         ("eco_timeout", "unsupported_timeout"),
         ("ac_output", "unsupported_transition"),
     ],
@@ -216,8 +216,9 @@ def test_strict_gate_rejects_capability_frame_false_positives(
     capture_path = tmp_path / run["evidence"][0]
     rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
     row = next(item for item in rows if item.get("capability") == capability)
-    if mutation == "mislabeled":
-        row["capability"] = "work_mode"
+    if mutation == "frame_targets_other_field":
+        data = bytes.fromhex("A5 65 00 B1 01 02 02 02 01")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
     elif mutation == "unsupported_timeout":
         data = bytes.fromhex("A5 65 00 B1 01 02 02 00 03")
         row["frame_hex"] = _with_xor_checksum(data).hex()
@@ -246,6 +247,42 @@ def _with_xor_checksum(data: bytes) -> bytes:
     for byte in data:
         checksum ^= byte
     return data + bytes((checksum,))
+
+
+def test_strict_gate_rejects_undocumented_protocol_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "local_adapter", "unsupported-model", captured_at)
+    matrix = _matrix([run])
+    revision = matrix["revisions"][0]
+    revision.update({"id": "ap-r1500-hw03", "model": "AP R1500"})
+
+    capture_path = tmp_path / run["evidence"][0]
+    rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
+    for row in rows:
+        row["revision_id"] = revision["id"]
+    capture_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    digest = _digest_manifest(tmp_path, run["evidence"])
+    for result in [*run["scenarios"].values(), *run["write_capabilities"].values()]:
+        result["physical_review"]["evidence_sha256"] = digest
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("unsupported protocol profile" in error for error in strict_errors)
+
+    non_strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+    assert not any(
+        "unsupported protocol profile" in error for error in non_strict_errors
+    )
 
 
 def test_strict_pass_rejects_scoped_reviewed_aa55_capture(

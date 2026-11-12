@@ -215,6 +215,9 @@ known status (`0x01`), settings (`0x03`), or device-name (`0x35`) forms. Writes
 use the documented outbound envelope for output control (`0x01`) and settings
 control (`0x02`); the observed status request is checked against its exact known
 bytes because that request form does not use the notification XOR envelope.
+Strict protocol validation currently supports only R600 `r600-hw03` and VOLIX
+P1800 `volix-p1800-hw03`, both hardware 0.3 / raw `0x03`; other profiles cannot
+qualify until their protocol frames are documented.
 Capability writes must also carry a requested state that matches the relevant
 frame bit/value. Output writes may set only the documented AC/DC/light bits;
 settings writes may preserve unknown flag bits but cannot request reserved work
