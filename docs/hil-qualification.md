@@ -100,8 +100,9 @@ authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
 The v3 validator implements per-feature, per-revision, per-firmware, and
-per-observed-route results. Tier arithmetic remains tracked by #269. Evidence
-age is an optional audit and does not revoke a stable support qualification.
+per-observed-route results. Run `python -m scripts.hil tiers` to calculate
+evidence-backed tiers. Evidence age is an optional audit and does not revoke a
+stable support qualification.
 
 ## Scope
 
@@ -446,3 +447,32 @@ No build-level physical qualification is claimed.
 ### Installed integration build identity
 
 `doctor`, `run`, and `trace` request the admin-only HIL WebSocket build fingerprint and compare it with the CLI checkout. The SHA-256 stream includes sorted relative paths and file bytes for the integration package, excluding `__pycache__` and `.pyc`. A matching fingerprint is `verified` only when those checkout files are clean in Git; the matching commit SHA is then recorded. Different fingerprints are `mismatch`, even when both manifests say `0.3.0`. Missing/unsupported endpoints, invalid responses, failed scans, or dirty checkouts are `unverified` with a reason. This metadata does not award a scenario PASS or prove that Home Assistant's already-loaded Python modules match its on-disk files. Install the desired development checkout and restart HA before HIL execution, then confirm the exact `Installed integration commit` reported by the CLI. The CLI does not modify installed files or restart/reload HA.
+
+## Calculated hardware support tiers
+
+The project-specific Bronze, Silver, Gold, and Platinum tiers classify reviewed
+physical evidence. They are separate from Home Assistant's Integration Quality
+Scale and never authorize runtime writes. Calculate the current result as stable
+JSON with:
+
+```bash
+python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json
+```
+
+Each result is isolated to one canonical model, exact hardware revision,
+firmware, and actually observed BLE route. Runs on different devices, firmware,
+or routes are never combined. The output includes `tier` (`unqualified` when no
+scoped production evidence exists), evidence links, qualified features,
+exclusions, feature presence, and unmet requirements. A later independently
+reviewed failure supersedes an earlier PASS for that feature in that scope.
+
+Bronze requires independently reviewed identity, active protocol probe, and
+fresh plausible telemetry (`bronze_evidence` entries). Silver adds reviewed
+basic reconnect and on/off evidence for each applicable AC/DC/light output; a
+reviewed absent feature is excluded, while unknown presence blocks advancement.
+At least one physical basic output must pass. Gold adds every declared present
+function/settings and recovery/transaction safety regressions; an unknown
+inventory entry cannot be omitted. Platinum adds only a reviewed uninterrupted
+86,400-second `soak_24h` result with no resumed segment. Short observations do
+not qualify. Legacy records, simulations, user selections, and experimental HIL
+grants do not count as tier evidence.
