@@ -19,11 +19,8 @@ ALL_FEATURES = (
     "eco_timeout",
     "car_charger",
 )
-GOLD_SCENARIOS = (
-    "reconnect_failover",
-    "rapid_consecutive_writes",
-    "stale_timeout_recovery",
-)
+GOLD_SCENARIOS = ("reconnect_failover",)
+OFFLINE_REGRESSION_GATE = "run --suite transaction-safety --simulate"
 
 
 def _stamp(run: dict[str, Any]) -> float:
@@ -859,6 +856,7 @@ def _report(
         "qualified_features": sorted(set(qualified)),
         "exclusions": sorted(set(exclusions)),
         "feature_presence": presence,
+        "offline_regression_gate": OFFLINE_REGRESSION_GATE,
         "unmet_requirements": sorted(set(reasons)) if tier != "platinum" else [],
     }
 
@@ -894,6 +892,7 @@ def evaluate_tiers(matrix: dict[str, Any]) -> dict[str, Any]:
                     "feature_presence": {
                         feature: "unknown" for feature in ALL_FEATURES
                     },
+                    "offline_regression_gate": OFFLINE_REGRESSION_GATE,
                     "unmet_requirements": [
                         "No production run has an exact firmware and verified observed route"
                     ],

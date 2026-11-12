@@ -505,11 +505,6 @@ def _matrix_fixture(
                 capabilities[feature] = _setting_result(
                     run, revision, root, capture, feature
                 )
-        for scenario in (
-            "rapid_consecutive_writes",
-            "stale_timeout_recovery",
-        ):
-            scenarios[scenario] = _reviewed(root, "pass", [capture])
     if tier == "platinum":
         soak = _soak_artifact(run, revision, root, soak_mode)
         scenarios["soak_24h"] = _reviewed(
@@ -675,6 +670,21 @@ def test_gold_requires_reviewed_feature_restoration(
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
+    assert result["tiers"][0]["offline_regression_gate"] == (
+        "run --suite transaction-safety --simulate"
+    )
+    assert (
+        matrix["revisions"][0]["runs"][0]["scenarios"]["rapid_consecutive_writes"][
+            "status"
+        ]
+        == "pending"
+    )
+    assert (
+        matrix["revisions"][0]["runs"][0]["scenarios"]["stale_timeout_recovery"][
+            "status"
+        ]
+        == "pending"
+    )
 
 
 def test_gold_rejects_malformed_restoration_row_even_with_other_valid_write(

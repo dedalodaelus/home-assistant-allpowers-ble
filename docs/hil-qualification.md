@@ -489,7 +489,12 @@ pass.
 
 Gold adds a reviewed feature inventory, a reviewed PASS for every declared
 supported function or setting, safe restoration evidence for each, and the
-relevant reconnect, transaction-safety, and recovery checks. An optional
+reviewed physical reconnect/recovery check. Rapid-write concurrency and stale
+timeout behavior are software regression gates run by repository CI through
+`run --suite transaction-safety --simulate`; they are not Gold hardware
+scenarios and their synthetic traces never count as device evidence. The tier
+report names this offline regression gate, but does not claim it passed; CI
+must pass it independently. An optional
 advanced feature can be excluded only through a reviewed revision-level
 `feature_contract` artifact that documents it as unavailable and safely
 disabled. Unknown inventory and free-form exclusion flags do not qualify.
