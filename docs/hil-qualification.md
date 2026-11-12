@@ -466,13 +466,34 @@ scoped production evidence exists), evidence links, qualified features,
 exclusions, feature presence, and unmet requirements. A later independently
 reviewed failure supersedes an earlier PASS for that feature in that scope.
 
-Bronze requires independently reviewed identity, active protocol probe, and
-fresh plausible telemetry (`bronze_evidence` entries). Silver adds reviewed
-basic reconnect and on/off evidence for each applicable AC/DC/light output; a
-reviewed absent feature is excluded, while unknown presence blocks advancement.
-At least one physical basic output must pass. Gold adds every declared present
-function/settings and recovery/transaction safety regressions; an unknown
-inventory entry cannot be omitted. Platinum adds only a reviewed uninterrupted
-86,400-second `soak_24h` result with no resumed segment. Short observations do
-not qualify. Legacy records, simulations, user selections, and experimental HIL
-grants do not count as tier evidence.
+Bronze requires three independently reviewed, file-hash-bound claims: confirmed
+identity, a route/session/build-bound active protocol probe, and fresh plausible
+telemetry. The evidence records must match the run's exact model/revision,
+firmware, route, session, build fingerprint, and timestamp. The run itself must
+have complete capture provenance and a verified matching installed/checkout
+build. Incomplete captures and unverified builds cannot advance a tier.
+
+Silver adds a reviewed reconnect and two separate AC/DC/light observations: each
+output must be requested and physically observed both on and off, with each
+action restored to its recorded initial state. A one-direction capture cannot
+be promoted by a matrix checkbox. A reviewed absent feature is excluded;
+unknown presence blocks advancement. At least one physical basic output must
+pass.
+
+Gold adds a reviewed feature inventory, a reviewed PASS for every declared
+supported function or setting, safe restoration evidence for each, and the
+relevant reconnect, transaction-safety, and recovery checks. An optional
+advanced feature can be excluded only through a reviewed revision-level
+`feature_contract` artifact that documents it as unavailable and safely
+disabled. Unknown inventory and free-form exclusion flags do not qualify.
+
+Platinum adds only a reviewed `soak_24h` evidence artifact containing one
+continuous, uninterrupted 86,400-second segment, at least 289 fresh telemetry
+samples, at least 24 complete saved route traces, allowed sample gaps, and no
+dropped traces, clock discontinuities, or restart. Short observations, resumed
+segments, and values copied only into matrix `details` do not qualify.
+
+An independently reviewed physical result from an `experimental_hil` run may
+contribute to the scoped evidence after review. The temporary grant itself does
+not count, cannot claim production qualification, and never authorizes normal
+Home Assistant writes.

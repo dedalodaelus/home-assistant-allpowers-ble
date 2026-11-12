@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
-from scripts.validate_hil_qualification import VERIFIED_ROUTES
+from scripts import validate_hil_qualification as hil_validation
 
 BASIC_OUTPUTS = ("ac_output", "dc_output", "light_output")
+VERIFIED_ROUTES = hil_validation.VERIFIED_ROUTES
 ALL_FEATURES = (
     "ac_output",
     "dc_output",
@@ -38,13 +40,48 @@ def _stamp(run: dict[str, Any]) -> float:
 
 
 def _scope_run(run: Any) -> bool:
+    if not isinstance(run, dict):
+        return False
+    authorization = run.get("authorization_context")
+    expected_source = {
+        "production": "reviewed_production_session",
+        "experimental_hil": "experimental_hil_grant",
+    }.get(authorization)
+    fingerprint = run.get("build_fingerprint")
+    if not isinstance(fingerprint, str):
+        return False
+    try:
+        captured = datetime.fromisoformat(
+            run.get("captured_at", "").replace("Z", "+00:00")
+        )
+    except AttributeError, ValueError:
+        return False
     return (
-        isinstance(run, dict)
-        and run.get("route") in VERIFIED_ROUTES
+        run.get("route") in VERIFIED_ROUTES
         and isinstance(run.get("firmware_version"), str)
         and bool(run["firmware_version"].strip())
-        and run.get("authorization_context") == "production"
+        and authorization in {"production", "experimental_hil"}
+        and run.get("authorization_context_source") == expected_source
+        and run.get("capture_completeness") == "complete"
+        and isinstance(run.get("evidence"), list)
+        and bool(run["evidence"])
+        and hil_validation._evidence_digests(run["evidence"]) is not None
+        and run.get("build_verification") == "verified"
+        and isinstance(run.get("run_id"), str)
+        and bool(run["run_id"].strip())
+        and isinstance(run.get("session_id"), str)
+        and run["session_id"] not in {"", "unknown"}
+        and len(fingerprint) == 64
+        and all(char in "0123456789abcdef" for char in fingerprint)
+        and run.get("installed_fingerprint") == fingerprint
+        and run.get("checkout_fingerprint") == fingerprint
+        and captured.tzinfo is not None
+        and captured.astimezone(UTC) <= datetime.now(UTC)
         and run.get("qualification_status") != "not_applicable"
+        and not (
+            authorization == "experimental_hil"
+            and run.get("qualification_status") == "pass"
+        )
     )
 
 
@@ -57,25 +94,29 @@ def _result(run: dict[str, Any], section: str, key: str) -> dict[str, Any]:
 def _latest_outcome(
     runs: list[dict[str, Any]], section: str, key: str
 ) -> dict[str, Any]:
-    candidates = [(_stamp(run), _result(run, section, key)) for run in runs]
-    candidates = [
-        (stamp, item)
-        for stamp, item in candidates
-        if (
-            item.get("status") == "pass"
-            and _pass(item)
-            or item.get("status") == "fail"
-            and _reviewed_fail(item)
-        )
-    ]
-    return (
-        max(
-            candidates,
-            key=lambda pair: (pair[0], pair[1].get("status") == "fail"),
-        )[1]
-        if candidates
-        else {}
-    )
+    run = _latest_run(runs, section, key)
+    return _result(run, section, key) if run else {}
+
+
+def _latest_run(
+    runs: list[dict[str, Any]], section: str, key: str
+) -> dict[str, Any] | None:
+    candidates = []
+    for run in runs:
+        item = _result(run, section, key)
+        if item.get("status") == "pass" and _pass(item):
+            candidates.append((run, item))
+        elif item.get("status") == "fail" and _reviewed_fail(item):
+            candidates.append((run, item))
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda pair: (
+            _stamp(pair[0]),
+            _result(pair[0], section, key).get("status") == "fail",
+        ),
+    )[0]
 
 
 def _presence(runs: list[dict[str, Any]], feature: str) -> str:
@@ -107,13 +148,15 @@ def _presence(runs: list[dict[str, Any]], feature: str) -> str:
             return "unknown"
         evidence = item.get("evidence")
         digests = item.get("evidence_sha256")
+        actual_digests = hil_validation._evidence_digests(evidence)
         if (
             not item.get("reviewed_by")
             or reviewed.tzinfo is None
             or not isinstance(evidence, list)
             or not evidence
             or not isinstance(digests, dict)
-            or not set(evidence).issubset(digests)
+            or actual_digests is None
+            or digests != actual_digests
         ):
             return "unknown"
     return status
@@ -125,60 +168,346 @@ def _proof(run: dict[str, Any], name: str) -> dict[str, Any]:
     return item if isinstance(item, dict) else {}
 
 
-def _contract_excluded(runs: list[dict[str, Any]], feature: str) -> bool:
-    for run in sorted(runs, key=_stamp, reverse=True):
-        exclusions = run.get("contract_exclusions")
-        item = exclusions.get(feature) if isinstance(exclusions, dict) else None
-        if not isinstance(item, dict):
-            continue
-        if (
-            item.get("documented_unavailable") is True
-            and item.get("safely_disabled") is True
-            and isinstance(item.get("rationale"), str)
-            and item["rationale"].strip()
-            and _pass({"status": "pass", **item})
-        ):
-            return True
-    return False
+def _read_artifact(path: Any) -> dict[str, Any] | None:
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        resolved = (hil_validation.ROOT / path).resolve()
+        resolved.relative_to(hil_validation.ROOT)
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, ValueError, TypeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _scope_matches(
+    artifact: dict[str, Any], run: dict[str, Any], revision: dict[str, Any]
+) -> bool:
+    expected = {
+        "revision_id": revision.get("id"),
+        "model": revision.get("model"),
+        "hardware_revision": revision.get("hardware_version"),
+        "firmware_version": run.get("firmware_version"),
+        "route": run.get("route"),
+        "run_id": run.get("run_id"),
+        "session_id": run.get("session_id"),
+        "build_fingerprint": run.get("build_fingerprint"),
+        "captured_at": run.get("captured_at"),
+    }
+    return all(artifact.get(key) == value for key, value in expected.items())
+
+
+def _scope_artifact(
+    path: Any,
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    *,
+    artifact_type: str,
+) -> dict[str, Any] | None:
+    artifact = _read_artifact(path)
+    if (
+        artifact is None
+        or artifact.get("artifact_type") != artifact_type
+        or not _scope_matches(artifact, run, revision)
+    ):
+        return None
+    return artifact
+
+
+def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
+    item = revision.get("feature_contract")
+    item = item.get(feature) if isinstance(item, dict) else None
+    if not isinstance(item, dict) or (
+        item.get("status") != "excluded"
+        or item.get("safely_disabled") is not True
+        or not isinstance(item.get("rationale"), str)
+        or not item["rationale"].strip()
+    ):
+        return False
+    if len(item.get("evidence", [])) != 1 or not _review_record(item, "confirmed_pass"):
+        return False
+    artifact = _read_artifact(item["evidence"][0])
+    return bool(
+        artifact
+        and artifact.get("artifact_type") == "feature_contract"
+        and artifact.get("revision_id") == revision.get("id")
+        and artifact.get("model") == revision.get("model")
+        and artifact.get("hardware_revision") == revision.get("hardware_version")
+        and artifact.get("feature") == feature
+        and artifact.get("safely_disabled") is True
+        and artifact.get("rationale") == item["rationale"]
+    )
+
+
+def _review_record(item: dict[str, Any], outcome: str) -> bool:
+    review = item.get("physical_review")
+    if not isinstance(review, dict) or review.get("outcome") != outcome:
+        return False
+    try:
+        reviewed_at = datetime.fromisoformat(
+            review.get("reviewed_at", "").replace("Z", "+00:00")
+        )
+    except AttributeError, ValueError:
+        return False
+    evidence = item.get("evidence")
+    actual_digests = hil_validation._evidence_digests(evidence)
+    return bool(
+        isinstance(review.get("reviewed_by"), str)
+        and review["reviewed_by"].strip()
+        and reviewed_at.tzinfo is not None
+        and actual_digests is not None
+        and review.get("evidence_sha256") == actual_digests
+    )
 
 
 def _pass(item: dict[str, Any]) -> bool:
-    review = item.get("physical_review")
-    return (
-        item.get("status") == "pass"
-        and isinstance(item.get("evidence"), list)
-        and bool(item["evidence"])
-        and isinstance(review, dict)
-        and review.get("outcome") == "confirmed_pass"
-        and isinstance(review.get("reviewed_by"), str)
-        and bool(review["reviewed_by"].strip())
-        and isinstance(review.get("evidence_sha256"), dict)
-        and set(item["evidence"]).issubset(review["evidence_sha256"])
-    )
+    return item.get("status") == "pass" and _review_record(item, "confirmed_pass")
 
 
 def _reviewed_fail(item: dict[str, Any]) -> bool:
-    review = item.get("physical_review")
-    return (
-        item.get("status") == "fail"
-        and isinstance(item.get("evidence"), list)
-        and bool(item["evidence"])
-        and isinstance(review, dict)
-        and review.get("outcome") == "confirmed_fail"
-        and isinstance(review.get("reviewed_by"), str)
-        and bool(review["reviewed_by"].strip())
-        and isinstance(review.get("evidence_sha256"), dict)
-        and set(item["evidence"]).issubset(review["evidence_sha256"])
+    return item.get("status") == "fail" and _review_record(item, "confirmed_fail")
+
+
+def _bronze_proof(
+    run: dict[str, Any], revision: dict[str, Any], claim: str
+) -> dict[str, Any] | None:
+    item = _proof(run, claim)
+    if not _pass(item) or not item.get("evidence"):
+        return None
+    artifact = _scope_artifact(
+        item.get("claim_artifact"),
+        run,
+        revision,
+        artifact_type="bronze_evidence",
+    )
+    if (
+        artifact is None
+        or item.get("claim_artifact") not in item["evidence"]
+        or artifact.get("claim") != claim
+    ):
+        return None
+    if claim == "identity":
+        return artifact if artifact.get("identity_confirmed") is True else None
+    if claim == "fresh_telemetry":
+        if (
+            artifact.get("fresh") is not True
+            or artifact.get("plausible") is not True
+            or type(artifact.get("sample_age_seconds")) is not int
+            or artifact["sample_age_seconds"] > 60
+        ):
+            return None
+        return artifact
+    # An independently reviewed assertion cannot substitute for a real active
+    # protocol probe. Require the existing route/session/build-bound GATT row.
+    capture = item.get("capture_evidence")
+    if capture not in item["evidence"] or not hil_validation._has_bound_capture(
+        [capture],
+        route=run["route"],
+        revision_id=revision["id"],
+        firmware_version=run["firmware_version"],
+        run_id=run["run_id"],
+        captured_at=run["captured_at"],
+        session_id=run["session_id"],
+        build_fingerprint=run["build_fingerprint"],
+        result_key="golden_vector_replay",
+        capability=False,
+        expected_verdict="ok",
+    ):
+        return None
+    return artifact
+
+
+def _bound_capture(
+    path: Any,
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    feature: str,
+    state: Any,
+) -> bool:
+    if not isinstance(path, str) or path not in run.get("evidence", []):
+        return False
+    requested_state = state == "on" if isinstance(state, str) else state
+    rows = hil_validation._capture_rows([path])
+    return bool(
+        rows
+        and any(
+            row.get("route") == run["route"]
+            and row.get("revision_id") == revision["id"]
+            and row.get("firmware_version") == run["firmware_version"]
+            and row.get("run_id") == run["run_id"]
+            and row.get("session_id") == run["session_id"]
+            and row.get("build_fingerprint") == run["build_fingerprint"]
+            and row.get("captured_at") == run["captured_at"]
+            and row.get("capability") == feature
+            and row.get("operation_id") == feature
+            and row.get("direction") == "write"
+            and row.get("requested_state") == requested_state
+            and row.get("verdict") == "ok"
+            for row in rows
+        )
     )
 
 
-def _output_pass(item: dict[str, Any]) -> bool:
+def _output_pass(
+    item: dict[str, Any], run: dict[str, Any], revision: dict[str, Any], feature: str
+) -> bool:
     review = item.get("physical_review")
-    return (
+    if not _pass(item) or not isinstance(review, dict):
+        return False
+    transitions = review.get("output_transitions")
+    if not isinstance(transitions, list) or len(transitions) != 2:
+        return False
+    states: set[str] = set()
+    for entry in transitions:
+        if not isinstance(entry, dict) or entry.get("state") not in {"on", "off"}:
+            return False
+        state = entry["state"]
+        artifact = _scope_artifact(
+            entry.get("evidence"),
+            run,
+            revision,
+            artifact_type="output_transition",
+        )
+        if (
+            state in states
+            or artifact is None
+            or entry.get("evidence") not in item.get("evidence", [])
+            or entry.get("capture_evidence") not in item.get("evidence", [])
+            or artifact.get("feature") != feature
+            or artifact.get("requested_state") != state
+            or artifact.get("observed_state") != state
+            or artifact.get("restored") is not True
+            or artifact.get("initial_state") not in {"on", "off"}
+            or artifact.get("restored_state") != artifact.get("initial_state")
+            or not _bound_capture(
+                entry.get("capture_evidence"), run, revision, feature, state
+            )
+            or not _bound_restoration(
+                entry.get("restoration_capture"),
+                item,
+                run,
+                revision,
+                feature,
+                artifact.get("initial_state") == "on" if artifact else None,
+            )
+        ):
+            return False
+        states.add(state)
+    return states == {"on", "off"}
+
+
+def _restoration_pass(
+    item: dict[str, Any],
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    feature: str,
+) -> bool:
+    review = item.get("physical_review")
+    artifact = _scope_artifact(
+        review.get("restoration_evidence") if isinstance(review, dict) else None,
+        run,
+        revision,
+        artifact_type="feature_restoration",
+    )
+    return bool(
         _pass(item)
-        and isinstance(review.get("verified_states"), list)
-        and {"on", "off"}.issubset(review["verified_states"])
+        and hil_validation._has_bound_capture(
+            item.get("evidence"),
+            route=run.get("route"),
+            revision_id=revision.get("id"),
+            firmware_version=run.get("firmware_version"),
+            run_id=run.get("run_id"),
+            captured_at=run.get("captured_at"),
+            session_id=run.get("session_id"),
+            build_fingerprint=run.get("build_fingerprint"),
+            result_key=feature,
+            capability=True,
+            expected_verdict="ok",
+        )
+        and artifact
+        and review.get("restoration_evidence") in item.get("evidence", [])
+        and artifact.get("feature") == feature
+        and artifact.get("restored") is True
+        and artifact.get("pre_state") is not None
+        and artifact.get("restored_state") == artifact.get("pre_state")
+        and _bound_restoration(
+            review.get("restoration_capture"),
+            item,
+            run,
+            revision,
+            feature,
+            artifact.get("pre_state"),
+        )
     )
+
+
+def _bound_restoration(
+    capture: Any,
+    item: dict[str, Any],
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    feature: str,
+    restored_state: Any,
+) -> bool:
+    if not isinstance(capture, str) or capture not in item.get("evidence", []):
+        return False
+    rows = hil_validation._capture_rows([capture])
+    return bool(
+        rows
+        and _bound_capture(capture, run, revision, feature, restored_state)
+        and any(
+            row.get("capability") == feature
+            and row.get("operation_id") == feature
+            and row.get("requested_state") == restored_state
+            and row.get("action_stage") == "restoration"
+            and row.get("physical_outcome") == "pass"
+            for row in rows
+        )
+    )
+
+
+def _feature_pass(
+    item: dict[str, Any], run: dict[str, Any], revision: dict[str, Any], feature: str
+) -> bool:
+    if feature in BASIC_OUTPUTS:
+        return _output_pass(item, run, revision, feature)
+    return _restoration_pass(item, run, revision, feature)
+
+
+def _scenario_pass(
+    item: dict[str, Any],
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    scenario: str,
+) -> bool:
+    return _pass(item) and hil_validation._has_bound_capture(
+        item.get("evidence"),
+        route=run.get("route"),
+        revision_id=revision.get("id"),
+        firmware_version=run.get("firmware_version"),
+        run_id=run.get("run_id"),
+        captured_at=run.get("captured_at"),
+        session_id=run.get("session_id"),
+        build_fingerprint=run.get("build_fingerprint"),
+        result_key=scenario,
+        capability=False,
+        expected_verdict="ok",
+    )
+
+
+def _soak_pass(
+    item: dict[str, Any], run: dict[str, Any], revision: dict[str, Any]
+) -> bool:
+    scope = {
+        "route": run.get("route"),
+        "revision_id": revision.get("id"),
+        "firmware_version": run.get("firmware_version"),
+        "run_id": run.get("run_id"),
+        "captured_at": run.get("captured_at"),
+        "session_id": run.get("session_id"),
+        "build_fingerprint": run.get("build_fingerprint"),
+    }
+    return _pass(item) and hil_validation._valid_tier_soak(item, scope)
 
 
 def _tier_for_scope(
@@ -196,9 +525,9 @@ def _tier_for_scope(
     for requirement in ("identity", "protocol_probe", "fresh_telemetry"):
         proof = next(
             (
-                _proof(run, requirement)
+                _bronze_proof(run, revision, requirement)
                 for run in sorted(runs, key=_stamp, reverse=True)
-                if _pass(_proof(run, requirement))
+                if _bronze_proof(run, revision, requirement)
             ),
             {},
         )
@@ -211,6 +540,7 @@ def _tier_for_scope(
             )
 
     latest_features: dict[str, dict[str, Any]] = {}
+    latest_feature_runs: dict[str, dict[str, Any]] = {}
     feature_presence: dict[str, str] = {}
     for scenario in ("reconnect_failover", *GOLD_SCENARIOS, "soak_24h"):
         scenario_result = _latest_outcome(runs, "scenarios", scenario)
@@ -222,18 +552,21 @@ def _tier_for_scope(
     for feature in ALL_FEATURES:
         feature_presence[feature] = _presence(runs, feature)
         latest_features[feature] = _latest_outcome(runs, "write_capabilities", feature)
+        latest_feature_runs[feature] = (
+            _latest_run(runs, "write_capabilities", feature) or {}
+        )
         result = latest_features[feature]
         links.update(
             item for item in result.get("evidence", []) if isinstance(item, str)
         )
-        if _output_pass(result) if feature in BASIC_OUTPUTS else _pass(result):
+        if _feature_pass(result, latest_feature_runs[feature], revision, feature):
             qualified.append(feature)
         if feature_presence[feature] == "absent":
             exclusions.append(feature)
         elif (
             feature in ALL_FEATURES[3:]
             and feature_presence[feature] == "unknown"
-            and _contract_excluded(runs, feature)
+            and _contract_excluded(revision, feature)
         ):
             exclusions.append(f"{feature} (documented unavailable and safely disabled)")
 
@@ -250,9 +583,20 @@ def _tier_for_scope(
             feature_presence,
         )
 
-    silver = _pass(_latest_outcome(runs, "scenarios", "reconnect_failover"))
+    reconnect_run = _latest_run(runs, "scenarios", "reconnect_failover") or {}
+    reconnect = _result(reconnect_run, "scenarios", "reconnect_failover")
+    silver = _scenario_pass(reconnect, reconnect_run, revision, "reconnect_failover")
     applicable_basic = [f for f in BASIC_OUTPUTS if feature_presence[f] != "absent"]
-    passed_basic = [f for f in applicable_basic if _output_pass(latest_features[f])]
+    passed_basic = [
+        feature
+        for feature in applicable_basic
+        if _feature_pass(
+            latest_features[feature],
+            latest_feature_runs[feature],
+            revision,
+            feature,
+        )
+    ]
     for feature in BASIC_OUTPUTS:
         state = feature_presence[feature]
         outcome = latest_features[feature].get("status")
@@ -262,9 +606,12 @@ def _tier_for_scope(
                 f"Silver requires reviewed present/absent inventory for {feature}"
             )
         elif state == "present" and not (
-            _output_pass(latest_features[feature])
-            if feature in BASIC_OUTPUTS
-            else _pass(latest_features[feature])
+            _feature_pass(
+                latest_features[feature],
+                latest_feature_runs.get(feature, {}),
+                revision,
+                feature,
+            )
         ):
             silver = False
             reasons.append(
@@ -279,7 +626,7 @@ def _tier_for_scope(
         reasons.append(
             "Silver requires at least one physically present basic output PASS"
         )
-    if not _pass(_latest_outcome(runs, "scenarios", "reconnect_failover")):
+    if not silver:
         reasons.append("Silver requires a reviewed basic reconnect PASS")
     if not silver:
         return _report(
@@ -301,7 +648,7 @@ def _tier_for_scope(
         if (
             feature in ALL_FEATURES[3:]
             and state == "unknown"
-            and _contract_excluded(runs, feature)
+            and _contract_excluded(revision, feature)
         ):
             continue
         if state == "unknown":
@@ -309,10 +656,11 @@ def _tier_for_scope(
             reasons.append(
                 f"Gold requires declared present/absent inventory for {feature}"
             )
-        elif state == "present" and not (
-            _output_pass(latest_features[feature])
-            if feature in BASIC_OUTPUTS
-            else _pass(latest_features[feature])
+        elif state == "present" and not _feature_pass(
+            latest_features[feature],
+            latest_feature_runs[feature],
+            revision,
+            feature,
         ):
             gold = False
             reasons.append(
@@ -322,7 +670,13 @@ def _tier_for_scope(
             gold = False
             reasons.append(f"Gold has conflicting PASS for reviewed-absent {feature}")
     for scenario in GOLD_SCENARIOS:
-        if not _pass(_latest_outcome(runs, "scenarios", scenario)):
+        scenario_run = _latest_run(runs, "scenarios", scenario) or {}
+        if not _scenario_pass(
+            _result(scenario_run, "scenarios", scenario),
+            scenario_run,
+            revision,
+            scenario,
+        ):
             gold = False
             reasons.append(f"Gold requires reviewed {scenario} PASS")
     if not gold:
@@ -339,16 +693,8 @@ def _tier_for_scope(
         )
 
     soak = _latest_outcome(runs, "scenarios", "soak_24h")
-    details = soak.get("details") if isinstance(soak.get("details"), dict) else {}
-    duration = details.get("continuous_seconds", details.get("measured_seconds"))
-    platinum = (
-        _pass(soak)
-        and isinstance(duration, (int, float))
-        and duration >= 86400
-        and details.get("resumed") is False
-        and details.get("interrupted") is False
-        and details.get("uninterrupted") is True
-    )
+    soak_run = _latest_run(runs, "scenarios", "soak_24h") or {}
+    platinum = _soak_pass(soak, soak_run, revision)
     if platinum:
         links.update(item for item in soak.get("evidence", []) if isinstance(item, str))
         tier = "platinum"
