@@ -53,7 +53,18 @@ jobs:
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
             const titleWasEdited = Object.hasOwn(context.payload.changes || {}, "title");
-            const prUpdatedAt = new Date(pr.updated_at).getTime();
+            const conventionalTypes = new Set([
+              "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "test",
+            ]);
+            const titleMatch = /^(\w+)(?:\(([^\r\n()]+)\))?(!)?: (.+\S)$/u.exec(pr.title || "");
+            const currentTitleIsValid = Boolean(titleMatch && conventionalTypes.has(titleMatch[1]));
+
+            // Check-runs have no created_at field. Their IDs increase as runs are
+            // created, including queued runs whose started_at is still null.
+            if (titleWasEdited && !currentTitleIsValid) {
+              core.setFailed(`Invalid pull request title: '${pr.title || ""}'. Use a Conventional Commit title.`);
+              return;
+            }
             const prAuthorLogin = pr.user?.login || "";
             const prAuthorType = pr.user?.type || "";
             const isHotfixBranch = /^hotfix\//.test(headRef);
@@ -271,15 +282,8 @@ jobs:
               const map = new Map();
               for (const run of checkRuns) {
                 const previous = map.get(run.name);
-                const runCreatedAt = new Date(run.created_at).getTime();
-                const previousCreatedAt = previous ? new Date(previous.created_at).getTime() : -1;
-                // Queued checks have no started_at. Use creation time, then the
-                // monotonically increasing check-run ID to break same-second ties.
-                if (
-                  !previous
-                  || runCreatedAt > previousCreatedAt
-                  || (runCreatedAt === previousCreatedAt && Number(run.id) > Number(previous.id))
-                ) {
+                // IDs order runs even when a new queued run has no started_at.
+                if (!previous || Number(run.id) > Number(previous.id)) {
                   map.set(run.name, run);
                 }
               }
@@ -305,16 +309,6 @@ jobs:
               const checkRuns = response.data.check_runs || [];
               const latestByName = formatRunsMap(checkRuns);
 
-              // A title edit starts a new Validate title check on the same head SHA.
-              // Ignore any older result until the run created for this edit appears.
-              const titleCheck = latestByName.get("Validate title");
-              const hasFreshTitleCheck = !titleWasEdited || (
-                titleCheck
-                // Strict comparison fails closed for same-second edits: timestamps
-                // alone cannot prove that a check was created after that edit.
-                && new Date(titleCheck.created_at).getTime() > prUpdatedAt
-              );
-
               const missing = [];
               const pending = [];
               const failed = [];
@@ -322,12 +316,16 @@ jobs:
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
                 const run = latestByName.get(checkName);
-                if (checkName === "Validate title" && !hasFreshTitleCheck) {
-                  pending.push("Validate title (waiting for fresh run after title edit)");
-                  continue;
-                }
                 if (!run) {
                   missing.push(checkName);
+                  continue;
+                }
+
+                // On title edits the event payload is validated above, since a
+                // check-run on the same SHA cannot prove which title it evaluated.
+                // Still wait if the newest title check is queued or in progress.
+                if (checkName === "Validate title" && titleWasEdited) {
+                  if (run.status !== "completed") pending.push(`${checkName} (${run.status})`);
                   continue;
                 }
 
