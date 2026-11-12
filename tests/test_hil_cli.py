@@ -3738,6 +3738,12 @@ def test_soak_without_numeric_measurements_cannot_start_a_passing_segment(
                 "session_generation": 1,
                 "model": "R600",
                 "profile": "r600-hw-0.3",
+                "settings_options": {
+                    "keepalive_enabled": True,
+                    "keepalive_interval_seconds": 540,
+                    "stale_timeout_seconds": 600,
+                },
+                "capabilities": {"write_settings_keepalive": True},
             }
 
     def interrupt_sleep(_seconds):
@@ -3774,6 +3780,191 @@ def test_soak_without_numeric_measurements_cannot_start_a_passing_segment(
     assert result == 2
     assert checkpoint["steps"] == []
     assert json.loads(sample_lines[-1])["event"] == "sample_gap"
+
+
+class _SoakObserverStarted(Exception):
+    """Stop gate tests at the first point where soak observation would begin."""
+
+
+def _soak_gate_services(prompt):
+    from types import SimpleNamespace
+
+    def start_observer():
+        raise _SoakObserverStarted
+
+    scenario = SimpleNamespace(
+        id="soak_24h_observation",
+        parameters={"duration_seconds": 86_400, "trace_interval_seconds": 3_600},
+    )
+    return SimpleNamespace(
+        load_scenarios=lambda: [scenario],
+        device_fingerprint=lambda *_: "private-test-fingerprint",
+        write_scenario_progress=lambda *_: None,
+        monotonic=start_observer,
+        prompt=prompt,
+    )
+
+
+def _soak_gate_snapshot(*, enabled, supported=True, include_settings=True):
+    snapshot = {
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "session_generation": 1,
+        "capabilities": {"write_settings_keepalive": supported},
+    }
+    if include_settings:
+        snapshot["settings_options"] = {
+            "keepalive_enabled": enabled,
+            "keepalive_interval_seconds": 540,
+            "stale_timeout_seconds": 600,
+        }
+    return snapshot
+
+
+def _run_soak_gate(api_fake, services, tmp_path, *, non_interactive, allow=False):
+    from types import SimpleNamespace
+
+    from scripts.hil.soak import _execute_soak_suite
+
+    device = SimpleNamespace(config_entry_id="entry-safe", entry_state="loaded")
+    return _execute_soak_suite(
+        api_fake,
+        SimpleNamespace(
+            route="auto",
+            non_interactive=non_interactive,
+            allow_keepalive_disabled=allow,
+        ),
+        device,
+        tmp_path,
+        "0123456789abcdef",
+        services,
+    )
+
+
+def test_soak_keepalive_gate_blocks_noninteractive_without_override(tmp_path, capsys):
+    class FakeHA:
+        origin = "https://ha.example.test"
+        websocket_calls = []
+
+        def hil_capabilities(self, _entry):
+            return _soak_gate_snapshot(enabled=False)
+
+        def websocket(self, commands):
+            self.websocket_calls.extend(commands)
+            return []
+
+    api_fake = FakeHA()
+    samples = []
+    services = _soak_gate_services(prompt=lambda _question: "")
+    services.read_only_sample = lambda *_: samples.append("sample") or {}
+
+    result = _run_soak_gate(api_fake, services, tmp_path, non_interactive=True)
+
+    assert result == 2
+    assert "Enable settings keepalive" in capsys.readouterr().out
+    assert samples == []
+    assert api_fake.websocket_calls == []
+
+
+def test_soak_keepalive_gate_rereads_after_interactive_enable(tmp_path):
+    class FakeHA:
+        origin = "https://ha.example.test"
+        websocket_calls = []
+
+        def __init__(self):
+            self.snapshots = [
+                _soak_gate_snapshot(enabled=False),
+                _soak_gate_snapshot(enabled=True),
+            ]
+            self.capability_reads = 0
+
+        def hil_capabilities(self, _entry):
+            self.capability_reads += 1
+            return self.snapshots.pop(0)
+
+        def websocket(self, commands):
+            self.websocket_calls.extend(commands)
+            return []
+
+    api_fake = FakeHA()
+    prompts = []
+    services = _soak_gate_services(
+        prompt=lambda question: prompts.append(question) or ""
+    )
+
+    with pytest.raises(_SoakObserverStarted):
+        _run_soak_gate(api_fake, services, tmp_path, non_interactive=False)
+
+    assert api_fake.capability_reads == 2
+    assert len(prompts) == 1
+    assert api_fake.websocket_calls == []
+
+
+def test_soak_keepalive_override_starts_with_warning_and_no_writes(tmp_path, capsys):
+    class FakeHA:
+        origin = "https://ha.example.test"
+        websocket_calls = []
+
+        def hil_capabilities(self, _entry):
+            return _soak_gate_snapshot(enabled=False)
+
+        def websocket(self, commands):
+            self.websocket_calls.extend(commands)
+            return []
+
+    api_fake = FakeHA()
+    services = _soak_gate_services(prompt=lambda _question: "")
+
+    with pytest.raises(_SoakObserverStarted):
+        _run_soak_gate(
+            api_fake,
+            services,
+            tmp_path,
+            non_interactive=True,
+            allow=True,
+        )
+
+    assert "explicit override" in capsys.readouterr().out
+    assert api_fake.websocket_calls == []
+
+
+@pytest.mark.parametrize(
+    ("include_settings", "supported"),
+    [(False, True), (True, False)],
+)
+def test_soak_keepalive_override_still_requires_verified_supported_option(
+    tmp_path, include_settings, supported
+):
+    class FakeHA:
+        origin = "https://ha.example.test"
+        websocket_calls = []
+
+        def hil_capabilities(self, _entry):
+            return _soak_gate_snapshot(
+                enabled=False,
+                supported=supported,
+                include_settings=include_settings,
+            )
+
+        def websocket(self, commands):
+            self.websocket_calls.extend(commands)
+            return []
+
+    api_fake = FakeHA()
+    services = _soak_gate_services(prompt=lambda _question: "")
+
+    result = _run_soak_gate(
+        api_fake,
+        services,
+        tmp_path,
+        non_interactive=True,
+        allow=True,
+    )
+
+    assert result == 2
+    assert api_fake.websocket_calls == []
 
 
 def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):
@@ -3815,6 +4006,12 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
                 "session_generation": 1,
                 "model": "R600",
                 "profile": "r600-hw-0.3",
+                "settings_options": {
+                    "keepalive_enabled": True,
+                    "keepalive_interval_seconds": 540,
+                    "stale_timeout_seconds": 600,
+                },
+                "capabilities": {"write_settings_keepalive": True},
             }
 
         def websocket(self, commands):

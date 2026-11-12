@@ -99,6 +99,11 @@ authorizing an individual control. These tiers classify coverage and never
 authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
+For `soak_24h`, complete the [station stability preflight](hil-cli.md#qualify-station-stability-before-a-24-hour-soak)
+before starting the 24-hour clock. Do not duplicate the process restart and
+persistence guidance in that checklist; see the soak execution notes in
+[hil-cli.md](hil-cli.md#guided-scenario-runner-230).
+
 The v3 validator implements per-feature, per-revision, per-firmware, and
 per-observed-route results. Run `python -m scripts.hil tiers` to calculate
 evidence-backed tiers. Evidence age is an optional audit and does not revoke a

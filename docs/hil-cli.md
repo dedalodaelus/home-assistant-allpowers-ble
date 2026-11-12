@@ -176,7 +176,7 @@ production client. A failing assertion reports `fail`; missing, skipped or
 unavailable cases report `inconclusive`. This simulation does not contact HA,
 write to hardware, or qualify a build. The ordinary `run` command remains the
 #228 read-only snapshot. Run the bounded 24-hour observer explicitly with
-`python -m scripts.hil --non-interactive --device 1 run --suite soak-24h`.
+`python -m scripts.hil run --device 1 --suite soak-24h`.
 It samples every five minutes, allows at most a ten-minute observation gap,
 collects an hourly 15-second route trace, and caps private run data at 10 MiB.
 Only a full uninterrupted 24-hour segment can pass; a process restart starts a
@@ -185,6 +185,61 @@ can resume a private schema v2 checkpoint for the same selected device. Resume
 continues observation only; it never repeats an operator action or replays an
 output write. Output checkpoints are not resumable because an interrupted
 service call may be ambiguous.
+
+### Qualify station stability before a 24-hour soak
+
+`run --suite soak-24h` is a read-only observer. It never enables or changes
+settings keepalive. Keepalive must be enabled before the soak starts; if it is
+disabled, the CLI shows the Home Assistant settings path, waits for you to
+enable it, then rereads the option before continuing. In non-interactive mode,
+it exits by default. To proceed anyway, explicitly pass
+`--allow-keepalive-disabled`; the CLI warns that a station cutoff can interrupt
+the soak. The default is disabled. Keepalive is not proven to prevent a
+physical station cutoff around ten minutes.
+
+```bash
+python -m scripts.hil run --device 1 --suite soak-24h --non-interactive \
+  --allow-keepalive-disabled
+```
+
+Before starting the 24-hour clock, inspect the integration options in Home
+Assistant at **Settings → Devices & services → Integrations → ALLPOWERS BLE →
+Configure → Advanced timing → Enable settings keepalive**. The keepalive
+interval is in the same section. Current defaults are 540 seconds for the
+interval and 600 seconds for the settings-stale timeout; when keepalive is
+enabled, validation requires the interval to be below the stale timeout.
+Shorter intervals increase BLE traffic.
+
+Before the soak, run an attended, short physical preflight under comparable,
+safe conditions for longer than the previously reported ten-minute cutoff.
+First record behavior using the current keepalive setting. If it is disabled,
+record that preflight separately, then explicitly enable keepalive before
+starting the soak. Record the enabled configuration and timestamps as a
+separate test; enabling keepalive is not claimed to prevent a cutoff. Keep
+output changes manual and separately authorized; use only a safe noncritical
+load. Do not automate output writes, change BLE routes, or retry ambiguous
+commands. Record each observation,
+including:
+
+- device model, hardware revision, firmware, Home Assistant Core, and
+  integration build/revision;
+- actual observed BLE route (local adapter or active proxy), not just the
+  requested route;
+- keepalive enabled/disabled state, interval, and settings-stale timeout;
+- noncritical load and station auto-off settings;
+- test conditions and timestamps, station power/activity, and any cutoff or
+  interruption;
+- route-specific settings TX/RX evidence when available.
+
+Start the 24-hour clock only after the selected configuration stays stable
+throughout preflight. On a cutoff, stale telemetry, or missing route proof,
+stop and document the reason; do not record a completed soak or PASS. A second
+attempt that stays on does not by itself prove keepalive prevented cutoff.
+Record unknown or inconclusive when observations or captures are insufficient.
+Keep private observations private; review the privacy-filtered `report` and
+`export` output before sharing it, and keep identifiers and tokens out of public
+evidence. The keepalive/cutoff relationship remains unresolved until repeated,
+route-specific physical testing establishes it.
 
 `run --suite read-only` also requests an admin-only runtime capability snapshot
 for the selected loaded entry. Without admin access, capability evidence is
@@ -231,20 +286,20 @@ confirmation remains inconclusive. The evidence is not build-level HIL
 qualification.
 
 ```bash
-python -m scripts.hil --device 1 run --suite recovery
-python -m scripts.hil --device 1 run --suite outputs
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_dc_cycle
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_light_cycle
-python -m scripts.hil --device 1 run --suite outputs --scenario-id output_car_charger_cycle
-python -m scripts.hil --device 1 run --suite settings --scenario-id settings_work_mode
-python -m scripts.hil --device 1 run --suite settings --scenario-id settings_eco_timeout
+python -m scripts.hil run --device 1 --suite recovery
+python -m scripts.hil run --device 1 --suite outputs
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_dc_cycle
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_light_cycle
+python -m scripts.hil run --device 1 --suite outputs --scenario-id output_car_charger_cycle
+python -m scripts.hil run --device 1 --suite settings --scenario-id settings_work_mode
+python -m scripts.hil run --device 1 --suite settings --scenario-id settings_eco_timeout
 ```
 
 Each guided run writes private `scenarios.json` and `checkpoint.json` files
 after steps. To resume a recovery observation, pass the existing run folder:
 
 ```bash
-python -m scripts.hil --device 1 run --suite recovery \
+python -m scripts.hil run --device 1 --suite recovery \
   --resume hil-results/2026-11-07T01-00-00Z_0123456789abcdef
 ```
 
