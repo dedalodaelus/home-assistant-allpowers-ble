@@ -53,6 +53,34 @@ def _capture_fixture(
     relative = f"tests/hil/fixtures/{name}.jsonl"
     target = tmp_path / relative
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    def frame_for(operation: str, direction: str) -> str:
+        if direction == "notify":
+            data = bytes.fromhex("A5 65 B1 00 01 08 01 00 64 00 00 00 00 00 00 00")
+        elif operation in {"stale_timeout_recovery", "reconnect_failover"}:
+            return validator.STATUS_REQUEST.hex()
+        elif operation in {"eco_mode", "work_mode", "eco_timeout", "car_charger"}:
+            setting_flags = {
+                "eco_mode": 0x01,
+                "work_mode": 0x00,
+                "eco_timeout": 0x00,
+                "car_charger": 0x00,
+            }[operation]
+            data = bytes(
+                (0xA5, 0x65, 0x00, 0xB1, 0x01, 0x02, 0x02, setting_flags, 0x01, 0x00)
+            )
+        elif operation in {"ac_output", "dc_output", "light_output"}:
+            output_flag = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[
+                operation
+            ]
+            data = bytes((0xA5, 0x65, 0x00, 0xB1, 0x01, 0x01, 0x00, output_flag, 0x00))
+        else:
+            data = bytes.fromhex("A5 65 00 B1 01 01 00 03 00")
+        checksum = 0
+        for byte in data[:-1]:
+            checksum ^= byte
+        return (data[:-1] + bytes((checksum,))).hex()
+
     rows = [
         {
             "route": route,
@@ -64,8 +92,25 @@ def _capture_fixture(
             "operation_id": scenario,
             "captured_at": captured_at,
             "scenario": scenario,
-            "direction": "notify" if scenario == "golden_vector_replay" else "write",
-            "frame_hex": "AA550E00107A0102005A6BC1000000",
+            "direction": "write"
+            if scenario
+            in {
+                "rapid_consecutive_writes",
+                "stale_timeout_recovery",
+                "reconnect_failover",
+            }
+            else "notify",
+            "frame_hex": frame_for(
+                scenario,
+                "write"
+                if scenario
+                in {
+                    "rapid_consecutive_writes",
+                    "stale_timeout_recovery",
+                    "reconnect_failover",
+                }
+                else "notify",
+            ),
             "verdict": verdict,
             "physical_outcome": "fail" if verdict == "fail" else "pass",
         }
@@ -86,8 +131,17 @@ def _capture_fixture(
                 "operation_id": capability,
                 "captured_at": captured_at,
                 "capability": capability,
+                "requested_state": {
+                    "ac_output": True,
+                    "dc_output": True,
+                    "light_output": True,
+                    "eco_mode": True,
+                    "work_mode": 0,
+                    "eco_timeout": 1,
+                    "car_charger": False,
+                }[capability],
                 "direction": "observe" if is_na else "write",
-                "frame_hex": "AA550E00107A0102005A6BC1000000",
+                "frame_hex": frame_for(capability, "write"),
                 "verdict": "not_applicable" if is_na else verdict,
                 "physical_outcome": "not_applicable"
                 if is_na
@@ -98,6 +152,165 @@ def _capture_fixture(
         )
     target.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     return relative
+
+
+def test_protocol_capture_validation_checks_documented_frames() -> None:
+    assert validator._valid_protocol_frame(
+        "a56500b10101000372", "write", "rapid_consecutive_writes"
+    )
+    assert validator._valid_protocol_frame(
+        "a565b10001080100640000000000001d", "notify", "golden_vector_replay"
+    )
+    assert validator._valid_protocol_frame(
+        "a56500b1010202010170", "write", "eco_mode", requested_state=True
+    )
+    preserved_unknown_bit = _with_xor_checksum(
+        bytes.fromhex("A5 65 00 B1 01 02 02 81 01")
+    ).hex()
+    assert validator._valid_protocol_frame(
+        preserved_unknown_bit, "write", "eco_mode", requested_state=True
+    )
+    reserved_mode = _with_xor_checksum(
+        bytes.fromhex("A5 65 00 B1 01 02 02 06 01")
+    ).hex()
+    assert not validator._valid_protocol_frame(
+        reserved_mode, "write", "work_mode", requested_state=3
+    )
+    assert not validator._valid_protocol_frame(
+        "AA550E00107A0102005A6BC1000000", "notify", "golden_vector_replay"
+    )
+    assert not validator._valid_protocol_frame(
+        "a565b1000108010064000000000000", "notify", "golden_vector_replay"
+    )  # declared length does not match
+    assert not validator._valid_protocol_frame(
+        "a565b100010801006400000000000001", "notify", "golden_vector_replay"
+    )  # invalid checksum
+    assert not validator._valid_protocol_frame(
+        "a565b100010804006400000000000018", "notify", "golden_vector_replay"
+    )  # unsupported command
+    assert not validator._valid_protocol_frame(
+        "a565b10001080100640000000000001d", "write", "golden_vector_replay"
+    )  # notification cannot prove a write
+    assert not validator._valid_protocol_frame(
+        "a56500b10101000372", "write", "soak_24h"
+    )  # unrelated operation
+
+
+@pytest.mark.parametrize(
+    "capability,mutation",
+    [
+        ("eco_mode", "frame_targets_other_field"),
+        ("eco_timeout", "unsupported_timeout"),
+        ("ac_output", "unsupported_transition"),
+    ],
+)
+def test_strict_gate_rejects_capability_frame_false_positives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+    mutation: str,
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "local_adapter", f"invalid-{mutation}", captured_at)
+    capture_path = tmp_path / run["evidence"][0]
+    rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
+    row = next(item for item in rows if item.get("capability") == capability)
+    if mutation == "frame_targets_other_field":
+        data = bytes.fromhex("A5 65 00 B1 01 02 02 02 01")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
+    elif mutation == "unsupported_timeout":
+        data = bytes.fromhex("A5 65 00 B1 01 02 02 00 03")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
+    else:
+        data = bytes.fromhex("A5 65 00 B1 01 01 00 01")
+        row["frame_hex"] = _with_xor_checksum(data).hex()
+    capture_path.write_text(
+        "".join(json.dumps(item) + "\n" for item in rows), encoding="utf-8"
+    )
+    digest = _digest_manifest(tmp_path, run["evidence"])
+    for result in [*run["scenarios"].values(), *run["write_capabilities"].values()]:
+        result["physical_review"]["evidence_sha256"] = digest
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix = _matrix([run])
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+
+    assert any(capability in error and "capture row" in error for error in errors)
+
+
+def _with_xor_checksum(data: bytes) -> bytes:
+    checksum = 0
+    for byte in data:
+        checksum ^= byte
+    return data + bytes((checksum,))
+
+
+def test_strict_gate_rejects_undocumented_protocol_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "local_adapter", "unsupported-model", captured_at)
+    matrix = _matrix([run])
+    revision = matrix["revisions"][0]
+    revision.update({"id": "ap-r1500-hw03", "model": "AP R1500"})
+
+    capture_path = tmp_path / run["evidence"][0]
+    rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
+    for row in rows:
+        row["revision_id"] = revision["id"]
+    capture_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    digest = _digest_manifest(tmp_path, run["evidence"])
+    for result in [*run["scenarios"].values(), *run["write_capabilities"].values()]:
+        result["physical_review"]["evidence_sha256"] = digest
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("unsupported protocol profile" in error for error in strict_errors)
+
+    non_strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=30
+    )
+    assert not any(
+        "unsupported protocol profile" in error for error in non_strict_errors
+    )
+
+
+def test_strict_pass_rejects_scoped_reviewed_aa55_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    run = _qualified_run(tmp_path, "local_adapter", "aa55-run", captured_at)
+    capture_path = tmp_path / run["evidence"][0]
+    rows = [json.loads(line) for line in capture_path.read_text().splitlines()]
+    rows[0]["frame_hex"] = "AA550E00107A0102005A6BC1000000"
+    capture_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    digest = _digest_manifest(tmp_path, run["evidence"])
+    for result in [*run["scenarios"].values(), *run["write_capabilities"].values()]:
+        result["physical_review"]["evidence_sha256"] = digest
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix = _matrix([run])
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+
+    assert any(
+        "golden_vector_replay" in error and "capture row" in error for error in errors
+    )
 
 
 def _qualified_run(
@@ -204,7 +417,7 @@ def _matrix(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "revisions": [
             {
                 "id": "r600-hw03",
-                "model": "R600",
+                "model": "ALLPOWERS R600",
                 "hardware_version": "0.3",
                 "raw_hardware_version": "0x03",
                 "privacy_review": "pass",

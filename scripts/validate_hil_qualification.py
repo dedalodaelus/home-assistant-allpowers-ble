@@ -42,6 +42,130 @@ REQUIRED_WRITE_CAPABILITIES = (
     "car_charger",
 )
 MAC_ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
+PROTOCOL_HEADER = bytes((0xA5, 0x65))
+STATUS_REQUEST = bytes.fromhex("A5 65 B1 00 01 06 01 00 00 00 00 00")
+VALID_ECO_TIMEOUTS = frozenset((1, 2, 4, 6))
+SUPPORTED_PROTOCOL_PROFILES = {
+    ("ALLPOWERS R600", "r600-hw03", "0.3", "0x03"),
+    ("VOLIX P1800", "volix-p1800-hw03", "0.3", "0x03"),
+}
+
+
+def _valid_protocol_frame(
+    frame_hex: str,
+    direction: Any,
+    operation: str,
+    requested_state: Any = None,
+) -> bool:
+    """Validate documented R600 notification and outbound GATT frame forms."""
+    try:
+        frame = bytes.fromhex(frame_hex)
+    except ValueError:
+        return False
+    if len(frame) < 8 or frame[:2] != PROTOCOL_HEADER:
+        return False
+
+    if direction == "write" and frame == STATUS_REQUEST:
+        return operation in {"stale_timeout_recovery", "reconnect_failover"}
+    if _xor(frame) != 0:
+        return False
+
+    if direction == "notify":
+        if frame[5] > 128 or len(frame) != 8 + frame[5]:
+            return False
+        command, payload = frame[6], frame[7:-1]
+        if command == 0x01:
+            valid = len(payload) >= 8 and payload[1] <= 100
+        elif command == 0x03:
+            valid = len(payload) >= 6
+        elif command == 0x35:
+            try:
+                payload.rstrip(b"\x00").decode("utf-8")
+                valid = True
+            except UnicodeDecodeError:
+                valid = False
+        else:
+            return False
+        return valid and operation in {
+            "golden_vector_replay",
+            "reconnect_failover",
+            "stale_timeout_recovery",
+            "soak_24h",
+            "upgrade_reload",
+            "vendor_app_contention",
+        }
+
+    if direction != "write":
+        return False
+    # The observed status request is a special outbound envelope, distinct
+    # from notification frames and the normal command-write envelope.
+    if frame[2:5] != bytes((0x00, 0xB1, 0x01)):
+        return False
+    command, payload_length, payload = frame[5], frame[6], frame[7:-1]
+    if command == 0x01:
+        # Combined output control has an empty encoded payload length and one
+        # flags byte, as documented by encode_output_control().
+        if not (
+            len(frame) == 9
+            and payload_length == 0
+            and len(payload) == 1
+            and payload[0] & ~0x23 == 0
+        ):
+            return False
+        if operation not in {
+            "rapid_consecutive_writes",
+            "ac_output",
+            "dc_output",
+            "light_output",
+        }:
+            return False
+        if operation == "rapid_consecutive_writes":
+            return True
+        mask = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[operation]
+        return (
+            type(requested_state) is bool and bool(payload[0] & mask) is requested_state
+        )
+    if command == 0x02:
+        if not (
+            len(frame) == 8 + payload_length
+            and payload_length == 2
+            and len(payload) == 2
+            and ((payload[0] & 0x06) >> 1) != 0x03
+            and payload[1] in VALID_ECO_TIMEOUTS
+        ):
+            return False
+        if operation == "rapid_consecutive_writes":
+            return True
+        if operation == "eco_mode":
+            return (
+                type(requested_state) is bool
+                and bool(payload[0] & 0x01) is requested_state
+            )
+        if operation == "car_charger":
+            return (
+                type(requested_state) is bool
+                and bool(payload[0] & 0x10) is requested_state
+            )
+        if operation == "work_mode":
+            return (
+                type(requested_state) is int
+                and requested_state in {0, 1, 2}
+                and ((payload[0] & 0x06) >> 1) == requested_state
+            )
+        if operation == "eco_timeout":
+            return (
+                type(requested_state) is int
+                and requested_state in VALID_ECO_TIMEOUTS
+                and payload[1] == requested_state
+            )
+    return False
+
+
+def _xor(frame: bytes) -> int:
+    checksum = 0
+    for byte in frame:
+        checksum ^= byte
+    return checksum
 
 
 def parse_args() -> argparse.Namespace:
@@ -234,6 +358,12 @@ def _has_bound_capture(
             != ("not_applicable" if expected_verdict == "not_applicable" else "pass")
             or not isinstance(frame_hex, str)
             or re.fullmatch(r"(?:[0-9A-Fa-f]{2}){1,256}", frame_hex) is None
+            or not _valid_protocol_frame(
+                frame_hex,
+                row.get("direction"),
+                row.get("capability") if capability else row.get("scenario"),
+                row.get("requested_state") if capability else None,
+            )
         ):
             continue
         if capability:
@@ -387,11 +517,17 @@ def _validate_run(
     require_pass: bool,
     max_age_days: int,
     revision_id: str,
+    protocol_profile_supported: bool,
     feature_scope: str | None = None,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
         return None
+    if require_pass and not protocol_profile_supported:
+        _error(
+            errors,
+            f"{context} uses an unsupported protocol profile; strict PASS supports only documented R600/VOLIX P1800 HW 0.3 profiles",
+        )
     run_id = run.get("run_id")
     if not isinstance(run_id, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id
@@ -696,6 +832,15 @@ def _strict_candidate(run: Any) -> tuple[str, str, datetime] | None:
     return firmware, route, parsed.astimezone(UTC)
 
 
+def _supports_documented_protocol(revision: dict[str, Any]) -> bool:
+    return (
+        revision.get("model"),
+        revision.get("id"),
+        revision.get("hardware_version"),
+        revision.get("raw_hardware_version"),
+    ) in SUPPORTED_PROTOCOL_PROFILES
+
+
 def validate_matrix(
     payload: dict[str, Any],
     *,
@@ -731,6 +876,7 @@ def validate_matrix(
         if revision_id in seen_revisions:
             _error(errors, f"duplicate revision id: {revision_id}")
         seen_revisions.add(revision_id)
+        protocol_profile_supported = _supports_documented_protocol(revision)
         for field in ("model", "hardware_version", "raw_hardware_version"):
             if not isinstance(revision.get(field), str) or not revision[field].strip():
                 _error(
@@ -763,6 +909,7 @@ def validate_matrix(
                 require_pass=False,
                 max_age_days=max_age_days,
                 revision_id=revision_id,
+                protocol_profile_supported=protocol_profile_supported,
             )
             if run_id is not None:
                 if run_id in seen_runs:
@@ -895,6 +1042,7 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            protocol_profile_supported=protocol_profile_supported,
                             feature_scope=feature_scope,
                         )
             else:
@@ -953,6 +1101,7 @@ def validate_matrix(
                             require_pass=True,
                             max_age_days=max_age_days,
                             revision_id=revision_id,
+                            protocol_profile_supported=protocol_profile_supported,
                         )
         summaries.append(
             f"{revision_id}: {len(runs)} scoped run(s), "
