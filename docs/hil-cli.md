@@ -156,6 +156,101 @@ unset HA_HIL_TOKEN
 
 If `doctor` exits 2 because the optional freshness sensor is disabled, that means **insufficient evidence**, not a failed device. `run` still saves the read-only snapshot.
 
+## Keep a 24-hour soak observable across terminal disconnects
+
+The soak command runs in the foreground. Keep it in a terminal multiplexer on
+the **same machine where Python and the CLI process run**. For a remote Debian
+host, that means `tmux` on the Debian host, inside the SSH session. Detaching
+or losing the SSH client is harmless only while the server-side tmux session
+and soak process continue running. It does not protect against a process exit,
+host shutdown/reboot, host sleep, or Home Assistant outage.
+
+### Linux, macOS, or remote Debian with tmux
+
+Install `tmux` using the operating system's package manager if it is not already
+installed. From the repository checkout, create a named session:
+
+```bash
+tmux new -s allpowers-soak
+```
+
+In the tmux shell, enter the checkout and prepare the isolated CLI environment
+(skip the venv and install commands if it is already prepared):
+
+```bash
+cd /path/to/home-assistant-allpowers-ble
+python3.14 -m venv .venv-hil
+source .venv-hil/bin/activate
+python -m pip install -r requirements_hil.txt
+export HA_HIL_URL=https://home-assistant.example:8123
+read -rs -p "HA long-lived token: " HA_HIL_TOKEN; echo
+export HA_HIL_TOKEN
+python -m scripts.hil run --non-interactive --device 1 --suite soak-24h
+unset HA_HIL_TOKEN
+```
+
+The hidden prompt does not echo the token or put it in shell history. Do not
+replace it with a literal in a command, `.env` file, or shell startup file. Once
+the soak starts, detach with **Ctrl-b**, then **d**. Reconnect to the same host
+and run `tmux attach -t allpowers-soak` to inspect or reattach. Closing the SSH
+client after detaching leaves the remote process running; closing the local
+terminal before detaching may interrupt it. Keep the host awake and the tmux
+session alive for the entire segment.
+
+### Windows using WSL2
+
+Use WSL2 with the repository checkout, Python 3.14 environment, and `tmux` all
+inside the same Linux distribution. Do not run Python in Windows while trying
+to keep it alive with a tmux server in WSL. Install tmux in the distribution
+(for Ubuntu, `sudo apt install tmux`), open the repository in WSL, and follow
+the Linux workflow above. Start `tmux new -s allpowers-soak` from that WSL
+shell. Detach with **Ctrl-b**, then **d**; later open the same distribution and
+use `tmux attach -t allpowers-soak` to reconnect.
+
+Closing Windows Terminal after detaching is safe only while the WSL2
+distribution remains running. `wsl --shutdown`, shutting down or restarting
+Windows, or otherwise stopping the distribution kills the process; Windows
+sleep pauses execution and breaks wall-clock continuity. Keep the computer
+awake, on power, and the WSL2 distribution running. A process exit or any such
+interruption ends that segment; resuming starts another segment and cannot
+make one continuous 24-hour PASS. The supported Windows instructions here are
+for WSL2; native PowerShell background execution is not documented as a
+supported persistent-run method.
+
+### Progress, checkpoint, and report
+
+The command prints its progress in the attached terminal. The default output
+root is `hil-results/` in the checkout. A run has a UTC timestamp and random
+identifier, and its local checkpoint is
+`hil-results/<run-name>/private/checkpoint.json`; the adjacent
+`scenarios.json` records segment outcomes. These files are private local
+evidence: do not commit or share `hil-results/`. Inspect progress by attaching
+to tmux; inspect a checkpoint with a local text/JSON viewer, without copying it
+into a public issue.
+
+After completion or interruption, generate the sanitized report and optional
+public ZIP from the run's private directory:
+
+```bash
+python -m scripts.hil report hil-results/<run-name>/private
+python -m scripts.hil export hil-results/<run-name>/private
+```
+
+Review `public/report.md` and the export preview before manually sharing the
+public ZIP. If continuing an interrupted soak, first use a fresh, verified HA
+connection and the same selected device, then explicitly resume the run:
+
+```bash
+python -m scripts.hil run --non-interactive --device 1 --suite soak-24h --resume hil-results/<run-name>/private
+```
+
+The checkpoint records a restart discontinuity and the resumed observation is
+a new segment. SSH client disconnection alone does not create a discontinuity
+when tmux and the process remain alive on the remote host. A stopped process,
+sleep/reboot, or HA interruption does; no resumed segments can be combined to
+claim one uninterrupted 24-hour PASS. The observer is read-only, and surviving
+an SSH disconnect or producing a report does not itself imply HIL PASS.
+
 ## Verification
 
 ## Guided scenario runner (#230)
