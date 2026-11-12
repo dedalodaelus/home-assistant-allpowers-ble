@@ -185,7 +185,7 @@ Each independently sourced JSONL row should be a sanitized object with:
 For strict qualification, each row must exactly match the matrix revision,
 firmware, run ID, session ID, build fingerprint, capture timestamp, and observed
 route. `operation_id` must match the scenario or capability key. A scenario row
-must have a `write` or `notify` direction, a valid frame, and `verdict: "ok"`
+must have a `write` or `notify` direction, a protocol-valid frame, and `verdict: "ok"`
 plus `physical_outcome: "pass"`. A capability PASS row must match its
 capability key and use `direction: "write"`. A physically absent capability
 does not need a GATT capture: record `feature_presence: "absent"` with reviewed
@@ -196,10 +196,20 @@ bind a claim to a specific run and capture record. They do not cryptographically
 authenticate where a file came from; independent physical evidence review
 remains required.
 
-Example row:
+The offline validator checks the `A5 65` header, complete-frame XOR checksum,
+declared length, supported command, direction, and compatibility with the claimed
+operation. Notifications use the documented envelope at offsets 5 and 6 and
+known status (`0x01`), settings (`0x03`), or device-name (`0x35`) forms. Writes
+use the documented outbound envelope for output control (`0x01`) and settings
+control (`0x02`); the observed status request is checked against its exact known
+bytes because that request form does not use the notification XOR envelope.
+These checks do not authenticate physical provenance or replace independent
+physical evidence review.
+
+Example row with a documented output-control write frame:
 
 ```json
-{"route":"local_adapter","revision_id":"r600-hw03","firmware_version":"1.1","run_id":"r600-hw03-fw11-local-20261109","session_id":"hil-session-20261109-a","build_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","captured_at":"2026-11-09T12:00:00+00:00","scenario":"rapid_consecutive_writes","operation_id":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
+{"route":"local_adapter","revision_id":"r600-hw03","firmware_version":"1.1","run_id":"r600-hw03-fw11-local-20261109","session_id":"hil-session-20261109-a","build_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","captured_at":"2026-11-09T12:00:00+00:00","scenario":"rapid_consecutive_writes","operation_id":"rapid_consecutive_writes","direction":"write","frame_hex":"A56500B10101000372","verdict":"ok","physical_outcome":"pass"}
 ```
 
 Do not describe a synthetic frame made with the project's checksum helper or a
