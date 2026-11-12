@@ -155,6 +155,8 @@ def execute_transaction_safety_simulation(output_root: Path) -> int:
                 "-m",
                 "pytest",
                 "-q",
+                "-p",
+                "no:homeassistant",
                 "--junitxml",
                 str(report_path),
                 "-k",

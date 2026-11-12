@@ -71,6 +71,13 @@ jobs:
               --cov-report=term-missing
               --cov-report=xml:coverage.xml
 
+          - name: HIL transaction-safety completeness gate
+            env:
+              USE_REAL_HOMEASSISTANT: "0"
+            run: >-
+              python -m scripts.hil run --suite transaction-safety --simulate
+              --output-root .pytest-tmp-transaction-safety --non-interactive
+
           - name: Config flow coverage gate
             env:
               COVERAGE_FILE: .coverage.config-flow
