@@ -162,7 +162,7 @@ def test_route_is_required_for_writes_but_not_bronze_read_only_probe() -> None:
     )
 
 
-def test_gold_marks_minimum_outputs_not_applicable_when_all_are_absent() -> None:
+def test_gold_minimum_output_remains_blocked_when_all_outputs_are_absent() -> None:
     profile_id = "ap-r1500-lite-hw-0.1-evidence"
     capabilities = _capabilities(profile_id)
     for feature in ("ac_output", "dc_output", "light_output"):
@@ -173,7 +173,31 @@ def test_gold_marks_minimum_outputs_not_applicable_when_all_are_absent() -> None
     )
 
     requirement = _steps(plan)["minimum_output_requirement"]
-    assert requirement["eligibility"] == "not_applicable"
+    assert requirement["eligibility"] == "blocked"
     assert requirement["reasons"] == [
-        "no basic physical output applies to this profile"
+        "tier requires a basic output PASS; all declared outputs are absent"
+    ]
+
+
+def test_present_authorized_output_requirement_waits_for_route_and_pass() -> None:
+    profile_id = "ap-r1500-lite-hw-0.1-evidence"
+    capabilities = _capabilities(profile_id)
+    capabilities["features"]["ac_output"]["physical_presence"] = "present"
+    capabilities["features"]["ac_output"]["production_authorized"] = True
+    controls = _controls(profile_id)
+    controls["ac_output"]["eligible"] = True
+
+    plan = build_tier_plan("silver", capabilities, controls, observed_route=None)
+
+    steps = _steps(plan)
+    assert steps["ac_output_cycle"]["eligibility"] == "blocked"
+    assert (
+        "connected GATT route has not been verified"
+        in steps["ac_output_cycle"]["reasons"]
+    )
+    requirement = steps["minimum_output_requirement"]
+    assert requirement["eligibility"] == "eligible"
+    assert requirement["outcome"] == "pending"
+    assert requirement["reasons"] == [
+        "minimum output requirement awaits a reviewed output PASS"
     ]

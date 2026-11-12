@@ -394,6 +394,89 @@ def test_tier_plan_export_drops_unrecognized_sensitive_reason(tmp_path: Path) ->
     verify_public_archive(archive)
 
 
+def test_tier_plan_export_and_verifier_reject_forged_pass(tmp_path: Path) -> None:
+    plan = {
+        "schema_version": 1,
+        "requested_tier": "bronze",
+        "attained_tier": None,
+        "review_state": "pending",
+        "device": {
+            "model": "R600",
+            "hardware_revision": "0.3",
+            "firmware_revision": "1.1",
+            "verified_route": None,
+        },
+        "operator_actions_estimate": 1,
+        "steps": [
+            {
+                "id": "read_only_probe",
+                "feature": "telemetry",
+                "eligibility": "eligible",
+                "outcome": "pending",
+                "reasons": [],
+                "human_review": "pending",
+            }
+        ],
+    }
+    run = write_run(
+        tmp_path,
+        "forged-private-tier-pass",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+            "test_plan": {
+                **plan,
+                "steps": [
+                    {
+                        **plan["steps"][0],
+                        "outcome": "pass",
+                        "human_review": "accepted",
+                    }
+                ],
+            },
+        },
+    )
+
+    private_forgery_archive = export_archive(run, confirmed=True)
+    with zipfile.ZipFile(private_forgery_archive) as exported:
+        public = {name: exported.read(name) for name in exported.namelist()}
+    public_session = json.loads(public["public/session.json"])
+    assert "test_plan" not in public_session["data"]
+    verify_public_archive(private_forgery_archive)
+
+    pending_run = write_run(
+        tmp_path,
+        "public-tier-pass-verifier",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": "1123456789abcdef",
+            "qualification_status": "inconclusive",
+            "test_plan": plan,
+        },
+    )
+    pending_archive = export_archive(pending_run, confirmed=True)
+    with zipfile.ZipFile(pending_archive) as exported:
+        forged_session = json.loads(exported.read("public/session.json"))
+    # Start with a valid public plan, then forge a PASS and human review.
+    forged_session["data"]["test_plan"]["steps"][0]["outcome"] = "pass"
+    forged_session["data"]["test_plan"]["steps"][0]["human_review"] = "accepted"
+    forged_archive = tmp_path / "forged-public-tier-pass.zip"
+    _rewrite_archive_members(
+        pending_archive,
+        forged_archive,
+        {
+            "session.json": (
+                json.dumps(forged_session, sort_keys=True, indent=2) + "\n"
+            ).encode()
+        },
+    )
+    with pytest.raises(HAAPIError, match="Invalid public guided tier plan"):
+        verify_public_archive(forged_archive)
+
+
 def test_environment_export_rejects_embedded_ip_and_hostname_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

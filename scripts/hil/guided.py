@@ -164,17 +164,34 @@ def build_tier_plan(
             "manual",
             ["checkpoint", "verified route", "physical confirmation"],
         )
-    present_outputs = [
-        step
-        for step in steps
-        if step["feature"] in _OUTPUTS and step["eligibility"] == "eligible"
-    ]
-    if tier in {"silver", "gold"} and not present_outputs:
-        output_presence = [
-            (feature_map.get(feature) or {}).get("physical_presence", "unknown")
+    if tier in {"silver", "gold"}:
+        output_facts = [
+            feature_map.get(feature)
+            if isinstance(feature_map.get(feature), dict)
+            else {}
             for feature in _OUTPUTS
         ]
+        output_presence = [
+            facts.get("physical_presence", "unknown") for facts in output_facts
+        ]
+        has_qualifying_output = any(
+            facts.get("physical_presence") == "present"
+            and (
+                facts.get("production_authorized") is True
+                or facts.get("candidate_hil_eligible") is True
+            )
+            for facts in output_facts
+        )
         all_absent = all(value == "absent" for value in output_presence)
+        requirement_reason = (
+            "minimum output requirement awaits a reviewed output PASS"
+            if has_qualifying_output
+            else (
+                "tier requires a basic output PASS; all declared outputs are absent"
+                if all_absent
+                else "no present, production-authorized or reviewed candidate output is available"
+            )
+        )
         steps.append(
             {
                 "id": "minimum_output_requirement",
@@ -182,15 +199,9 @@ def build_tier_plan(
                 "action": "requirement",
                 "original_state": None,
                 "target_state": None,
-                "eligibility": "not_applicable" if all_absent else "blocked",
+                "eligibility": "eligible" if has_qualifying_output else "blocked",
                 "outcome": "pending",
-                "reasons": [
-                    (
-                        "no basic physical output applies to this profile"
-                        if all_absent
-                        else "at least one present, authorized basic output is required"
-                    )
-                ],
+                "reasons": [requirement_reason],
                 "required_evidence": [],
                 "human_review": "pending",
             }

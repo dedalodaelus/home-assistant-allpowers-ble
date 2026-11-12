@@ -837,8 +837,9 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "control state is unavailable",
         "fresh same-session capability preflight is not ready",
         "connected GATT route has not been verified",
-        "no basic physical output applies to this profile",
-        "at least one present, authorized basic output is required",
+        "minimum output requirement awaits a reviewed output PASS",
+        "tier requires a basic output PASS; all declared outputs are absent",
+        "no present, production-authorized or reviewed candidate output is available",
     }
     safe_step_ids = {
         "read_only_probe",
@@ -880,9 +881,8 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
             not isinstance(step.get("id"), str)
             or step["id"] not in safe_step_ids
             or step.get("eligibility") not in {"eligible", "blocked", "not_applicable"}
-            or step.get("outcome")
-            not in {"pending", "pass", "fail", "inconclusive", "not_applicable"}
-            or step.get("human_review") not in {"pending", "accepted", "rejected"}
+            or step.get("outcome") != "pending"
+            or step.get("human_review") != "pending"
             or not isinstance(step.get("reasons"), list)
             or not all(
                 isinstance(reason, str) and reason in safe_reasons
