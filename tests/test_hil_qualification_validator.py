@@ -465,6 +465,67 @@ def test_strict_age_is_non_expiring_unless_audit_requested(
     assert any("evidence is stale" in item for item in errors) is (age_days > 30)
 
 
+def test_cli_strict_age_is_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.combine(
+        datetime.now(UTC).date() - timedelta(days=90),
+        datetime.min.time(),
+        tzinfo=UTC,
+    )
+    run = _qualified_run(tmp_path, "local_adapter", "cli-90-day", captured_at)
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(_matrix([run])), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_hil_qualification.py",
+            "--matrix",
+            str(matrix_path),
+            "--require-pass",
+        ],
+    )
+    assert validator.main() == 0
+    assert "validation passed" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_hil_qualification.py",
+            "--matrix",
+            str(matrix_path),
+            "--require-pass",
+            "--max-age-days",
+            "30",
+        ],
+    )
+    assert validator.main() == 1
+    assert "evidence is stale" in capsys.readouterr().err
+
+
+def test_hil_workflow_uses_age_only_for_explicit_manual_audit() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "hil-qualification.yml"
+    ).read_text(encoding="utf-8")
+    assert 'default: ""' in workflow
+    assert 'if [[ -n "$HIL_MAX_AGE_DAYS" ]]; then' in workflow
+    assert 'ARGS+=(--max-age-days "$HIL_MAX_AGE_DAYS")' in workflow
+    assert "ARGS+=(--require-pass --max-age-days 30)" not in workflow
+    assert (
+        'elif [[ "${{ vars.REQUIRE_HIL_STABLE_GATE }}" == "true" ]]; then\n'
+        "            ARGS+=(--require-pass)\n" in workflow
+    )
+
+
 def test_require_pass_rejects_future_run_without_requiring_second_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -488,6 +549,11 @@ def test_require_pass_rejects_future_run_without_requiring_second_route(
     )
     assert any("captured_at is in the future" in item for item in errors)
     assert not any("missing strict route" in item for item in errors)
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any("captured_at is in the future" in item for item in errors)
 
 
 def test_strict_gate_uses_latest_eligible_run_and_ignores_imported_inconclusive(
