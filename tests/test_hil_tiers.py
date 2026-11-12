@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from scripts import validate_hil_qualification as validator
-from scripts.hil.tiers import evaluate_tiers
+from scripts.hil.tiers import evaluate_tiers, normalize_soak_evidence
 
 REVISION = {
     "id": "r600-hw03",
@@ -363,6 +363,72 @@ def _soak_artifact(
     return path
 
 
+def _runner_soak_artifact(
+    run: dict[str, Any], revision: dict[str, Any], root: Path
+) -> str:
+    scope = _scope(run, revision)
+    started = datetime.fromisoformat(run["captured_at"]) - timedelta(seconds=86400)
+    samples = [
+        {
+            "event": "sample",
+            "utc": (started + timedelta(seconds=300 * index)).isoformat(),
+            "elapsed_seconds": 300 * index,
+            "session_generation": 7,
+            "status_fresh": True,
+            "telemetry": {"battery": {"value": 50, "verified": True}},
+        }
+        for index in range(289)
+    ]
+    windows = [
+        {
+            "event": "trace_window",
+            "utc": (started + timedelta(seconds=3600 * index)).isoformat(),
+            "capture_id_present": True,
+            "observed_route": run["route"],
+            "complete": True,
+            "saved": True,
+        }
+        for index in range(1, 25)
+    ]
+    checkpoint = {
+        "schema_version": 2,
+        "scenario_id": "soak_24h_observation",
+        "qualification_status": "inconclusive",
+        "steps": [
+            {
+                "step_id": "soak_segment",
+                "segment": 1,
+                "outcome": "pass",
+                "segment_started_utc": started.isoformat(),
+                "ended_utc": run["captured_at"],
+                "measured_seconds": 86400,
+                "sample_count": len(samples),
+                "trace_count": len(windows),
+                "maximum_gap_seconds": 300,
+                "dropped_traces": 0,
+                "clock_discontinuities": 0,
+            }
+        ],
+    }
+    saved_traces = [
+        {
+            "complete": True,
+            "observed_route": run["route"],
+            "capture_id": f"capture-{index}",
+        }
+        for index in range(len(windows))
+    ]
+    rows = normalize_soak_evidence(scope, checkpoint, samples, windows, saved_traces)
+    path = f"tests/hil/fixtures/{run['run_id']}-normalized-runner-soak.jsonl"
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _matrix_fixture(
     root: Path,
     tier: str,
@@ -483,6 +549,11 @@ def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "bronze"
+    assert set(result["tiers"][0]["evidence_links"]) == {
+        path
+        for proof in matrix["revisions"][0]["runs"][0]["bronze_evidence"].values()
+        for path in proof["evidence"]
+    }
 
 
 def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(
@@ -541,6 +612,39 @@ def test_off_only_capture_does_not_satisfy_output_transition_pair(
     assert result["tiers"][0]["tier"] == "bronze"
 
 
+@pytest.mark.parametrize("action_stage", ["transition", "restoration"])
+def test_malformed_output_frame_on_claimed_row_cannot_borrow_other_valid_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action_stage: str
+):
+    matrix = _matrix_fixture(tmp_path, "silver")
+    revision = matrix["revisions"][0]
+    run = revision["runs"][0]
+    capture = run["evidence"][0]
+    path = tmp_path / capture
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        if (
+            row.get("capability") == "ac_output"
+            and row.get("action_stage") == action_stage
+        ):
+            row["frame_hex"] = "a56500b10101000200"
+            break
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    for records in (
+        run["bronze_evidence"],
+        run["scenarios"],
+        run["write_capabilities"],
+    ):
+        for item in records.values():
+            if capture in item.get("evidence", []):
+                item["physical_review"]["evidence_sha256"] = _digest(
+                    tmp_path, item["evidence"]
+                )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert any("transition lacks bound observation" in error for error in errors)
+    assert result["tiers"][0]["tier"] == "bronze"
+
+
 def test_gold_requires_reviewed_feature_restoration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -548,6 +652,37 @@ def test_gold_requires_reviewed_feature_restoration(
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
+
+
+def test_gold_rejects_malformed_restoration_row_even_with_other_valid_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    run = matrix["revisions"][0]["runs"][0]
+    capture = run["evidence"][0]
+    path = tmp_path / capture
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        if (
+            row.get("capability") == "eco_mode"
+            and row.get("action_stage") == "restoration"
+        ):
+            row["frame_hex"] = "a56500b10102020100"
+            break
+    path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    for records in (
+        run["bronze_evidence"],
+        run["scenarios"],
+        run["write_capabilities"],
+    ):
+        for item in records.values():
+            if capture in item.get("evidence", []):
+                item["physical_review"]["evidence_sha256"] = _digest(
+                    tmp_path, item["evidence"]
+                )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert any("safe-restoration evidence" in error for error in errors)
+    assert result["tiers"][0]["tier"] == "silver"
 
 
 def test_gold_rejects_restoration_without_bound_physical_capture(
@@ -641,6 +776,15 @@ def test_actual_complete_soak_artifact_can_earn_platinum(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     matrix = _matrix_fixture(tmp_path, "platinum")
+    revision = matrix["revisions"][0]
+    run = revision["runs"][0]
+    scenario = run["scenarios"]["soak_24h"]
+    soak = _runner_soak_artifact(run, revision, tmp_path)
+    scenario["evidence"].append(soak)
+    scenario["physical_review"]["evidence_sha256"] = _digest(
+        tmp_path, scenario["evidence"]
+    )
+    scenario["physical_review"]["soak_artifact"] = soak
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "platinum"

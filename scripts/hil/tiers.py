@@ -239,6 +239,117 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
     )
 
 
+def normalize_soak_evidence(
+    scope: dict[str, Any],
+    checkpoint: dict[str, Any],
+    sample_rows: list[dict[str, Any]],
+    trace_windows: list[dict[str, Any]],
+    saved_traces: list[dict[str, Any]],
+    *,
+    allowed_gap_seconds: int = 600,
+) -> list[dict[str, Any]]:
+    """Normalize a completed runner checkpoint and its private soak files."""
+    steps = checkpoint.get("steps")
+    if (
+        checkpoint.get("schema_version") != 2
+        or checkpoint.get("scenario_id") != "soak_24h_observation"
+        or not isinstance(steps, list)
+        or len(steps) != 1
+    ):
+        raise ValueError("soak checkpoint must contain one uninterrupted segment")
+    step = steps[0]
+    if (
+        not isinstance(step, dict)
+        or step.get("step_id") != "soak_segment"
+        or step.get("outcome") != "pass"
+        or step.get("restart_discontinuity") is True
+        or step.get("data_limit_hit") is True
+        or step.get("dropped_traces") != 0
+        or step.get("clock_discontinuities") != 0
+    ):
+        raise ValueError("soak checkpoint does not prove a clean passing segment")
+    started = datetime.fromisoformat(step["segment_started_utc"].replace("Z", "+00:00"))
+    ended = datetime.fromisoformat(step["ended_utc"].replace("Z", "+00:00"))
+    if started.tzinfo is None or ended.tzinfo is None:
+        raise ValueError("soak checkpoint timestamps must include a timezone")
+    duration = (ended.astimezone(UTC) - started.astimezone(UTC)).total_seconds()
+    samples = [row for row in sample_rows if row.get("event") == "sample"]
+    windows = [row for row in trace_windows if row.get("event") == "trace_window"]
+    elapsed = [row.get("elapsed_seconds") for row in samples]
+    if (
+        duration < 86400
+        or step.get("measured_seconds", 0) < 86400
+        or step.get("sample_count") != len(samples)
+        or step.get("trace_count") != len(windows)
+        or len(samples) < 289
+        or len(windows) < 24
+        or any(
+            row.get("event")
+            in {
+                "process_restart_gap",
+                "session_generation_change",
+                "clock_discontinuity",
+                "trace_window_dropped",
+            }
+            for row in [*sample_rows, *trace_windows]
+        )
+        or any(type(value) not in (int, float) for value in elapsed)
+        or any(
+            later - earlier > allowed_gap_seconds
+            for earlier, later in zip(elapsed, elapsed[1:], strict=False)
+        )
+        or len(saved_traces) != len(windows)
+        or any(
+            row.get("saved") is not True
+            or row.get("complete") is not True
+            or row.get("capture_id_present") is not True
+            or row.get("observed_route") != scope["route"]
+            for row in windows
+        )
+        or any(
+            trace.get("complete") is not True
+            or trace.get("observed_route") != scope["route"]
+            or not isinstance(trace.get("capture_id"), str)
+            or not trace["capture_id"]
+            for trace in saved_traces
+        )
+    ):
+        raise ValueError("runner files do not substantiate the passing soak checkpoint")
+    scoped_samples = []
+    for row in samples:
+        if (
+            row.get("status_fresh") is not True
+            or not isinstance(row.get("telemetry"), dict)
+            or not any(
+                isinstance(value, dict) and value.get("verified") is True
+                for value in row["telemetry"].values()
+            )
+        ):
+            raise ValueError("soak contains a stale or unverified telemetry sample")
+        scoped_samples.append({**scope, **row})
+    scoped_windows = [{**scope, **window} for window in windows]
+    summary = {
+        **scope,
+        "event": "segment_summary",
+        "segment_started_utc": started.isoformat(),
+        "segment_ended_utc": ended.isoformat(),
+        "measured_seconds": duration,
+        "sample_count": len(scoped_samples),
+        "minimum_samples": 289,
+        "trace_count": len(scoped_windows),
+        "minimum_traces": 24,
+        "maximum_gap_seconds": step.get("maximum_gap_seconds"),
+        "allowed_gap_seconds": allowed_gap_seconds,
+        "dropped_traces": 0,
+        "clock_discontinuities": 0,
+        "outcome": "pass",
+        "resumed": False,
+        "interrupted": False,
+        "uninterrupted": True,
+    }
+    return [summary, *scoped_samples, *scoped_windows]
+
+
 def _review_record(item: dict[str, Any], outcome: str) -> bool:
     review = item.get("physical_review")
     if not isinstance(review, dict) or review.get("outcome") != outcome:
@@ -287,7 +398,11 @@ def _bronze_proof(
     ):
         return None
     if claim == "identity":
-        return artifact if artifact.get("identity_confirmed") is True else None
+        return (
+            {**artifact, "evidence": item["evidence"]}
+            if artifact.get("identity_confirmed") is True
+            else None
+        )
     if claim == "fresh_telemetry":
         if (
             artifact.get("fresh") is not True
@@ -296,7 +411,7 @@ def _bronze_proof(
             or artifact["sample_age_seconds"] > 60
         ):
             return None
-        return artifact
+        return {**artifact, "evidence": item["evidence"]}
     # An independently reviewed assertion cannot substitute for a real active
     # protocol probe. Require the existing route/session/build-bound GATT row.
     capture = item.get("capture_evidence")
@@ -314,7 +429,7 @@ def _bronze_proof(
         expected_verdict="ok",
     ):
         return None
-    return artifact
+    return {**artifact, "evidence": item["evidence"]}
 
 
 def _bound_capture(
@@ -323,6 +438,8 @@ def _bound_capture(
     revision: dict[str, Any],
     feature: str,
     state: Any,
+    *,
+    action_stage: str = "transition",
 ) -> bool:
     if not isinstance(path, str) or path not in run.get("evidence", []):
         return False
@@ -331,18 +448,23 @@ def _bound_capture(
     return bool(
         rows
         and any(
-            row.get("route") == run["route"]
-            and row.get("revision_id") == revision["id"]
-            and row.get("firmware_version") == run["firmware_version"]
-            and row.get("run_id") == run["run_id"]
-            and row.get("session_id") == run["session_id"]
-            and row.get("build_fingerprint") == run["build_fingerprint"]
-            and row.get("captured_at") == run["captured_at"]
-            and row.get("capability") == feature
-            and row.get("operation_id") == feature
-            and row.get("direction") == "write"
-            and row.get("requested_state") == requested_state
-            and row.get("verdict") == "ok"
+            hil_validation._valid_tier_capture_row(
+                row,
+                {
+                    "route": run["route"],
+                    "revision_id": revision["id"],
+                    "model": revision["model"],
+                    "hardware_revision": revision["hardware_version"],
+                    "firmware_version": run["firmware_version"],
+                    "run_id": run["run_id"],
+                    "session_id": run["session_id"],
+                    "build_fingerprint": run["build_fingerprint"],
+                    "captured_at": run["captured_at"],
+                },
+                feature,
+                requested_state,
+                action_stage,
+            )
             for row in rows
         )
     )
@@ -454,14 +576,13 @@ def _bound_restoration(
     rows = hil_validation._capture_rows([capture])
     return bool(
         rows
-        and _bound_capture(capture, run, revision, feature, restored_state)
-        and any(
-            row.get("capability") == feature
-            and row.get("operation_id") == feature
-            and row.get("requested_state") == restored_state
-            and row.get("action_stage") == "restoration"
-            and row.get("physical_outcome") == "pass"
-            for row in rows
+        and _bound_capture(
+            capture,
+            run,
+            revision,
+            feature,
+            restored_state,
+            action_stage="restoration",
         )
     )
 

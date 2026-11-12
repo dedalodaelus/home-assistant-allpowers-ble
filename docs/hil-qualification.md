@@ -466,9 +466,11 @@ scoped production evidence exists), evidence links, qualified features,
 exclusions, feature presence, and unmet requirements. A later independently
 reviewed failure supersedes an earlier PASS for that feature in that scope.
 
-Bronze requires three independently reviewed, file-hash-bound claims: confirmed
-identity, a route/session/build-bound active protocol probe, and fresh plausible
-telemetry. The evidence records must match the run's exact model/revision,
+Bronze requires three file-hash-bound claims: confirmed identity, a
+route/session/build-bound active protocol probe, and fresh plausible telemetry.
+All three may come from one captured session and be covered by one independent
+review; they do not require separate runs or reviews. The evidence records must
+match the run's exact model/revision,
 firmware, route, session, build fingerprint, and timestamp. The run itself must
 have complete capture provenance and a verified matching installed/checkout
 build. Incomplete captures and unverified builds cannot advance a tier.
@@ -490,8 +492,17 @@ disabled. Unknown inventory and free-form exclusion flags do not qualify.
 Platinum adds only a reviewed `soak_24h` evidence artifact containing one
 continuous, uninterrupted 86,400-second segment, at least 289 fresh telemetry
 samples, at least 24 complete saved route traces, allowed sample gaps, and no
-dropped traces, clock discontinuities, or restart. Short observations, resumed
-segments, and values copied only into matrix `details` do not qualify.
+dropped traces, clock discontinuities, or restart. The runner stores the
+checkpoint in `checkpoint.json`, samples and trace-window outcomes in
+`soak_samples_*.jsonl`, and each saved trace under
+`traces/soak_trace_*/trace.json`. Prepare the reviewed artifact with
+`scripts.hil.tiers.normalize_soak_evidence(scope, checkpoint, sample_rows,
+trace_windows, saved_traces)`, where the three row/metadata collections are
+parsed from those runner files. It accepts only one completed passing segment
+and returns JSONL rows for the existing tier validator. Include the source
+runner files and normalized JSONL in the reviewed result's evidence and digest.
+Short observations, resumed segments, and values copied only into matrix
+`details` do not qualify.
 
 An independently reviewed physical result from an `experimental_hil` run may
 contribute to the scoped evidence after review. The temporary grant itself does

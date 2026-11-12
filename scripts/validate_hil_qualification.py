@@ -1016,6 +1016,31 @@ def _tier_artifact(
     )
 
 
+def _valid_tier_capture_row(
+    row: Any,
+    scope: dict[str, Any],
+    feature: str,
+    requested_state: Any,
+    action_stage: str,
+) -> bool:
+    """Validate one physical write row, including its encoded target state."""
+    if not isinstance(row, dict):
+        return False
+    return bool(
+        all(row.get(key) == value for key, value in scope.items())
+        and row.get("capability") == feature
+        and row.get("operation_id") == feature
+        and row.get("action_stage") == action_stage
+        and type(row.get("requested_state")) is type(requested_state)
+        and row.get("requested_state") == requested_state
+        and row.get("direction") == "write"
+        and row.get("verdict") == "ok"
+        and row.get("physical_outcome") == "pass"
+        and isinstance(row.get("frame_hex"), str)
+        and _valid_protocol_frame(row["frame_hex"], "write", feature, requested_state)
+    )
+
+
 def _check_output_transitions(
     item: dict[str, Any],
     context: str,
@@ -1062,14 +1087,9 @@ def _check_output_transitions(
                 expected_verdict="ok",
             )
             and any(
-                all(row.get(key) == value for key, value in scope.items())
-                and row.get("capability") == feature
-                and row.get("operation_id") == feature
-                and row.get("requested_state") is expected_request
-                and row.get("action_stage") == "transition"
-                and row.get("direction") == "write"
-                and row.get("verdict") == "ok"
-                and row.get("physical_outcome") == "pass"
+                _valid_tier_capture_row(
+                    row, scope, feature, expected_request, "transition"
+                )
                 for row in rows
             )
         )
@@ -1154,14 +1174,7 @@ def _valid_restoration_capture(
             expected_verdict="ok",
         )
         and any(
-            all(row.get(key) == value for key, value in scope.items())
-            and row.get("capability") == feature
-            and row.get("operation_id") == feature
-            and row.get("requested_state") == restored_state
-            and row.get("action_stage") == "restoration"
-            and row.get("direction") == "write"
-            and row.get("verdict") == "ok"
-            and row.get("physical_outcome") == "pass"
+            _valid_tier_capture_row(row, scope, feature, restored_state, "restoration")
             for row in rows
         )
     )
