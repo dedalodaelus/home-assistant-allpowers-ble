@@ -89,12 +89,15 @@ sha256sum --check dist/allpowers_ble.zip.sha256
 - For stable promotion where HIL is mandatory, enforce the gate with
   `REQUIRE_HIL_STABLE_GATE=true` and run
   `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`.
-- The ordinary CI validator checks metadata offline; the strict gate requires
-  the newest fresh, complete, verified-build result for both supported routes
-  per firmware. A newer eligible failure supersedes an older pass; incomplete
-  and inconclusive imports do not. Scenarios require PASS; write capabilities
-  may use evidence-backed `not_applicable` with a rationale. Legacy results do
-  not qualify.
+- The ordinary CI validator checks matrix structure and evidence reviews offline.
+  The no-scope strict gate checks the newest fresh, complete, verified-build
+  result for every reported firmware and every route with eligible evidence; it
+  does not itself require both supported routes. If this release requires both
+  routes, verify that each firmware has eligible results on `local_adapter` and
+  `active_proxy` before approval. A newer eligible failure supersedes an older
+  pass; incomplete and inconclusive imports do not. Scenarios require PASS;
+  write capabilities may use evidence-backed `not_applicable` with a rationale.
+  Legacy results do not qualify.
 
 ## Publishing
 

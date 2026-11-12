@@ -3,37 +3,50 @@
 This runbook explains how to execute and document real hardware qualification for
 verified profiles.
 
-## Qualification matrix schema v2
+## Qualification matrix schema v3
 
-`tests/hil/qualification_matrix.json` uses schema v2. A revision describes the
-model and hardware revision; each item in its `runs` list is scoped to one
-firmware version, one observed BLE route, and one HIL run. A run records its
-timestamp when available, tool and installed integration versions, capture
-completeness, build verification (`verified`, `unverified`, or `mismatch`), an
-overall qualification status, scenario results, write-capability results, and
-links to sanitized evidence. Use `null` for firmware only when it is unknown;
-unknown firmware cannot qualify a run.
+`tests/hil/qualification_matrix.json` uses schema v3. A revision describes the
+model and exact hardware revision; each run records firmware, observed BLE
+route, run and session IDs, timestamp, verified build fingerprints, evidence,
+and authorization provenance. `feature_presence` records `present`, `absent`,
+or `unknown` separately from each write capability's outcome. Every declared
+physical PASS requires a reviewer record, including during default structural
+validation. PASS/FAIL review records and reviewed absence bind a deterministic
+`evidence_sha256` mapping from every referenced evidence path to its SHA-256.
+An absent feature requires a reviewer and physical evidence; it does not require
+a GATT operation for a control that is not present.
 
 Result statuses have distinct meanings:
 
 - `pending`: not yet evaluated;
 - `fail`: evidence demonstrates a failed result;
-- `not_applicable`: a write capability is absent on this model, with a recorded
-  rationale and evidence for that absence;
+- `not_applicable`: a feature is physically absent, with reviewed absence
+  evidence referenced by both `feature_presence` and the capability outcome;
 - `inconclusive`: evidence is missing, incomplete, or cannot establish an outcome;
 - `pass`: the scoped result is supported by its linked evidence.
 
-Strict mode selects the newest complete, dated, build-verified `pass` or `fail`
-run for each revision/firmware/route group. An inconclusive imported archive is
-kept as history and does not supersede a qualification run; a newer eligible
-physical failure supersedes an older pass. Every required scenario must pass.
-Each write capability must pass or have a justified `not_applicable` result
-with evidence for its absence. PASS/N/A evidence must contain a route- and
-operation-bound capture row; a generic note or a legacy `*.sample.jsonl` file
-cannot satisfy the gate.
+Strict per-feature mode selects one exact revision, firmware, observed route,
+and feature. For example:
 
-The v1 migration preserves each old revision and all its route, scenario, and
-write-capability values under `legacy_results`. These records are marked
+```bash
+python scripts/validate_hil_qualification.py --require-pass \
+  --revision r600-hw03 --firmware 1.1 --route active_proxy --feature ac_output
+```
+
+Only that feature/scope determines the requested verdict; pending results on
+other features, routes, revisions, and firmware do not block it. A requested
+`auto` route, scanner inventory, `mixed`, and `unverified` never qualify. A
+later reviewed FAIL supersedes an earlier PASS for the same feature/scope.
+Experimental HIL authorization and unknown provenance cannot qualify production
+results. PASS evidence must bind route, firmware, run, session, timestamp, and
+verified build fingerprint, and carry an independent physical-review record
+whose digest manifest matches every referenced evidence file. Malformed JSONL
+capture lines invalidate strict qualification. A ZIP import remains inconclusive.
+The no-scope `--require-pass` command remains the broader release gate.
+
+The v1/v2 migration preserves prior outcomes verbatim as unqualified history.
+V1 revisions and their route, scenario, and write-capability values remain under
+`legacy_results`; v2 run records move to `legacy_v2_runs`. These records are marked
 `unscoped_legacy`: v1 shared scenario/control results cannot be assigned to a
 route or firmware after the fact. Historical `na` values are retained verbatim
 in the source snapshot and normalized to `not_applicable` in the legacy outcome
@@ -76,13 +89,10 @@ authorizing an individual control. These tiers classify coverage and never
 authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
-These are accepted policy targets, not implemented behavior yet. The integration
-still uses grouped R600/VOLIX write flags. Follow-up work #266/#267 implements
-per-feature enforcement, #268 implements per-route qualification, #269 implements
-tier calculation, and #275 implements candidate grants. Until those changes land,
-the strict schema-v2 validator continues to require both supported routes for
-each firmware and enforces a 30-day maximum age by default. `--max-age-days N`
-overrides the default. Issue #273 tracks the planned opt-in, non-expiring policy.
+The v3 validator implements per-feature, per-revision, per-firmware, and
+per-observed-route results. Tier arithmetic remains tracked by #269; freshness
+policy remains tracked by #273. The existing 30-day maximum age is unchanged and
+can be configured with `--max-age-days N`.
 
 ## Scope
 
@@ -92,11 +102,9 @@ Use this process when you need to:
 - refresh stale HIL evidence before a stable release;
 - qualify a new hardware revision for write-capable support.
 
-For one newly proposed control, collect operation-specific evidence on one
-verified, actually observed route as required by ADR 0017. The two-route,
-full-scenario checklist below describes the current legacy strict-v2
-matrix/release procedure pending #268. It is not a prerequisite for each
-individual control or the accepted future support tiers.
+For one control, collect operation-specific evidence on one verified, actually
+observed route as required by ADR 0017. The broader release gate can be used
+separately when a release requires wider coverage.
 
 Use the [guided HIL CLI](hil-cli.md) to collect a run and make a public evidence
 ZIP. Read-only snapshots and guided software steps are useful review evidence;
@@ -112,8 +120,8 @@ must not be used to mark a physical qualification result `pass`.
 
 - One physical ALLPOWERS device for the target revision.
 - For one control's evidence, one verified, actually observed route is sufficient.
-- The current legacy strict-v2 matrix/release procedure requires both a local
-  Bluetooth adapter route and an active ESPHome Bluetooth Proxy route.
+- Select the target revision, firmware, observed route, and feature for strict
+  per-feature qualification.
 - A Home Assistant instance dedicated to testing (not production).
 - A local checkout of this repository with test dependencies installed.
 
@@ -138,15 +146,10 @@ logger:
     bleak_retry_connector: debug
 ```
 
-## 2. Capture evidence for the current strict-v2 matrix/release procedure
+## 2. Capture evidence for the selected qualification scope
 
-The existing strict schema-v2 validator requires the full scenario set in both
-lanes for each firmware. This is the current matrix/release procedure pending
-#268; it does not change ADR 0017's one-observed-route evidence boundary for an
-individual write control.
-
-- local_adapter
-- active_proxy
+Use the route that was actually connected and observed. Each feature result is
+scoped independently; evidence from one route cannot qualify another route.
 
 For each observed route, create a separate guided run and export its public ZIP
 using the steps in the [archive handoff example](#complete-archive-handoff-example).
@@ -169,30 +172,34 @@ sanitized fixture files under:
 Each independently sourced JSONL row should be a sanitized object with:
 
 - route: local_adapter or active_proxy
-- revision_id, firmware_version, run_id, and timezone-aware captured_at
+- revision_id, firmware_version, run_id, session_id, and timezone-aware captured_at
+- build_fingerprint: verified checkout/build SHA-256
+- operation_id: exact scenario or capability key
 - scenario: one required scenario name
 - direction: write or notify
 - frame_hex: payload bytes in hex
 - verdict: ok, timeout, reconnect, or rejected
-- physical_outcome: pass, fail, or not_applicable, based on the observed result
+- physical_outcome: pass or fail for the captured operation
 - capability: required for write-capability evidence; use the matrix key
 
 For strict qualification, each row must exactly match the matrix revision,
-firmware, run ID, and capture timestamp as well as its route. A scenario row
-must match the scenario key, have a `write` or `notify` direction, a valid
-frame, and `verdict: "ok"` plus `physical_outcome: "pass"`. A capability PASS
-row must match its capability key and use `direction: "write"`; a justified
-`not_applicable` row must use `direction: "observe"`,
-`verdict: "not_applicable"`, `physical_outcome: "not_applicable"`, and a matrix
-rationale. Changing the matrix timestamp cannot make an older capture current
-because the capture row retains its own timestamp. These checks bind a claim to
-a specific run and capture record. They do not cryptographically authenticate
-where a file came from; independent physical evidence review remains required.
+firmware, run ID, session ID, build fingerprint, capture timestamp, and observed
+route. `operation_id` must match the scenario or capability key. A scenario row
+must have a `write` or `notify` direction, a valid frame, and `verdict: "ok"`
+plus `physical_outcome: "pass"`. A capability PASS row must match its
+capability key and use `direction: "write"`. A physically absent capability
+does not need a GATT capture: record `feature_presence: "absent"` with reviewed
+physical evidence, and cite that evidence from the `not_applicable` capability
+result with a rationale. Changing the matrix timestamp cannot make an older
+capture current because the capture row retains its own timestamp. These checks
+bind a claim to a specific run and capture record. They do not cryptographically
+authenticate where a file came from; independent physical evidence review
+remains required.
 
 Example row:
 
 ```json
-{"route":"local_adapter","revision_id":"r600-hw03","firmware_version":"1.1","run_id":"r600-hw03-fw11-local-20261109","captured_at":"2026-11-09T12:00:00+00:00","scenario":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
+{"route":"local_adapter","revision_id":"r600-hw03","firmware_version":"1.1","run_id":"r600-hw03-fw11-local-20261109","session_id":"hil-session-20261109-a","build_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","captured_at":"2026-11-09T12:00:00+00:00","scenario":"rapid_consecutive_writes","operation_id":"rapid_consecutive_writes","direction":"write","frame_hex":"EE010B0000000000000000000000","verdict":"ok","physical_outcome":"pass"}
 ```
 
 Do not describe a synthetic frame made with the project's checksum helper or a
@@ -202,7 +209,8 @@ available; otherwise leave that requirement pending.
 
 ## 3. Execute the required scenario set
 
-Mark results in the matrix for all required scenarios:
+Keep the full scenario inventory visible in the matrix. `vendor_app_contention`
+is optional; it may remain pending or inconclusive without blocking qualification.
 
 - golden_vector_replay
 - reconnect_failover
@@ -254,15 +262,13 @@ The validator checks:
 - redaction failures such as raw Bluetooth MAC addresses.
 
 The default command validates structure and privacy while allowing pending and
-inconclusive results. It does not qualify hardware. `--require-pass` selects the
-newest eligible run for each firmware and route, checks freshness and capture
-bindings, and requires both supported routes for every non-empty firmware
-version recorded in the revision's scoped runs. Incomplete or inconclusive runs
-still put their reported firmware in scope, but do not count as route evidence.
-A newer eligible failure supersedes an older pass; incomplete or inconclusive
-imports do not supersede eligible results. Scenarios require PASS. Write
-capabilities allow PASS or evidence-backed `not_applicable` with a rationale.
-Unknown, partial, expired, or legacy results do not satisfy the gate.
+inconclusive results. It does not qualify hardware. The scoped command above
+checks only the selected revision/firmware/route/feature result. It requires
+explicit production provenance, complete captures, verified matching build
+fingerprints, exact session-bound capture records, and independent physical
+review. N/A relies on reviewed physical-absence evidence and never on an
+invented GATT capture. The global `--require-pass` form remains available for a
+release-wide check of all recorded revisions and scopes.
 
 ## 6. Privacy and publication rules
 
@@ -321,9 +327,10 @@ reviewed evidence can support per-route, per-firmware PASS results.
 ## Transaction safety regression
 
 Issue #197 has deterministic simulation coverage, not new physical qualification.
-For R600 hardware 0.3 / raw `0x03`, execute this checklist on both routes with
-noncritical test loads. Do not mark matrix scenarios passed without sanitized
-capture evidence, and do not automatically retry an ambiguous power command.
+For R600 hardware 0.3 / raw `0x03`, execute this checklist on the route selected
+for qualification with noncritical test loads. Do not mark matrix scenarios
+passed without reviewed physical evidence, and do not automatically retry an
+ambiguous power command.
 
 - Send AC on followed immediately by DC on without intervening matching telemetry:
   verify rejection of DC and absence of a second combined write on the wire.

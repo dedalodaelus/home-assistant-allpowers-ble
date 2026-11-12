@@ -13,7 +13,7 @@ import pytest
 from scripts.hil.api import HAAPIError
 from scripts.hil.evidence import export_archive
 from scripts.hil.importer import import_archive
-from scripts.hil.qualification import migrate_v1_to_v2
+from scripts.hil.qualification import migrate_v1_to_v3, migrate_v2_to_v3
 from scripts.hil.storage import write_run, write_scenario_progress
 from scripts.hil.trace import _save_private_trace
 
@@ -136,7 +136,7 @@ def _rewrite_capture_archive(
 
 def _matrix(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    matrix = migrate_v1_to_v2(
+    matrix = migrate_v1_to_v3(
         {
             "schema_version": 1,
             "generated_at": "2026-11-09",
@@ -158,6 +158,21 @@ def _matrix(path: Path) -> Path:
     result = path / "qualification_matrix.json"
     result.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
     return result
+
+
+def test_v2_migration_preserves_runs_as_unqualified_history() -> None:
+    source_run = {"run_id": "old", "qualification_status": "pass"}
+    migrated = migrate_v2_to_v3(
+        {
+            "schema_version": 2,
+            "generated_at": "2026-11-09",
+            "revisions": [{"id": "r", "runs": [source_run]}],
+        }
+    )
+
+    assert migrated["schema_version"] == 3
+    assert migrated["revisions"][0]["legacy_v2_runs"] == [source_run]
+    assert migrated["revisions"][0]["runs"] == []
 
 
 def _captured_archive(
@@ -310,6 +325,8 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
     assert imported["route"] == "unverified"
     assert imported["capture_completeness"] == "unknown"
     assert imported["build_verification"] == "mismatch"
+    assert imported["authorization_context"] == "unknown"
+    assert imported["authorization_context_source"] == "archive_unverified"
     assert imported["installed_commit"] is None
     assert all(
         result["status"] == "inconclusive" for result in imported["scenarios"].values()
