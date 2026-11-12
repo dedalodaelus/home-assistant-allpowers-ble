@@ -32,9 +32,6 @@ jobs:
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
       - name: Validate edited PR title
         if: github.event.action == 'edited' && github.event.changes.title != null
         uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
@@ -58,7 +55,6 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const { spawnSync } = require("node:child_process");
             // Resolve repository/PR context from the event payload.
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -287,6 +283,15 @@ jobs:
             const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
+            function latestRunsByName(checkRuns) {
+              const latest = new Map();
+              for (const run of checkRuns) {
+                const previous = latest.get(run.name);
+                if (!previous || Number(run.id) > Number(previous.id)) latest.set(run.name, run);
+              }
+              return latest;
+            }
+
             // Poll until all required checks are completed/accepted, or fail fast on policy.
             while (true) {
               const elapsed = Date.now() - start;
@@ -304,16 +309,7 @@ jobs:
               });
 
               const checkRuns = response.data.check_runs || [];
-              const policyProcess = spawnSync(
-                "python3",
-                ["scripts/merge_gate_policy.py"],
-                { input: JSON.stringify({ check_runs: checkRuns, title_was_edited: titleWasEdited }), encoding: "utf8" }
-              );
-              if (policyProcess.status !== 0) {
-                core.setFailed(`Merge-gate Python policy failed: ${policyProcess.stderr || "unknown error"}`);
-                return;
-              }
-              const { latest_by_name: latestByName, title_state: titleState } = JSON.parse(policyProcess.stdout);
+              const latestByName = latestRunsByName(checkRuns);
 
               const missing = [];
               const pending = [];
@@ -321,15 +317,13 @@ jobs:
 
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
-                const run = latestByName[checkName];
+                // The pinned action above validates edited titles. An old check on
+                // this unchanged head SHA cannot prove which title it evaluated.
+                if (checkName === "Validate title" && titleWasEdited) continue;
+
+                const run = latestByName.get(checkName);
                 if (!run) {
                   missing.push(checkName);
-                  continue;
-                }
-
-                if (checkName === "Validate title") {
-                  if (titleState === "pending") pending.push(`${checkName} (${run.status})`);
-                  if (titleState === "failed") failed.push(`${checkName} (${run.conclusion || "unknown"})`);
                   continue;
                 }
 
@@ -357,7 +351,7 @@ jobs:
 
               // Fail early with actionable context when expected checks do not appear.
               if (missing.length && elapsed >= missingChecksGraceMs) {
-                const discoveredChecks = Object.keys(latestByName).sort();
+                const discoveredChecks = [...latestByName.keys()].sort();
                 core.setFailed(
                   `Missing required checks after ${Math.floor(missingChecksGraceMs / 60000)} minutes: `
                   + `${missing.join(", ")}. Discovered checks: ${discoveredChecks.join(", ") || "none"}. `
