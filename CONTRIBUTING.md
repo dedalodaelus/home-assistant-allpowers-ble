@@ -7,10 +7,12 @@ explicit.
 
 - Start from the latest `devel` and target `devel` with your pull request. `main`
   is for releases. This keeps your diff aligned with current development.
-- [Open a pull request with `devel` selected as the base](https://github.com/dedalodaelus/home-assistant-allpowers-ble/pull/new/devel).
-  If you are contributing from a fork, confirm the base repository is
-  `dedalodaelus/home-assistant-allpowers-ble` and the base branch is `devel`
-  before submitting; GitHub may initially select `main`.
+- [Open the GitHub comparison page](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare)
+  and set the base repository to
+  `dedalodaelus/home-assistant-allpowers-ble` and the base branch to `devel`.
+  For a fork, choose **compare across forks**, then select your fork and feature
+  branch as the head. Confirm all four selections before submitting; GitHub may
+  initially select `main` as the base branch.
 - Check for an existing issue and pull request before starting, then link the
   issue in your PR description.
 - Use a Conventional Commits PR title, such as

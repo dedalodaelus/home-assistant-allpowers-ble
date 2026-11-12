@@ -82,7 +82,7 @@ before enabling controls or automations.
 ## Documentation & support
 
 - [Contributing and first-time contributor guide](CONTRIBUTING.md)
-  · [Open a PR targeting `devel`](https://github.com/dedalodaelus/home-assistant-allpowers-ble/pull/new/devel)
+  · [Compare changes on GitHub (select `devel` as the base)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare)
 - [Full user guide](docs/user-guide.md)
   · [Guía de usuario en español](docs/user-guide.es.md)
 - [Compatibility](docs/compatibility.md)
