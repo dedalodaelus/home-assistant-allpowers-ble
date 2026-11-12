@@ -244,10 +244,15 @@ python -m scripts.hil export hil-results/<run-name>/private
 
 Review `public/report.md` and the export preview before manually sharing the
 public ZIP. If continuing an interrupted soak, first use a fresh, verified HA
-connection and the same selected device, then explicitly resume the run:
+connection and the same selected device. In the new shell, load the HA URL and
+enter the token again without echo or shell history, then explicitly resume:
 
 ```bash
+export HA_HIL_URL=https://home-assistant.example:8123
+read -rs -p "HA long-lived token: " HA_HIL_TOKEN; echo
+export HA_HIL_TOKEN
 python -m scripts.hil run --non-interactive --device 1 --suite soak-24h --resume hil-results/<run-name>/private
+unset HA_HIL_TOKEN
 ```
 
 The checkpoint records a restart discontinuity and the resumed observation is
