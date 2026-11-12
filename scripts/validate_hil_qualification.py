@@ -171,7 +171,11 @@ def _xor(frame: bytes) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", default=str(DEFAULT_MATRIX))
-    parser.add_argument("--require-pass", action="store_true")
+    parser.add_argument(
+        "--require-pass",
+        action="store_true",
+        help="Require reviewed eligible scoped passes; evidence does not expire by age",
+    )
     parser.add_argument("--route", choices=sorted(VERIFIED_ROUTES))
     parser.add_argument(
         "--revision", help="Limit strict qualification to one revision ID"
@@ -180,9 +184,14 @@ def parse_args() -> argparse.Namespace:
         "--firmware", help="Limit strict qualification to one firmware version"
     )
     parser.add_argument("--feature", choices=REQUIRED_WRITE_CAPABILITIES)
-    parser.add_argument("--max-age-days", type=int, default=30)
+    parser.add_argument(
+        "--max-age-days",
+        type=int,
+        default=None,
+        help="Opt-in evidence freshness audit; support qualification does not expire by age",
+    )
     args = parser.parse_args()
-    if args.max_age_days < 0:
+    if args.max_age_days is not None and args.max_age_days < 0:
         parser.error("--max-age-days must be a non-negative integer")
     scope_values = (args.revision, args.firmware, args.route, args.feature)
     if any(scope_values) and not all(scope_values):
@@ -515,7 +524,7 @@ def _validate_run(
     errors: list[str],
     *,
     require_pass: bool,
-    max_age_days: int,
+    max_age_days: int | None,
     revision_id: str,
     protocol_profile_supported: bool,
     feature_scope: str | None = None,
@@ -548,6 +557,7 @@ def _validate_run(
         _error(errors, f"{context} cannot qualify without a firmware_version")
     captured_at = run.get("captured_at")
     captured_date: date | None = None
+    parsed_capture: datetime | None = None
     if captured_at is None:
         pass
     elif not isinstance(captured_at, str):
@@ -557,9 +567,12 @@ def _validate_run(
             parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 raise ValueError
-            captured_date = parsed.date()
+            parsed_capture = parsed.astimezone(UTC)
+            captured_date = parsed_capture.date()
         except ValueError:
             _error(errors, f"{context} captured_at must include a timezone")
+    if parsed_capture is not None and parsed_capture > datetime.now(UTC):
+        _error(errors, f"{context} captured_at is in the future")
     session_id = run.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
         _error(errors, f"{context} session_id must be an explicit non-empty value")
@@ -624,9 +637,7 @@ def _validate_run(
             )
         if captured_date is not None:
             age = (datetime.now(UTC).date() - captured_date).days
-            if age < 0:
-                _error(errors, f"{context} captured_at is in the future")
-            if age > max_age_days:
+            if max_age_days is not None and age > max_age_days:
                 _error(
                     errors, f"{context} evidence is stale ({age}d > {max_age_days}d)"
                 )
@@ -846,7 +857,7 @@ def validate_matrix(
     *,
     matrix_path: Path,
     require_pass: bool,
-    max_age_days: int,
+    max_age_days: int | None,
     route_scope: str | None = None,
     revision_scope: str | None = None,
     firmware_scope: str | None = None,

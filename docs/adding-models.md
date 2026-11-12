@@ -120,8 +120,9 @@ For verified write-capable profiles, also:
   firmware and observed route. Never copy a PASS or `not_applicable` result across
   scopes. Matrix/tier qualification is distinct from authorizing one individual
   production control;
-- run `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`
-  before requesting stable promotion.
+- run `python scripts/validate_hil_qualification.py --require-pass` before
+  requesting stable promotion. Add `--max-age-days N` only for a requested
+  freshness audit.
 
 ## 9. Validate on failure paths
 

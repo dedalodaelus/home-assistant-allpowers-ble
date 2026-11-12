@@ -439,6 +439,32 @@ def test_max_age_days_rejects_negative_values(monkeypatch: pytest.MonkeyPatch) -
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize("age_days", [29, 30, 31, 90])
+def test_strict_age_is_non_expiring_unless_audit_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, age_days: int
+) -> None:
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    captured_at = datetime.combine(
+        datetime.now(UTC).date() - timedelta(days=age_days),
+        datetime.min.time(),
+        tzinfo=UTC,
+    )
+    run = _qualified_run(tmp_path, "local_adapter", f"age-{age_days}", captured_at)
+    matrix = _matrix([run])
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=None
+    )
+    assert errors == []
+
+    errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=True, max_age_days=30
+    )
+    assert any("evidence is stale" in item for item in errors) is (age_days > 30)
+
+
 def test_require_pass_rejects_future_run_without_requiring_second_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

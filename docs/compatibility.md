@@ -35,15 +35,22 @@ review records, not physical qualification. The strict per-feature command
 qualifies one exact revision, firmware, observed route, and capability. The
 broader `--require-pass` gate checks every reported firmware and every route
 with eligible runs; it does not require both supported routes when only one has
-eligible evidence. Strict mode enforces a 30-day maximum age by default;
-`--max-age-days N` overrides that limit. Issue #273 tracks the planned opt-in,
-non-expiring policy. The gate selects the newest eligible run per firmware and
+eligible evidence. Support qualification does not expire due to age. Use
+`--max-age-days N` only for an explicit freshness audit; the threshold is
+inclusive, so evidence exactly N days old passes. The gate selects the newest eligible run per firmware and
 route, so a later complete failure supersedes an older pass while an
 inconclusive archive import does not. Scenario results must pass; a write
 capability may be `not_applicable` only with reviewed absence evidence and a
 rationale. Capture records must also match the matrix revision, firmware, run,
 session, build, route, and timestamp. Independent physical evidence review
 remains necessary.
+
+Revalidate when hardware revision changes, firmware changes affect BLE,
+protocol, or controls, codec/output/settings semantics change, a safety
+regression or substantiated failure appears, or a maintainer requests a focused
+risk review. New or materially changed firmware requires scoped evidence;
+another firmware's result does not transfer unless maintainers explicitly
+document equivalence and the focused checks that support it.
 
 ## Write authorization and hardware support tiers
 

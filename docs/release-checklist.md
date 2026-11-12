@@ -88,9 +88,10 @@ sha256sum --check dist/allpowers_ble.zip.sha256
 - Run `python scripts/validate_hil_qualification.py` before opening the release PR.
 - For stable promotion where HIL is mandatory, enforce the gate with
   `REQUIRE_HIL_STABLE_GATE=true` and run
-  `python scripts/validate_hil_qualification.py --require-pass --max-age-days 30`.
+  `python scripts/validate_hil_qualification.py --require-pass`. Add
+  `--max-age-days N` only when the reviewer requests a finite freshness audit.
 - The ordinary CI validator checks matrix structure and evidence reviews offline.
-  The no-scope strict gate checks the newest fresh, complete, verified-build
+  The no-scope strict gate checks the newest eligible, complete, verified-build
   result for every reported firmware and every route with eligible evidence; it
   does not itself require both supported routes. If this release requires both
   routes, verify that each firmware has eligible results on `local_adapter` and

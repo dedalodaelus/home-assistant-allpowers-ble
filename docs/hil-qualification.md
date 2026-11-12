@@ -60,9 +60,19 @@ python -m scripts.migrate_hil_qualification old-matrix.json migrated-matrix.json
 ```
 
 The default validator checks structure and privacy while allowing unfinished
-runs. `--require-pass` requires fresh, fully scoped current results and enforces
-a 30-day maximum age by default; `--max-age-days N` overrides that limit. Issue
-#273 tracks the planned opt-in, non-expiring qualification policy.
+runs. `--require-pass` requires reviewed, fully scoped results and does not
+expire them based on age. Add `--max-age-days N` for an explicit freshness
+audit; evidence exactly N days old passes, while older evidence fails that
+audit. Timestamps and provenance remain in the matrix.
+
+Revalidate after a hardware revision change; firmware changes that affect BLE,
+protocol, or controls; codec, output, or settings semantic changes; a safety
+regression or substantiated failure; or a maintainer-directed risk review. New
+or materially changed firmware needs scoped evidence of its own. Maintainers
+may document equivalence and focused checks, but evidence does not transfer
+automatically between firmware versions or routes. Stable promotion does not
+require recurring 30-day HIL campaigns; reviewers can request a finite age
+threshold for a focused release or reliability audit.
 
 The runtime `verified` classification is a software model/revision decision, not a
 claim that physical qualification is complete. Track that separately in the
@@ -90,16 +100,15 @@ authorize writes. Candidate testing is intended to use a separate
 attended, temporary #275 grant and does not enable normal Home Assistant controls.
 
 The v3 validator implements per-feature, per-revision, per-firmware, and
-per-observed-route results. Tier arithmetic remains tracked by #269; freshness
-policy remains tracked by #273. The existing 30-day maximum age is unchanged and
-can be configured with `--max-age-days N`.
+per-observed-route results. Tier arithmetic remains tracked by #269. Evidence
+age is an optional audit and does not revoke a stable support qualification.
 
 ## Scope
 
 Use this process when you need to:
 
 - promote or keep a profile in the verified lane;
-- refresh stale HIL evidence before a stable release;
+- run a focused evidence freshness audit when requested for a release;
 - qualify a new hardware revision for write-capable support.
 
 For one control, collect operation-specific evidence on one verified, actually
@@ -278,7 +287,8 @@ Run:
 
 ```bash
 python scripts/validate_hil_qualification.py
-python scripts/validate_hil_qualification.py --require-pass --max-age-days 30
+python scripts/validate_hil_qualification.py --require-pass
+python scripts/validate_hil_qualification.py --require-pass --max-age-days 30  # optional freshness audit
 ```
 
 The validator checks:
@@ -286,7 +296,7 @@ The validator checks:
 - required schema keys and status fields;
 - required route/scenario/capability coverage;
 - fixture file existence;
-- stale evidence in require-pass mode;
+- stale evidence when an explicit freshness audit is requested;
 - redaction failures such as raw Bluetooth MAC addresses.
 
 The default command validates structure and privacy while allowing pending and

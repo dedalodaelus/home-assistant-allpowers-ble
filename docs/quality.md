@@ -116,6 +116,9 @@ The operational procedure for collecting real-device evidence is documented in
 For stable promotions that require HIL evidence, maintainers can enforce the
 `HIL qualification (opt-in)` check by enabling
 `REQUIRE_HIL_STABLE_GATE=true` in repository variables.
+The strict gate validates reviewed, scoped evidence without an automatic age
+limit. Reviewers can request `--max-age-days N` for a focused freshness audit;
+routine `devel` to `main` promotions do not require recurring 30-day HIL runs.
 
 ## Deterministic sequence regression fixtures
 
