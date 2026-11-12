@@ -197,7 +197,7 @@ client after detaching leaves the remote process running; closing the local
 terminal before detaching may interrupt it. Keep the host awake and the tmux
 session alive for the entire segment.
 
-### Windows using WSL2
+### Windows using WSL2 (not yet runtime-tested)
 
 Use WSL2 with the repository checkout, Python 3.14 environment, and `tmux` all
 inside the same Linux distribution. Do not run Python in Windows while trying
@@ -206,6 +206,12 @@ to keep it alive with a tmux server in WSL. Install tmux in the distribution
 the Linux workflow above. Start `tmux new -s allpowers-soak` from that WSL
 shell. Detach with **Ctrl-b**, then **d**; later open the same distribution and
 use `tmux attach -t allpowers-soak` to reconnect.
+
+This is the recommended Windows setup, but its lifecycle has not yet been
+smoke-tested on Windows with WSL2. The Windows workflow acceptance criterion
+therefore remains unverified; validate that a detached tmux process survives
+closing and reopening Windows Terminal on the target machine before relying on
+it for a soak.
 
 Closing Windows Terminal after detaching is safe only while the WSL2
 distribution remains running. `wsl --shutdown`, shutting down or restarting
