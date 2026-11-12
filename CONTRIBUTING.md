@@ -18,6 +18,10 @@ explicit.
 - Check for the `status: fixed-in-devel` label before starting work. It means a
   merged PR addressed the issue in `devel`, but the fix is not yet in a stable
   release. Keep the issue open while it is pending release.
+- This label automation becomes active only after its workflow has reached
+  `main` through the normal `devel` to `main` promotion. Until then, maintainers
+  must apply the label and add the pending-release comment manually for fixes
+  merged into `devel`.
 - Use a Conventional Commits PR title, such as
   `test: cover status freshness timeout boundary`.
 - Descriptive source branch names such as `fix/issue-123-description`,

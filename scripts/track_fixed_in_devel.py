@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
@@ -52,17 +53,9 @@ class GitHubAPI:
                 **({"Content-Type": "application/json"} if payload else {}),
             },
         )
-        try:
-            with urllib.request.urlopen(request) as response:
-                result = response.read()
-                return json.loads(result) if result else None
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                return None
-            if error.code == 422:
-                # Label creation can race with another delivery of this workflow.
-                return {"_http_status": 422}
-            raise
+        with urllib.request.urlopen(request) as response:
+            result = response.read()
+            return json.loads(result) if result else None
 
     def pages(self, path: str) -> Iterator[Any]:
         page = 1
@@ -78,7 +71,13 @@ class GitHubAPI:
 
 
 def mark_issue(api: GitHubAPI, issue_number: int, pr_number: int, pr_url: str) -> None:
-    issue = api.request("GET", f"/issues/{issue_number}")
+    try:
+        issue = api.request("GET", f"/issues/{issue_number}")
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        print(f"Skipping #{issue_number}: not an issue in this repository")
+        return
     if issue is None or "pull_request" in issue:
         print(f"Skipping #{issue_number}: not an issue in this repository")
         return
@@ -87,11 +86,21 @@ def mark_issue(api: GitHubAPI, issue_number: int, pr_number: int, pr_url: str) -
     if LABEL not in existing_labels:
         labels = {label["name"] for label in api.pages("/labels")}
         if LABEL not in labels:
-            api.request(
-                "POST",
-                "/labels",
-                {"name": LABEL, "color": LABEL_COLOR, "description": LABEL_DESCRIPTION},
-            )
+            try:
+                api.request(
+                    "POST",
+                    "/labels",
+                    {
+                        "name": LABEL,
+                        "color": LABEL_COLOR,
+                        "description": LABEL_DESCRIPTION,
+                    },
+                )
+            except urllib.error.HTTPError as error:
+                if error.code != 422:
+                    raise
+                label_path = f"/labels/{urllib.parse.quote(LABEL, safe='')}"
+                api.request("GET", label_path)
         api.request("POST", f"/issues/{issue_number}/labels", {"labels": [LABEL]})
 
     marker = f"<!-- fixed-in-devel:pr-{pr_number} -->"
