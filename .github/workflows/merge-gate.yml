@@ -9,6 +9,7 @@ on:
       - reopened
       - synchronize
       - ready_for_review
+      - edited
 
 # Minimum privileges for reading PR/check state.
 permissions: {}
@@ -31,6 +32,24 @@ jobs:
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
+      - name: Validate edited PR title
+        if: github.event.action == 'edited' && github.event.changes.title != null
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            test
+
       - name: Wait for required checks on PR head
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
@@ -51,6 +70,7 @@ jobs:
             const baseRef = pr.base?.ref || "";
             const headRef = pr.head?.ref || "";
             const headSha = pr.head.sha;
+            const titleWasEdited = Object.hasOwn(context.payload.changes || {}, "title");
             const prAuthorLogin = pr.user?.login || "";
             const prAuthorType = pr.user?.type || "";
             const isHotfixBranch = /^hotfix\//.test(headRef);
@@ -263,16 +283,13 @@ jobs:
             const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
 
-            // Keep only the latest run per check name (re-runs may create duplicates).
-            function formatRunsMap(checkRuns) {
-              const map = new Map();
+            function latestRunsByName(checkRuns) {
+              const latest = new Map();
               for (const run of checkRuns) {
-                const previous = map.get(run.name);
-                if (!previous || new Date(run.started_at) > new Date(previous.started_at)) {
-                  map.set(run.name, run);
-                }
+                const previous = latest.get(run.name);
+                if (!previous || Number(run.id) > Number(previous.id)) latest.set(run.name, run);
               }
-              return map;
+              return latest;
             }
 
             // Poll until all required checks are completed/accepted, or fail fast on policy.
@@ -292,7 +309,7 @@ jobs:
               });
 
               const checkRuns = response.data.check_runs || [];
-              const latestByName = formatRunsMap(checkRuns);
+              const latestByName = latestRunsByName(checkRuns);
 
               const missing = [];
               const pending = [];
@@ -300,6 +317,10 @@ jobs:
 
               // Classify each required check as missing, pending, or failed.
               for (const checkName of requiredChecks) {
+                // The pinned action above validates edited titles. An old check on
+                // this unchanged head SHA cannot prove which title it evaluated.
+                if (checkName === "Validate title" && titleWasEdited) continue;
+
                 const run = latestByName.get(checkName);
                 if (!run) {
                   missing.push(checkName);
@@ -341,6 +362,17 @@ jobs:
 
               // Success condition: no missing checks and no pending runs.
               if (missing.length === 0 && pending.length === 0) {
+                // Metadata can change while checks are running. Do not accept a gate
+                // decision made for an obsolete title/base/head event payload.
+                const current = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+                if (
+                  current.data.title !== pr.title
+                  || current.data.base.ref !== baseRef
+                  || current.data.head.sha !== headSha
+                ) {
+                  core.setFailed("PR title, base, or head changed while required checks were being validated; rerun the merge gate.");
+                  return;
+                }
                 core.info("All required checks completed successfully.");
                 return;
               }
