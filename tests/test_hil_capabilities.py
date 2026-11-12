@@ -94,7 +94,12 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
         connected=True,
     )
     client = SimpleNamespace(
-        options=SimpleNamespace(enable_car_charger=True),
+        options=SimpleNamespace(
+            enable_car_charger=True,
+            settings_keepalive=False,
+            settings_keepalive_interval=540,
+            settings_stale_timeout=600,
+        ),
         active_session_generation=7,
         has_pending_transaction=True,
     )
@@ -119,6 +124,11 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert result["firmware_revision"] == "2.1"
     assert result["raw_firmware_revision"] == 21
     assert result["session_generation"] == 7
+    assert result["settings_options"] == {
+        "keepalive_enabled": False,
+        "keepalive_interval_seconds": 540,
+        "stale_timeout_seconds": 600,
+    }
     assert result["pending_transaction"] is True
     assert result["capabilities"]["car_charger_enabled"] is True
     assert entry.entry_id not in str(result)
@@ -145,7 +155,12 @@ async def test_capability_endpoint_filters_invalid_or_stale_revisions() -> None:
         connected=False,
     )
     client = SimpleNamespace(
-        options=SimpleNamespace(enable_car_charger=False),
+        options=SimpleNamespace(
+            enable_car_charger=False,
+            settings_keepalive=False,
+            settings_keepalive_interval=540,
+            settings_stale_timeout=600,
+        ),
         active_session_generation=True,
         has_pending_transaction=False,
     )

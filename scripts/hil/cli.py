@@ -140,6 +140,11 @@ def make_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--suite", choices=(*SUITES, "all"))
     run_parser.add_argument(
+        "--allow-keepalive-disabled",
+        action="store_true",
+        help="Allow soak-24h to start while settings keepalive is disabled",
+    )
+    run_parser.add_argument(
         "--scenario-id",
         help="Select one declared scenario for outputs or settings",
     )
@@ -685,6 +690,11 @@ def execute(args: argparse.Namespace) -> int:
             raise HAAPIError(
                 "This suite is declarative but execution is not implemented yet; use --dry-run"
             )
+        if (
+            getattr(args, "allow_keepalive_disabled", False)
+            and args.suite != "soak-24h"
+        ):
+            raise HAAPIError("--allow-keepalive-disabled applies only to soak-24h")
         if args.suite in {"outputs", "settings", "recovery"} and args.non_interactive:
             raise HAAPIError(f"The {args.suite} suite requires interactive operation")
     resume_state: dict[str, Any] | None = None

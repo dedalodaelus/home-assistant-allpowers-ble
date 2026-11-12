@@ -7,6 +7,7 @@ all can contain network topology or personally identifying information.
 from __future__ import annotations
 
 import json
+import math
 import re
 import socket
 from typing import Any
@@ -321,6 +322,25 @@ class HAClient:
         if generation is not None and (type(generation) is not int or generation < 1):
             raise HAAPIError("Malformed HIL session generation")
         normalized["session_generation"] = generation
+        settings_options = result.get("settings_options")
+        if settings_options is not None:
+            if (
+                not isinstance(settings_options, dict)
+                or type(settings_options.get("keepalive_enabled")) is not bool
+                or any(
+                    type(settings_options.get(key)) not in {int, float}
+                    or not math.isfinite(settings_options[key])
+                    or settings_options[key] <= 0
+                    for key in (
+                        "keepalive_interval_seconds",
+                        "stale_timeout_seconds",
+                    )
+                )
+            ):
+                raise HAAPIError("Malformed HIL settings option snapshot")
+            normalized["settings_options"] = dict(settings_options)
+        else:
+            normalized["settings_options"] = None
         normalized["capabilities"] = dict(capabilities)
         if result["schema_version"] == 2:
             features = result.get("features")
