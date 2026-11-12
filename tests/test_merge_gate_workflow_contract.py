@@ -6,7 +6,18 @@ import unittest
 
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/merge-gate.yml"
-TITLE_TYPES = {"build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "revert", "test"}
+TITLE_TYPES = {
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "revert",
+    "test",
+}
 TITLE_PATTERN = re.compile(r"^(\w+)(?:\(([^\r\n()]+)\))?(!)?: (.+\S)$")
 
 
