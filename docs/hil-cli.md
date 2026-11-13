@@ -225,14 +225,25 @@ supported persistent-run method.
 
 ### Progress, checkpoint, and report
 
-The command prints its progress in the attached terminal. The default output
-root is `hil-results/` in the checkout. A run has a UTC timestamp and random
-identifier, and its local checkpoint is
-`hil-results/<run-name>/private/checkpoint.json`; the adjacent
-`scenarios.json` records segment outcomes. These files are private local
-evidence: do not commit or share `hil-results/`. Inspect progress by attaching
-to tmux; inspect a checkpoint with a local text/JSON viewer, without copying it
-into a public issue.
+Reattaching to tmux lets you confirm the session is still running and see any
+terminal output, but the soak currently prints no periodic progress metrics.
+Long periods of terminal silence are expected. For progress, inspect the local
+checkpoint, which is updated as samples and traces are collected. The default
+output root is `hil-results/` in the checkout. A run has a UTC timestamp and
+random identifier, and its checkpoint is
+`hil-results/<run-name>/private/checkpoint.json`; the adjacent `scenarios.json`
+records segment outcomes. Pretty-print the checkpoint locally with:
+
+```bash
+python -m json.tool hil-results/<run-name>/private/checkpoint.json
+```
+
+In the last object in `steps`, check `sample_count`, `trace_count`, and
+`measured_seconds`; `last_sample_utc` appears after the first successful sample.
+The counters advance when their corresponding samples or traces are collected,
+so they do not all change at the same interval. The checkpoint and its output
+are private local evidence: do not commit `hil-results/`, copy checkpoint data
+into a public issue, or share its contents.
 
 After completion or interruption, generate the sanitized report and optional
 public ZIP from the run's private directory:
