@@ -208,10 +208,9 @@ shell. Detach with **Ctrl-b**, then **d**; later open the same distribution and
 use `tmux attach -t allpowers-soak` to reconnect.
 
 This is the recommended Windows setup, but its lifecycle has not yet been
-smoke-tested on Windows with WSL2. The Windows workflow acceptance criterion
-therefore remains unverified; validate that a detached tmux process survives
-closing and reopening Windows Terminal on the target machine before relying on
-it for a soak.
+runtime-verified on Windows with WSL2. Validate that a detached tmux process
+survives closing and reopening Windows Terminal on the target machine before
+relying on it for a soak.
 
 Closing Windows Terminal after detaching is safe only while the WSL2
 distribution remains running. `wsl --shutdown`, shutting down or restarting
