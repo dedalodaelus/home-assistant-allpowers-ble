@@ -119,9 +119,15 @@ def _review_file(path: Path, run: dict[str, Any]) -> tuple[str, str, dict[str, s
         raise HAAPIError("Review file does not match this imported run")
     try:
         timestamp = datetime.fromisoformat(value["reviewed_at"].replace("Z", "+00:00"))
+        captured = datetime.fromisoformat(run["captured_at"].replace("Z", "+00:00"))
     except ValueError as exc:
         raise HAAPIError("Review timestamp is invalid") from exc
-    if timestamp.tzinfo is None or timestamp.astimezone(UTC) > datetime.now(UTC):
+    if (
+        timestamp.tzinfo is None
+        or captured.tzinfo is None
+        or timestamp.astimezone(UTC) < captured.astimezone(UTC)
+        or timestamp.astimezone(UTC) > datetime.now(UTC)
+    ):
         raise HAAPIError("Review timestamp must be timezone-aware and current")
     return value["reviewed_by"].strip(), timestamp.isoformat(), value["claims"]
 
@@ -164,6 +170,7 @@ def _claim_support(
         and re.fullmatch(r"[a-f0-9]{64}", run["build_fingerprint"])
         and run.get("captured_at") == session.get("started_at")
         and run.get("session_id") not in {None, "", "unknown"}
+        and session.get("mode") == "read_only_preflight"
         and isinstance(runtime, dict)
         and runtime.get("available") is True
         and runtime.get("connected") is True
