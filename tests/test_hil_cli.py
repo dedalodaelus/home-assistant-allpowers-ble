@@ -589,6 +589,122 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
             assert "physical_outcome" not in evidence
 
 
+def test_tier_executor_dispatches_candidate_through_grant_and_restore(
+    monkeypatch, tmp_path
+):
+    """Exercise tier dispatch through the candidate HIL executor with Fake HA."""
+    from argparse import Namespace
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    device = discovery.Device(
+        device_id="synthetic-device",
+        model="S500",
+        hardware="1",
+        firmware="1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"dc_output": "switch.dc"},
+        config_entry_id="synthetic-entry",
+    )
+
+    class FakeHA:
+        origin = "https://example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.writes = []
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "pending_transaction": False,
+                "session_generation": 9,
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                },
+            }
+
+        def control_state(self, _feature, _entity):
+            return {"available": True, "state": self.state}
+
+        @contextmanager
+        def websocket_session(self):
+            yield self
+
+        def experimental_output(
+            self,
+            _entry,
+            _feature,
+            target,
+            *,
+            authorization_confirmed,
+            execution_confirmed,
+        ):
+            assert authorization_confirmed is True
+            assert execution_confirmed is True
+            self.writes.append(target)
+            self.state = "on" if target else "off"
+            return {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "route": "local_adapter",
+                "session_generation": 9,
+            }
+
+    fake = FakeHA()
+    answers = iter(["1", "1", "1", "1", "1"])
+    base_services = cli._suite_services()
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(base_services, prompt=lambda _question: next(answers)),
+    )
+    root = storage.write_run(tmp_path, "guided-parent", {}, {})
+    plan = {"requested_tier": "silver", "steps": [{"id": "dc_output_cycle"}]}
+    capabilities = {
+        "features": {
+            "dc_output": {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+            }
+        }
+    }
+
+    assert (
+        cli._execute_tier_suite(
+            fake,
+            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+            device,
+            {},
+            root,
+            "parent-run",
+            plan,
+            capabilities,
+        )
+        == 0
+    )
+    assert fake.writes == [True, False]
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["review_state"] == "pending"
+    assert execution["steps"][0]["outcome"] == "pass"
+    artifact = root / execution["steps"][0]["machine_evidence"][0]["path"]
+    evidence = json.loads(artifact.read_text())
+    assert evidence["outcome"] == "pass"
+    assert [action["route"] for action in evidence["actions"]] == [
+        "local_adapter",
+        "local_adapter",
+    ]
+
+
 def test_discovery_without_optional_config_entries(allpowers_registry):
     entities, devices, _ = allpowers_registry
     choices = discovery.find_devices(entities, devices, None)
