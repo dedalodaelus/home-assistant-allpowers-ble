@@ -986,6 +986,7 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
             "session_generation_before": 4,
             "session_generation_after": 5,
             "disconnect_observed": True,
+            "ha_observation": "ha_recovered",
             "route": "local_adapter",
             "reason": "private address aa:bb:cc:dd:ee:ff recovered",
         },
@@ -1150,6 +1151,55 @@ def test_recovery_route_observation_exports_with_controlled_scenario_summary(
         assert b"ha_observation `inconclusive`" in report
         assert b"fresh_status_telemetry `False`" in report
         assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+def test_ordinary_recovery_export_preserves_reconnected_semantics_when_inconclusive(
+    tmp_path: Path,
+) -> None:
+    run_id = "0123456789abcdef"
+    private = write_run(
+        tmp_path,
+        "ordinary-recovery",
+        {"schema_version": 1},
+        {"schema_version": 1, "run_id": run_id},
+    )
+    write_scenario_progress(
+        private,
+        run_id,
+        "recovery_reconnect",
+        "d" * 64,
+        [
+            {"step_id": "baseline", "outcome": "pass", "session_generation": 1},
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "route interruption and restoration",
+                "operator_confirmed": True,
+            },
+            {
+                "step_id": "recovered_session",
+                "outcome": "inconclusive",
+                "connected": True,
+                "status_fresh": True,
+                "session_generation_before": 1,
+                "session_generation_after": 2,
+                "disconnect_observed": True,
+                "trace_complete": False,
+                "route": "unverified",
+                "route_verified": False,
+                "physical_outcome": "unable_to_observe",
+            },
+        ],
+    )
+
+    archive = export_archive(tmp_path / "ordinary-recovery", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        scenarios = json.loads(exported.read("public/scenarios.json"))
+        recovered = scenarios["steps"][2]
+        assert recovered["outcome"] == "inconclusive"
+        assert recovered["actual"] == "reconnected"
+        assert "ha_observation" not in recovered["observation"]
+        assert recovered["observation"]["route_verified"] is False
 
 
 def test_soak_summary_exports_metrics_without_private_samples(tmp_path: Path) -> None:

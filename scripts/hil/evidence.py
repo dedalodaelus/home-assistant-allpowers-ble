@@ -272,7 +272,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
             step.get("connected") is True
             and type(step.get("session_generation_after")) is int
         ):
-            actual = step.get("ha_observation", "ha_recovered")
+            actual = state_value("ha_observation") or "reconnected"
         elif step.get("trace_complete") is False:
             actual = "observation_incomplete"
     if actual is None and step.get("step_id") == "soak_segment":
