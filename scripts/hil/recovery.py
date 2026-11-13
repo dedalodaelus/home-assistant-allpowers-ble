@@ -23,7 +23,7 @@ def _execute_recovery_suite(
     services: SuiteServices,
     resume_state: dict[str, Any] | None = None,
 ) -> int:
-    """Guide a human recovery action and observe a new, fresh runtime session."""
+    """Guide a human action and observe stable or recovered HA runtime state."""
     scenario = next(
         item for item in services.load_scenarios() if item.id == "recovery_reconnect"
     )
@@ -35,6 +35,7 @@ def _execute_recovery_suite(
         else []
     )
     run_started = services.monotonic()
+    resumed_with_gap = resume_state is not None
 
     def checkpoint() -> None:
         services.write_scenario_progress(
@@ -201,6 +202,19 @@ def _execute_recovery_suite(
             "utc": services.datetime.now(UTC).isoformat(),
             "elapsed_ms": int((services.monotonic() - run_started) * 1000),
         }
+        if action == "vendor-app contention":
+            print(
+                "Report only what happened in the official app; no recording is requested."
+            )
+            print("  1. Could not connect")
+            print("  2. Connected")
+            print("  3. Unable or unwilling to test")
+            app_result = prompt("App result [1-3]: ")
+            action_step["operator_app_result"] = {
+                "1": "could_not_connect",
+                "2": "connected",
+                "3": "unable_or_unwilling",
+            }.get(app_result, "unable_or_unwilling")
         steps.append(action_step)
         checkpoint()
     else:
@@ -209,6 +223,9 @@ def _execute_recovery_suite(
     deadline = services.monotonic() + scenario.steps[2]["timeout_seconds"]
     saw_disconnect = False
     recovered: dict[str, Any] | None = None
+    stable: dict[str, Any] | None = None
+    stable_since: float | None = None
+    vendor_action = action_step.get("action") == "vendor-app contention"
     try:
         while services.monotonic() < deadline:
             try:
@@ -218,6 +235,21 @@ def _execute_recovery_suite(
                 continue
             if current["connected"] is not True:
                 saw_disconnect = True
+                stable_since = None
+            if (
+                vendor_action
+                and current["verified"] is True
+                and not current["identity_conflicted"]
+                and current["connected"] is True
+                and current["status_fresh"] is True
+                and current["session_generation"] == generation
+            ):
+                stable_since = stable_since or services.monotonic()
+                if services.monotonic() - stable_since >= 4:
+                    stable = current
+                    break
+            else:
+                stable_since = None
             if (
                 current["verified"] is True
                 and not current["identity_conflicted"]
@@ -253,12 +285,21 @@ def _execute_recovery_suite(
     }
     steps.append(observation)
     trace: dict[str, Any] | None = None
-    if recovered is not None:
+    observed_session = recovered or stable
+    if observed_session is not None:
         observation.update(
             {
-                "session_generation_after": recovered["session_generation"],
+                "session_generation_after": observed_session["session_generation"],
                 "connected": True,
                 "status_fresh": True,
+                "ha_observation": (
+                    "ha_recovered"
+                    if recovered is not None
+                    else "inconclusive"
+                    if resumed_with_gap
+                    or action_step.get("operator_app_result") == "unable_or_unwilling"
+                    else "ha_stable"
+                ),
             }
         )
         try:
@@ -323,6 +364,28 @@ def _execute_recovery_suite(
                 observation["trace"] = f"traces/{trace_name}"
                 observation["route"] = trace.get("observed_route")
                 observation["trace_complete"] = trace.get("complete") is True
+                events = trace.get("events")
+                if isinstance(events, list) and any(
+                    isinstance(event, dict)
+                    and event.get("event") in {"disconnect", "disconnected"}
+                    for event in events
+                ):
+                    saw_disconnect = True
+                    observation["disconnect_observed"] = True
+                    if recovered is None:
+                        observation["ha_observation"] = "inconclusive"
+                observation["fresh_status_telemetry"] = bool(
+                    isinstance(events, list)
+                    and any(
+                        isinstance(event, dict)
+                        and event.get("event") == "notification_decoded"
+                        and event.get("session_generation")
+                        == observed_session["session_generation"]
+                        and isinstance(event.get("decoded_packet_types"), list)
+                        and "StatusData" in event["decoded_packet_types"]
+                        for event in events
+                    )
+                )
         except KeyboardInterrupt:
             observation["reason"] = "operator interrupted the bounded route capture"
             checkpoint()
@@ -330,6 +393,38 @@ def _execute_recovery_suite(
             return 2
         except HAAPIError, OSError:
             observation["trace"] = "unavailable"
+
+    if vendor_action:
+        observation["operator_app_result"] = action_step.get(
+            "operator_app_result", "unable_or_unwilling"
+        )
+        observation["route_verified"] = bool(
+            trace is not None
+            and services.route_matches_request(args.route, trace.get("observed_route"))
+        )
+        machine_evidence_complete = bool(
+            observed_session is not None
+            and observation.get("fresh_status_telemetry") is True
+            and (recovered is not None or not saw_disconnect)
+            and not resumed_with_gap
+            and action_step.get("operator_app_result") != "unable_or_unwilling"
+            and observation["route_verified"]
+            and trace is not None
+            and trace.get("complete") is True
+        )
+        observation["outcome"] = "pass" if machine_evidence_complete else "inconclusive"
+        observation["limitation"] = (
+            "operator-reported app result; HA session and fresh status are observed, "
+            "but app-side causality and uninterrupted intervals outside capture are unknown"
+        )
+        checkpoint()
+        print(
+            "HA observation:",
+            observation.get("ha_observation", "inconclusive"),
+            observation["outcome"],
+        )
+        print("Scenario checkpoint saved to:", run_root(output_dir))
+        return 0 if observation["outcome"] == "pass" else 2
 
     print(
         "Physical recovery outcome: 1=recovered, 2=not recovered, 3=unable to observe"

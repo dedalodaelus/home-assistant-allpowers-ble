@@ -188,6 +188,11 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "yes",
         "no",
         "unable_to_observe",
+        "could_not_connect",
+        "unable_or_unwilling",
+        "connected",
+        "ha_stable",
+        "ha_recovered",
     }
     if declared_step is not None and isinstance(declared_step.get("expected"), str):
         expected = declared_step["expected"]
@@ -209,6 +214,8 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "disconnect_observed",
         "operator_confirmed",
         "route_verified",
+        "trace_complete",
+        "fresh_status_telemetry",
         "restart_discontinuity",
         "data_limit_hit",
     ):
@@ -245,6 +252,12 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "Home Assistant or integration reload/upgrade",
     }:
         observation["operator_action"] = action
+    app_result = state_value("operator_app_result")
+    if app_result is not None:
+        observation["operator_app_result"] = app_result
+    ha_observation = state_value("ha_observation")
+    if ha_observation is not None:
+        observation["ha_observation"] = ha_observation
 
     target = declared_step.get("target") if declared_step is not None else None
     expected = declared_step.get("expected") if declared_step is not None else None
@@ -258,7 +271,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
             step.get("connected") is True
             and type(step.get("session_generation_after")) is int
         ):
-            actual = "reconnected"
+            actual = step.get("ha_observation", "ha_recovered")
         elif step.get("trace_complete") is False:
             actual = "observation_incomplete"
     if actual is None and step.get("step_id") == "soak_segment":
@@ -300,6 +313,8 @@ def _valid_public_observation(value: Any) -> bool:
         "disconnect_observed",
         "operator_confirmed",
         "route_verified",
+        "trace_complete",
+        "fresh_status_telemetry",
         "restart_discontinuity",
         "data_limit_hit",
         "session_generation",
@@ -314,6 +329,8 @@ def _valid_public_observation(value: Any) -> bool:
         "maximum_gap_seconds",
         "route",
         "operator_action",
+        "operator_app_result",
+        "ha_observation",
     }
     state_values = {
         "on",
@@ -329,6 +346,11 @@ def _valid_public_observation(value: Any) -> bool:
         "yes",
         "no",
         "unable_to_observe",
+        "could_not_connect",
+        "connected",
+        "unable_or_unwilling",
+        "ha_stable",
+        "ha_recovered",
     }
     if set(value) - allowed:
         return False
@@ -341,6 +363,8 @@ def _valid_public_observation(value: Any) -> bool:
         "disconnect_observed",
         "operator_confirmed",
         "route_verified",
+        "trace_complete",
+        "fresh_status_telemetry",
         "restart_discontinuity",
         "data_limit_hit",
     } & set(value):
@@ -376,6 +400,18 @@ def _valid_public_observation(value: Any) -> bool:
         "route interruption and restoration",
         "vendor-app contention",
         "Home Assistant or integration reload/upgrade",
+    }:
+        return False
+    if "operator_app_result" in value and value["operator_app_result"] not in {
+        "could_not_connect",
+        "connected",
+        "unable_or_unwilling",
+    }:
+        return False
+    if "ha_observation" in value and value["ha_observation"] not in {
+        "ha_stable",
+        "ha_recovered",
+        "inconclusive",
     }:
         return False
     return True
@@ -2065,6 +2101,8 @@ def verify_public_archive(
                             "no",
                             "unable_to_observe",
                             "reconnected",
+                            "ha_stable",
+                            "ha_recovered",
                             "observation_incomplete",
                             "completed",
                             "inconclusive",

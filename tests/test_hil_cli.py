@@ -3494,6 +3494,339 @@ def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(
     ]
 
 
+@pytest.mark.parametrize("app_answer", ("1", "2", "3"))
+def test_vendor_app_result_is_separate_from_machine_observed_ha_stability(
+    monkeypatch, tmp_path, app_answer
+):
+    from types import SimpleNamespace
+
+    class StableHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.commands = []
+            self.calls = 0
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "stable-capture"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "active_proxy",
+                    "complete": True,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 4,
+                            "decoded_packet_types": ["StatusData"],
+                        }
+                    ],
+                }
+            ]
+
+    api_fake = StableHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "vendor-stable"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("2", "1", app_answer))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "stable-run",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    action = next(
+        step for step in stored["steps"] if step["step_id"] == "operator_action"
+    )
+    observation = stored["steps"][-1]
+    assert result == (2 if app_answer == "3" else 0)
+    assert (
+        action["operator_app_result"]
+        == (
+            {"1": "could_not_connect", "2": "connected", "3": "unable_or_unwilling"}[
+                app_answer
+            ]
+        )
+    )
+    assert observation["ha_observation"] == (
+        "inconclusive" if app_answer == "3" else "ha_stable"
+    )
+    assert observation["fresh_status_telemetry"] is True
+    assert observation["outcome"] == ("inconclusive" if app_answer == "3" else "pass")
+
+
+@pytest.mark.parametrize(
+    ("observed_route", "complete", "packet_types"),
+    (
+        ("active_proxy", True, ["SettingsData"]),
+        ("unverified", True, ["StatusData"]),
+        ("active_proxy", False, ["StatusData"]),
+    ),
+)
+def test_vendor_app_stability_is_inconclusive_without_complete_fresh_route_evidence(
+    monkeypatch, tmp_path, observed_route, complete, packet_types
+):
+    from types import SimpleNamespace
+
+    class StableWithoutTelemetry:
+        origin = "https://ha.example.test"
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "no-status"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": observed_route,
+                    "complete": complete,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 4,
+                            "decoded_packet_types": packet_types,
+                        }
+                    ],
+                }
+            ]
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "vendor-stale"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("2", "1", "3"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        StableWithoutTelemetry(),
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "stale-run",
+    )
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    assert result == 2
+    assert stored["steps"][-1]["outcome"] == "inconclusive"
+
+
+def test_vendor_app_observed_disconnect_requires_and_records_new_session(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class RecoveredHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.snapshots = iter(
+                (
+                    (True, 3),  # baseline
+                    (False, 3),  # observed disconnect
+                    (True, 4),  # new session
+                )
+            )
+
+        def hil_capabilities(self, entry_id):
+            connected, generation = next(self.snapshots)
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": connected,
+                "status_fresh": connected,
+                "session_generation": generation,
+            }
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "recovered-capture"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "active_proxy",
+                    "complete": True,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 4,
+                            "decoded_packet_types": ["StatusData"],
+                        }
+                    ],
+                }
+            ]
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "vendor-recovered"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("2", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        RecoveredHA(),
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "recovered-run",
+    )
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    observation = stored["steps"][-1]
+    assert result == 0
+    assert observation["disconnect_observed"] is True
+    assert observation["ha_observation"] == "ha_recovered"
+    assert observation["session_generation_before"] == 3
+    assert observation["session_generation_after"] == 4
+    assert observation["outcome"] == "pass"
+
+
+def test_vendor_app_resume_gap_cannot_be_classified_as_ha_stable(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    class ResumedHA:
+        origin = "https://ha.example.test"
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            if commands[0]["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "resumed-capture"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "observed_route": "active_proxy",
+                    "complete": True,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 4,
+                            "decoded_packet_types": ["StatusData"],
+                        }
+                    ],
+                }
+            ]
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "vendor-resumed"
+    output_dir.mkdir(mode=0o700)
+    fingerprint = cli._device_fingerprint(
+        "resume-run", device, "https://ha.example.test", "auto"
+    )
+    resume_state = {
+        "run_id": "resume-run",
+        "scenario_id": "recovery_reconnect",
+        "device_fingerprint": fingerprint,
+        "steps": [
+            {"step_id": "baseline", "outcome": "pass", "session_generation": 4},
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "vendor-app contention",
+                "operator_confirmed": True,
+                "operator_app_result": "connected",
+            },
+        ],
+    }
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_save_private_trace", lambda *args, **kwargs: None)
+
+    result = cli._execute_recovery_suite(
+        ResumedHA(),
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "resume-run",
+        resume_state,
+    )
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    observation = stored["steps"][-1]
+    assert result == 2
+    assert observation["ha_observation"] == "inconclusive"
+    assert observation["outcome"] == "inconclusive"
+
+
 def test_device_fingerprint_is_run_and_server_scoped():
     device = discovery.Device(
         device_id="private-device",

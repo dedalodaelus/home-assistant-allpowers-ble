@@ -23,16 +23,16 @@
     },
     {
       "id": "recovered_session",
-      "instruction": "Observe a new connected session generation with fresh status after the operator action.",
+      "instruction": "Observe a new connected session generation for reconnect actions, or the same verified session with fresh status for vendor-app stability.",
       "timeout_seconds": 300,
       "action": "observe",
       "target": null,
-      "expected": "new session generation and fresh status"
+      "expected": "verified session observation and fresh status"
     }
   ],
   "required_evidence": [
     "verified_runtime_capabilities",
-    "new_session_generation",
+    "session_generation_observation",
     "fresh_status",
     "operator_observation",
     "connected_route_trace"

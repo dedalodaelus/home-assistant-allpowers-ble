@@ -90,6 +90,17 @@ qualification status remains inconclusive where evidence is insufficient.
 After interruption, run `report` on the same directory; it does not resume or
 repeat HIL actions.
 
+For `run --suite recovery`, choosing vendor-app contention asks for one
+operator-reported result: could not connect, connected, or unable/unwilling to
+test. The runner never opens the app or changes the BLE route. It reports
+`ha_stable` for an unchanged verified session or `ha_recovered` after an
+observed session change only when the bounded trace contains a fresh decoded
+status packet and complete verified route evidence. The app answer is stored
+separately from machine observations. A resume gap, missing status packet,
+unverified route, or incomplete trace stays inconclusive; the result cannot
+establish why the app connected or failed, or prove uninterrupted behavior
+outside the observed interval.
+
 ### Review and import a public evidence ZIP
 
 An exported ZIP can be reviewed and added to the repository without upgrading
