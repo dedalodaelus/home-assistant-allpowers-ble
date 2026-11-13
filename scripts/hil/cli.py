@@ -896,23 +896,156 @@ def _execute_experimental_output_step(
     machine_actions: list[dict[str, Any]] = []
 
     def execute(target_state: bool) -> dict[str, Any]:
-        with api.websocket_session() as connection:
-            result = connection.experimental_output(
-                entry_id,
-                feature,
-                target_state,
-                authorization_confirmed=True,
-                execution_confirmed=True,
+        phase = "change" if not machine_actions else "restore"
+        scenario_id = {
+            "ac_output": "output_ac_cycle",
+            "dc_output": "output_dc_cycle",
+            "light_output": "output_light_cycle",
+        }[feature]
+        try:
+            started = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/start",
+                        "entry_id": entry_id,
+                        "run_id": run_id,
+                        "scenario_id": scenario_id,
+                        "requested_route": args.route,
+                    }
+                ]
+            )[0]
+        except HAAPIError:
+            machine_actions.append(
+                {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "trace_error": "capture_start_failed",
+                    "trace_evidence": [],
+                }
             )
+            return {
+                "outcome": "inconclusive",
+                "confirmed": False,
+                "trace_error": "capture_start_failed",
+            }
+        capture_id = started.get("capture_id") if isinstance(started, dict) else None
+        if not isinstance(capture_id, str) or started.get("schema_version") != 2:
+            machine_actions.append(
+                {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "trace_error": "capture_start_invalid",
+                    "trace_evidence": [],
+                }
+            )
+            return {
+                "outcome": "inconclusive",
+                "confirmed": False,
+                "trace_error": "capture_start_invalid",
+            }
+        backend_result: dict[str, Any] | None = None
+        backend_failed = False
+        try:
+            with api.websocket_session() as connection:
+                backend_result = connection.experimental_output(
+                    entry_id,
+                    feature,
+                    target_state,
+                    authorization_confirmed=True,
+                    execution_confirmed=True,
+                )
+        except HAAPIError:
+            backend_failed = True
+        try:
+            trace = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/stop",
+                        "entry_id": entry_id,
+                        "capture_id": capture_id,
+                    }
+                ]
+            )[0]
+        except HAAPIError:
+            try:
+                trace = api.websocket(
+                    [
+                        {
+                            "type": "allpowers_ble/hil/fetch",
+                            "entry_id": entry_id,
+                            "capture_id": capture_id,
+                        }
+                    ]
+                )[0]
+            except HAAPIError:
+                trace = None
+        transaction = None
+        trace_path = None
+        trace_valid = False
+        if isinstance(trace, dict):
+            try:
+                services.validate_trace_result(
+                    trace,
+                    run_id=run_id,
+                    scenario_id=scenario_id,
+                    capture_id=capture_id,
+                    requested_route=args.route,
+                    expected_version=2,
+                )
+                trace_valid = True
+                transaction = services.correlate_transaction(
+                    trace,
+                    expected_generation=generation,
+                    kind="output",
+                )
+                trace_dir = output_dir / "traces" / f"{step_id}_{phase}"
+                trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+                trace_dir.mkdir(mode=0o700, exist_ok=False)
+                services.save_private_trace(trace_dir, trace)
+                trace_path = str(trace_dir.relative_to(output_dir))
+            except HAAPIError, OSError, TypeError, ValueError:
+                trace_valid = False
+                transaction = None
+        trace_evidence = []
+        if trace_path is not None:
+            for filename in ("trace.json", "events.jsonl", "frames.jsonl"):
+                path = output_dir / trace_path / filename
+                if path.is_file():
+                    trace_evidence.append(
+                        {
+                            "path": f"{trace_path}/{filename}",
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                    )
+        action_result = backend_result or {
+            "outcome": "inconclusive",
+            "confirmed": False,
+        }
+        action_result = {
+            **action_result,
+            "trace_valid": trace_valid,
+            "trace_complete": trace_valid and trace.get("complete") is True,
+            "trace_route": trace.get("observed_route") if trace_valid else None,
+            "trace_path": trace_path,
+            "trace_evidence": trace_evidence,
+            "transaction": transaction,
+        }
         machine_actions.append(
             {
-                "outcome": result["outcome"],
-                "confirmed": result["confirmed"],
-                "route": result.get("route"),
-                "session_generation": result.get("session_generation"),
+                "outcome": action_result["outcome"],
+                "confirmed": action_result["confirmed"],
+                "route": action_result.get("route"),
+                "session_generation": action_result.get("session_generation"),
+                "trace_route": action_result.get("trace_route"),
+                "trace_complete": action_result.get("trace_complete"),
+                "trace_valid": action_result.get("trace_valid"),
+                "trace_path": action_result.get("trace_path"),
+                "trace_evidence": action_result.get("trace_evidence", []),
+                "transaction": action_result.get("transaction"),
+                "backend_failed": backend_failed,
             }
         )
-        return result
+        return action_result
 
     try:
         changed = execute(target)
@@ -933,7 +1066,7 @@ def _execute_experimental_output_step(
             )
         except HAAPIError:
             after_caps, after_state = {}, {"available": False}
-        state_confirmed = (
+        change_readback_confirmed = (
             changed.get("outcome") == "confirmed"
             and changed.get("confirmed") is True
             and changed.get("session_generation") == generation
@@ -951,7 +1084,15 @@ def _execute_experimental_output_step(
             and after_state.get("available") is True
             and after_state.get("state") == target_name
         )
-        if not state_confirmed:
+        change_evidence_complete = (
+            changed.get("trace_valid") is True
+            and changed.get("trace_complete") is True
+            and changed.get("trace_route") == changed.get("route")
+            and services.route_matches_request(args.route, changed.get("trace_route"))
+            and isinstance(changed.get("transaction"), dict)
+            and changed["transaction"].get("session_generation") == generation
+        )
+        if not change_readback_confirmed:
             evidence = {
                 "schema_version": 1,
                 "step_id": step_id,
@@ -962,7 +1103,11 @@ def _execute_experimental_output_step(
                 "outcome": "inconclusive",
             }
             outcome = "inconclusive"
-            reason = "write/readback is ambiguous; no automatic restoration or retry"
+            reason = (
+                "GATT trace could not be armed; no write was sent"
+                if changed.get("trace_error")
+                else "write/readback is ambiguous; no automatic restoration or retry"
+            )
         else:
             try:
                 physical_change = services.prompt(
@@ -1021,7 +1166,7 @@ def _execute_experimental_output_step(
                     final_state = api.control_state(
                         entity_key, device.control_entities.get(entity_key)
                     )
-                    restored_ok = (
+                    restoration_readback_confirmed = (
                         restored.get("outcome") == "confirmed"
                         and restored.get("confirmed") is True
                         and restored.get("session_generation") == generation
@@ -1039,8 +1184,20 @@ def _execute_experimental_output_step(
                         and final_state.get("available") is True
                         and final_state.get("state") == initial
                     )
+                    restoration_evidence_complete = (
+                        restored.get("trace_valid") is True
+                        and restored.get("trace_complete") is True
+                        and restored.get("trace_route") == restored.get("route")
+                        and services.route_matches_request(
+                            args.route, restored.get("trace_route")
+                        )
+                        and isinstance(restored.get("transaction"), dict)
+                        and restored["transaction"].get("session_generation")
+                        == generation
+                    )
                 except HAAPIError:
-                    restored_ok = False
+                    restoration_readback_confirmed = False
+                    restoration_evidence_complete = False
                     final_state = {"state": None}
                 evidence = {
                     "schema_version": 1,
@@ -1058,7 +1215,7 @@ def _execute_experimental_output_step(
                 }
                 outcome = "inconclusive"
                 reason = "restoration lacks confirmed same-session readback"
-                if restored_ok:
+                if restoration_readback_confirmed:
                     try:
                         physical_restore = services.prompt(
                             "Physical restoration result: 1=original state restored, 2=incorrect, 3=unable to observe: "
@@ -1074,9 +1231,15 @@ def _execute_experimental_output_step(
                         evidence["physical_change_outcome"] == "correct"
                         and evidence["physical_restore_outcome"] == "correct"
                     ):
-                        evidence["outcome"] = "pass"
-                        outcome = "pass"
-                        reason = None
+                        if change_evidence_complete and restoration_evidence_complete:
+                            evidence["outcome"] = "pass"
+                            outcome = "pass"
+                            reason = None
+                        else:
+                            reason = (
+                                "physical change and restoration were observed, but "
+                                "complete trace-bound transaction evidence is missing"
+                            )
     evidence_path = output_dir / f"tier-{step_id}.json"
     evidence_path.write_text(
         json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -524,6 +524,24 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
         def control_state(self, _feature, _entity):
             return {"available": True, "state": self.state}
 
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-change"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "run_id": "0123456789abcdef",
+                    "scenario_id": "output_dc_cycle",
+                    "capture_id": command["capture_id"],
+                    "requested_route": "auto",
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                    "events": [],
+                    "frames": [],
+                }
+            ]
+
         @contextmanager
         def websocket_session(self):
             yield self
@@ -563,7 +581,13 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
     fake = FakeHA()
     prompt_answers = iter(answers)
     services = replace(
-        cli._suite_services(), prompt=lambda _question: next(prompt_answers)
+        cli._suite_services(),
+        prompt=lambda _question: next(prompt_answers),
+        validate_trace_result=lambda *_args, **_kwargs: None,
+        correlate_transaction=lambda *_args, **_kwargs: {
+            "session_generation": 9,
+            "kind": "output",
+        },
     )
     result = cli._execute_experimental_output_step(
         fake,
@@ -635,6 +659,25 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
         def control_state(self, _feature, _entity):
             return {"available": True, "state": self.state}
 
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture_id = "capture-guided"
+                return [{"schema_version": 2, "capture_id": self.capture_id}]
+            return [
+                {
+                    "schema_version": 2,
+                    "run_id": "parent-run",
+                    "scenario_id": "output_dc_cycle",
+                    "capture_id": command["capture_id"],
+                    "requested_route": "auto",
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                    "events": [],
+                    "frames": [],
+                }
+            ]
+
         @contextmanager
         def websocket_session(self):
             yield self
@@ -665,7 +708,15 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
     monkeypatch.setattr(
         cli,
         "_suite_services",
-        lambda: replace(base_services, prompt=lambda _question: next(answers)),
+        lambda: replace(
+            base_services,
+            prompt=lambda _question: next(answers),
+            validate_trace_result=lambda *_args, **_kwargs: None,
+            correlate_transaction=lambda *_args, **_kwargs: {
+                "session_generation": 9,
+                "kind": "output",
+            },
+        ),
     )
     root = storage.write_run(tmp_path, "guided-parent", {}, {})
     plan = {"requested_tier": "silver", "steps": [{"id": "dc_output_cycle"}]}
@@ -703,6 +754,14 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
         "local_adapter",
         "local_adapter",
     ]
+    for action in evidence["actions"]:
+        assert action["trace_complete"] is True
+        for trace_artifact in action["trace_evidence"]:
+            trace_path = root / trace_artifact["path"]
+            assert (
+                hashlib.sha256(trace_path.read_bytes()).hexdigest()
+                == trace_artifact["sha256"]
+            )
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
