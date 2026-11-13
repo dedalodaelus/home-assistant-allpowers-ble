@@ -615,7 +615,7 @@ def test_tier_executor_skips_absent_and_blocks_unknown_without_ble_write(
     assert api.commands == []
 
 
-def test_noninteractive_tier_read_only_failure_does_not_crash_on_hashlib(
+def test_noninteractive_tier_read_only_failure_records_inconclusive_without_writes(
     monkeypatch, tmp_path
 ):
     from argparse import Namespace
@@ -627,10 +627,20 @@ def test_noninteractive_tier_read_only_failure_does_not_crash_on_hashlib(
 
     def fake_output(_api, _args, _device, _environment, out, _run_id, _services):
         (out / "checkpoint.json").write_text(
-            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "outcome": "inconclusive",
+                            "reason": "no interactive authorization was given",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
         )
         (out / "trace.json").write_text("{}", encoding="utf-8")
-        return 0
+        return 2
 
     monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
     base_services = cli._suite_services()
@@ -673,7 +683,9 @@ def test_noninteractive_tier_read_only_failure_does_not_crash_on_hashlib(
     assert result == 2
     execution = json.loads((root / "tier-execution.json").read_text())
     assert execution["steps"][0]["outcome"] == "inconclusive"
-    assert execution["steps"][1]["outcome"] == "pass"
+    assert execution["steps"][1]["outcome"] == "inconclusive"
+    assert "no interactive authorization" in execution["steps"][1]["reason"]
+    assert not list(tmp_path.rglob("frames.jsonl"))
 
 
 @pytest.mark.parametrize(

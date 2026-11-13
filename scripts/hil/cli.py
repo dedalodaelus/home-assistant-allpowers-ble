@@ -528,7 +528,7 @@ def _execute_tier_suite(
                 {
                     "step_id": step_id,
                     "outcome": "blocked",
-                    "reason": "not attempted because an earlier state change may remain unrestored",
+                    "reason": f"not attempted because an earlier step stopped execution: {stop_reason}",
                 }
             )
             continue
@@ -848,7 +848,12 @@ def _execute_tier_suite(
                     if candidate_result.get("outcome") != "pass":
                         overall = 2
                     if candidate_result.get("state_safe_to_continue") is False:
-                        stop_reason = "candidate state may remain changed or uncertain"
+                        reason = candidate_result.get("reason")
+                        stop_reason = (
+                            reason.strip()
+                            if isinstance(reason, str) and reason.strip()
+                            else "candidate state may remain changed or uncertain"
+                        )
                     continue
                 execution["steps"].append(
                     {
@@ -945,11 +950,19 @@ def _execute_tier_suite(
             and any(Path(item).name == "trace.json" for item in evidence_paths)
             and all(row.get("outcome") == "pass" for row in rows)
         )
+        failed = next((row for row in rows if row.get("outcome") != "pass"), None)
+        failed_reason = failed.get("reason") if isinstance(failed, dict) else None
+        step_reason = (
+            failed_reason.strip()
+            if isinstance(failed_reason, str) and failed_reason.strip()
+            else "guided scenario did not complete with confirmed evidence"
+        )
         execution["steps"].append(
             {
                 "step_id": step_id,
                 "scenario_id": scenario_id,
                 "outcome": "pass" if passed else "inconclusive",
+                **({} if passed else {"reason": step_reason}),
                 "observed_routes": sorted(verified_routes),
                 "human_review": "pending",
                 "machine_evidence": [
@@ -968,7 +981,7 @@ def _execute_tier_suite(
             recovery_evidence_run = f"../../tier_{child_run_id}/private"
         if not passed:
             overall = 2
-            stop_reason = "guided scenario did not complete with confirmed evidence"
+            stop_reason = step_reason
     target = output_dir / "tier-execution.json"
     execution["verified_routes"] = sorted(
         {

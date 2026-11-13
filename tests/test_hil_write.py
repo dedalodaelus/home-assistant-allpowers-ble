@@ -930,6 +930,8 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
         assert tier_status == 2
     if failure == "restore_ambiguous":
         assert execution["steps"][1]["outcome"] == "blocked"
+        assert "restor" in result["reason"].lower()
+        assert result["reason"] in execution["steps"][1]["reason"]
         assert len(fake_ble.writes) == 2
     assert result["outcome"] == expected_outcome, result
     assert len(fake_ble.writes) == expected_write_count
