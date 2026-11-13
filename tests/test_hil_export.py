@@ -173,6 +173,10 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
     assert bronze["qualification_status"] == "inconclusive"
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
+    artifact.write_text(json.dumps({"outcome": "tampered"}), encoding="utf-8")
+    with pytest.raises(HAAPIError, match="(?i)guided tier evidence digest mismatch"):
+        export_archive(run, confirmed=True)
+
 
 def test_blocked_output_run_is_retained_in_public_report(tmp_path: Path) -> None:
     from argparse import Namespace
