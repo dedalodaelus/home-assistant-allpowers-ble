@@ -139,6 +139,45 @@ python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json
 Imported consent, software PASS labels, synthetic captures, or hashes without
 their verified child artifacts cannot create a qualification PASS.
 
+For imported Bronze archives, the reviewer CLI can apply a digest-bound
+independent review. Create a JSON file that names the archive digest and
+imported run ID, and set each claim to `pass` only after inspecting its
+supporting public artifacts; otherwise use `inconclusive`:
+
+```json
+{
+  "schema_version": 1,
+  "archive_sha256": "<imported archive sha256>",
+  "run_id": "<archive-... run ID>",
+  "reviewed_by": "Reviewer name",
+  "reviewed_at": "2026-11-13T12:00:00+00:00",
+  "claims": {
+    "identity": "pass",
+    "protocol_probe": "pass",
+    "fresh_telemetry": "pass"
+  }
+}
+```
+
+Preview, then explicitly apply the reviewed claims:
+
+```bash
+python -m scripts.hil review \
+  --matrix tests/hil/qualification_matrix.json \
+  --run-id archive-... \
+  --review-file bronze-review.json
+python -m scripts.hil review \
+  --matrix tests/hil/qualification_matrix.json \
+  --run-id archive-... \
+  --review-file bronze-review.json \
+  --apply
+```
+
+The command preserves a claim as inconclusive unless its imported archive
+digest, manifest, route, build, runtime session, and claim-specific evidence
+verify. It invokes the schema-v3 tier evaluator after applying the review;
+review input and operator consent alone cannot create Bronze PASS.
+
 ### Bluetooth adapter/proxy candidates in Home Assistant 2026.10.4
 
 Home Assistant 2026.10.4 registers the **admin-only** WebSocket command `bluetooth/subscribe_scanner_details` ([server implementation](https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/bluetooth/websocket_api.py#L249-L294); [upstream tests](https://github.com/home-assistant/core/blob/2026.10.4/tests/components/bluetooth/test_websocket_api.py#L310-L373)). This is a short-lived *subscription*: it returns a command acknowledgement, then an initial `event.add` list of scanner objects, if any. That list includes **addresses, names and source IDs**. The CLI requests the initial event only when permitted, collects four **counts only** (`total_scanners`, `connectable_scanners`, `remote_scanners`, `connectable_remote_scanners`), and closes the subscription. No raw scanner record or identifier enters the JSON. With non-admin accounts, Bluetooth not loaded, unsupported API, or an absent initial event, `bluetooth_scanner_candidates` is explicitly `unknown`.

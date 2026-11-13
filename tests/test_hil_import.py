@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -222,7 +223,12 @@ def test_v2_migration_preserves_runs_as_unqualified_history() -> None:
 
 
 def _captured_archive(
-    path: Path, route: str | list[str], firmware: str, run_id: str
+    path: Path,
+    route: str | list[str],
+    firmware: str,
+    run_id: str,
+    *,
+    bronze_reviewable: bool = False,
 ) -> Path:
     environment = {
         "schema_version": 1,
@@ -234,6 +240,13 @@ def _captured_archive(
             "runner_checkout_commit": _fact(None, "unknown", False),
         },
     }
+    if bronze_reviewable:
+        environment["integration"].update(
+            build_match=_fact("verified", "runner_build_verification"),
+            installed_commit=_fact("a" * 40, "runner_git_checkout"),
+            installed_fingerprint=_fact("b" * 64, "ha_ws_hil_build"),
+            checkout_fingerprint=_fact("b" * 64, "runner_integration_files"),
+        )
     session = {
         "schema_version": 1,
         "run_id": run_id,
@@ -247,6 +260,14 @@ def _captured_archive(
             "firmware_version": _fact(firmware, "ha_device_registry"),
         },
     }
+    if bronze_reviewable:
+        session["runtime_capabilities"] = {
+            "verified": True,
+            "connected": True,
+            "status_fresh": True,
+            "pending_transaction": False,
+            "capabilities": {"read_telemetry": True},
+        }
     private = write_run(path, f"run-{run_id}", environment, session)
     write_scenario_progress(
         private,
@@ -255,7 +276,11 @@ def _captured_archive(
         "a" * 64,
         [{"step_id": "route_evidence", "outcome": "pass"}],
     )
-    stamp = "2026-11-09T12:00:00+00:00"
+    stamp = (
+        datetime.now(UTC).isoformat()
+        if bronze_reviewable
+        else "2026-11-09T12:00:00+00:00"
+    )
     common = {
         "schema_version": 2,
         "run_id": run_id,
@@ -336,9 +361,96 @@ def _captured_archive(
                 }
             ],
         }
+        if bronze_reviewable:
+            status_frame = {
+                **common,
+                "seq": 2,
+                "utc": stamp,
+                "elapsed_ms": 1.0,
+                "event": "write_attempt",
+                "direction": "tx",
+                "command_type": "status_request",
+                "frame_validation": "validated_tx",
+                "hex": "a565b1000106010000000000",
+            }
+            notification_event = {
+                **common,
+                "seq": 3,
+                "utc": stamp,
+                "elapsed_ms": 2.0,
+                "event": "notification_received",
+            }
+            decoded_event = {
+                **common,
+                "seq": 4,
+                "utc": stamp,
+                "elapsed_ms": 3.0,
+                "event": "notification_decoded",
+            }
+            trace["events"] = [
+                route_event,
+                {**status_frame, "direction": "write"},
+                notification_event,
+                decoded_event,
+            ]
+            trace["frames"] = [
+                status_frame,
+                {
+                    **notification_event,
+                    "direction": "rx",
+                    "command_type": "unknown",
+                    "frame_validation": "unvalidated_chunk",
+                    "hex": "aa55",
+                },
+            ]
+            trace["event_count"] = 4
+            trace["frame_count"] = 2
         trace_dir = private / "traces" / f"read_only_snapshot_{index}"
         trace_dir.mkdir(parents=True)
         _save_private_trace(trace_dir, trace)
+        if bronze_reviewable:
+            bronze_trace = private / "traces" / "bronze_read_only"
+            bronze_trace.mkdir(parents=True)
+            _save_private_trace(bronze_trace, trace)
+            sample_time = datetime.now(UTC).isoformat()
+            sample = {
+                "sampled_at_utc": sample_time,
+                "telemetry": {
+                    "battery": {"value": 50, "verified": True, "sample_age_seconds": 5},
+                    "telemetry_available": {"value": "on", "verified": True},
+                },
+            }
+            (private / "tier-bronze-read-only.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "step_id": "read_only_probe",
+                        "sample_sha256": [
+                            hashlib.sha256(
+                                json.dumps(sample, sort_keys=True).encode()
+                            ).hexdigest()
+                        ]
+                        * 2,
+                        "samples": [sample, sample],
+                        "fresh_verified_samples": True,
+                        "protocol_probe": {
+                            "outcome": "pass",
+                            "trace": "traces/bronze_read_only",
+                            "trace_sha256": hashlib.sha256(
+                                (bronze_trace / "trace.json").read_bytes()
+                            ).hexdigest(),
+                            "route": observed_route,
+                            "session_generation": 1,
+                            "status_request_seq": 2,
+                            "decoded_response_seq": 4,
+                            "status_request_hex": "a565b1000106010000000000",
+                        },
+                        "physical_observation": "plausible",
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
@@ -793,3 +905,158 @@ def test_exported_captures_import_with_route_firmware_and_steps_scoped(
             "scenarios.json",
         }
         assert all((tmp_path / evidence).is_file() for evidence in run["evidence"])
+
+
+def test_export_import_and_independent_bronze_review_is_digest_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]
+    review_path = tmp_path / "bronze-review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archive_sha256": imported["archive_sha256"],
+                "run_id": imported["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    mismatched_review = tmp_path / "mismatched-review.json"
+    mismatched_review.write_text(
+        json.dumps(
+            json.loads(review_path.read_text(encoding="utf-8"))
+            | {"archive_sha256": "0" * 64}
+        ),
+        encoding="utf-8",
+    )
+    before_review = matrix_path.read_bytes()
+    with pytest.raises(HAAPIError, match="does not match"):
+        review_imported_run(
+            matrix_path,
+            run_id=imported["run_id"],
+            review_file=mismatched_review,
+            apply=True,
+            repo_root=tmp_path,
+        )
+    assert matrix_path.read_bytes() == before_review
+
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=imported["run_id"],
+            review_file=review_path,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+    assert '"applied": false' in capsys.readouterr().out
+    assert (
+        json.loads(matrix_path.read_text())["revisions"][0]["runs"][0].get(
+            "bronze_evidence"
+        )
+        is None
+    )
+
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=imported["run_id"],
+            review_file=review_path,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+    assert '"tier": "bronze"' in capsys.readouterr().out
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]
+    assert {
+        key: value["status"] for key, value in reviewed["bronze_evidence"].items()
+    } == {
+        "identity": "pass",
+        "protocol_probe": "pass",
+        "fresh_telemetry": "pass",
+    }
+    errors, _ = validate_hil_qualification.validate_matrix(
+        json.loads(matrix_path.read_text()),
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+
+
+def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
+
+    archive = _captured_archive(
+        tmp_path / "source", "local_adapter", "1.1", "0123456789abcdef"
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    review_path = tmp_path / "bronze-review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archive_sha256": imported["archive_sha256"],
+                "run_id": imported["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=imported["run_id"],
+            review_file=review_path,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+    reviewed = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    assert all(
+        item["status"] == "inconclusive"
+        for item in reviewed["bronze_evidence"].values()
+    )

@@ -130,6 +130,15 @@ def make_parser() -> argparse.ArgumentParser:
         "tiers", help="Calculate evidence-backed hardware support tiers as JSON"
     )
     tiers_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    review_parser = commands.add_parser(
+        "review", help="Review an imported Bronze archive with independent claims"
+    )
+    review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    review_parser.add_argument("--run-id", required=True)
+    review_parser.add_argument("--review-file", type=Path, required=True)
+    review_mode = review_parser.add_mutually_exclusive_group()
+    review_mode.add_argument("--dry-run", action="store_true")
+    review_mode.add_argument("--apply", action="store_true")
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
@@ -1605,6 +1614,15 @@ def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
+    if args.command == "review":
+        from .review import review_imported_run
+
+        return review_imported_run(
+            args.matrix,
+            run_id=args.run_id,
+            review_file=args.review_file,
+            apply=args.apply,
+        )
     if args.command == "tiers":
         from .tiers import evaluate_tiers
         from scripts.validate_hil_qualification import validate_matrix
