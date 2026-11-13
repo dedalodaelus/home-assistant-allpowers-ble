@@ -3520,7 +3520,13 @@ def test_vendor_app_result_is_separate_from_machine_observed_ha_stability(
         def websocket(self, commands):
             self.commands.extend(commands)
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "stable-capture"}]
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "stable-capture",
+                        "ttl_seconds": 120,
+                    }
+                ]
             return [
                 {
                     "schema_version": 2,
@@ -3587,6 +3593,129 @@ def test_vendor_app_result_is_separate_from_machine_observed_ha_stability(
     assert observation["outcome"] == ("inconclusive" if app_answer == "3" else "pass")
 
 
+@pytest.mark.parametrize("status_delay", (20, None))
+def test_vendor_app_waits_for_fresh_status_with_real_v2_trace_validation(
+    monkeypatch, tmp_path, status_delay
+):
+    from types import SimpleNamespace
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    class DelayedStatusHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self, clock):
+            self.clock = clock
+            self.capture = None
+            self.capture_started_at = None
+            self.status_recorded = False
+
+        def hil_capabilities(self, entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4,
+            }
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "entry-safe",
+                    "operator",
+                    "0123456789abcdef",
+                    "recovery_reconnect",
+                    "auto",
+                )
+                self.capture_started_at = self.clock[0]
+                self.capture.record("capture_started", session_generation=4)
+                self.capture.observe_route(
+                    4,
+                    ConnectedRoute(
+                        "active_proxy",
+                        "esphome",
+                        "esphome_scanner_binding",
+                        proxy_id="private-proxy-id",
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+
+            if command["type"].endswith("/fetch"):
+                if (
+                    status_delay is not None
+                    and not self.status_recorded
+                    and self.clock[0] - self.capture_started_at >= status_delay
+                ):
+                    self.capture.record(
+                        "notification_decoded",
+                        session_generation=4,
+                        decoded_packets=1,
+                        decoded_packet_types=["StatusData"],
+                        characteristic_uuid="0000fff1-0000-1000-8000-00805f9b34fb",
+                        inferred_model_profile="r600",
+                        session_hardware_revision="0.3",
+                        discarded_frames=0,
+                        discarded_bytes=0,
+                    )
+                    self.status_recorded = True
+                return [self.capture.snapshot()]
+
+            self.capture.record("capture_stopped", session_generation=4)
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+    clock = [100.0]
+    api_fake = DelayedStatusHA(clock)
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / f"delayed-status-{status_delay}"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("2", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(non_interactive=False, route="auto"),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    observation = stored["steps"][-1]
+    assert api_fake.capture_started_at is not None
+    assert api_fake.clock[0] - api_fake.capture_started_at >= (status_delay or 119)
+    assert result == (0 if status_delay is not None else 2)
+    assert observation["trace_complete"] is True
+    assert observation["fresh_status_telemetry"] is (status_delay is not None)
+    assert observation["ha_observation"] == (
+        "ha_stable" if status_delay is not None else "inconclusive"
+    )
+    assert observation["outcome"] == (
+        "pass" if status_delay is not None else "inconclusive"
+    )
+
+
 @pytest.mark.parametrize(
     ("observed_route", "complete", "packet_types"),
     (
@@ -3614,7 +3743,9 @@ def test_vendor_app_stability_is_inconclusive_without_complete_fresh_route_evide
 
         def websocket(self, commands):
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "no-status"}]
+                return [
+                    {"schema_version": 2, "capture_id": "no-status", "ttl_seconds": 120}
+                ]
             return [
                 {
                     "schema_version": 2,
@@ -3692,7 +3823,13 @@ def test_vendor_app_observed_disconnect_requires_and_records_new_session(
 
         def websocket(self, commands):
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "recovered-capture"}]
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "recovered-capture",
+                        "ttl_seconds": 120,
+                    }
+                ]
             return [
                 {
                     "schema_version": 2,
@@ -3759,7 +3896,13 @@ def test_vendor_app_resume_gap_cannot_be_classified_as_ha_stable(monkeypatch, tm
 
         def websocket(self, commands):
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "resumed-capture"}]
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "resumed-capture",
+                        "ttl_seconds": 120,
+                    }
+                ]
             return [
                 {
                     "schema_version": 2,

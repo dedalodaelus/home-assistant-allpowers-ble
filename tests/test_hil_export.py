@@ -1114,7 +1114,7 @@ def test_recovery_route_observation_exports_with_controlled_scenario_summary(
             },
             {
                 "step_id": "recovered_session",
-                "outcome": "pass",
+                "outcome": "inconclusive",
                 "trace": "traces/recovery",
                 "connected": True,
                 "status_fresh": True,
@@ -1123,10 +1123,9 @@ def test_recovery_route_observation_exports_with_controlled_scenario_summary(
                 "disconnect_observed": True,
                 "trace_complete": True,
                 "route": "unverified",
-                "physical_outcome": "yes",
                 "operator_app_result": "could_not_connect",
-                "ha_observation": "ha_recovered",
-                "fresh_status_telemetry": True,
+                "ha_observation": "inconclusive",
+                "fresh_status_telemetry": False,
                 "route_verified": False,
             },
         ],
@@ -1137,16 +1136,19 @@ def test_recovery_route_observation_exports_with_controlled_scenario_summary(
         assert scenarios["scenario_id"] == "recovery_reconnect"
         recovered = scenarios["steps"][2]
         assert recovered["expected"] == "verified session observation and fresh status"
-        assert recovered["actual"] == "ha_recovered"
+        assert recovered["actual"] == "inconclusive"
         assert recovered["observation"]["operator_app_result"] == "could_not_connect"
-        assert recovered["observation"]["ha_observation"] == "ha_recovered"
+        assert recovered["observation"]["ha_observation"] == "inconclusive"
+        assert recovered["observation"]["fresh_status_telemetry"] is False
         assert recovered["observation_evidence"] == ["capture-0001:1"]
         assert recovered["missing_observation_evidence"] is False
         report = exported.read("public/report.md")
         assert b"Scenario: `recovery_reconnect`" in report
         assert b"verified session observation and fresh status" in report
         assert b"operator_app_result `could_not_connect`" in report
-        assert b"ha_observation `ha_recovered`" in report
+        assert b"observed `inconclusive`" in report
+        assert b"ha_observation `inconclusive`" in report
+        assert b"fresh_status_telemetry `False`" in report
         assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
 

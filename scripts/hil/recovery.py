@@ -292,14 +292,6 @@ def _execute_recovery_suite(
                 "session_generation_after": observed_session["session_generation"],
                 "connected": True,
                 "status_fresh": True,
-                "ha_observation": (
-                    "ha_recovered"
-                    if recovered is not None
-                    else "inconclusive"
-                    if resumed_with_gap
-                    or action_step.get("operator_app_result") == "unable_or_unwilling"
-                    else "ha_stable"
-                ),
             }
         )
         try:
@@ -321,7 +313,49 @@ def _execute_recovery_suite(
             ):
                 capture_id = start["capture_id"]
                 try:
-                    services.sleep(2)
+                    if vendor_action:
+                        ttl_seconds = start.get("ttl_seconds")
+                        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 120:
+                            raise HAAPIError("Invalid bounded recovery capture TTL")
+                        capture_deadline = services.monotonic() + ttl_seconds - 1
+                        print(
+                            "Waiting for new decoded status telemetry for up to",
+                            ttl_seconds - 1,
+                            "seconds (bounded by the trace TTL).",
+                        )
+                        while services.monotonic() < capture_deadline:
+                            try:
+                                partial = api.websocket(
+                                    [
+                                        {
+                                            "type": "allpowers_ble/hil/fetch",
+                                            "entry_id": entry_id,
+                                            "capture_id": capture_id,
+                                        }
+                                    ]
+                                )[0]
+                            except HAAPIError:
+                                partial = None
+                            events = (
+                                partial.get("events")
+                                if isinstance(partial, dict)
+                                else None
+                            )
+                            if isinstance(events, list) and any(
+                                isinstance(event, dict)
+                                and event.get("event") == "notification_decoded"
+                                and event.get("session_generation")
+                                == observed_session["session_generation"]
+                                and isinstance(event.get("decoded_packet_types"), list)
+                                and "StatusData" in event["decoded_packet_types"]
+                                for event in events
+                            ):
+                                break
+                            remaining = capture_deadline - services.monotonic()
+                            if remaining > 0:
+                                services.sleep(min(2, remaining))
+                    else:
+                        services.sleep(2)
                 finally:
                     try:
                         trace = api.websocket(
@@ -413,6 +447,11 @@ def _execute_recovery_suite(
             and trace.get("complete") is True
         )
         observation["outcome"] = "pass" if machine_evidence_complete else "inconclusive"
+        observation["ha_observation"] = (
+            ("ha_recovered" if recovered is not None else "ha_stable")
+            if machine_evidence_complete
+            else "inconclusive"
+        )
         observation["limitation"] = (
             "operator-reported app result; HA session and fresh status are observed, "
             "but app-side causality and uninterrupted intervals outside capture are unknown"

@@ -193,6 +193,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "connected",
         "ha_stable",
         "ha_recovered",
+        "inconclusive",
     }
     if declared_step is not None and isinstance(declared_step.get("expected"), str):
         expected = declared_step["expected"]
