@@ -113,8 +113,23 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
         ),
         encoding="utf-8",
     )
-    artifact = private / "tier-dc-output.json"
-    artifact.write_text(json.dumps({"outcome": "pass"}), encoding="utf-8")
+    artifact = private / "tier-dc_output_cycle.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "step_id": "dc_output_cycle",
+                "outcome": "pass",
+                "initial_state": "off",
+                "target_state": "on",
+                "physical_change_outcome": "correct",
+                "restored_state": "off",
+                "physical_restore_outcome": "correct",
+                "actions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     (private / "tier-execution.json").write_text(
         json.dumps(
@@ -143,6 +158,31 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
                 "schema_version": 1,
                 "step_id": "read_only_probe",
                 "sample_sha256": ["a" * 64, "b" * 64],
+                "samples": [
+                    {
+                        "sampled_at_utc": "2026-11-09T12:00:00+00:00",
+                        "telemetry": {
+                            "battery": {
+                                "value": 50,
+                                "verified": True,
+                                "sample_age_seconds": 5,
+                                "entity_id": "sensor.private_battery",
+                            },
+                            "telemetry_available": {"value": "on", "verified": True},
+                        },
+                    },
+                    {
+                        "sampled_at_utc": "2026-11-09T12:00:01+00:00",
+                        "telemetry": {
+                            "battery": {
+                                "value": 51,
+                                "verified": True,
+                                "sample_age_seconds": 4,
+                            },
+                            "telemetry_available": {"value": "on", "verified": True},
+                        },
+                    },
+                ],
                 "fresh_verified_samples": True,
                 "physical_observation": "plausible",
             }
@@ -153,7 +193,9 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
     archive = export_archive(run, confirmed=True)
     with zipfile.ZipFile(archive) as exported:
         payload = exported.read("public/tier-execution.json")
+        artifacts_payload = exported.read("public/tier-artifacts.json")
         bronze_payload = exported.read("public/tier-bronze-read-only.json")
+        complete_archive = b"".join(exported.read(name) for name in exported.namelist())
     public = json.loads(payload)
     assert public["attained_tier"] is None
     assert public["qualification_status"] == "inconclusive"
@@ -163,19 +205,94 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
             "outcome": "pass",
             "human_review": "pending",
             "machine_evidence_sha256": [digest],
+            "machine_evidence": [
+                {"artifact_id": "step-01-evidence-01", "source_sha256": digest}
+            ],
         }
     ]
     assert b"PRIVATE_DEVICE_ID" not in payload
     assert b"tier-dc-output.json" not in payload
     assert b"private detail" not in payload
+    assert b"PRIVATE_DEVICE_ID" not in artifacts_payload
+    assert b"private/" not in artifacts_payload
+    assert b"0123456789abcdef" not in complete_archive
+    public_artifacts = json.loads(artifacts_payload)["artifacts"]
+    assert public_artifacts[0]["content"]["kind"] == "guided_step_evidence"
+    assert public_artifacts[0]["content"]["physical_change_outcome"] == "correct"
     bronze = json.loads(bronze_payload)
     assert bronze["protocol_probe"] == "not_observed"
     assert bronze["qualification_status"] == "inconclusive"
+    assert bronze["fresh_verified_samples"] is True
+    assert [
+        sample["telemetry"]["battery"]["value"] for sample in bronze["samples"]
+    ] == [
+        50,
+        51,
+    ]
+    assert b"sensor.private_battery" not in bronze_payload
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
     artifact.write_text(json.dumps({"outcome": "tampered"}), encoding="utf-8")
     with pytest.raises(HAAPIError, match="(?i)guided tier evidence digest mismatch"):
         export_archive(run, confirmed=True)
+
+
+def test_public_guided_artifacts_reject_tampered_private_paths(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "guided"
+    private = run / "private"
+    private.mkdir(parents=True)
+    (private / "environment.json").write_text(
+        json.dumps({"schema_version": 1}), encoding="utf-8"
+    )
+    (private / "session.json").write_text(
+        json.dumps({"schema_version": 1, "run_id": "0123456789abcdef"}),
+        encoding="utf-8",
+    )
+    artifact = private / "tier-dc_output_cycle.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "step_id": "dc_output_cycle",
+                "outcome": "inconclusive",
+                "actions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (private / "tier-execution.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "0123456789abcdef",
+                "requested_tier": "silver",
+                "attained_tier": None,
+                "review_state": "pending",
+                "steps": [
+                    {
+                        "step_id": "dc_output_cycle",
+                        "outcome": "inconclusive",
+                        "machine_evidence": [{"path": artifact.name, "sha256": digest}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    archive = export_archive(run, confirmed=True)
+    bundle = json.loads(zipfile.ZipFile(archive).read("public/tier-artifacts.json"))
+    bundle["artifacts"][0]["content"]["private_path"] = "/private/session.json"
+    tampered = tmp_path / "private-path.zip"
+    _rewrite_archive_members(
+        archive,
+        tampered,
+        {"tier-artifacts.json": (json.dumps(bundle) + "\n").encode()},
+    )
+    with pytest.raises(HAAPIError, match="Invalid public guided artifact entry"):
+        verify_public_archive(tampered)
 
 
 def test_blocked_output_run_is_retained_in_public_report(tmp_path: Path) -> None:
@@ -885,6 +1002,32 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
             }
         ],
     )
+    tier_evidence = [
+        {
+            "path": f"traces/output_ac_cycle/{name}",
+            "sha256": hashlib.sha256((trace_dir / name).read_bytes()).hexdigest(),
+        }
+        for name in ("trace.json", "events.jsonl", "frames.jsonl")
+    ]
+    (private / "tier-execution.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "requested_tier": "silver",
+                "attained_tier": None,
+                "review_state": "pending",
+                "steps": [
+                    {
+                        "step_id": "ac_output_cycle",
+                        "outcome": "pass",
+                        "machine_evidence": tier_evidence,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     archive = export_archive(tmp_path / "trace-run", confirmed=True)
     with zipfile.ZipFile(archive) as evidence:
@@ -892,6 +1035,14 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
         assert "public/events.jsonl" in members
         assert "public/frames.jsonl" in members
         combined = b"".join(evidence.read(name) for name in members)
+        tier_artifacts = json.loads(evidence.read("public/tier-artifacts.json"))[
+            "artifacts"
+        ]
+        assert {item["content"]["kind"] for item in tier_artifacts} == {
+            "gatt_trace_metadata",
+            "gatt_events",
+            "gatt_frames",
+        }
         scenarios = json.loads(evidence.read("public/scenarios.json"))
         assert scenarios["scenario_id"] == "output_ac_cycle"
         assert scenarios["steps"][0]["target"] == "ac_output"
@@ -926,6 +1077,8 @@ def test_validated_private_trace_exports_allowlisted_events_and_frame_metadata(
     assert b"do-not-export-token" not in combined
     assert b"a565b1000106010000000000" not in combined
     assert b"deadbeef" not in combined
+    assert b"capture-private-id" not in combined
+    assert b"private-tx-id" not in combined
     assert b"capture-0001" in combined
     assert verify_public_archive(archive)["captures"]["complete"] is True
 

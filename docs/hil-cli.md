@@ -87,6 +87,12 @@ manually to the issue or PR; there is no automatic posting. Unknown frame
 payloads and uncorrelated trace data are omitted. A step result or complete
 capture does not establish physical HIL qualification, and the generated
 qualification status remains inconclusive where evidence is insufficient.
+Guided-tier archives also carry verified, allowlisted child checkpoints, GATT
+event/frame metadata, and operator-observation summaries in
+`tier-artifacts.json`. Opaque artifact references bind these files to the
+requested steps; local paths, HA identifiers, BLE addresses, grant tokens, and
+raw notification payloads are excluded. Outbound transaction metadata remains
+review evidence, not an automatic qualification result.
 After interruption, run `report` on the same directory; it does not resume or
 repeat HIL actions.
 
@@ -107,9 +113,10 @@ schemas, privacy allowlist and file hashes, then copies only public ZIP members
 into `tests/hil/fixtures/` and records the run in the v3 matrix. Imported run,
 scenario, and write-capability results remain `inconclusive`; a guided software
 step or route trace does not become a physical qualification PASS. The original
-session run ID, scoped to the verified model/revision, firmware, and route,
-defines logical run identity; ZIP SHA-256 is retained separately as an artifact
-integrity value. Repackaging or re-exporting the same public members is
+session run ID is pseudonymized before export; the archive does not expose that
+source ID. The importer uses the pseudonym and verified contents for logical
+run identity. ZIP SHA-256 is retained separately as an artifact integrity
+value. Repackaging or re-exporting the same public members is
 idempotent. If a known session ID arrives with different verified member
 contents or scope, import fails without changing the matrix or fixtures. When
 the source session ID is unavailable, a canonical hash of the verified member
@@ -118,6 +125,19 @@ timestamps and packaging. Conflicting existing evidence is rejected.
 Archives without verified model or hardware metadata are kept under an
 unattributed revision identifier. Missing capture timestamps or firmware remain
 unknown and cannot satisfy strict qualification.
+
+For independent review, inspect the imported `tier-execution.json` and its
+referenced artifacts in `tier-artifacts.json`. Record only physically reviewed
+claims in the schema-v3 qualification matrix, including the reviewer, timestamp,
+evidence digest map, and scope-bound capture rows required by the
+[qualification guide](hil-qualification.md). Then compute the attained tier:
+
+```bash
+python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json
+```
+
+Imported consent, software PASS labels, synthetic captures, or hashes without
+their verified child artifacts cannot create a qualification PASS.
 
 ### Bluetooth adapter/proxy candidates in Home Assistant 2026.10.4
 

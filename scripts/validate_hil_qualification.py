@@ -393,6 +393,60 @@ def _has_bound_capture(
     return False
 
 
+def _has_bound_bronze_probe(
+    values: Any,
+    *,
+    route: Any,
+    revision_id: str,
+    firmware_version: Any,
+    run_id: Any,
+    captured_at: Any,
+    session_id: Any,
+    build_fingerprint: Any,
+) -> bool:
+    """Require a scoped status request and its later decoded response event."""
+    rows = _capture_rows(values)
+    if rows is None:
+        return False
+    scope = {
+        "route": route,
+        "revision_id": revision_id,
+        "firmware_version": firmware_version,
+        "run_id": run_id,
+        "captured_at": captured_at,
+        "session_id": session_id,
+        "build_fingerprint": build_fingerprint,
+    }
+    requests = [
+        row
+        for row in rows
+        if all(row.get(key) == value for key, value in scope.items())
+        and row.get("event") == "write_attempt"
+        and row.get("direction") == "write"
+        and isinstance(row.get("frame_hex"), str)
+        and row["frame_hex"].lower() == STATUS_REQUEST.hex()
+        and row.get("verdict") == "ok"
+        and row.get("physical_outcome") == "pass"
+        and isinstance(row.get("capture_id"), str)
+        and type(row.get("session_generation")) is int
+        and type(row.get("seq")) is int
+    ]
+    for request in requests:
+        if any(
+            all(row.get(key) == value for key, value in scope.items())
+            and row.get("capture_id") == request["capture_id"]
+            and row.get("session_generation") == request["session_generation"]
+            and row.get("seq", 0) > request["seq"]
+            and row.get("event") == "notification_decoded"
+            and row.get("direction") == "notify"
+            and row.get("verdict") == "ok"
+            and row.get("physical_outcome") == "pass"
+            for row in rows
+        ):
+            return True
+    return False
+
+
 def _check_physical_review(
     item: dict[str, Any], status: str, context: str, errors: list[str]
 ) -> None:
@@ -786,10 +840,15 @@ def _validate_run(
                     )
     authorization_context = run.get("authorization_context")
     authorization_context_source = run.get("authorization_context_source")
-    if authorization_context not in {"unknown", "production", "experimental_hil"}:
+    if authorization_context not in {
+        "unknown",
+        "read_only",
+        "production",
+        "experimental_hil",
+    }:
         _error(
             errors,
-            f"{context} authorization_context must be unknown, production, or experimental_hil",
+            f"{context} authorization_context must be unknown, read_only, production, or experimental_hil",
         )
     if authorization_context == "experimental_hil" and (
         run.get("qualification_status") == "pass"
@@ -804,6 +863,7 @@ def _validate_run(
             f"{context} qualification requires explicit production authorization_context",
         )
     expected_context_source = {
+        "read_only": "verified_read_only_session",
         "production": "reviewed_production_session",
         "experimental_hil": "experimental_hil_grant",
         "unknown": "archive_unverified",
@@ -812,6 +872,18 @@ def _validate_run(
         _error(
             errors,
             f"{context} authorization_context_source does not verify its authorization_context",
+        )
+    if authorization_context == "read_only" and any(
+        isinstance(item, dict) and item.get("status") in {"pass", "fail"}
+        for item in (
+            run.get("write_capabilities", {}).values()
+            if isinstance(run.get("write_capabilities"), dict)
+            else []
+        )
+    ):
+        _error(
+            errors,
+            f"{context} read_only authorization cannot contain write-capability verdicts",
         )
     if qualification == "pass" and (
         route not in VERIFIED_ROUTES
@@ -909,7 +981,7 @@ def _check_bronze_evidence(
             _error(errors, f"{claim_context} must establish fresh plausible telemetry")
         elif claim == "protocol_probe":
             capture_path = item.get("capture_evidence")
-            if capture_path not in paths or not _has_bound_capture(
+            if capture_path not in paths or not _has_bound_bronze_probe(
                 [capture_path],
                 route=run.get("route"),
                 revision_id=revision_id,
@@ -918,9 +990,6 @@ def _check_bronze_evidence(
                 captured_at=run.get("captured_at"),
                 session_id=run.get("session_id"),
                 build_fingerprint=run.get("build_fingerprint"),
-                result_key="golden_vector_replay",
-                capability=False,
-                expected_verdict="ok",
             ):
                 _error(
                     errors,

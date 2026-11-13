@@ -43,6 +43,7 @@ def _scope_run(run: Any) -> bool:
     expected_source = {
         "production": "reviewed_production_session",
         "experimental_hil": "experimental_hil_grant",
+        "read_only": "verified_read_only_session",
     }.get(authorization)
     fingerprint = run.get("build_fingerprint")
     if not isinstance(fingerprint, str):
@@ -57,7 +58,7 @@ def _scope_run(run: Any) -> bool:
         run.get("route") in VERIFIED_ROUTES
         and isinstance(run.get("firmware_version"), str)
         and bool(run["firmware_version"].strip())
-        and authorization in {"production", "experimental_hil"}
+        and authorization in {"production", "experimental_hil", "read_only"}
         and run.get("authorization_context_source") == expected_source
         and run.get("capture_completeness") == "complete"
         and isinstance(run.get("evidence"), list)
@@ -412,7 +413,7 @@ def _bronze_proof(
     # An independently reviewed assertion cannot substitute for a real active
     # protocol probe. Require the existing route/session/build-bound GATT row.
     capture = item.get("capture_evidence")
-    if capture not in item["evidence"] or not hil_validation._has_bound_capture(
+    if capture not in item["evidence"] or not hil_validation._has_bound_bronze_probe(
         [capture],
         route=run["route"],
         revision_id=revision["id"],
@@ -421,9 +422,6 @@ def _bronze_proof(
         captured_at=run["captured_at"],
         session_id=run["session_id"],
         build_fingerprint=run["build_fingerprint"],
-        result_key="golden_vector_replay",
-        capability=False,
-        expected_verdict="ok",
     ):
         return None
     return {**artifact, "evidence": item["evidence"]}

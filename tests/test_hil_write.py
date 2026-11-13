@@ -883,12 +883,15 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
     services = replace(
         hil_cli._suite_services(), prompt=lambda _question: next(service_answers)
     )
-    if failure == "restore_ambiguous":
-        from scripts.hil.storage import write_run
+    from scripts.hil.storage import write_run
 
-        api = FakeHA()
-        monkeypatch.setattr(hil_cli, "_suite_services", lambda: services)
-        parent = write_run(tmp_path, "guided-parent", {}, {})
+    api = FakeHA()
+    monkeypatch.setattr(hil_cli, "_suite_services", lambda: services)
+    parent = write_run(tmp_path, "guided-parent", {}, {})
+    plan_steps = [{"id": "dc_output_cycle"}]
+    if failure == "restore_ambiguous":
+        plan_steps.append({"id": "dc_output_cycle"})
+    try:
         tier_status = hil_cli._execute_tier_suite(
             api,
             SimpleNamespace(route="auto", output_root=tmp_path, non_interactive=False),
@@ -896,13 +899,7 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
             {},
             parent,
             "0123456789abcdef",
-            {
-                "requested_tier": "gold",
-                "steps": [
-                    {"id": "dc_output_cycle"},
-                    {"id": "dc_output_cycle"},
-                ],
-            },
+            {"requested_tier": "gold", "steps": plan_steps},
             {
                 "features": {
                     "dc_output": {
@@ -913,26 +910,27 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
                 }
             },
         )
-        result = json.loads((parent / "tier-execution.json").read_text())["steps"][0]
+    finally:
+        loop.close()
+    execution = json.loads((parent / "tier-execution.json").read_text())
+    result = execution["steps"][0]
+    if expected_outcome == "pass":
+        assert tier_status == 0
+        assert execution["review_state"] == "pending"
+        assert result["human_review"] == "pending"
+        assert execution["device"] == {
+            "model": "S500",
+            "hardware_version": "1",
+            "firmware_version": "1",
+        }
+        assert execution["requested_route"] == "auto"
+        assert execution["verified_routes"] == ["local_adapter"]
+        assert result["observed_routes"] == ["local_adapter"]
+    else:
         assert tier_status == 2
-        execution = json.loads((parent / "tier-execution.json").read_text())
+    if failure == "restore_ambiguous":
         assert execution["steps"][1]["outcome"] == "blocked"
         assert len(fake_ble.writes) == 2
-        loop.close()
-    else:
-        try:
-            result = hil_cli._execute_experimental_output_step(
-                FakeHA(),
-                SimpleNamespace(route="auto", non_interactive=False),
-                device,
-                tmp_path,
-                "0123456789abcdef",
-                "dc_output_cycle",
-                "dc_output",
-                services,
-            )
-        finally:
-            loop.close()
     assert result["outcome"] == expected_outcome, result
     assert len(fake_ble.writes) == expected_write_count
     expected_packets = [
@@ -941,7 +939,7 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
     ][:expected_write_count]
     assert fake_ble.writes == expected_packets
     if expected_outcome == "pass":
-        evidence = json.loads((tmp_path / "tier-dc_output_cycle.json").read_text())
+        evidence = json.loads((parent / "tier-dc_output_cycle.json").read_text())
         assert evidence["outcome"] == "pass"
         assert [action["confirmed"] for action in evidence["actions"]] == [True, True]
         assert all(action["trace_complete"] for action in evidence["actions"])
@@ -959,16 +957,16 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
             "frames.jsonl",
         }
         for item in trace_artifacts:
-            path = tmp_path / item["path"]
+            path = parent / item["path"]
             assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"]
         metadata = json.loads(
-            (tmp_path / evidence["actions"][0]["trace_path"] / "trace.json").read_text()
+            (parent / evidence["actions"][0]["trace_path"] / "trace.json").read_text()
         )
         assert metadata["observed_route"] == "local_adapter"
         assert metadata["route_observations"][0]["session_generation"] == 1
         assert "token" not in json.dumps(evidence).lower()
     else:
-        evidence_path = tmp_path / "tier-dc_output_cycle.json"
+        evidence_path = parent / "tier-dc_output_cycle.json"
         if evidence_path.exists():
             evidence = json.loads(evidence_path.read_text())
             assert evidence["outcome"] == "inconclusive"

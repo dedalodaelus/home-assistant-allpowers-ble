@@ -311,7 +311,9 @@ def _build_proposal(
         ),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
-        "session_id": session.get("session_id", "unknown"),
+        # The source session identifier is intentionally not exported. Use a
+        # stable pseudonym so later review artifacts can bind to this import.
+        "session_id": f"archive-session-{content_sha256[:32]}",
         "build_fingerprint": manifest["build_provenance"].get("checkout_fingerprint")
         or "unknown",
         "feature_presence": {

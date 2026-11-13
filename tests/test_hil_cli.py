@@ -309,6 +309,20 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
     private_session = json.loads((run_dir / "private" / "session.json").read_text())
     assert private_session["test_plan"]["requested_tier"] == "bronze"
     assert private_session["test_plan"]["attained_tier"] is None
+    tier_execution = json.loads(
+        (run_dir / "private" / "tier-execution.json").read_text()
+    )
+    assert tier_execution["device"] == {
+        "model": "R600",
+        "hardware_version": "0.3",
+        "firmware_version": "0.2",
+    }
+    assert tier_execution["requested_route"] == "active_proxy"
+    assert tier_execution["verified_routes"] == []
+    assert (
+        tier_execution["build_provenance"]
+        == private_session["test_plan"]["device"]["build_provenance"]
+    )
 
     from scripts.hil.evidence import export_archive, verify_public_archive
 
@@ -539,6 +553,66 @@ def test_tier_executor_stops_after_unrestored_candidate_mutation(monkeypatch, tm
         "blocked",
     ]
     assert "not attempted" in execution["steps"][1]["reason"]
+
+
+def test_tier_executor_skips_absent_and_blocks_unknown_without_ble_write(
+    tmp_path,
+):
+    from argparse import Namespace
+
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    class FakeHA:
+        def __init__(self):
+            self.commands = []
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            raise AssertionError("ineligible controls must not start a GATT trace")
+
+    api = FakeHA()
+    device = Device(
+        device_id="fake-device",
+        model="R1500 LITE",
+        hardware="0.1",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={"light": "switch.light", "ac_output": "switch.ac"},
+    )
+    root = write_run(tmp_path, "profile-eligibility", {}, {})
+    capabilities = {
+        "features": {
+            "light_output": {"physical_presence": "absent"},
+            "ac_output": {"physical_presence": "unknown"},
+        }
+    }
+
+    result = cli._execute_tier_suite(
+        api,
+        Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+        device,
+        {},
+        root,
+        "parent-run",
+        {
+            "requested_tier": "silver",
+            "steps": [{"id": "light_output_cycle"}, {"id": "ac_output_cycle"}],
+        },
+        capabilities,
+    )
+
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert result == 2
+    assert [step["outcome"] for step in execution["steps"]] == [
+        "not_applicable",
+        "blocked",
+    ]
+    assert "substantiates physical absence" in execution["steps"][0]["reason"]
+    assert "unknown or unreviewed" in execution["steps"][1]["reason"]
+    assert api.commands == []
 
 
 def test_noninteractive_tier_read_only_failure_does_not_crash_on_hashlib(

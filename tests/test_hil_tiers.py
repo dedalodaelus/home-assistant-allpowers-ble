@@ -189,6 +189,36 @@ def _capture(run: dict[str, Any], revision: dict[str, Any], root: Path) -> str:
 def _bronze_records(
     run: dict[str, Any], revision: dict[str, Any], root: Path, capture: str
 ) -> dict[str, Any]:
+    protocol_rows = [
+        {
+            **_scope(run, revision),
+            "capture_id": f"bronze-{run['run_id']}",
+            "session_generation": 1,
+            "seq": 1,
+            "scenario": "read_only_snapshot",
+            "operation_id": "read_only_snapshot",
+            "event": "write_attempt",
+            "direction": "write",
+            "frame_hex": validator.STATUS_REQUEST.hex(),
+            "verdict": "ok",
+            "physical_outcome": "pass",
+        },
+        {
+            **_scope(run, revision),
+            "capture_id": f"bronze-{run['run_id']}",
+            "session_generation": 1,
+            "seq": 2,
+            "scenario": "read_only_snapshot",
+            "operation_id": "read_only_snapshot",
+            "event": "notification_decoded",
+            "direction": "notify",
+            "verdict": "ok",
+            "physical_outcome": "pass",
+        },
+    ]
+    with (root / capture).open("a", encoding="utf-8") as stream:
+        for row in protocol_rows:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
     records = {}
     claims = {
         "identity": {"identity_confirmed": True},
@@ -549,6 +579,30 @@ def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(
         for proof in matrix["revisions"][0]["runs"][0]["bronze_evidence"].values()
         for path in proof["evidence"]
     }
+
+
+def test_read_only_review_can_earn_bronze_but_never_write_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "bronze")
+    run = matrix["revisions"][0]["runs"][0]
+    run["authorization_context"] = "read_only"
+    run["authorization_context_source"] = "verified_read_only_session"
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors == []
+    assert result["tiers"][0]["tier"] == "bronze"
+
+    run["write_capabilities"]["ac_output"] = _output_result(
+        run,
+        matrix["revisions"][0],
+        tmp_path,
+        run["evidence"][0],
+        "ac_output",
+    )
+    errors, _ = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert any(
+        "read_only authorization cannot contain write-capability" in e for e in errors
+    )
 
 
 def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(

@@ -75,8 +75,23 @@ def _public_archive(
     (run / "environment.json").write_text(json.dumps(environment), encoding="utf-8")
     (run / "session.json").write_text(json.dumps(session), encoding="utf-8")
     if guided_tier:
-        artifact = run / "tier-dc-output.json"
-        artifact.write_text(json.dumps({"outcome": "pass"}), encoding="utf-8")
+        artifact = run / "tier-dc_output_cycle.json"
+        artifact.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "step_id": "dc_output_cycle",
+                    "outcome": "pass",
+                    "initial_state": "off",
+                    "target_state": "on",
+                    "physical_change_outcome": "correct",
+                    "restored_state": "off",
+                    "physical_restore_outcome": "correct",
+                    "actions": [],
+                }
+            ),
+            encoding="utf-8",
+        )
         (run / "tier-execution.json").write_text(
             json.dumps(
                 {
@@ -404,6 +419,7 @@ def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from scripts import validate_hil_qualification
+    from scripts.hil.tiers import evaluate_tiers
 
     archive = _public_archive(tmp_path, guided_tier=True)
     matrix_path = _matrix(tmp_path)
@@ -424,10 +440,25 @@ def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
     assert public_execution["attained_tier"] is None
     assert public_execution["qualification_status"] == "inconclusive"
     assert public_execution["steps"][0]["machine_evidence_sha256"]
+    artifacts_file = next(
+        path for path in evidence_paths if path.name == "tier-artifacts.json"
+    )
+    public_artifacts = json.loads(artifacts_file.read_text(encoding="utf-8"))
+    assert public_artifacts["artifacts"][0]["content"]["kind"] == (
+        "guided_step_evidence"
+    )
     assert all(
         result["status"] == "inconclusive"
         for result in imported["write_capabilities"].values()
     )
+    assert (
+        evaluate_tiers(json.loads(matrix_path.read_text(encoding="utf-8")))["tiers"][0][
+            "tier"
+        ]
+        == "unqualified"
+    )
+    assert imported["session_id"].startswith("archive-session-")
+    assert "0123456789abcdef" not in imported["session_id"]
 
 
 def test_verified_build_provenance_is_retained_in_imported_matrix(

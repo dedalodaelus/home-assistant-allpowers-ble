@@ -496,6 +496,15 @@ def _execute_tier_suite(
         "schema_version": 1,
         "run_id": run_id,
         "requested_tier": plan["requested_tier"],
+        "requested_route": args.route,
+        "device": {
+            "model": device.model,
+            "hardware_version": device.hardware,
+            "firmware_version": device.firmware,
+        },
+        "build_provenance": plan.get("device", {}).get("build_provenance", {})
+        if isinstance(plan.get("device"), dict)
+        else {},
         "review_state": "pending",
         "steps": [],
     }
@@ -525,10 +534,12 @@ def _execute_tier_suite(
                 )
                 overall = 2
                 continue
+            first_sampled_at = services.datetime.now(UTC).isoformat()
             try:
                 first_sample = services.read_only_sample(api, device)
             except HAAPIError:
                 first_sample = {}
+            second_sampled_at = services.datetime.now(UTC).isoformat()
             protocol_probe: dict[str, Any] = {"outcome": "inconclusive"}
             if (
                 device.entry_state == "loaded"
@@ -556,6 +567,7 @@ def _execute_tier_suite(
                         capture_id = started["capture_id"]
                         api.request_read_only_refresh(device.refresh_entity)
                         services.sleep(1)
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
                         stop_command = {
                             "type": "allpowers_ble/hil/stop",
@@ -632,8 +644,12 @@ def _execute_tier_suite(
                             "decoded_response_seq": decoded.get("seq")
                             if decoded
                             else None,
+                            "status_request_hex": status_tx.get("hex")
+                            if status_tx
+                            else None,
                         }
                     else:
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
                 except HAAPIError, OSError, TypeError, ValueError, KeyError:
                     second_sample = {}
@@ -654,8 +670,10 @@ def _execute_tier_suite(
             else:
                 services.sleep(1)
                 try:
+                    second_sampled_at = services.datetime.now(UTC).isoformat()
                     second_sample = services.read_only_sample(api, device)
                 except HAAPIError:
+                    second_sampled_at = services.datetime.now(UTC).isoformat()
                     second_sample = {}
             samples_valid = services.has_verified_telemetry(
                 first_sample
@@ -676,6 +694,16 @@ def _execute_tier_suite(
                 "schema_version": 1,
                 "step_id": step_id,
                 "sample_sha256": sample_hashes,
+                "samples": [
+                    {
+                        "sampled_at_utc": first_sampled_at,
+                        "telemetry": first_sample,
+                    },
+                    {
+                        "sampled_at_utc": second_sampled_at,
+                        "telemetry": second_sample,
+                    },
+                ],
                 "fresh_verified_samples": bool(samples_valid),
                 "protocol_probe": protocol_probe,
                 "physical_observation": {
@@ -699,6 +727,11 @@ def _execute_tier_suite(
                 {
                     "step_id": step_id,
                     "outcome": "pass" if bronze_pass else "inconclusive",
+                    "observed_routes": [
+                        protocol_probe["route"]
+                        if protocol_probe.get("outcome") == "pass"
+                        else None
+                    ],
                     "machine_evidence": [
                         {
                             "path": bronze_path.name,
@@ -714,6 +747,11 @@ def _execute_tier_suite(
                 {
                     "step_id": "physical_plausibility_observation",
                     "outcome": "pass" if bronze_pass else "inconclusive",
+                    "observed_routes": [
+                        protocol_probe["route"]
+                        if protocol_probe.get("outcome") == "pass"
+                        else None
+                    ],
                     "machine_evidence": [
                         {
                             "path": bronze_path.name,
@@ -875,6 +913,23 @@ def _execute_tier_suite(
                 and (path.name == "trace.json" or path.name == "checkpoint.json")
             }
         )
+        verified_routes: set[str] = set()
+        for evidence_path in evidence_paths:
+            if Path(evidence_path).name != "trace.json":
+                continue
+            try:
+                trace_metadata = json.loads(
+                    (child_root / evidence_path).read_text(encoding="utf-8")
+                )
+            except OSError, UnicodeError, ValueError:
+                continue
+            route = trace_metadata.get("observed_route")
+            if (
+                trace_metadata.get("complete") is True
+                and route in {"local_adapter", "active_proxy"}
+                and services.route_matches_request(args.route, route)
+            ):
+                verified_routes.add(route)
         passed = (
             status == 0
             and bool(rows)
@@ -886,6 +941,7 @@ def _execute_tier_suite(
                 "step_id": step_id,
                 "scenario_id": scenario_id,
                 "outcome": "pass" if passed else "inconclusive",
+                "observed_routes": sorted(verified_routes),
                 "human_review": "pending",
                 "machine_evidence": [
                     {
@@ -905,6 +961,14 @@ def _execute_tier_suite(
             overall = 2
             stop_reason = "guided scenario did not complete with confirmed evidence"
     target = output_dir / "tier-execution.json"
+    execution["verified_routes"] = sorted(
+        {
+            route
+            for step in execution["steps"]
+            for route in step.get("observed_routes", [])
+            if route in {"local_adapter", "active_proxy"}
+        }
+    )
     target.write_text(
         json.dumps(execution, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -1390,6 +1454,17 @@ def _execute_experimental_output_step(
     result = {
         "step_id": step_id,
         "outcome": outcome,
+        "observed_routes": sorted(
+            {
+                action["trace_route"]
+                for action in machine_actions
+                if action.get("trace_valid") is True
+                and action.get("trace_complete") is True
+                and action.get("trace_route") == action.get("route")
+                and action.get("trace_route") in {"local_adapter", "active_proxy"}
+                and services.route_matches_request(args.route, action.get("route"))
+            }
+        ),
         "state_safe_to_continue": (
             not machine_actions
             or (
