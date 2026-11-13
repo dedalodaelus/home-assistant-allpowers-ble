@@ -104,7 +104,12 @@ jobs:
           - name: Validate HIL schema v2 and metadata (offline)
             run: python scripts/validate_hil_qualification.py
 
-      - name: Validate repository
+      - name: Remove generated Python caches
+        run: |
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+      - name: Validate repository contents
         run: python scripts/validate_repository.py
 
       - name: Upload coverage report
