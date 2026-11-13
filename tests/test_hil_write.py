@@ -889,7 +889,7 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
     monkeypatch.setattr(hil_cli, "_suite_services", lambda: services)
     parent = write_run(tmp_path, "guided-parent", {}, {})
     plan_steps = [{"id": "dc_output_cycle"}]
-    if failure == "restore_ambiguous":
+    if failure in {"grant_denied", "restore_ambiguous"}:
         plan_steps.append({"id": "dc_output_cycle"})
     try:
         tier_status = hil_cli._execute_tier_suite(
@@ -928,11 +928,15 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
         assert result["observed_routes"] == ["local_adapter"]
     else:
         assert tier_status == 2
-    if failure == "restore_ambiguous":
+    if failure in {"grant_denied", "restore_ambiguous"}:
         assert execution["steps"][1]["outcome"] == "blocked"
-        assert "restor" in result["reason"].lower()
         assert result["reason"] in execution["steps"][1]["reason"]
+    if failure == "restore_ambiguous":
+        assert "restor" in result["reason"].lower()
         assert len(fake_ble.writes) == 2
+    if failure == "grant_denied":
+        assert len(fake_ble.writes) == 0
+        assert "denied" in result["reason"].lower()
     assert result["outcome"] == expected_outcome, result
     assert len(fake_ble.writes) == expected_write_count
     expected_packets = [

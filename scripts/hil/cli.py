@@ -847,12 +847,15 @@ def _execute_tier_suite(
                     execution["steps"].append(candidate_result)
                     if candidate_result.get("outcome") != "pass":
                         overall = 2
-                    if candidate_result.get("state_safe_to_continue") is False:
+                    if (
+                        candidate_result.get("outcome") != "pass"
+                        or candidate_result.get("state_safe_to_continue") is False
+                    ):
                         reason = candidate_result.get("reason")
                         stop_reason = (
                             reason.strip()
                             if isinstance(reason, str) and reason.strip()
-                            else "candidate state may remain changed or uncertain"
+                            else "candidate was denied or did not complete with confirmed restoration"
                         )
                     continue
                 execution["steps"].append(
@@ -1257,6 +1260,7 @@ def _execute_experimental_output_step(
             "trace_path": trace_path,
             "trace_evidence": trace_evidence,
             "transaction": transaction,
+            "backend_failed": backend_failed,
         }
         machine_actions.append(
             {
@@ -1331,11 +1335,16 @@ def _execute_experimental_output_step(
                 "outcome": "inconclusive",
             }
             outcome = "inconclusive"
-            reason = (
-                "GATT trace could not be armed; no write was sent"
-                if changed.get("trace_error")
-                else "write/readback is ambiguous; no automatic restoration or retry"
-            )
+            if changed.get("backend_failed"):
+                reason = (
+                    "backend grant denied, expired, or execution unconfirmed; no retry"
+                )
+            elif changed.get("trace_error"):
+                reason = "GATT trace could not be armed; no write was sent"
+            else:
+                reason = (
+                    "write/readback is ambiguous; no automatic restoration or retry"
+                )
         else:
             try:
                 physical_change = services.prompt(

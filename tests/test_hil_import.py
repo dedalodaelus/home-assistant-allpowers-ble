@@ -281,12 +281,13 @@ def _captured_archive(
         if bronze_reviewable
         else "2026-11-09T12:00:00+00:00"
     )
+    generation = 7 if bronze_reviewable else 1
     common = {
         "schema_version": 2,
         "run_id": run_id,
         "scenario_id": "read_only_snapshot",
         "layer": "gatt_api",
-        "session_generation": 1,
+        "session_generation": generation,
         "observed_route": route,
     }
     routes = [route] if isinstance(route, str) else route
@@ -352,7 +353,7 @@ def _captured_archive(
             "frames": [frame],
             "route_observations": [
                 {
-                    "session_generation": 1,
+                    "session_generation": generation,
                     "seq": 1,
                     "utc": stamp,
                     "elapsed_ms": 0.0,
@@ -440,7 +441,7 @@ def _captured_archive(
                                 (bronze_trace / "trace.json").read_bytes()
                             ).hexdigest(),
                             "route": observed_route,
-                            "session_generation": 1,
+                            "session_generation": generation,
                             "status_request_seq": 2,
                             "decoded_response_seq": 4,
                             "status_request_hex": "a565b1000106010000000000",
@@ -1003,6 +1004,14 @@ def test_export_import_and_independent_bronze_review_is_digest_bound(
         "protocol_probe": "pass",
         "fresh_telemetry": "pass",
     }
+    capture_path = (
+        tmp_path / reviewed["bronze_evidence"]["protocol_probe"]["capture_evidence"]
+    )
+    capture_rows = [
+        json.loads(line) for line in capture_path.read_text().splitlines() if line
+    ]
+    assert [row["session_generation"] for row in capture_rows] == [7, 7]
+    assert all("physical_outcome" not in row for row in capture_rows)
     errors, _ = validate_hil_qualification.validate_matrix(
         json.loads(matrix_path.read_text()),
         matrix_path=matrix_path,

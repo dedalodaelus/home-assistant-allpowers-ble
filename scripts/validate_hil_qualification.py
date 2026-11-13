@@ -426,7 +426,6 @@ def _has_bound_bronze_probe(
         and isinstance(row.get("frame_hex"), str)
         and row["frame_hex"].lower() == STATUS_REQUEST.hex()
         and row.get("verdict") == "ok"
-        and row.get("physical_outcome") == "pass"
         and isinstance(row.get("capture_id"), str)
         and type(row.get("session_generation")) is int
         and type(row.get("seq")) is int
@@ -440,7 +439,6 @@ def _has_bound_bronze_probe(
             and row.get("event") == "notification_decoded"
             and row.get("direction") == "notify"
             and row.get("verdict") == "ok"
-            and row.get("physical_outcome") == "pass"
             for row in rows
         ):
             return True

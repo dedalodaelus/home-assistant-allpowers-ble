@@ -199,6 +199,7 @@ def _claim_support(
     protocol = False
     protocol_evidence: list[str] = []
     capture_id = bronze.get("protocol_capture_id")
+    generation = bronze.get("protocol_session_generation")
     status_seq = bronze.get("protocol_status_request_seq")
     decoded_seq = bronze.get("protocol_decoded_response_seq")
     if (
@@ -207,6 +208,8 @@ def _claim_support(
         and bronze.get("protocol_route") == run.get("route")
         and bronze.get("qualification_status") == "inconclusive"
         and isinstance(capture_id, str)
+        and type(generation) is int
+        and generation > 0
         and type(status_seq) is int
         and type(decoded_seq) is int
     ):
@@ -363,6 +366,7 @@ def review_imported_run(
                 capture_id = bronze["protocol_capture_id"]
                 status_seq = bronze["protocol_status_request_seq"]
                 decoded_seq = bronze["protocol_decoded_response_seq"]
+                generation = bronze["protocol_session_generation"]
                 scope = {
                     "revision_id": revision["id"],
                     "model": revision["model"],
@@ -378,7 +382,7 @@ def review_imported_run(
                     {
                         **scope,
                         "capture_id": capture_id,
-                        "session_generation": 1,
+                        "session_generation": generation,
                         "seq": status_seq,
                         "scenario": "read_only_snapshot",
                         "operation_id": "read_only_snapshot",
@@ -386,19 +390,17 @@ def review_imported_run(
                         "direction": "write",
                         "frame_hex": STATUS_REQUEST_HEX,
                         "verdict": "ok",
-                        "physical_outcome": "pass",
                     },
                     {
                         **scope,
                         "capture_id": capture_id,
-                        "session_generation": 1,
+                        "session_generation": generation,
                         "seq": decoded_seq,
                         "scenario": "read_only_snapshot",
                         "operation_id": "read_only_snapshot",
                         "event": "notification_decoded",
                         "direction": "notify",
                         "verdict": "ok",
-                        "physical_outcome": "pass",
                     },
                 ]
                 files[root / capture_rel] = (
