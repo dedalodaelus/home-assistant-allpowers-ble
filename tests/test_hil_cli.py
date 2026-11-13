@@ -3593,9 +3593,11 @@ def test_vendor_app_result_is_separate_from_machine_observed_ha_stability(
     assert observation["outcome"] == ("inconclusive" if app_answer == "3" else "pass")
 
 
-@pytest.mark.parametrize("status_delay", (20, None))
+@pytest.mark.parametrize(
+    ("status_delay", "trace_disconnect"), ((20, False), (None, False), (20, True))
+)
 def test_vendor_app_waits_for_fresh_status_with_real_v2_trace_validation(
-    monkeypatch, tmp_path, status_delay
+    monkeypatch, tmp_path, status_delay, trace_disconnect
 ):
     from types import SimpleNamespace
 
@@ -3641,6 +3643,8 @@ def test_vendor_app_waits_for_fresh_status_with_real_v2_trace_validation(
                         proxy_id="private-proxy-id",
                     ),
                 )
+                if trace_disconnect:
+                    self.capture.record("disconnect", session_generation=4)
                 return [
                     {
                         "schema_version": 2,
@@ -3705,14 +3709,15 @@ def test_vendor_app_waits_for_fresh_status_with_real_v2_trace_validation(
     observation = stored["steps"][-1]
     assert api_fake.capture_started_at is not None
     assert api_fake.clock[0] - api_fake.capture_started_at >= (status_delay or 119)
-    assert result == (0 if status_delay is not None else 2)
+    evidence_is_complete = status_delay is not None and not trace_disconnect
+    assert result == (0 if evidence_is_complete else 2)
     assert observation["trace_complete"] is True
     assert observation["fresh_status_telemetry"] is (status_delay is not None)
     assert observation["ha_observation"] == (
-        "ha_stable" if status_delay is not None else "inconclusive"
+        "ha_stable" if evidence_is_complete else "inconclusive"
     )
     assert observation["outcome"] == (
-        "pass" if status_delay is not None else "inconclusive"
+        "pass" if evidence_is_complete else "inconclusive"
     )
 
 

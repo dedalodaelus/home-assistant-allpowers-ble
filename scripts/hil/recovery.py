@@ -285,6 +285,7 @@ def _execute_recovery_suite(
     }
     steps.append(observation)
     trace: dict[str, Any] | None = None
+    trace_disconnect_observed = False
     observed_session = recovered or stable
     if observed_session is not None:
         observation.update(
@@ -404,6 +405,7 @@ def _execute_recovery_suite(
                     and event.get("event") in {"disconnect", "disconnected"}
                     for event in events
                 ):
+                    trace_disconnect_observed = True
                     saw_disconnect = True
                     observation["disconnect_observed"] = True
                     if recovered is None:
@@ -439,6 +441,7 @@ def _execute_recovery_suite(
         machine_evidence_complete = bool(
             observed_session is not None
             and observation.get("fresh_status_telemetry") is True
+            and not trace_disconnect_observed
             and (recovered is not None or not saw_disconnect)
             and not resumed_with_gap
             and action_step.get("operator_app_result") != "unable_or_unwilling"
