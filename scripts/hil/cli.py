@@ -459,6 +459,643 @@ def _execute_probe_trace(
     )
 
 
+def _execute_tier_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    environment: dict[str, Any],
+    output_dir: Path,
+    run_id: str,
+    plan: dict[str, Any],
+    capabilities: dict[str, Any] | None,
+) -> int:
+    """Dispatch applicable guided steps through the existing scenario runners."""
+    import copy
+    import json
+    import secrets
+
+    from .outputs import _execute_output_suite
+    from .recovery import _execute_recovery_suite
+    from .settings import _execute_settings_suite
+
+    services = _suite_services()
+    features = (
+        capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    )
+    declarations = {item.id: item for item in load_scenarios()}
+    step_scenarios = {
+        "ac_output_cycle": ("outputs", "output_ac_cycle", "ac_output"),
+        "dc_output_cycle": ("outputs", "output_dc_cycle", "dc_output"),
+        "light_output_cycle": ("outputs", "output_light_cycle", "light_output"),
+        "eco_mode_reversal": ("settings", "settings_eco_mode", "eco_mode"),
+        "work_mode_reversal": ("settings", "settings_work_mode", "work_mode"),
+        "eco_timeout_reversal": ("settings", "settings_eco_timeout", "eco_timeout"),
+        "car_charger_reversal": ("outputs", "output_car_charger_cycle", "car_charger"),
+    }
+    execution: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "requested_tier": plan["requested_tier"],
+        "review_state": "pending",
+        "steps": [],
+    }
+    overall = 0
+    recovery_completed = False
+    recovery_evidence_run: str | None = None
+    for planned in plan["steps"]:
+        step_id = planned["id"]
+        if step_id == "read_only_probe":
+            if args.non_interactive:
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "inconclusive",
+                        "reason": "interactive observation is required",
+                    }
+                )
+                overall = 2
+                continue
+            try:
+                first_sample = services.read_only_sample(api, device)
+                services.sleep(1)
+                second_sample = services.read_only_sample(api, device)
+            except HAAPIError:
+                first_sample = second_sample = {}
+            samples_valid = services.has_verified_telemetry(
+                first_sample
+            ) and services.has_verified_telemetry(second_sample)
+            try:
+                physical = services.prompt(
+                    "Physical plausibility: 1=telemetry matches the attended station, 2=does not match, 3=unable to observe: "
+                ).strip()
+            except EOFError, KeyboardInterrupt:
+                physical = "3"
+            import hashlib
+
+            sample_hashes = [
+                hashlib.sha256(
+                    json.dumps(item, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()
+                for item in (first_sample, second_sample)
+            ]
+            bronze_evidence = {
+                "schema_version": 1,
+                "step_id": step_id,
+                "sample_sha256": sample_hashes,
+                "fresh_verified_samples": bool(samples_valid),
+                "physical_observation": {
+                    "1": "plausible",
+                    "2": "implausible",
+                    "3": "unable_to_observe",
+                }.get(physical, "unable_to_observe"),
+            }
+            bronze_path = output_dir / "tier-bronze-read-only.json"
+            bronze_path.write_text(
+                json.dumps(bronze_evidence, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            bronze_path.chmod(0o600)
+            bronze_pass = samples_valid and physical == "1"
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "pass" if bronze_pass else "inconclusive",
+                    "machine_evidence": [
+                        {
+                            "path": bronze_path.name,
+                            "sha256": hashlib.sha256(
+                                bronze_path.read_bytes()
+                            ).hexdigest(),
+                        }
+                    ],
+                    "human_review": "pending",
+                }
+            )
+            execution["steps"].append(
+                {
+                    "step_id": "physical_plausibility_observation",
+                    "outcome": "pass" if bronze_pass else "inconclusive",
+                    "machine_evidence": [
+                        {
+                            "path": bronze_path.name,
+                            "sha256": hashlib.sha256(
+                                bronze_path.read_bytes()
+                            ).hexdigest(),
+                        }
+                    ],
+                    "human_review": "pending",
+                }
+            )
+            if not bronze_pass:
+                overall = 2
+            continue
+        if step_id == "physical_plausibility_observation":
+            continue
+        if step_id == "minimum_output_requirement":
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "pending_review",
+                    "reason": "minimum output qualification is computed after evidence import and independent review",
+                    "human_review": "pending",
+                }
+            )
+            continue
+        if step_id == "guarded_recovery" and recovery_completed:
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "scenario_id": "recovery_reconnect",
+                    "outcome": "shared_evidence",
+                    "evidence_run": recovery_evidence_run,
+                }
+            )
+            continue
+        if step_id in {"basic_reconnect", "guarded_recovery"}:
+            scenario_id = "recovery_reconnect"
+            suite = "recovery"
+            feature = "telemetry"
+        else:
+            mapping = step_scenarios.get(step_id)
+            if mapping is None:
+                continue
+            suite, scenario_id, feature = mapping
+            facts = features.get(feature, {}) if isinstance(features, dict) else {}
+            if isinstance(facts, dict) and facts.get("physical_presence") == "absent":
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "not_applicable",
+                        "reason": "reviewed profile substantiates physical absence",
+                    }
+                )
+                continue
+            if (
+                not isinstance(facts, dict)
+                or facts.get("physical_presence") != "present"
+            ):
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "blocked",
+                        "reason": "physical presence is unknown or unreviewed",
+                    }
+                )
+                overall = 2
+                continue
+            if facts.get("production_authorized") is not True:
+                if (
+                    feature in {"ac_output", "dc_output", "light_output"}
+                    and facts.get("candidate_hil_eligible") is True
+                ):
+                    candidate_result = _execute_experimental_output_step(
+                        api,
+                        args,
+                        device,
+                        output_dir,
+                        run_id,
+                        step_id,
+                        feature,
+                        services,
+                    )
+                    execution["steps"].append(candidate_result)
+                    if candidate_result.get("outcome") != "pass":
+                        overall = 2
+                    continue
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "blocked",
+                        "reason": "production capability absent; experimental grant execution unavailable for this control",
+                    }
+                )
+                overall = 2
+                continue
+        declaration = declarations.get(scenario_id)
+        if declaration is None:
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "blocked",
+                    "reason": "reviewed scenario declaration missing",
+                }
+            )
+            overall = 2
+            continue
+        child_run_id = f"{run_id[:12]}-{secrets.token_hex(4)}"
+        child_session = {
+            "run_id": child_run_id,
+            "parent_tier_run_id": run_id,
+            "tier_step_id": step_id,
+            "requested_route": args.route,
+            "device": {
+                "model": device.model,
+                "hardware_version": device.hardware,
+                "firmware_version": device.firmware,
+            },
+        }
+        child_root = write_run(
+            args.output_root,
+            f"tier_{child_run_id}",
+            environment,
+            child_session,
+        )
+        child_args = copy.copy(args)
+        child_args.suite = suite
+        child_args.scenario_id = scenario_id if suite != "recovery" else None
+        child_args.resume = None
+        if suite == "outputs":
+            status = _execute_output_suite(
+                api, child_args, device, environment, child_root, child_run_id, services
+            )
+        elif suite == "settings":
+            status = _execute_settings_suite(
+                api, child_args, device, child_root, child_run_id, services
+            )
+        else:
+            status = _execute_recovery_suite(
+                api, child_args, device, child_root, child_run_id, services, None
+            )
+            recovery_completed = True
+        try:
+            checkpoint = json.loads(
+                (child_root / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            rows = checkpoint.get("steps", [])
+        except OSError, ValueError:
+            rows = []
+        evidence_paths = sorted(
+            {
+                str(path.relative_to(child_root))
+                for path in child_root.rglob("*")
+                if path.is_file()
+                and (path.name == "trace.json" or path.name == "checkpoint.json")
+            }
+        )
+        passed = (
+            status == 0
+            and bool(rows)
+            and any(Path(item).name == "trace.json" for item in evidence_paths)
+            and all(row.get("outcome") == "pass" for row in rows)
+        )
+        execution["steps"].append(
+            {
+                "step_id": step_id,
+                "scenario_id": scenario_id,
+                "outcome": "pass" if passed else "inconclusive",
+                "human_review": "pending",
+                "machine_evidence": [
+                    {
+                        "path": f"../../tier_{child_run_id}/private/{item}",
+                        "sha256": hashlib.sha256(
+                            (child_root / item).read_bytes()
+                        ).hexdigest(),
+                    }
+                    for item in evidence_paths
+                ],
+                "evidence_run": f"../../tier_{child_run_id}/private",
+            }
+        )
+        if suite == "recovery":
+            recovery_evidence_run = f"../../tier_{child_run_id}/private"
+        if not passed:
+            overall = 2
+    target = output_dir / "tier-execution.json"
+    target.write_text(
+        json.dumps(execution, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    target.chmod(0o600)
+    print("Guided execution saved to:", target)
+    print(
+        "Requested tier is not an attained qualification; independent review remains pending."
+    )
+    return overall
+
+
+def _execute_experimental_output_step(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+    step_id: str,
+    feature: str,
+    services: SuiteServices,
+) -> dict[str, Any]:
+    """Execute one candidate output and its separately authorized restoration."""
+    import json
+
+    entity_key = {"light_output": "light"}.get(feature, feature)
+    entry_id = device.config_entry_id
+    if entry_id is None or args.non_interactive or device.entry_state != "loaded":
+        return {
+            "step_id": step_id,
+            "outcome": "blocked",
+            "reason": "interactive loaded entry required",
+        }
+    try:
+        before_caps = api.hil_capabilities(entry_id)
+        before_state = api.control_state(
+            entity_key, device.control_entities.get(entity_key)
+        )
+    except HAAPIError:
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "fresh candidate preflight unavailable",
+        }
+    facts = before_caps.get("features", {}).get(feature, {})
+    generation = before_caps.get("session_generation")
+    initial = before_state.get("state")
+    if (
+        before_caps.get("verified") is not True
+        or before_caps.get("identity_conflicted") is not False
+        or before_caps.get("connected") is not True
+        or before_caps.get("status_fresh") is not True
+        or before_caps.get("pending_transaction") is not False
+        or type(generation) is not int
+        or not isinstance(facts, dict)
+        or facts.get("physical_presence") != "present"
+        or facts.get("candidate_hil_eligible") is not True
+        or facts.get("production_authorized") is True
+        or before_state.get("available") is not True
+        or initial not in {"on", "off"}
+    ):
+        return {
+            "step_id": step_id,
+            "outcome": "blocked",
+            "reason": "candidate capability or state is not eligible",
+        }
+    target = initial != "on"
+    target_name = "on" if target else "off"
+    print(
+        f"Experimental HIL only: verify a noncritical load is safe; "
+        f"{feature} will change to {target_name} and then restore to {initial}."
+    )
+    try:
+        if (
+            services.prompt(
+                "Type 1 to authorize this single experimental action: "
+            ).strip()
+            != "1"
+        ):
+            return {
+                "step_id": step_id,
+                "outcome": "skipped",
+                "reason": "experimental action denied",
+            }
+        if (
+            services.prompt(
+                "Type 1 again to request and execute the single-use backend grant: "
+            ).strip()
+            != "1"
+        ):
+            return {
+                "step_id": step_id,
+                "outcome": "skipped",
+                "reason": "grant execution denied",
+            }
+    except EOFError, KeyboardInterrupt:
+        return {
+            "step_id": step_id,
+            "outcome": "skipped",
+            "reason": "experimental action consent interrupted",
+        }
+    try:
+        current_caps = api.hil_capabilities(entry_id)
+        current_state = api.control_state(
+            entity_key, device.control_entities.get(entity_key)
+        )
+    except HAAPIError:
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "pre-write state unavailable; no BLE action sent",
+        }
+    current_facts = current_caps.get("features", {}).get(feature, {})
+    if (
+        current_caps.get("verified") is not True
+        or current_caps.get("identity_conflicted") is not False
+        or current_caps.get("connected") is not True
+        or current_caps.get("status_fresh") is not True
+        or current_caps.get("pending_transaction") is not False
+        or current_caps.get("session_generation") != generation
+        or not isinstance(current_facts, dict)
+        or current_facts.get("candidate_hil_eligible") is not True
+        or current_state.get("available") is not True
+        or current_state.get("state") != initial
+    ):
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "same-session pre-write recheck failed; no BLE action sent",
+        }
+
+    machine_actions: list[dict[str, Any]] = []
+
+    def execute(target_state: bool) -> dict[str, Any]:
+        with api.websocket_session() as connection:
+            result = connection.experimental_output(
+                entry_id,
+                feature,
+                target_state,
+                authorization_confirmed=True,
+                execution_confirmed=True,
+            )
+        machine_actions.append(
+            {
+                "outcome": result["outcome"],
+                "confirmed": result["confirmed"],
+                "route": result.get("route"),
+                "session_generation": result.get("session_generation"),
+            }
+        )
+        return result
+
+    try:
+        changed = execute(target)
+    except HAAPIError:
+        evidence = {
+            "schema_version": 1,
+            "step_id": step_id,
+            "actions": machine_actions,
+            "outcome": "inconclusive",
+        }
+        outcome = "inconclusive"
+        reason = "backend grant denied, expired, or execution unconfirmed; no retry"
+    else:
+        try:
+            after_caps = api.hil_capabilities(entry_id)
+            after_state = api.control_state(
+                entity_key, device.control_entities.get(entity_key)
+            )
+        except HAAPIError:
+            after_caps, after_state = {}, {"available": False}
+        state_confirmed = (
+            changed.get("outcome") == "confirmed"
+            and changed.get("confirmed") is True
+            and changed.get("session_generation") == generation
+            and changed.get("route") in {"local_adapter", "active_proxy"}
+            and after_caps.get("verified") is True
+            and after_caps.get("identity_conflicted") is False
+            and after_caps.get("connected") is True
+            and after_caps.get("status_fresh") is True
+            and after_caps.get("pending_transaction") is False
+            and after_caps.get("session_generation") == generation
+            and after_caps.get("features", {})
+            .get(feature, {})
+            .get("candidate_hil_eligible")
+            is True
+            and after_state.get("available") is True
+            and after_state.get("state") == target_name
+        )
+        if not state_confirmed:
+            evidence = {
+                "schema_version": 1,
+                "step_id": step_id,
+                "initial_state": initial,
+                "target_state": target_name,
+                "actions": machine_actions,
+                "readback_state": after_state.get("state"),
+                "outcome": "inconclusive",
+            }
+            outcome = "inconclusive"
+            reason = "write/readback is ambiguous; no automatic restoration or retry"
+        else:
+            try:
+                physical_change = services.prompt(
+                    f"Physical result for {feature}={target_name}: 1=correct, 2=incorrect, 3=unable to observe: "
+                ).strip()
+            except EOFError, KeyboardInterrupt:
+                physical_change = "3"
+            try:
+                restore_consent = (
+                    services.prompt(
+                        f"Fresh readback confirms {target_name}. Type 1 to authorize a separate restoration to {initial}: "
+                    ).strip()
+                    == "1"
+                )
+            except EOFError, KeyboardInterrupt:
+                restore_consent = False
+            if not restore_consent:
+                evidence = {
+                    "schema_version": 1,
+                    "step_id": step_id,
+                    "initial_state": initial,
+                    "target_state": target_name,
+                    "actions": machine_actions,
+                    "physical_change_outcome": {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_change, "unable_to_observe"),
+                    "outcome": "inconclusive",
+                }
+                outcome = "inconclusive"
+                reason = "restoration was not authorized; manual inspection required"
+            else:
+                try:
+                    restore_caps = api.hil_capabilities(entry_id)
+                    restore_state = api.control_state(
+                        entity_key, device.control_entities.get(entity_key)
+                    )
+                    if (
+                        restore_caps.get("verified") is not True
+                        or restore_caps.get("identity_conflicted") is not False
+                        or restore_caps.get("connected") is not True
+                        or restore_caps.get("status_fresh") is not True
+                        or restore_caps.get("pending_transaction") is not False
+                        or restore_caps.get("session_generation") != generation
+                        or restore_caps.get("features", {})
+                        .get(feature, {})
+                        .get("candidate_hil_eligible")
+                        is not True
+                        or restore_state.get("available") is not True
+                        or restore_state.get("state") != target_name
+                    ):
+                        raise HAAPIError("Restoration preflight changed")
+                    restored = execute(initial == "on")
+                    final_caps = api.hil_capabilities(entry_id)
+                    final_state = api.control_state(
+                        entity_key, device.control_entities.get(entity_key)
+                    )
+                    restored_ok = (
+                        restored.get("outcome") == "confirmed"
+                        and restored.get("confirmed") is True
+                        and restored.get("session_generation") == generation
+                        and restored.get("route") in {"local_adapter", "active_proxy"}
+                        and final_caps.get("verified") is True
+                        and final_caps.get("identity_conflicted") is False
+                        and final_caps.get("connected") is True
+                        and final_caps.get("status_fresh") is True
+                        and final_caps.get("pending_transaction") is False
+                        and final_caps.get("session_generation") == generation
+                        and final_caps.get("features", {})
+                        .get(feature, {})
+                        .get("candidate_hil_eligible")
+                        is True
+                        and final_state.get("available") is True
+                        and final_state.get("state") == initial
+                    )
+                except HAAPIError:
+                    restored_ok = False
+                    final_state = {"state": None}
+                evidence = {
+                    "schema_version": 1,
+                    "step_id": step_id,
+                    "initial_state": initial,
+                    "target_state": target_name,
+                    "actions": machine_actions,
+                    "physical_change_outcome": {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_change, "unable_to_observe"),
+                    "restored_state": final_state.get("state"),
+                    "outcome": "inconclusive",
+                }
+                outcome = "inconclusive"
+                reason = "restoration lacks confirmed same-session readback"
+                if restored_ok:
+                    try:
+                        physical_restore = services.prompt(
+                            "Physical restoration result: 1=original state restored, 2=incorrect, 3=unable to observe: "
+                        ).strip()
+                    except EOFError, KeyboardInterrupt:
+                        physical_restore = "3"
+                    evidence["physical_restore_outcome"] = {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_restore, "unable_to_observe")
+                    if (
+                        evidence["physical_change_outcome"] == "correct"
+                        and evidence["physical_restore_outcome"] == "correct"
+                    ):
+                        evidence["outcome"] = "pass"
+                        outcome = "pass"
+                        reason = None
+    evidence_path = output_dir / f"tier-{step_id}.json"
+    evidence_path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    evidence_path.chmod(0o600)
+    result = {
+        "step_id": step_id,
+        "outcome": outcome,
+        "machine_evidence": [
+            {
+                "path": evidence_path.name,
+                "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+            }
+        ],
+        "human_review": "pending",
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
 def _suite_services() -> SuiteServices:
     """Build the injected runtime dependencies for suite executors."""
     return SuiteServices(
@@ -837,6 +1474,8 @@ def execute(args: argparse.Namespace) -> int:
         environment=environment,
         sample=sample,
     )
+    tier_plan: dict[str, Any] | None = None
+    tier_capabilities: dict[str, Any] | None = None
     if args.command == "run" and (args.suite == "read-only" or args.tier is not None):
         capabilities: dict[str, Any] | None = None
         unavailable_reason = "no unique loaded integration entry found"
@@ -869,6 +1508,8 @@ def execute(args: argparse.Namespace) -> int:
                     "build_match": integration.get("build_match"),
                 },
             )
+            tier_plan = test_plan
+            tier_capabilities = capabilities
             session["test_plan"] = test_plan
             print(
                 f"Guided {args.tier.title()} plan for {test_plan['device']['model']} "
@@ -893,6 +1534,17 @@ def execute(args: argparse.Namespace) -> int:
     else:
         output_dir = write_run(
             args.output_root, f"{timestamp}_{run_id}", environment, session
+        )
+    if args.command == "run" and tier_plan is not None:
+        return _execute_tier_suite(
+            api,
+            args,
+            selected,
+            environment,
+            output_dir,
+            run_id,
+            tier_plan,
+            tier_capabilities,
         )
     if args.command == "run" and args.suite == "outputs":
         return _execute_output_suite(

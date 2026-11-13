@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
 import subprocess
+import builtins
 from types import ModuleType
 from urllib.error import HTTPError
 import zipfile
@@ -224,7 +226,6 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
                 "read-only",
                 "--ha-url",
                 "https://example.test",
-                "--non-interactive",
                 "--output-root",
                 str(output_root),
             ]
@@ -279,6 +280,11 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
 ):
     fake = FakeHA(allpowers_registry)
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
+    monkeypatch.setattr(
+        cli, "_has_verified_telemetry", lambda sample: sample == {"sample": "fresh"}
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "1")
     monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
     output_root = tmp_path / "guided-tier"
 
@@ -292,7 +298,6 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
                 "active_proxy",
                 "--ha-url",
                 "https://example.test",
-                "--non-interactive",
                 "--output-root",
                 str(output_root),
             ]
@@ -321,6 +326,261 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
     assert b"secret-entry-1" not in combined
     assert b"PRIVATE_TOKEN" not in combined
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+@pytest.mark.parametrize("include_trace", [True, False])
+def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
+    monkeypatch, tmp_path, include_trace
+):
+    from argparse import Namespace
+
+    from scripts.hil import outputs, recovery, settings
+    from scripts.hil.guided import build_tier_plan
+
+    api = type("FakeHA", (), {"origin": "https://example.test"})()
+    device = discovery.Device(
+        device_id="fake-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={
+            "ac_output": "switch.ac",
+            "dc_output": "switch.dc",
+            "light": "switch.light",
+            "eco_mode": "switch.eco",
+            "work_mode": "select.mode",
+            "eco_timeout": "select.timeout",
+            "car_charger": "switch.car",
+        },
+        config_entry_id="fake-entry",
+    )
+    capabilities = {
+        "model": "R600",
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.0",
+        "features": {
+            key: {"physical_presence": "present", "production_authorized": True}
+            for key in (
+                "ac_output",
+                "dc_output",
+                "light_output",
+                "eco_mode",
+                "work_mode",
+                "eco_timeout",
+                "car_charger",
+            )
+        },
+    }
+    controls = {
+        key: {"available": True, "eligible": True, "state": "off"}
+        for key in (
+            "ac_output",
+            "dc_output",
+            "light",
+            "eco_mode",
+            "work_mode",
+            "eco_timeout",
+            "car_charger",
+        )
+    }
+    plan = build_tier_plan(
+        "gold", capabilities, controls, observed_route="local_adapter"
+    )
+    calls = []
+
+    def fake_output(_api, args, _device, _environment, out, _run_id, _services):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        if include_trace:
+            (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    def fake_settings(_api, args, _device, out, _run_id, _services):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        if include_trace:
+            (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    def fake_recovery(_api, args, _device, out, _run_id, _services, _resume):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        if include_trace:
+            (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
+    monkeypatch.setattr(settings, "_execute_settings_suite", fake_settings)
+    monkeypatch.setattr(recovery, "_execute_recovery_suite", fake_recovery)
+    from dataclasses import replace
+
+    base_services = cli._suite_services()
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            base_services,
+            read_only_sample=lambda *_args: {"sample": "fresh"},
+            has_verified_telemetry=lambda sample: sample == {"sample": "fresh"},
+            prompt=lambda _question: "1",
+        ),
+    )
+    args = Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False)
+    root = storage.write_run(tmp_path, "tier-parent", {}, {})
+
+    assert cli._execute_tier_suite(
+        api, args, device, {}, root, "parent-run", plan, capabilities
+    ) == (0 if include_trace else 2)
+    assert calls.count(("recovery", None)) == 1
+    assert ("outputs", "output_ac_cycle") in calls
+    assert ("settings", "settings_eco_mode") in calls
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["review_state"] == "pending"
+    scenario_steps = [
+        step
+        for step in execution["steps"]
+        if step.get("scenario_id") in {"output_ac_cycle", "settings_eco_mode"}
+    ]
+    assert all((step["outcome"] == "pass") is include_trace for step in scenario_steps)
+    assert all(
+        step["machine_evidence"]
+        for step in execution["steps"]
+        if step["outcome"] == "pass"
+    )
+    for step in execution["steps"]:
+        for artifact in step.get("machine_evidence", []):
+            path = (root / artifact["path"]).resolve()
+            assert path.is_file()
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected", "writes", "failure_mode"),
+    [
+        (["1", "1", "1", "1", "1"], "pass", [True, False], None),
+        (["2"], "skipped", [], None),
+        (["1", "2"], "skipped", [], None),
+        (["1", "1"], "inconclusive", [], "grant_denied"),
+        (["1", "1"], "inconclusive", [True], "disconnect"),
+        (["1", "1", "1", "1"], "inconclusive", [True, False], "restore_ambiguous"),
+        (["1", "1", "1", "2"], "inconclusive", [True], None),
+    ],
+)
+def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
+    monkeypatch, tmp_path, answers, expected, writes, failure_mode
+):
+    from argparse import Namespace
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    device = discovery.Device(
+        device_id="synthetic-device",
+        model="S500",
+        hardware="1",
+        firmware="1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"dc_output": "switch.dc"},
+        config_entry_id="synthetic-entry",
+    )
+
+    class FakeHA:
+        origin = "https://example.test"
+        state = "off"
+        writes = []
+        connected = True
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": self.connected,
+                "status_fresh": True,
+                "pending_transaction": False,
+                "session_generation": 9,
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                },
+            }
+
+        def control_state(self, _feature, _entity):
+            return {"available": True, "state": self.state}
+
+        @contextmanager
+        def websocket_session(self):
+            yield self
+
+        def experimental_output(
+            self,
+            _entry,
+            _feature,
+            target,
+            *,
+            authorization_confirmed,
+            execution_confirmed,
+        ):
+            if failure_mode == "grant_denied":
+                raise api.HAAPIError("synthetic expired grant")
+            assert authorization_confirmed is True
+            assert execution_confirmed is True
+            self.writes.append(target)
+            if failure_mode == "disconnect":
+                self.connected = False
+            elif failure_mode != "restore_ambiguous" or target:
+                self.state = "on" if target else "off"
+            if failure_mode == "restore_ambiguous" and not target:
+                return {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "route": "local_adapter",
+                    "session_generation": 9,
+                }
+            return {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "route": "local_adapter",
+                "session_generation": 9,
+            }
+
+    fake = FakeHA()
+    prompt_answers = iter(answers)
+    services = replace(
+        cli._suite_services(), prompt=lambda _question: next(prompt_answers)
+    )
+    result = cli._execute_experimental_output_step(
+        fake,
+        Namespace(route="auto", non_interactive=False),
+        device,
+        tmp_path,
+        "synthetic-run",
+        "dc_output_cycle",
+        "dc_output",
+        services,
+    )
+    assert result["outcome"] == expected
+    assert fake.writes == writes
+    if writes:
+        evidence = json.loads((tmp_path / "tier-dc_output_cycle.json").read_text())
+        if expected == "pass":
+            assert len(evidence["actions"]) == 2
+            assert all(action["confirmed"] for action in evidence["actions"])
+            assert evidence["physical_change_outcome"] == "correct"
+            assert evidence["physical_restore_outcome"] == "correct"
+        else:
+            assert evidence["outcome"] == "inconclusive"
+            assert "physical_outcome" not in evidence
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
