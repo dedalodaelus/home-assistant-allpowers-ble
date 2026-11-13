@@ -442,6 +442,12 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
     assert calls.count(("recovery", None)) == 1
     assert ("outputs", "output_ac_cycle") in calls
     assert ("settings", "settings_eco_mode") in calls
+    child_runs = list(tmp_path.glob("tier_*/private/session.json"))
+    assert child_runs
+    for session_path in child_runs:
+        child_session = json.loads(session_path.read_text())
+        assert re.fullmatch(r"[a-f0-9]{16}", child_session["run_id"])
+        assert session_path.parent.parent.name == f"tier_{child_session['run_id']}"
     execution = json.loads((root / "tier-execution.json").read_text())
     assert execution["review_state"] == "pending"
     scenario_steps = [

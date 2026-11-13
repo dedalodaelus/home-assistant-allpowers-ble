@@ -682,7 +682,9 @@ def _execute_tier_suite(
             )
             overall = 2
             continue
-        child_run_id = f"{run_id[:12]}-{secrets.token_hex(4)}"
+        # Checkpoints and trace validators require the same 16-hex run IDs
+        # used by standalone scenario runs.
+        child_run_id = secrets.token_hex(8)
         child_session = {
             "run_id": child_run_id,
             "parent_tier_run_id": run_id,
