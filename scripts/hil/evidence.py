@@ -23,7 +23,7 @@ from .trace import _validate_trace_result
 PUBLIC_SCHEMA = 2
 MAX_FILE = 2 * 1024 * 1024
 MAX_ARCHIVE = 8 * 1024 * 1024
-MAX_MEMBERS = 8
+MAX_MEMBERS = 10
 PUBLIC_NAMES = {
     "environment.json",
     "session.json",
@@ -32,6 +32,8 @@ PUBLIC_NAMES = {
     "frames.jsonl",
     "manifest.json",
     "report.md",
+    "tier-execution.json",
+    "tier-bronze-read-only.json",
 }
 
 
@@ -111,6 +113,20 @@ STEP_IDS.update(
         "soak_segment",
     }
 )
+TIER_STEP_IDS = {
+    "read_only_probe",
+    "physical_plausibility_observation",
+    "ac_output_cycle",
+    "dc_output_cycle",
+    "light_output_cycle",
+    "basic_reconnect",
+    "eco_mode_reversal",
+    "work_mode_reversal",
+    "eco_timeout_reversal",
+    "car_charger_reversal",
+    "guarded_recovery",
+    "minimum_output_requirement",
+}
 REQUESTED_ROUTES = {"auto", "local_adapter", "active_proxy"}
 PREFLIGHT_CHECKS = {"entry_loaded", "connected", "telemetry_fresh"}
 PREFLIGHT_RESULTS = {"ready", "incomplete", "unknown"}
@@ -1028,6 +1044,206 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
         files["scenarios.json"] = (
             json.dumps(payload, sort_keys=True, indent=2) + "\n"
         ).encode()
+    tier_execution_path = private / "tier-execution.json"
+    if tier_execution_path.exists():
+        tier_execution = _read_json(tier_execution_path)
+        if (
+            tier_execution.get("schema_version") != 1
+            or tier_execution.get("run_id") != raw_run_id
+            or tier_execution.get("review_state") != "pending"
+            or tier_execution.get("attained_tier") is not None
+            or tier_execution.get("requested_tier") not in {"bronze", "silver", "gold"}
+            or not isinstance(tier_execution.get("steps"), list)
+            or len(tier_execution["steps"]) > 32
+        ):
+            raise HAAPIError("Invalid private guided tier execution")
+        public_steps = []
+        for step in tier_execution["steps"]:
+            if (
+                not isinstance(step, dict)
+                or not isinstance(step.get("step_id"), str)
+                or step["step_id"] not in TIER_STEP_IDS
+                or not isinstance(step.get("outcome"), str)
+                or step.get("outcome")
+                not in OUTCOMES | {"blocked", "pending_review", "shared_evidence"}
+            ):
+                raise HAAPIError("Invalid private guided tier step")
+            evidence_hashes = []
+            machine_evidence = step.get("machine_evidence", [])
+            if not isinstance(machine_evidence, list) or len(machine_evidence) > 32:
+                raise HAAPIError("Invalid guided tier evidence list")
+            for item in machine_evidence:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise HAAPIError("Invalid guided tier evidence reference")
+                try:
+                    evidence_source = private / item["path"]
+                    evidence_path = evidence_source.resolve(strict=True)
+                    evidence_path.relative_to(run_dir.parent.resolve())
+                    evidence_bytes = _regular(evidence_source)
+                except (OSError, ValueError) as exc:
+                    raise HAAPIError("Guided tier evidence is unavailable") from exc
+                digest = hashlib.sha256(evidence_bytes).hexdigest()
+                if item.get("sha256") != digest:
+                    raise HAAPIError("Guided tier evidence digest mismatch")
+                evidence_hashes.append(digest)
+            public_step = {
+                "step_id": step["step_id"],
+                "outcome": step["outcome"],
+                "machine_evidence_sha256": sorted(set(evidence_hashes)),
+            }
+            if step.get("human_review") in {"pending", "reviewed"}:
+                public_step["human_review"] = step["human_review"]
+            public_steps.append(public_step)
+        files["tier-execution.json"] = (
+            json.dumps(
+                {
+                    "schema_version": PUBLIC_SCHEMA,
+                    "requested_tier": tier_execution["requested_tier"],
+                    "attained_tier": None,
+                    "review_state": "pending",
+                    "qualification_status": "inconclusive",
+                    "steps": public_steps,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        ).encode()
+    bronze_path = private / "tier-bronze-read-only.json"
+    if bronze_path.exists():
+        bronze = _read_json(bronze_path)
+        samples = bronze.get("sample_sha256")
+        if (
+            bronze.get("schema_version") != 1
+            or bronze.get("step_id") != "read_only_probe"
+            or not isinstance(samples, list)
+            or len(samples) != 2
+            or any(
+                not isinstance(value, str)
+                or re.fullmatch(r"[a-f0-9]{64}", value) is None
+                for value in samples
+            )
+            or type(bronze.get("fresh_verified_samples")) is not bool
+            or bronze.get("physical_observation")
+            not in {"plausible", "implausible", "unable_to_observe"}
+        ):
+            raise HAAPIError("Invalid private Bronze read-only evidence")
+        protocol = bronze.get("protocol_probe", {})
+        if not isinstance(protocol, dict):
+            raise HAAPIError("Invalid private Bronze protocol evidence")
+        protocol_outcome = protocol.get("outcome", "not_observed")
+        if protocol_outcome not in {"pass", "inconclusive", "not_observed"}:
+            raise HAAPIError("Invalid private Bronze protocol outcome")
+        protocol_digest = protocol.get("trace_sha256")
+        if protocol_digest is not None and (
+            not isinstance(protocol_digest, str)
+            or re.fullmatch(r"[a-f0-9]{64}", protocol_digest) is None
+        ):
+            raise HAAPIError("Invalid private Bronze trace digest")
+        protocol_route = protocol.get("route")
+        if protocol_route not in {None, "local_adapter", "active_proxy", "unverified"}:
+            raise HAAPIError("Invalid private Bronze route")
+        for name in (
+            "session_generation",
+            "status_request_seq",
+            "decoded_response_seq",
+        ):
+            value = protocol.get(name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise HAAPIError("Invalid private Bronze protocol reference")
+        protocol_pass = False
+        if protocol_outcome == "pass":
+            if (
+                protocol.get("trace") != "traces/bronze_read_only"
+                or protocol_digest is None
+            ):
+                raise HAAPIError("Bronze protocol evidence has no safe trace link")
+            trace_dir = private / "traces" / "bronze_read_only"
+            trace_meta = _read_json(trace_dir / "trace.json")
+            trace_events = _read_jsonl(trace_dir / "events.jsonl")
+            trace_frames = _read_jsonl(trace_dir / "frames.jsonl")
+            trace = {**trace_meta, "events": trace_events, "frames": trace_frames}
+            try:
+                _validate_trace_result(
+                    trace,
+                    run_id=raw_run_id,
+                    scenario_id="read_only_snapshot",
+                    capture_id=trace_meta.get("capture_id"),
+                    requested_route=trace_meta.get("requested_route"),
+                    expected_version=2,
+                )
+            except (HAAPIError, TypeError, ValueError, KeyError) as exc:
+                raise HAAPIError("Bronze protocol trace failed validation") from exc
+            status_tx = next(
+                (
+                    frame
+                    for frame in trace_frames
+                    if frame.get("direction") == "tx"
+                    and frame.get("command_type") == "status_request"
+                    and frame.get("frame_validation") == "validated_tx"
+                ),
+                None,
+            )
+            decoded = next(
+                (
+                    event
+                    for event in trace_events
+                    if event.get("event") == "notification_decoded"
+                    and status_tx is not None
+                    and event.get("session_generation")
+                    == status_tx.get("session_generation")
+                    and event.get("seq", 0) > status_tx.get("seq", 0)
+                ),
+                None,
+            )
+            protocol_pass = bool(
+                trace_meta.get("complete") is True
+                and trace_meta.get("dropped_events", 0) == 0
+                and trace_meta.get("dropped_frames", 0) == 0
+                and trace_meta.get("observed_route")
+                in {"local_adapter", "active_proxy"}
+                and status_tx is not None
+                and decoded is not None
+                and hashlib.sha256((trace_dir / "trace.json").read_bytes()).hexdigest()
+                == protocol_digest
+                and protocol.get("route") == trace_meta.get("observed_route")
+                and protocol.get("session_generation")
+                == status_tx.get("session_generation")
+                and protocol.get("status_request_seq") == status_tx.get("seq")
+                and protocol.get("decoded_response_seq") == decoded.get("seq")
+            )
+            if not protocol_pass:
+                raise HAAPIError("Bronze protocol evidence binding failed")
+        files["tier-bronze-read-only.json"] = (
+            json.dumps(
+                {
+                    "schema_version": PUBLIC_SCHEMA,
+                    "sample_sha256": samples,
+                    "fresh_verified_samples": bronze["fresh_verified_samples"],
+                    "physical_observation": bronze["physical_observation"],
+                    "protocol_probe": "verified" if protocol_pass else protocol_outcome,
+                    "protocol_trace_sha256": protocol_digest if protocol_pass else None,
+                    "protocol_route": protocol_route if protocol_pass else None,
+                    "protocol_session_generation": protocol.get("session_generation")
+                    if protocol_pass
+                    else None,
+                    "protocol_status_request_seq": protocol.get("status_request_seq")
+                    if protocol_pass
+                    else None,
+                    "protocol_decoded_response_seq": protocol.get(
+                        "decoded_response_seq"
+                    )
+                    if protocol_pass
+                    else None,
+                    "protocol_capture_id": None,
+                    "protocol_evidence": [],
+                    "qualification_status": "inconclusive",
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        ).encode()
     omissions = [
         "raw_frame_payloads",
         "private_identifiers",
@@ -1320,6 +1536,54 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 indent=2,
             )
             + "\n"
+        ).encode()
+    if "tier-bronze-read-only.json" in files:
+        bronze_public = _load_public_json(files["tier-bronze-read-only.json"])
+        if bronze_public.get("protocol_probe") == "verified":
+            protocol_trace = trace_references.get("traces/bronze_read_only")
+            if protocol_trace is not None:
+                all_refs, capture_incomplete, source_events, source_frames = (
+                    protocol_trace
+                )
+                capture_id = all_refs[0].split(":", 1)[0] if all_refs else None
+                status_seq = bronze_public["protocol_status_request_seq"]
+                decoded_seq = bronze_public["protocol_decoded_response_seq"]
+                status_event = source_events.get(status_seq)
+                status_frame = source_frames.get(status_seq)
+                decoded_event = source_events.get(decoded_seq)
+                if (
+                    not capture_incomplete
+                    and capture_id is not None
+                    and isinstance(status_event, dict)
+                    and status_event.get("event") == "write_attempt"
+                    and isinstance(status_frame, dict)
+                    and status_frame.get("direction") == "tx"
+                    and status_frame.get("command_type") == "status_request"
+                    and status_frame.get("frame_validation") == "validated_tx"
+                    and isinstance(decoded_event, dict)
+                    and decoded_event.get("event") == "notification_decoded"
+                    and decoded_event.get("session_generation")
+                    == status_event.get("session_generation")
+                ):
+                    bronze_public["protocol_capture_id"] = capture_id
+                    bronze_public["protocol_evidence"] = [
+                        f"{capture_id}:{status_seq}",
+                        f"{capture_id}:{decoded_seq}",
+                    ]
+                else:
+                    bronze_public["protocol_probe"] = "inconclusive"
+                    for key in (
+                        "protocol_trace_sha256",
+                        "protocol_route",
+                        "protocol_session_generation",
+                        "protocol_status_request_seq",
+                        "protocol_decoded_response_seq",
+                    ):
+                        bronze_public[key] = None
+            else:
+                bronze_public["protocol_probe"] = "inconclusive"
+        files["tier-bronze-read-only.json"] = (
+            json.dumps(bronze_public, sort_keys=True, indent=2) + "\n"
         ).encode()
     public_dir = run_dir / "public"
     safe_run_id = json.loads(files["session.json"]).get("data", {}).get("run_id")
@@ -2264,6 +2528,203 @@ def verify_public_archive(
                         )
                     ):
                         raise HAAPIError("Invalid public scenario row")
+            elif name == "tier-execution.json":
+                if (
+                    set(value)
+                    != {
+                        "schema_version",
+                        "requested_tier",
+                        "attained_tier",
+                        "review_state",
+                        "qualification_status",
+                        "steps",
+                    }
+                    or value.get("requested_tier") not in {"bronze", "silver", "gold"}
+                    or value.get("attained_tier") is not None
+                    or value.get("review_state") != "pending"
+                    or value.get("qualification_status") != "inconclusive"
+                    or not isinstance(value.get("steps"), list)
+                    or len(value["steps"]) > 32
+                ):
+                    raise HAAPIError("Invalid public guided tier execution")
+                for row in value["steps"]:
+                    hashes = (
+                        row.get("machine_evidence_sha256")
+                        if isinstance(row, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(row, dict)
+                        or set(row)
+                        - {
+                            "step_id",
+                            "outcome",
+                            "human_review",
+                            "machine_evidence_sha256",
+                        }
+                        or row.get("step_id") not in TIER_STEP_IDS
+                        or row.get("outcome")
+                        not in OUTCOMES
+                        | {"blocked", "pending_review", "shared_evidence"}
+                        or row.get("human_review") not in {None, "pending", "reviewed"}
+                        or not isinstance(hashes, list)
+                        or len(hashes) > 32
+                        or any(
+                            not isinstance(digest, str)
+                            or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+                            for digest in hashes
+                        )
+                    ):
+                        raise HAAPIError("Invalid public guided tier step")
+            elif name == "tier-bronze-read-only.json":
+                if (
+                    set(value)
+                    != {
+                        "schema_version",
+                        "sample_sha256",
+                        "fresh_verified_samples",
+                        "physical_observation",
+                        "protocol_probe",
+                        "protocol_trace_sha256",
+                        "protocol_route",
+                        "protocol_session_generation",
+                        "protocol_status_request_seq",
+                        "protocol_decoded_response_seq",
+                        "protocol_capture_id",
+                        "protocol_evidence",
+                        "qualification_status",
+                    }
+                    or not isinstance(value.get("sample_sha256"), list)
+                    or len(value["sample_sha256"]) != 2
+                    or any(
+                        not isinstance(digest, str)
+                        or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+                        for digest in value["sample_sha256"]
+                    )
+                    or type(value.get("fresh_verified_samples")) is not bool
+                    or value.get("physical_observation")
+                    not in {"plausible", "implausible", "unable_to_observe"}
+                    or value.get("protocol_probe")
+                    not in {"not_observed", "inconclusive", "verified"}
+                    or value.get("qualification_status") != "inconclusive"
+                    or (
+                        value.get("protocol_probe") == "verified"
+                        and (
+                            not isinstance(value.get("protocol_trace_sha256"), str)
+                            or re.fullmatch(
+                                r"[a-f0-9]{64}", value["protocol_trace_sha256"]
+                            )
+                            is None
+                            or value.get("protocol_route")
+                            not in {"local_adapter", "active_proxy"}
+                            or type(value.get("protocol_session_generation")) is not int
+                            or type(value.get("protocol_status_request_seq")) is not int
+                            or type(value.get("protocol_decoded_response_seq"))
+                            is not int
+                            or value["protocol_status_request_seq"]
+                            >= value["protocol_decoded_response_seq"]
+                            or not isinstance(value.get("protocol_capture_id"), str)
+                            or re.fullmatch(
+                                r"capture-[0-9]{4}", value["protocol_capture_id"]
+                            )
+                            is None
+                            or value.get("protocol_evidence")
+                            != [
+                                f"{value['protocol_capture_id']}:{value['protocol_status_request_seq']}",
+                                f"{value['protocol_capture_id']}:{value['protocol_decoded_response_seq']}",
+                            ]
+                        )
+                    )
+                    or (
+                        value.get("protocol_probe") != "verified"
+                        and any(
+                            value.get(key) is not None
+                            for key in (
+                                "protocol_trace_sha256",
+                                "protocol_route",
+                                "protocol_session_generation",
+                                "protocol_status_request_seq",
+                                "protocol_decoded_response_seq",
+                                "protocol_capture_id",
+                            )
+                        )
+                    )
+                    or (
+                        value.get("protocol_probe") != "verified"
+                        and value.get("protocol_evidence") != []
+                    )
+                ):
+                    raise HAAPIError("Invalid public Bronze evidence")
+                if value.get("protocol_probe") == "verified":
+                    try:
+                        public_events = [
+                            _load_public_json(line)
+                            for line in data["events.jsonl"].splitlines()
+                        ]
+                        public_frames = [
+                            _load_public_json(line)
+                            for line in data["frames.jsonl"].splitlines()
+                        ]
+                    except (KeyError, UnicodeError, ValueError) as exc:
+                        raise HAAPIError(
+                            "Bronze protocol references have no trace"
+                        ) from exc
+                    capture_id = value["protocol_capture_id"]
+                    status_seq = value["protocol_status_request_seq"]
+                    decoded_seq = value["protocol_decoded_response_seq"]
+                    status_event = next(
+                        (
+                            row
+                            for row in public_events
+                            if row.get("capture_id") == capture_id
+                            and row.get("seq") == status_seq
+                        ),
+                        None,
+                    )
+                    decoded_event = next(
+                        (
+                            row
+                            for row in public_events
+                            if row.get("capture_id") == capture_id
+                            and row.get("seq") == decoded_seq
+                        ),
+                        None,
+                    )
+                    status_frame = next(
+                        (
+                            row
+                            for row in public_frames
+                            if row.get("capture_id") == capture_id
+                            and row.get("seq") == status_seq
+                        ),
+                        None,
+                    )
+                    capture = next(
+                        (
+                            row
+                            for row in captures.get("by_capture", [])
+                            if row.get("capture_id") == capture_id
+                        ),
+                        None,
+                    )
+                    if not (
+                        isinstance(status_event, dict)
+                        and status_event.get("event") == "write_attempt"
+                        and isinstance(decoded_event, dict)
+                        and decoded_event.get("event") == "notification_decoded"
+                        and status_event.get("session_generation")
+                        == decoded_event.get("session_generation")
+                        and isinstance(status_frame, dict)
+                        and status_frame.get("direction") == "tx"
+                        and status_frame.get("command_type") == "status_request"
+                        and status_frame.get("frame_validation") == "validated_tx"
+                        and isinstance(capture, dict)
+                        and capture.get("route") == value.get("protocol_route")
+                        and capture.get("complete") is True
+                    ):
+                        raise HAAPIError(
+                            "Bronze protocol evidence is not capture-bound"
+                        )
         elif name.endswith(".jsonl"):
             try:
                 for line in data[name].splitlines():

@@ -55,6 +55,7 @@ class Device:
     entry_state: str | None = None
     control_entities: dict[str, str] = field(default_factory=dict)
     config_entry_id: str | None = None
+    refresh_entity: str | None = None
 
 
 def safe_model(value: Any) -> str:
@@ -184,6 +185,20 @@ def _control_key(entry: dict[str, Any]) -> str | None:
     return None
 
 
+def _refresh_entity(entry: dict[str, Any]) -> str | None:
+    """Resolve only the integration-owned read-only refresh button."""
+    unique_id = entry.get("unique_id")
+    entity_id = entry.get("entity_id")
+    if (
+        isinstance(unique_id, str)
+        and unique_id.endswith("_refresh")
+        and isinstance(entity_id, str)
+        and entity_id.startswith("button.")
+    ):
+        return entity_id
+    return None
+
+
 def find_devices(
     entities: list[Any],
     devices: list[Any],
@@ -223,6 +238,8 @@ def find_devices(
             continue
         mapping: dict[str, str] = {}
         control_mapping: dict[str, str] = {}
+        refresh_entity: str | None = None
+        ambiguous_refresh = False
         ambiguous: set[str] = set()
         ambiguous_controls: set[str] = set()
         for entity in platforms.get(device_id, []):
@@ -235,9 +252,21 @@ def find_devices(
                     ambiguous.add(key)
                 mapping[key] = entity_id
             control_key = _control_key(entity)
+            refresh = _refresh_entity(entity)
+            if refresh is not None:
+                config_entry_id = entity.get("config_entry_id")
+                linked_entries = _linked_entry_ids(raw_device)
+                if config_entry_id is None or (
+                    linked_entries and config_entry_id not in linked_entries
+                ):
+                    continue
+                if refresh_entity is not None:
+                    ambiguous_refresh = True
+                refresh_entity = refresh
             expected_domain = CONTROL_DOMAINS.get(control_key or "")
             if (
                 control_key is not None
+                and expected_domain is not None
                 and isinstance(entity_id, str)
                 and entity_id.startswith(expected_domain + ".")
             ):
@@ -256,6 +285,8 @@ def find_devices(
             mapping.pop(key, None)
         for key in ambiguous_controls:
             control_mapping.pop(key, None)
+        if ambiguous_refresh:
+            refresh_entity = None
         results.append(
             Device(
                 device_id=device_id,
@@ -266,6 +297,7 @@ def find_devices(
                 entry_state=_entry_state(raw_device, entries),
                 control_entities=control_mapping,
                 config_entry_id=_loaded_entry_id(raw_device, entries),
+                refresh_entity=refresh_entity,
             )
         )
     return sorted(

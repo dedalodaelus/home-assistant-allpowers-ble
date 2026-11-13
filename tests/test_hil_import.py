@@ -29,6 +29,7 @@ def _public_archive(
     installed_version: str = "1.2.3",
     firmware_version: str = "1.1",
     verified_build: bool = False,
+    guided_tier: bool = False,
 ) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     run = path / "run"
@@ -73,6 +74,36 @@ def _public_archive(
         session["run_id"] = source_run_id
     (run / "environment.json").write_text(json.dumps(environment), encoding="utf-8")
     (run / "session.json").write_text(json.dumps(session), encoding="utf-8")
+    if guided_tier:
+        artifact = run / "tier-dc-output.json"
+        artifact.write_text(json.dumps({"outcome": "pass"}), encoding="utf-8")
+        (run / "tier-execution.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": source_run_id,
+                    "requested_tier": "silver",
+                    "attained_tier": None,
+                    "review_state": "pending",
+                    "steps": [
+                        {
+                            "step_id": "dc_output_cycle",
+                            "outcome": "pass",
+                            "human_review": "pending",
+                            "machine_evidence": [
+                                {
+                                    "path": artifact.name,
+                                    "sha256": hashlib.sha256(
+                                        artifact.read_bytes()
+                                    ).hexdigest(),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
     return export_archive(run, confirmed=True)
 
 
@@ -367,6 +398,36 @@ def test_import_defaults_to_preview_and_apply_is_idempotent(
         import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
     assert evidence[0].read_text(encoding="utf-8") == "conflicting contents"
     assert matrix_path.read_bytes() == matrix_before_conflict
+
+
+def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+
+    archive = _public_archive(tmp_path, guided_tier=True)
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]
+    evidence_paths = [tmp_path / item for item in imported["evidence"]]
+    guided_file = next(
+        path for path in evidence_paths if path.name == "tier-execution.json"
+    )
+    public_execution = json.loads(guided_file.read_text(encoding="utf-8"))
+    assert public_execution["attained_tier"] is None
+    assert public_execution["qualification_status"] == "inconclusive"
+    assert public_execution["steps"][0]["machine_evidence_sha256"]
+    assert all(
+        result["status"] == "inconclusive"
+        for result in imported["write_capabilities"].values()
+    )
 
 
 def test_verified_build_provenance_is_retained_in_imported_matrix(

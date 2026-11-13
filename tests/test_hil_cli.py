@@ -302,7 +302,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
                 str(output_root),
             ]
         )
-        == 0
+        == 2
     )
 
     (run_dir,) = tuple(output_root.iterdir())
@@ -316,11 +316,14 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
     with zipfile.ZipFile(archive) as exported:
         public = {name: exported.read(name) for name in exported.namelist()}
     session = json.loads(public["public/session.json"])
+    bronze_evidence = json.loads(public["public/tier-bronze-read-only.json"])
     combined = b"".join(public.values())
     tier_plan = session["data"]["test_plan"]
     assert tier_plan["requested_tier"] == "bronze"
     assert tier_plan["attained_tier"] is None
     assert tier_plan["device"]["verified_route"] is None
+    assert bronze_evidence["protocol_probe"] == "inconclusive"
+    assert bronze_evidence["qualification_status"] == "inconclusive"
     assert session["data"]["route"]["requested"] == "active_proxy"
     assert b"secret-device-id-012345" not in combined
     assert b"secret-entry-1" not in combined
@@ -436,12 +439,15 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
     args = Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False)
     root = storage.write_run(tmp_path, "tier-parent", {}, {})
 
-    assert cli._execute_tier_suite(
-        api, args, device, {}, root, "parent-run", plan, capabilities
-    ) == (0 if include_trace else 2)
-    assert calls.count(("recovery", None)) == 1
+    assert (
+        cli._execute_tier_suite(
+            api, args, device, {}, root, "parent-run", plan, capabilities
+        )
+        == 2
+    )
+    assert calls.count(("recovery", None)) == (1 if include_trace else 0)
     assert ("outputs", "output_ac_cycle") in calls
-    assert ("settings", "settings_eco_mode") in calls
+    assert (("settings", "settings_eco_mode") in calls) is include_trace
     child_runs = list(tmp_path.glob("tier_*/private/session.json"))
     assert child_runs
     for session_path in child_runs:
@@ -466,6 +472,134 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
             path = (root / artifact["path"]).resolve()
             assert path.is_file()
             assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+
+
+def test_tier_executor_stops_after_unrestored_candidate_mutation(monkeypatch, tmp_path):
+    from argparse import Namespace
+
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    calls = []
+
+    def uncertain(*args, **kwargs):
+        calls.append(args[5])
+        return {
+            "step_id": args[5],
+            "outcome": "inconclusive",
+            "state_safe_to_continue": False,
+            "reason": "restoration was not authorized; manual inspection required",
+        }
+
+    monkeypatch.setattr(cli, "_execute_experimental_output_step", uncertain)
+    root = write_run(tmp_path, "stop-after-uncertain", {}, {})
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware=None,
+        firmware=None,
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    capabilities = {
+        "features": {
+            name: {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+            }
+            for name in ("dc_output", "ac_output")
+        }
+    }
+    plan = {
+        "requested_tier": "gold",
+        "steps": [{"id": "dc_output_cycle"}, {"id": "ac_output_cycle"}],
+    }
+
+    assert (
+        cli._execute_tier_suite(
+            object(),
+            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+            device,
+            {},
+            root,
+            "parent-run",
+            plan,
+            capabilities,
+        )
+        == 2
+    )
+
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert calls == ["dc_output_cycle"]
+    assert [step["outcome"] for step in execution["steps"]] == [
+        "inconclusive",
+        "blocked",
+    ]
+    assert "not attempted" in execution["steps"][1]["reason"]
+
+
+def test_noninteractive_tier_read_only_failure_does_not_crash_on_hashlib(
+    monkeypatch, tmp_path
+):
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from scripts.hil import outputs
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    def fake_output(_api, _args, _device, _environment, out, _run_id, _services):
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
+    base_services = cli._suite_services()
+    monkeypatch.setattr(cli, "_suite_services", lambda: base_services)
+    root = write_run(tmp_path, "noninteractive-tier", {}, {})
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware=None,
+        firmware=None,
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    plan = {
+        "requested_tier": "silver",
+        "steps": [{"id": "read_only_probe"}, {"id": "dc_output_cycle"}],
+    }
+    capabilities = {
+        "features": {
+            "dc_output": {
+                "physical_presence": "present",
+                "production_authorized": True,
+            }
+        }
+    }
+
+    result = cli._execute_tier_suite(
+        SimpleNamespace(origin="https://example.test"),
+        Namespace(route="local_adapter", output_root=tmp_path, non_interactive=True),
+        device,
+        {},
+        root,
+        "parent-run",
+        plan,
+        capabilities,
+    )
+
+    assert result == 2
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["steps"][0]["outcome"] == "inconclusive"
+    assert execution["steps"][1]["outcome"] == "pass"
 
 
 @pytest.mark.parametrize(
@@ -3638,6 +3772,40 @@ def test_discovery_maps_only_unambiguous_integration_control_entities():
     assert device.config_entry_id == "entry-1"
 
 
+def test_discovery_maps_only_linked_integration_read_only_refresh_button():
+    entities = [
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "button.device_refresh",
+            "unique_id": "registry_refresh",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "button.foreign_refresh",
+            "unique_id": "registry_refresh",
+            "config_entry_id": "entry-2",
+            "disabled_by": None,
+        },
+    ]
+    devices = [
+        {
+            "id": "device-1",
+            "config_entry_id": "entry-1",
+            "identifiers": [["allpowers_ble", "private-registry-id"]],
+            "model": "R600",
+        }
+    ]
+    entries = [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}]
+
+    (device,) = discovery.find_devices(entities, devices, entries)
+
+    assert device.refresh_entity == "button.device_refresh"
+
+
 def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatch):
     """Only current values and select choices defined by the integration survive."""
     client = api.HAClient("http://127.0.0.1:8123", "token")
@@ -3688,6 +3856,29 @@ def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
             "target": {"entity_id": "select.station_mode"},
         },
     ]
+
+
+def test_request_read_only_refresh_uses_only_the_integration_button(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda rows: commands.extend(rows) or [{"context": {}}],
+    )
+
+    client.request_read_only_refresh("button.station_refresh")
+
+    assert commands == [
+        {
+            "type": "call_service",
+            "domain": "button",
+            "service": "press",
+            "target": {"entity_id": "button.station_refresh"},
+        }
+    ]
+    with pytest.raises(api.HAAPIError):
+        client.request_read_only_refresh("button.other_domain_press")
 
 
 @pytest.mark.parametrize(

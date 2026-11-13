@@ -883,19 +883,56 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
     services = replace(
         hil_cli._suite_services(), prompt=lambda _question: next(service_answers)
     )
-    try:
-        result = hil_cli._execute_experimental_output_step(
-            FakeHA(),
-            SimpleNamespace(route="auto", non_interactive=False),
+    if failure == "restore_ambiguous":
+        from scripts.hil.storage import write_run
+
+        api = FakeHA()
+        monkeypatch.setattr(hil_cli, "_suite_services", lambda: services)
+        parent = write_run(tmp_path, "guided-parent", {}, {})
+        tier_status = hil_cli._execute_tier_suite(
+            api,
+            SimpleNamespace(route="auto", output_root=tmp_path, non_interactive=False),
             device,
-            tmp_path,
+            {},
+            parent,
             "0123456789abcdef",
-            "dc_output_cycle",
-            "dc_output",
-            services,
+            {
+                "requested_tier": "gold",
+                "steps": [
+                    {"id": "dc_output_cycle"},
+                    {"id": "dc_output_cycle"},
+                ],
+            },
+            {
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                }
+            },
         )
-    finally:
+        result = json.loads((parent / "tier-execution.json").read_text())["steps"][0]
+        assert tier_status == 2
+        execution = json.loads((parent / "tier-execution.json").read_text())
+        assert execution["steps"][1]["outcome"] == "blocked"
+        assert len(fake_ble.writes) == 2
         loop.close()
+    else:
+        try:
+            result = hil_cli._execute_experimental_output_step(
+                FakeHA(),
+                SimpleNamespace(route="auto", non_interactive=False),
+                device,
+                tmp_path,
+                "0123456789abcdef",
+                "dc_output_cycle",
+                "dc_output",
+                services,
+            )
+        finally:
+            loop.close()
     assert result["outcome"] == expected_outcome, result
     assert len(fake_ble.writes) == expected_write_count
     expected_packets = [

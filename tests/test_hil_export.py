@@ -93,6 +93,87 @@ def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> No
     assert archive.read_bytes() == previous
 
 
+def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "guided"
+    private = run / "private"
+    private.mkdir(parents=True)
+    (private / "environment.json").write_text(
+        json.dumps({"schema_version": 1}), encoding="utf-8"
+    )
+    (private / "session.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "0123456789abcdef",
+                "qualification_status": "inconclusive",
+                "device_id": "PRIVATE_DEVICE_ID",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = private / "tier-dc-output.json"
+    artifact.write_text(json.dumps({"outcome": "pass"}), encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    (private / "tier-execution.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "0123456789abcdef",
+                "requested_tier": "silver",
+                "attained_tier": None,
+                "review_state": "pending",
+                "steps": [
+                    {
+                        "step_id": "dc_output_cycle",
+                        "outcome": "pass",
+                        "human_review": "pending",
+                        "machine_evidence": [{"path": artifact.name, "sha256": digest}],
+                        "reason": "contains private detail and must not be exported",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (private / "tier-bronze-read-only.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "step_id": "read_only_probe",
+                "sample_sha256": ["a" * 64, "b" * 64],
+                "fresh_verified_samples": True,
+                "physical_observation": "plausible",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    archive = export_archive(run, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        payload = exported.read("public/tier-execution.json")
+        bronze_payload = exported.read("public/tier-bronze-read-only.json")
+    public = json.loads(payload)
+    assert public["attained_tier"] is None
+    assert public["qualification_status"] == "inconclusive"
+    assert public["steps"] == [
+        {
+            "step_id": "dc_output_cycle",
+            "outcome": "pass",
+            "human_review": "pending",
+            "machine_evidence_sha256": [digest],
+        }
+    ]
+    assert b"PRIVATE_DEVICE_ID" not in payload
+    assert b"tier-dc-output.json" not in payload
+    assert b"private detail" not in payload
+    bronze = json.loads(bronze_payload)
+    assert bronze["protocol_probe"] == "not_observed"
+    assert bronze["qualification_status"] == "inconclusive"
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
 def test_blocked_output_run_is_retained_in_public_report(tmp_path: Path) -> None:
     from argparse import Namespace
     from types import SimpleNamespace

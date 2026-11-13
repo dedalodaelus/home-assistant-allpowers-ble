@@ -226,6 +226,26 @@ class HAClient:
         if not isinstance(result, dict) or not isinstance(result.get("context"), dict):
             raise HAAPIError("Home Assistant did not acknowledge the service call")
 
+    def request_read_only_refresh(self, entity_id: str) -> None:
+        """Use the discovered integration refresh button for a status-only poll."""
+        if (
+            not isinstance(entity_id, str)
+            or re.fullmatch(r"button\.[a-z0-9_]*_refresh", entity_id) is None
+        ):
+            raise HAAPIError("Invalid discovered refresh button")
+        result = self.websocket(
+            [
+                {
+                    "type": "call_service",
+                    "domain": "button",
+                    "service": "press",
+                    "target": {"entity_id": entity_id},
+                }
+            ]
+        )[0]
+        if not isinstance(result, dict) or not isinstance(result.get("context"), dict):
+            raise HAAPIError("Home Assistant did not acknowledge the refresh request")
+
     def hil_capabilities(self, entry_id: str) -> dict[str, Any]:
         """Fetch and strictly normalize the entry-scoped HIL capability snapshot."""
         if (
