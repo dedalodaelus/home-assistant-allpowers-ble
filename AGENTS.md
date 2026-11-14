@@ -46,8 +46,9 @@ in a follow-up pull request.
   item is satisfied, and leave incomplete, unverified, or inapplicable items
   unchecked. Explain any inapplicable or incomplete items in the PR description.
   Describe the change, rationale, actual validation, safety impact, and known
-  limitations. Distinguish simulation from physical hardware evidence. Do not
-  edit `CHANGELOG.md`; release tooling owns it.
+  limitations. Distinguish checks run locally from remote CI results, and
+  simulation from physical hardware evidence. Do not edit `CHANGELOG.md`; release
+  tooling owns it.
 - A mature pull request may be opened before remote CI finishes. Fix CI failures
   on the same pull request. Opening a pull request is not approval; passing CI
   alone does not prove correctness or authorize merging.
