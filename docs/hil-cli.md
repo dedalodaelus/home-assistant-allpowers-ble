@@ -454,13 +454,20 @@ A restoration does not turn an incomplete run into a pass. These scenarios
 have not been piloted on hardware.
 
 The `settings` suite currently provides ECO-mode, work-mode and ECO-timeout
-checks. Each change is restricted to a declared value exposed by HA, requires
-fresh settings and a separate authorization, and is followed by a separately
-authorized attempt to restore the original value. After an ambiguous service
-call, the runner may offer one traced restoration only when fresh same-session
-telemetry confirms the changed value and no transaction is pending. Missing
-confirmation or route evidence remains inconclusive. Settings checks have not
-been piloted on hardware.
+checks. Before asking for consent, it prints and privately checkpoints the
+current value, requested value, first transition and restoration to the
+original value. Each change is restricted to a value supported by HA, requires
+fresh settings and separate authorization, and is followed by a separately
+authorized attempt to restore the original value. If ECO is already at the
+declared target, the runner offers the supported reverse transition and then
+restores the original state. If work mode or ECO timeout already matches its
+target, the runner explains that no safe alternative is declared and skips
+without writing. Missing or stale telemetry is inconclusive; unsupported
+controls are not applicable. After an ambiguous service call, the runner may
+offer one traced restoration only when fresh same-session telemetry confirms
+the changed value and no transaction is pending. Missing confirmation or route
+evidence remains inconclusive, and restoration never upgrades the initial
+result. Settings checks have not been piloted on hardware.
 
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA

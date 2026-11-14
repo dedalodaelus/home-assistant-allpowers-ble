@@ -282,6 +282,20 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
 
     target = declared_step.get("target") if declared_step is not None else None
     expected = declared_step.get("expected") if declared_step is not None else None
+    executed_pre_state = step.get("pre_state")
+    if executed_pre_state is None and isinstance(step.get("observation"), dict):
+        executed_pre_state = step["observation"].get("pre_state")
+    if (
+        scenario_id == "settings_eco_mode"
+        and step_id == "eco_mode_on"
+        and expected == "on"
+        and step.get("expected") == "off"
+        and executed_pre_state == "on"
+    ):
+        # The only alternate ECO action is the declared, reversible off edge
+        # when the original value was already on. Never publish arbitrary
+        # private requested values as public expectations.
+        expected = "off"
     if not isinstance(target, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", target):
         target = None
     if not isinstance(expected, str) or not 0 < len(expected) <= 128:
@@ -3962,7 +3976,13 @@ def verify_public_archive(
         for step in scenario_steps:
             declared = _public_observation(
                 json.loads(data["scenarios.json"])["scenario_id"],
-                {"step_id": step["step_id"]},
+                {
+                    "step_id": step["step_id"],
+                    "expected": step["expected"],
+                    "pre_state": step["observation"].get("pre_state"),
+                    "post_state": step["actual"],
+                    "outcome": step["outcome"],
+                },
             )
             if (
                 step["target"] != declared["target"]

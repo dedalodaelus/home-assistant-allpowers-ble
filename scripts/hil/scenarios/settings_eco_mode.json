@@ -2,12 +2,12 @@
   "id": "settings_eco_mode",
   "schema_version": 1,
   "suite": "settings",
-  "title": "Toggle and restore ECO mode",
+  "title": "Exercise and restore ECO mode",
   "mode": "interactive_write",
   "steps": [
     {
       "id": "eco_mode_on",
-      "instruction": "Enable ECO mode, observe fresh settings, then restore the original state.",
+      "instruction": "Choose the declared ECO target, or the supported reverse if already selected; observe fresh settings, then restore the original state.",
       "timeout_seconds": 30,
       "action": "switch",
       "target": "eco_mode",

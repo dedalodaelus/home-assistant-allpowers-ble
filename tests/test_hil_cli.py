@@ -2652,6 +2652,7 @@ def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
     ("scenario_id", "control_key", "initial", "options"),
     [
         ("settings_eco_mode", "eco_mode", "off", ["off", "on"]),
+        ("settings_eco_mode", "eco_mode", "on", ["off", "on"]),
         (
             "settings_work_mode",
             "work_mode",
@@ -2766,19 +2767,171 @@ def test_settings_scenarios_restore_original_option_with_fresh_evidence(
 
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
     assert result == 0
-    assert api_fake.actions == [
-        (
-            control_key,
-            "on"
-            if control_key == "eco_mode"
-            else "standard"
-            if control_key == "work_mode"
-            else "two_hours",
-        ),
-        (control_key, initial),
-    ]
-    assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+    first_target = (
+        "off"
+        if control_key == "eco_mode" and initial == "on"
+        else "on"
+        if control_key == "eco_mode"
+        else "standard"
+        if control_key == "work_mode"
+        else "two_hours"
+    )
+    assert api_fake.actions == [(control_key, first_target), (control_key, initial)]
+    preflight = checkpoint["steps"][0]
+    assert preflight["step_id"] == "settings_preflight"
+    assert preflight["current_value"] == initial
+    assert preflight["first_transition"] == first_target
+    assert preflight["restoration_value"] == initial
+    assert [step["outcome"] for step in checkpoint["steps"][-2:]] == ["pass", "pass"]
     assert api_fake.state == initial
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "control_key", "value", "options"),
+    [
+        ("settings_work_mode", "work_mode", "standard", ["mute", "standard", "fast"]),
+        (
+            "settings_eco_timeout",
+            "eco_timeout",
+            "two_hours",
+            ["one_hour", "two_hours", "four_hours"],
+        ),
+    ],
+)
+def test_settings_preflight_skips_matching_select_without_inventing_alternative(
+    monkeypatch, tmp_path, capsys, scenario_id, control_key, value, options
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    services_factory = cli._suite_services
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            services_factory(),
+            prompt=lambda _message: (_ for _ in ()).throw(AssertionError("prompted")),
+        ),
+    )
+
+    class MatchingSettingsHA:
+        origin = "https://ha.example.test"
+
+        def hil_capabilities(self, _entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def control_state(self, _key, _entity_id):
+            return {"available": True, "state": value, "options": options}
+
+        def call_control(self, *_args):
+            raise AssertionError("matching setting must not be written")
+
+    output_dir = tmp_path / scenario_id
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={control_key: f"select.private_{control_key}"},
+        config_entry_id="entry-safe",
+    )
+    result = cli._execute_settings_suite(
+        MatchingSettingsHA(),
+        SimpleNamespace(non_interactive=False, route="auto", scenario_id=scenario_id),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    preflight = checkpoint["steps"][0]
+    assert result == 2
+    assert preflight["outcome"] == "skipped"
+    assert preflight["current_value"] == value
+    assert preflight["first_transition"] is None
+    assert "no safe alternative is declared" in preflight["reason"]
+    assert preflight["restoration_value"] == value
+    assert "no safe alternative" in capsys.readouterr().out
+
+
+def test_settings_preflight_records_declined_authorization_without_write(
+    monkeypatch, tmp_path
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    services_factory = cli._suite_services
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(services_factory(), prompt=lambda _message: "no"),
+    )
+
+    class DeclinedSettingsHA:
+        origin = "https://ha.example.test"
+        actions = []
+
+        def hil_capabilities(self, _entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 9,
+                "capabilities": {"write_settings_controls": True},
+            }
+
+        def control_state(self, _key, _entity_id):
+            return {"available": True, "state": "off", "options": ["off", "on"]}
+
+        def call_control(self, *args):
+            self.actions.append(args)
+
+    output_dir = tmp_path / "declined"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    api_fake = DeclinedSettingsHA()
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False, route="auto", scenario_id="settings_eco_mode"
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    preflight = checkpoint["steps"][0]
+    assert result == 2
+    assert api_fake.actions == []
+    assert preflight["authorization"] == "declined"
+    assert "no write attempted" in preflight["reason"]
 
 
 @pytest.mark.parametrize(
@@ -2932,12 +3085,18 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
     )
 
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
-    change = checkpoint["steps"][0]
+    change = next(
+        step for step in checkpoint["steps"] if step["step_id"] == "eco_mode_on"
+    )
     assert result == 2
     assert change["service_attempted"] is True
     assert change["post_state"] == ("off" if cleanup_state == "unchanged" else "on")
     if cleanup_state == "safe":
-        restoration = checkpoint["steps"][1]
+        restoration = next(
+            step
+            for step in checkpoint["steps"]
+            if step["step_id"] == "restore_after_ambiguous_write"
+        )
         assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
         assert change["cleanup_status"] == (
             "restoration_inconclusive" if trace_unavailable else "restoration_confirmed"
@@ -2952,13 +3111,22 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
     elif cleanup_state == "race_after_cleanup_trace":
         assert api_fake.actions == [("eco_mode", "on")]
         assert change["cleanup_status"] == "restoration_inconclusive"
-        assert checkpoint["steps"][1]["step_id"] == "restore_after_ambiguous_write"
-        assert checkpoint["steps"][1].get("service_attempted") is not True
-        assert "changed after trace start" in checkpoint["steps"][1]["reason"]
+        restoration = next(
+            step
+            for step in checkpoint["steps"]
+            if step["step_id"] == "restore_after_ambiguous_write"
+        )
+        assert restoration.get("service_attempted") is not True
+        assert "changed after trace start" in restoration["reason"]
     elif cleanup_state == "pending_after_restore":
         assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
         assert change["cleanup_status"] == "restoration_inconclusive"
-        assert checkpoint["steps"][1]["outcome"] == "inconclusive"
+        restoration = next(
+            step
+            for step in checkpoint["steps"]
+            if step["step_id"] == "restore_after_ambiguous_write"
+        )
+        assert restoration["outcome"] == "inconclusive"
         assert api_fake.state == "off"
     elif cleanup_state == "unchanged":
         assert api_fake.actions == [("eco_mode", "on")]
@@ -2972,8 +3140,9 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
 
 @pytest.mark.parametrize("include_control_frame", [True, False])
 @pytest.mark.parametrize("requested_route", ["auto", "active_proxy"])
+@pytest.mark.parametrize("initial_state", ["off", "on"])
 def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
-    monkeypatch, tmp_path, include_control_frame, requested_route
+    monkeypatch, tmp_path, include_control_frame, requested_route, initial_state
 ):
     from datetime import UTC, datetime
     from types import SimpleNamespace
@@ -2981,15 +3150,20 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
     from custom_components.allpowers_ble.protocol import SettingsData, WorkMode
     from custom_components.allpowers_ble.protocol import encode_settings_control
     from scripts.hil.discovery import Device
+    from scripts.hil.environment import build_environment, build_session
+    from scripts.hil.evidence import export_archive, verify_public_archive
+    from scripts.hil.storage import write_run
 
     class TracedSettingsHA:
         origin = "https://ha.example.test"
 
         def __init__(self):
-            self.state = "off"
+            self.state = initial_state
             self.capture = 0
             self.actions = []
             self.requested_route = requested_route
+            self.run_id = "0123456789abcdef"
+            self.scenario_id = "settings_eco_mode"
 
         def hil_capabilities(self, entry_id):
             return {
@@ -3018,6 +3192,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             command = commands[0]
             if command["type"].endswith("/start"):
                 self.capture += 1
+                self.run_id = command["run_id"]
+                self.scenario_id = command["scenario_id"]
                 return [{"schema_version": 2, "capture_id": f"eco-{self.capture}"}]
             return [self.trace(command["capture_id"])]
 
@@ -3027,8 +3203,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             common = {
                 "schema_version": 2,
                 "utc": utc,
-                "run_id": "0123456789abcdef",
-                "scenario_id": "settings_eco_mode",
+                "run_id": self.run_id,
+                "scenario_id": self.scenario_id,
                 "session_generation": 9,
                 "layer": "gatt_api",
                 "observed_route": "local_adapter",
@@ -3098,8 +3274,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
                 "schema_version": 2,
                 "capture_scope": "runtime_entry",
                 "capture_id": capture_id,
-                "run_id": "0123456789abcdef",
-                "scenario_id": "settings_eco_mode",
+                "run_id": self.run_id,
+                "scenario_id": self.scenario_id,
                 "requested_route": self.requested_route,
                 "observed_route": "local_adapter",
                 "capture_layer": "gatt_api_not_rf",
@@ -3131,8 +3307,6 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             }
 
     api_fake = TracedSettingsHA()
-    output_dir = tmp_path / f"real-trace-{include_control_frame}"
-    output_dir.mkdir(mode=0o700)
     device = Device(
         device_id="private-device",
         model="R600",
@@ -3142,6 +3316,20 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         entry_state="loaded",
         control_entities={"eco_mode": "switch.private_eco_mode"},
         config_entry_id="entry-safe",
+    )
+    environment = build_environment({"version": "2026.10.4"}, None)
+    session = build_session(
+        run_id="0123456789abcdef",
+        requested_route=requested_route,
+        device=device,
+        environment=environment,
+        sample={},
+    )
+    output_dir = write_run(
+        tmp_path,
+        f"real-trace-{include_control_frame}-{requested_route}-{initial_state}",
+        environment,
+        session,
     )
     answers = iter(("1", "1", "1", "1"))
     monkeypatch.setattr(cli, "input", lambda _prompt: next(answers), raising=False)
@@ -3159,17 +3347,145 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
     )
 
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    first_target = "on" if initial_state == "off" else "off"
+    restored_actions = [
+        ("eco_mode", first_target),
+        ("eco_mode", initial_state),
+    ]
     if include_control_frame and requested_route == "auto":
         assert result == 0
-        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
-        assert [step["outcome"] for step in checkpoint["steps"]] == ["pass", "pass"]
+        assert api_fake.actions == restored_actions
+        assert [step["outcome"] for step in checkpoint["steps"][-2:]] == [
+            "pass",
+            "pass",
+        ]
+        assert checkpoint["steps"][0]["outcome"] == "pass"
+        if initial_state == "on":
+            archive = export_archive(output_dir.parent, confirmed=True)
+            manifest, public, _digest = verify_public_archive(
+                archive, include_contents=True
+            )
+            scenario = json.loads(public["scenarios.json"])
+            change = next(
+                step for step in scenario["steps"] if step["step_id"] == "eco_mode_on"
+            )
+            restoration = next(
+                step
+                for step in scenario["steps"]
+                if step["step_id"] == "restore_original"
+            )
+            assert manifest["qualification_status"] == "inconclusive"
+            assert change["expected"] == "off"
+            assert change["actual"] == "off"
+            assert change["outcome"] == "pass"
+            assert restoration["actual"] == "on"
+            assert restoration["outcome"] == "pass"
+            assert "expected `off`; observed `off`" in public["report.md"].decode()
+
+            # Exercise the real child settings runner through the Gold tier
+            # aggregator; its successful read-only preflight must not block Gold.
+            api_fake.state = initial_state
+            api_fake.actions.clear()
+            tier_root = tmp_path / "gold-tier"
+            parent_dir = write_run(
+                tier_root,
+                "gold-parent",
+                environment,
+                {"run_id": "abcdef0123456789"},
+            )
+            gold_answers = iter(("1", "1", "1", "1"))
+            monkeypatch.setattr(
+                cli, "input", lambda _prompt: next(gold_answers), raising=False
+            )
+            tier_result = cli._execute_tier_suite(
+                api_fake,
+                SimpleNamespace(
+                    route="auto", output_root=tier_root, non_interactive=False
+                ),
+                device,
+                environment,
+                parent_dir,
+                "abcdef0123456789",
+                {"requested_tier": "gold", "steps": [{"id": "eco_mode_reversal"}]},
+                {
+                    "features": {
+                        "eco_mode": {
+                            "physical_presence": "present",
+                            "production_authorized": True,
+                            "runtime_ready": True,
+                        }
+                    }
+                },
+            )
+            tier_execution = json.loads(
+                (parent_dir / "tier-execution.json").read_text()
+            )
+            assert tier_result == 0
+            assert tier_execution["steps"][0]["outcome"] == "pass"
     else:
         assert result == 2
-        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
-        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
-        assert checkpoint["steps"][0]["cleanup_status"] == ("restoration_inconclusive")
-        assert checkpoint["steps"][1]["step_id"] == "restore_after_ambiguous_write"
-        assert checkpoint["steps"][1]["outcome"] == "inconclusive"
+        assert api_fake.actions == restored_actions
+        change = next(
+            step for step in checkpoint["steps"] if step["step_id"] == "eco_mode_on"
+        )
+        restoration = next(
+            step
+            for step in checkpoint["steps"]
+            if step["step_id"] == "restore_after_ambiguous_write"
+        )
+        assert change["outcome"] == "inconclusive"
+        assert change["cleanup_status"] == "restoration_inconclusive"
+        assert restoration["outcome"] == "inconclusive"
+        if initial_state == "on":
+            archive = export_archive(output_dir.parent, confirmed=True)
+            _manifest, public, _digest = verify_public_archive(
+                archive, include_contents=True
+            )
+            scenario = json.loads(public["scenarios.json"])
+            public_change = next(
+                step for step in scenario["steps"] if step["step_id"] == "eco_mode_on"
+            )
+            assert public_change["expected"] == "off"
+            assert public_change["outcome"] == "inconclusive"
+            assert "expected `off`" in public["report.md"].decode()
+
+
+def test_public_eco_reversal_expected_value_requires_validated_reverse_edge():
+    from scripts.hil.evidence import _public_observation
+
+    legitimate = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "pass",
+            "expected": "off",
+            "pre_state": "on",
+            "post_state": "off",
+        },
+    )
+    arbitrary = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "pass",
+            "expected": "off",
+            "pre_state": "off",
+            "post_state": "off",
+        },
+    )
+    inconclusive_reverse = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "inconclusive",
+            "expected": "off",
+            "pre_state": "on",
+            "post_state": None,
+        },
+    )
+    assert legitimate["expected"] == "off"
+    assert inconclusive_reverse["expected"] == "off"
+    assert arbitrary["expected"] == "on"
 
 
 @pytest.mark.parametrize(
@@ -3278,11 +3594,112 @@ def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
     assert result == 2
     assert api_fake.actions == []
+    preflight = next(
+        step for step in checkpoint["steps"] if step["step_id"] == "settings_preflight"
+    )
     if failed_check.endswith("_after_trace"):
-        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
-        assert checkpoint["steps"][0].get("service_attempted") is not True
+        action = next(
+            step
+            for step in checkpoint["steps"]
+            if step["step_id"] == "work_mode_standard"
+        )
+        assert action["outcome"] == "inconclusive"
+        assert action.get("service_attempted") is not True
     else:
-        assert checkpoint["steps"][0]["outcome"] == "not_applicable"
+        assert preflight["outcome"] in {"inconclusive", "not_applicable"}
+        assert preflight["reason"]
+
+
+@pytest.mark.parametrize(
+    ("supported", "settings_fresh", "expected_outcome"),
+    [
+        (True, False, "inconclusive"),
+        (False, True, "not_applicable"),
+    ],
+)
+def test_settings_schema_v2_distinguishes_runtime_staleness_from_unsupported(
+    monkeypatch, tmp_path, supported, settings_fresh, expected_outcome
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    services_factory = cli._suite_services
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            services_factory(),
+            prompt=lambda _message: (_ for _ in ()).throw(
+                AssertionError("blocked preflight must not prompt")
+            ),
+        ),
+    )
+
+    class SchemaV2SettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+
+        def hil_capabilities(self, _entry_id):
+            return {
+                "schema_version": 2,
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": settings_fresh,
+                "session_generation": 9,
+                "features": {
+                    "eco_mode": {
+                        "production_authorized": supported,
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": False,
+                        "runtime_ready": False,
+                    }
+                },
+            }
+
+        def control_state(self, _key, _entity_id):
+            return {"available": True, "state": "off", "options": ["off", "on"]}
+
+        def call_control(self, *args):
+            self.actions.append(args)
+
+    output_dir = tmp_path / f"schema-v2-{supported}-{settings_fresh}"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    api_fake = SchemaV2SettingsHA()
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False, route="auto", scenario_id="settings_eco_mode"
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    preflight = checkpoint["steps"][0]
+    assert result == 2
+    assert api_fake.actions == []
+    assert preflight["outcome"] == expected_outcome
+    if supported:
+        assert "stale" in preflight["reason"]
+    else:
+        assert "explicitly unsupported or unauthorized" in preflight["reason"]
 
 
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
@@ -4371,6 +4788,11 @@ def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatc
         "state": None,
         "options": [],
     }
+    payloads["switch.online"] = {"state": "on", "attributes": {}}
+    assert client.control_state("eco_mode", "switch.online")["options"] == [
+        "off",
+        "on",
+    ]
 
 
 def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):

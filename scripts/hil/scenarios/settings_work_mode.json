@@ -7,7 +7,7 @@
   "steps": [
     {
       "id": "work_mode_standard",
-      "instruction": "Select standard work mode, observe fresh settings, then restore the original option.",
+      "instruction": "Select standard work mode only when different from the current value, observe fresh settings, then restore the original option.",
       "timeout_seconds": 30,
       "action": "select",
       "target": "work_mode",
