@@ -370,7 +370,7 @@ def _execute_soak_suite(
             except HAAPIError:
                 capabilities = None
                 snapshot = {}
-            cutoff_observed = bool(
+            disconnect_observed = bool(
                 capabilities is not None
                 and capabilities.get("verified") is True
                 and capabilities.get("connected") is False
@@ -417,8 +417,8 @@ def _execute_soak_suite(
                         "utc": utc_now.isoformat(),
                         "gap_seconds": round(gap, 3) if gap is not None else None,
                         "reason": (
-                            "station cutoff observed; cause unverified"
-                            if cutoff_observed
+                            "BLE/runtime disconnect observed; physical cause unknown"
+                            if disconnect_observed
                             else "runtime disconnected, unverified or stale"
                         ),
                         "session_generation": (
@@ -428,11 +428,11 @@ def _execute_soak_suite(
                         ),
                     }
                 )
-                if cutoff_observed and active_segment is not None:
-                    active_segment["station_cutoff_observed"] = True
+                if disconnect_observed and active_segment is not None:
+                    active_segment["disconnect_observed"] = True
                 end_segment(
-                    "station cutoff observed; cause unverified"
-                    if cutoff_observed
+                    "BLE/runtime disconnect observed; physical cause unknown"
+                    if disconnect_observed
                     else "fresh connected status or verified telemetry unavailable"
                 )
             else:
@@ -450,7 +450,10 @@ def _execute_soak_suite(
                             "gap_seconds": round(gap, 3),
                         }
                     )
-                if capabilities["session_generation"] != last_generation:
+                generation_changed = (
+                    capabilities["session_generation"] != last_generation
+                )
+                if generation_changed:
                     append_record(
                         {
                             "event": "session_generation_change",
@@ -459,6 +462,13 @@ def _execute_soak_suite(
                             "session_generation": capabilities["session_generation"],
                         }
                     )
+                    if is_short:
+                        end_segment("GATT session generation changed")
+                        begin_segment(now, utc_now)
+                        gap = None
+                        previous_sample_monotonic = None
+                        previous_sample_utc = None
+                        next_trace = now
                 last_generation = capabilities["session_generation"]
                 sample_count += 1
                 if gap is not None:

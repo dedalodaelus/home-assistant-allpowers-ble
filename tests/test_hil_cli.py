@@ -6217,6 +6217,7 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
         ("stability-short", "trace_incomplete", "inconclusive"),
         ("stability-short", "missing_telemetry", "inconclusive"),
         ("stability-short", "cutoff", "inconclusive"),
+        ("stability-short", "session_change", "inconclusive"),
         ("stability-short", "repeated_cutoff", "inconclusive"),
         ("stability-short", "interrupted", "inconclusive"),
         ("stability-short", "overlong_gap", "inconclusive"),
@@ -6282,7 +6283,9 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
                 "connected": connected,
                 "status_fresh": connected,
                 "settings_fresh": True,
-                "session_generation": 1,
+                "session_generation": 2
+                if mode == "session_change" and elapsed >= 900
+                else 1,
                 "model": "R600",
                 "profile": "r600-hw-0.3",
                 "settings_options": {
@@ -6332,7 +6335,9 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
                     }
                 )
                 observation = {
-                    "session_generation": 1,
+                    "session_generation": 2
+                    if mode == "session_change" and clock.value - 10_000 >= 900
+                    else 1,
                     "seq": 1,
                     "utc": utc,
                     "elapsed_ms": 1,
@@ -6352,7 +6357,9 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
                             else "soak_24h_observation"
                         ),
                         "event": "route_observed",
-                        "session_generation": 1,
+                        "session_generation": 2
+                        if mode == "session_change" and clock.value - 10_000 >= 900
+                        else 1,
                         "layer": "gatt_api",
                         "observed_route": route,
                         **proof,
@@ -6487,13 +6494,25 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
     if mode == "cutoff":
         assert all(step["outcome"] != "fail" for step in checkpoint["steps"])
         assert any(
-            step.get("station_cutoff_observed") is True for step in checkpoint["steps"]
+            step.get("disconnect_observed") is True for step in checkpoint["steps"]
         )
         cutoff_segment = next(
-            step for step in checkpoint["steps"] if step.get("station_cutoff_observed")
+            step for step in checkpoint["steps"] if step.get("disconnect_observed")
         )
         assert cutoff_segment["sample_count"] > 0
         assert cutoff_segment["trace_count"] > 0
+        assert "station_cutoff_observed" not in cutoff_segment
+    if mode == "session_change":
+        segments = [
+            step for step in checkpoint["steps"] if step["step_id"] == "soak_segment"
+        ]
+        assert len(segments) == 2
+        assert segments[0]["reason"] == "GATT session generation changed"
+        assert segments[0]["sample_count"] < minimum_samples
+        assert segments[0]["measured_seconds"] < duration
+        assert segments[1]["sample_count"] < minimum_samples
+        assert segments[1]["measured_seconds"] < duration
+        assert segments[1]["last_session_generation"] == 2
     if mode in {"cutoff", "repeated_cutoff", "missing_telemetry"}:
         terminal = checkpoint["steps"][-1]
         assert terminal["measured_seconds"] == 0

@@ -377,8 +377,8 @@ For a lower-commitment, read-only observation, run
 30 uninterrupted minutes, samples every minute, captures a 15-second verified
 route trace every five minutes, and records its own `short_stability` result.
 It does not count as `soak_24h`, cannot qualify Platinum, and never changes
-keepalive or station outputs. A station cutoff without an independently
-verified failure is `inconclusive`; missing freshness, route proof, trace
+keepalive or station outputs. A BLE/runtime disconnect with unknown physical
+cause is `inconclusive`; missing freshness, route proof, trace
 completeness, or an interrupted run is also `inconclusive`. Samples are
 read-only polls of fresh Home Assistant telemetry; their count does not claim
 new device notifications. A global 40-minute monotonic budget bounds retries

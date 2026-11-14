@@ -238,7 +238,6 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
-        "station_cutoff_observed",
         "restart_discontinuity",
         "data_limit_hit",
     ):
@@ -375,7 +374,6 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
-        "station_cutoff_observed",
         "restart_discontinuity",
         "data_limit_hit",
         "session_generation",

@@ -1430,13 +1430,13 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
             "fresh_status_sample_count": 8,
             "route_verified": True,
             "trace_complete": False,
-            "station_cutoff_observed": True,
+            "disconnect_observed": True,
             "route": "local_adapter",
             "station_model": "R600",
             "station_hardware_revision": "0.3",
             "station_firmware_revision": "0.2",
             "operator_mode": "interactive",
-            "reason": "verified station disconnect observed",
+            "reason": "BLE/runtime disconnect observed; physical cause unknown",
         },
     )
     assert (
@@ -1448,7 +1448,7 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert short_stability["observation"]["fresh_status_sample_count"] == 8
     assert short_stability["observation"]["route_verified"] is True
     assert short_stability["observation"]["trace_complete"] is False
-    assert short_stability["observation"]["station_cutoff_observed"] is True
+    assert short_stability["observation"]["disconnect_observed"] is True
     assert short_stability["observation"]["station_model"] == "R600"
     assert short_stability["observation"]["operator_mode"] == "interactive"
 
