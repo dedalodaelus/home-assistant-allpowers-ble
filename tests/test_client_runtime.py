@@ -893,6 +893,7 @@ async def test_session_generation_rejects_stale_disconnect_and_notifications(
     client = make_client()
     loop = asyncio.get_running_loop()
     client._loop = loop
+    assert client.session_status_notification_count is None
 
     first = FakeClient()
     second = FakeClient()

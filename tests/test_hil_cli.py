@@ -6635,6 +6635,7 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
         ("stability-short", "trace_incomplete", "inconclusive"),
         ("stability-short", "missing_telemetry", "inconclusive"),
         ("stability-short", "cached_notifications", "inconclusive"),
+        ("stability-short", "marker_loss", "pass"),
         ("stability-short", "cutoff", "inconclusive"),
         ("stability-short", "session_change", "inconclusive"),
         ("stability-short", "repeated_cutoff", "inconclusive"),
@@ -6713,7 +6714,9 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
                 if mode == "session_change" and elapsed >= 900
                 else 1,
                 "status_notification_count": (
-                    12
+                    None
+                    if mode == "marker_loss" and elapsed >= 600
+                    else 12
                     if mode == "cached_notifications"
                     else int(
                         (
@@ -6929,6 +6932,21 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert segment["trace_count"] >= minimum_traces
     if mode == "mixed_routes":
         assert checkpoint["steps"][-1]["route"] == "mixed"
+    if suite == "stability-short" and mode == "steady":
+        segment = checkpoint["steps"][-1]
+        assert segment["status_notifications_observed"] == 30
+        sample_rows = []
+        for sample_path in sorted(output_dir.glob("stability_samples_*.jsonl")):
+            sample_rows.extend(
+                json.loads(line)
+                for line in sample_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "sample"
+            )
+        deltas = [
+            row["status_notifications_since_previous_poll"] for row in sample_rows
+        ]
+        assert sum(deltas) == segment["status_notifications_observed"]
+        assert any(delta > 0 for delta in deltas)
     if mode == "cutoff":
         assert all(step["outcome"] != "fail" for step in checkpoint["steps"])
         assert any(
@@ -6953,6 +6971,33 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert segments[1]["measured_seconds"] < duration
         assert segments[1]["trace_count"] < minimum_traces
         assert segments[1]["last_session_generation"] == 2
+        assert segments[0]["status_notifications_observed"] == 14
+        sample_rows = []
+        for sample_path in sorted(output_dir.glob("stability_samples_*.jsonl")):
+            sample_rows.extend(
+                json.loads(line)
+                for line in sample_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "sample"
+            )
+        first_generation_deltas = [
+            row["status_notifications_since_previous_poll"]
+            for row in sample_rows
+            if row["session_generation"] == 1
+        ]
+        second_generation_deltas = [
+            row["status_notifications_since_previous_poll"]
+            for row in sample_rows
+            if row["session_generation"] == 2
+        ]
+        assert sum(first_generation_deltas) == 14
+        assert second_generation_deltas[0] is None
+        assert (
+            sum(delta for delta in second_generation_deltas if delta is not None)
+            == (segments[1]["status_notifications_observed"])
+        )
+        assert segments[1]["status_notifications_observed"] > 0
+        assert all(delta in {0, 1} for delta in first_generation_deltas)
+        assert all(delta in {None, 0, 1} for delta in second_generation_deltas)
     if mode == "cached_notifications":
         segment = next(
             step for step in checkpoint["steps"] if step.get("sample_count", 0) > 0
@@ -6978,6 +7023,30 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         public = _public_observation(checkpoint["scenario_id"], segment)
         assert public["observation"]["status_notification_marker_available"] is True
         assert public["observation"]["status_notifications_observed"] == 0
+    if mode == "marker_loss":
+        segment = checkpoint["steps"][-1]
+        sample_rows = []
+        for sample_path in sorted(output_dir.glob("stability_samples_*.jsonl")):
+            sample_rows.extend(
+                json.loads(line)
+                for line in sample_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "sample"
+            )
+        lost_marker_rows = [
+            row for row in sample_rows if row["status_notification_count"] is None
+        ]
+        assert lost_marker_rows
+        assert all(
+            row["status_notifications_since_previous_poll"] is None
+            for row in lost_marker_rows
+        )
+        assert segment["status_notification_marker_available"] is False
+        assert segment["status_notifications_observed"] is None
+        from scripts.hil.evidence import _public_observation
+
+        public = _public_observation(checkpoint["scenario_id"], segment)
+        assert public["observation"]["status_notification_marker_available"] is False
+        assert "status_notifications_observed" not in public["observation"]
     if mode in {"cutoff", "repeated_cutoff", "missing_telemetry"}:
         terminal = checkpoint["steps"][-1]
         assert terminal["measured_seconds"] == 0
