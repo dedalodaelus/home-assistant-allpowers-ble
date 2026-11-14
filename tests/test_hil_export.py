@@ -1419,7 +1419,7 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
         "short_stability_observation",
         {
             "step_id": "soak_segment",
-            "outcome": "fail",
+            "outcome": "inconclusive",
             "segment": 1,
             "sample_count": 8,
             "measured_seconds": 420.0,
@@ -1443,7 +1443,7 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
         short_stability["expected"]
         == "30 minutes of uninterrupted measured observations"
     )
-    assert short_stability["actual"] == "fail"
+    assert short_stability["actual"] == "inconclusive"
     assert short_stability["observation"]["measured_seconds"] == 420.0
     assert short_stability["observation"]["fresh_status_sample_count"] == 8
     assert short_stability["observation"]["route_verified"] is True

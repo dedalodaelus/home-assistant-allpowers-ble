@@ -6217,7 +6217,12 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
         ("stability-short", "trace_incomplete", "inconclusive"),
         ("stability-short", "missing_telemetry", "inconclusive"),
         ("stability-short", "cutoff", "inconclusive"),
+        ("stability-short", "repeated_cutoff", "inconclusive"),
         ("stability-short", "interrupted", "inconclusive"),
+        ("stability-short", "overlong_gap", "inconclusive"),
+        ("stability-short", "clock_jump", "inconclusive"),
+        ("stability-short", "storage_cap", "inconclusive"),
+        ("stability-short", "resumed", "pass"),
     ],
 )
 def test_soak_fake_clock_preserves_scope_and_fails_closed(
@@ -6231,12 +6236,16 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
 
     class FakeClock:
         value = 10_000.0
+        overlong_gap_injected = False
 
         def monotonic(self):
             return self.value
 
         def sleep(self, seconds):
             self.value += seconds
+            if mode == "overlong_gap" and not self.overlong_gap_injected:
+                self.value += 700
+                self.overlong_gap_injected = True
             if mode == "interrupted" and self.value - 10_000 >= 600:
                 raise KeyboardInterrupt
 
@@ -6244,7 +6253,10 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         @staticmethod
         def now(tz=UTC):
             base = datetime(2026, 1, 1, tzinfo=tz)
-            return base + timedelta(seconds=clock.value - 10_000.0)
+            elapsed = clock.value - 10_000.0
+            if mode == "clock_jump" and elapsed >= 600:
+                elapsed += 1200
+            return base + timedelta(seconds=elapsed)
 
     clock = FakeClock()
 
@@ -6256,7 +6268,14 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
             self.commands = []
 
         def hil_capabilities(self, entry_id):
-            connected = not (mode == "cutoff" and clock.value - 10_000 >= 600)
+            elapsed = clock.value - 10_000
+            connected = not (
+                (mode == "cutoff" and elapsed >= 600)
+                or (
+                    mode == "repeated_cutoff"
+                    and (600 <= elapsed < 900 or 1500 <= elapsed < 2400)
+                )
+            )
             return {
                 "verified": True,
                 "identity_conflicted": False,
@@ -6416,12 +6435,39 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
 
     monkeypatch.setattr(cli, "_save_private_trace", save_trace)
 
+    resume_state = None
+    if mode == "resumed":
+        resume_state = {
+            "steps": [
+                {
+                    "step_id": "soak_segment",
+                    "segment": 1,
+                    "outcome": "inconclusive",
+                    "trace_count": 1,
+                    "sample_file_index": 1,
+                    "measured_seconds": 600.0,
+                }
+            ]
+        }
+    if mode == "storage_cap":
+        load_scenarios = cli.load_scenarios
+
+        def load_capped_scenarios():
+            scenarios = load_scenarios()
+            for scenario in scenarios:
+                if scenario.id == "short_stability_observation":
+                    scenario.parameters["max_bytes"] = 4096
+            return scenarios
+
+        monkeypatch.setattr(cli, "load_scenarios", load_capped_scenarios)
+
     result = cli._execute_soak_suite(
         api_fake,
         SimpleNamespace(route="auto", suite=suite),
         device,
         output_dir,
         "0123456789abcdef",
+        resume_state,
     )
 
     assert result == (0 if expected_outcome == "pass" else 2)
@@ -6443,12 +6489,47 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert any(
             step.get("station_cutoff_observed") is True for step in checkpoint["steps"]
         )
+        cutoff_segment = next(
+            step for step in checkpoint["steps"] if step.get("station_cutoff_observed")
+        )
+        assert cutoff_segment["sample_count"] > 0
+        assert cutoff_segment["trace_count"] > 0
+    if mode in {"cutoff", "repeated_cutoff", "missing_telemetry"}:
+        terminal = checkpoint["steps"][-1]
+        assert terminal["measured_seconds"] == 0
+        assert terminal["sample_count"] == 0
+        assert terminal["fresh_status_sample_count"] == 0
+        assert terminal["trace_count"] == 0
+        from scripts.hil.evidence import _public_observation
+
+        public = _public_observation(checkpoint["scenario_id"], terminal)
+        assert public["actual"] == "inconclusive"
+        assert public["observation"]["measured_seconds"] == 0
+        assert public["observation"]["sample_count"] == 0
+    if mode == "repeated_cutoff":
+        assert len(checkpoint["steps"]) >= 3
+    if mode == "overlong_gap":
+        assert any(
+            step.get("maximum_gap_seconds", 0) > 120 for step in checkpoint["steps"]
+        )
+    if mode == "clock_jump":
+        assert any(
+            step.get("clock_discontinuities", 0) > 0 for step in checkpoint["steps"]
+        )
+    if mode == "storage_cap":
+        assert checkpoint["steps"][-1]["data_limit_hit"] is True
+    if mode == "resumed":
+        assert len(checkpoint["steps"]) == 2
+        assert checkpoint["steps"][0]["restart_discontinuity"] is True
+        assert checkpoint["steps"][0]["outcome"] == "inconclusive"
+        assert checkpoint["steps"][1]["segment"] == 2
+        assert checkpoint["steps"][1]["outcome"] == "pass"
     assert len(api_fake.commands) % 2 == 0
     assert all(
         command in {"allpowers_ble/hil/start", "allpowers_ble/hil/stop"}
         for command in api_fake.commands
     )
-    if mode in {"steady", "mixed_routes", "cutoff"}:
+    if mode in {"steady", "mixed_routes", "cutoff", "repeated_cutoff"}:
         sample_prefix = "stability" if suite == "stability-short" else "soak"
         assert (output_dir / f"{sample_prefix}_samples_001.jsonl").exists()
 
