@@ -15,6 +15,17 @@ pre-commit install
 The custom integration itself does not install a separate protocol package. At
 runtime it uses the Bleak and retry connector versions supplied by Home Assistant.
 
+## Coordinated test-stack upgrades
+
+Dependabot leaves `homeassistant`, `pytest-homeassistant-custom-component`, and
+`bleak-esphome` out of routine version updates. Upgrade these three together in a
+reviewed change: choose the new HA baseline, update all three requirements, then
+run dependency resolution (`pip check`) and the real Home Assistant lifecycle
+suite as well as the ordinary CI checks. Revisit those three `ignore` entries in
+`.github/dependabot.yml` only when the project deliberately changes this policy.
+Other pip dependencies, including independent test and static-analysis tools,
+remain eligible for Dependabot updates.
+
 ## Fast unit suite
 
 The normal unit suite installs lightweight API-shaped Home Assistant and BLE stubs
