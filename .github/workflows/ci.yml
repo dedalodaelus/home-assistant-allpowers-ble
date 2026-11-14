@@ -40,13 +40,23 @@ jobs:
         run: uv pip install --python "$(command -v python)" -r requirements_test.txt
 
       - name: Validate synchronized Home Assistant test stack
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python scripts/sync_ha_test_deps.py --check
+          python scripts/validate_ha_candidate.py
           uv pip check --python "$(command -v python)"
 
       # Pre-commit contains autofix hooks and must finish before readers start.
       - name: Pre-commit hooks
         run: pre-commit run --all-files
+
+      # Repository validation rejects generated caches, so run it before tests
+      # create Python bytecode in the shared checkout.
+      - name: Validate repository
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/validate_repository.py
 
       # GitHub waits for every step in this group before continuing.
       # Keep this group at or below GitHub's ten-step parallel limit.

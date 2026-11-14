@@ -65,6 +65,45 @@ exception with a resolved install and relevant real-HA coverage before changing
 the synchronizer. Other pip dependencies, including independent test and
 static-analysis tools, remain eligible for routine updates.
 
+## Proposed Home Assistant releases
+
+Dependabot checks `requirements/ha-candidate/requirements.txt` monthly and may
+open an informational PR against `devel` for **Home Assistant only**. The
+`ha-version-proposal` label and `build(ha-proposal)` title identify these
+notifications. This file is advisory: `requirements_test.txt` remains the
+selected environment baseline. CI rejects a proposal whose candidate pin differs
+from the selected baseline, so an informational PR cannot be merged as an
+upgrade. Review the release and choose a compatible
+`pytest-homeassistant-custom-component` version before selecting anything.
+
+Dependabot reads its authoritative configuration from default branch `main`.
+The matching `devel` configuration keeps local policy validation and development
+behavior aligned, but changing only `devel` does not activate the proposals. The
+small Dependabot configuration change must reach `main` separately; do not
+promote other `devel` changes just to activate it. The existing root pip update
+entry continues to ignore every HA-managed stack pin, leaving independent tools
+and security updates enabled.
+
+To prepare a coordinated upgrade, use **Actions → Prepare coordinated Home
+Assistant upgrade → Run workflow** on `main`, entering both the explicit HA and
+fixture versions. The workflow checks out trusted `devel` code, creates an
+isolated Python 3.14 environment, resolves the requested HA and fixture normally,
+reuses `scripts/sync_ha_test_deps.py`, synchronizes the managed pins and advisory
+baseline, then runs `uv pip check`, the drift and repository checks, pre-commit,
+fake HA/BLE tests, and real HA lifecycle tests. Resolver or test failures stop
+before the branch or PR is updated. It creates or refreshes one
+`automation/ha-stack-upgrade` PR against `devel`; repeated dispatches reuse that
+PR. Review its diff and CI before merging. After the coordinated upgrade merges,
+close any obsolete informational proposal.
+
+The dispatch workflow must first be present on default branch `main` to appear in
+the Actions UI. Its code runs from trusted `devel` and does not execute a
+Dependabot PR. It requests only contents and pull-request write permissions for
+the final branch/PR step. GitHub may require a maintainer to approve workflows
+created by `GITHUB_TOKEN`; do not merge the upgrade PR until its normal CI has
+actually run and passed. Preparing the branch successfully is not a substitute
+for those PR checks.
+
 ## Fast unit suite
 
 The normal unit suite installs lightweight API-shaped Home Assistant and BLE stubs
