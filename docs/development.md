@@ -15,6 +15,56 @@ pre-commit install
 The custom integration itself does not install a separate protocol package. At
 runtime it uses the Bleak and retry connector versions supplied by Home Assistant.
 
+## Coordinated test-stack upgrades
+
+Dependabot excludes every package in the managed `requirements_test.txt` block
+from independent routine updates, while tooling outside the block remains
+eligible. Repository validation checks that the ignore list matches the managed
+pins, so adding or removing an HA component dependency requires a reviewed policy
+update too. The block is generated from the selected Home Assistant release's
+`bluetooth`, `esphome`, and `usb` component manifests, plus a separately selected
+pytest fixture. It contains only these components' direct requirements; Home
+Assistant core and transitive dependencies remain resolver-managed.
+
+The current baseline is HA `2026.10.4` and fixture `0.13.375`. The BLE/ESPHome
+and USB pins match the HA manifests (`bleak-esphome==4.0.0`,
+`aioesphomeapi==46.6.0`, and `serialx==1.11.0`). This exact stack resolves and
+passes the real-HA lifecycle and proxy-route tests, so no version-specific
+exceptions are currently needed.
+
+To deliberately select another HA release, first choose and resolve a compatible
+`pytest-homeassistant-custom-component` version. Install both selections, then
+generate the component pins and resolve the full test requirements:
+
+```bash
+HA_VERSION=2026.x.y
+FIXTURE_VERSION=x.y.z
+uv pip install --python "$(command -v python)" \
+  "homeassistant==$HA_VERSION" \
+  "pytest-homeassistant-custom-component==$FIXTURE_VERSION"
+python scripts/sync_ha_test_deps.py \
+  --sync \
+  --ha-version "$HA_VERSION" \
+  --fixture-version "$FIXTURE_VERSION"
+uv pip install --python "$(command -v python)" -r requirements_test.txt
+uv pip check --python "$(command -v python)"
+python scripts/sync_ha_test_deps.py --check
+USE_REAL_HOMEASSISTANT=1 pytest tests/homeassistant
+```
+
+Review the generated diff against those exact installed manifests, then run the
+ordinary CI suite. `requirements_test.txt` is the single source for HA and fixture
+versions: CI installs those pins, then `--check` confirms the installed versions
+and every managed direct requirement match the installed HA manifests before
+running `uv pip check`. Version values are not duplicated in the workflow or
+check command. Never infer fixture compatibility
+from recency alone: upgrade mode requires an explicit `--fixture-version`, and
+the resolved install plus real-HA suite validates that choice. If an HA manifest
+pin cannot support required tests, stop and document a minimal HA-version-specific
+exception with a resolved install and relevant real-HA coverage before changing
+the synchronizer. Other pip dependencies, including independent test and
+static-analysis tools, remain eligible for routine updates.
+
 ## Fast unit suite
 
 The normal unit suite installs lightweight API-shaped Home Assistant and BLE stubs

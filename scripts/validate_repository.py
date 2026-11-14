@@ -36,9 +36,11 @@ REQUIRED_REPOSITORY_FILES = {
     "hacs.json",
     "pyproject.toml",
     "scripts/validate_release_metadata.py",
+    "scripts/sync_ha_test_deps.py",
     "scripts/promote_devel.py",
     "scripts/promotion_metadata.py",
     "tests/test_promote_devel.py",
+    "tests/test_sync_ha_test_deps.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
@@ -493,6 +495,11 @@ def validate_quality_readiness_contract(errors: list[str]) -> None:
 
 def validate_branch_workflow_contract(errors: list[str]) -> None:
     """Enforce repository branch workflow invariants used by CI/release."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    sys.dont_write_bytecode = True
+    from scripts.sync_ha_test_deps import validate_dependabot_ignores
+
     try:
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
     except OSError as ex:
@@ -509,6 +516,11 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
                     "dependabot target-branch must be devel "
                     f"(entry {index} is {target!r})"
                 )
+        try:
+            requirements = (ROOT / "requirements_test.txt").read_text(encoding="utf-8")
+            errors.extend(validate_dependabot_ignores(requirements, dependabot))
+        except OSError as ex:
+            errors.append(f"failed reading requirements_test.txt: {ex}")
 
     try:
         release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(

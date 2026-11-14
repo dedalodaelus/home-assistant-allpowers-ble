@@ -1,11 +1,22 @@
+# BEGIN HA TEST STACK (managed by scripts/sync_ha_test_deps.py)
+# These pins come from the selected HA component manifests, plus the explicitly reviewed pytest fixture.
+aioesphomeapi==46.6.0
+aiousbwatcher==1.1.2
+bleak==3.0.2
+bleak-esphome==4.0.0
+bleak-retry-connector==4.7.1
+bluetooth-adapters==2.4.0
+bluetooth-auto-recovery==1.6.4
+bluetooth-data-tools==1.29.24
+dbus-fast==5.0.22
+esphome-dashboard-api==1.4.0
+habluetooth==7.1.2
 homeassistant==2026.10.4
-# Test the installed HA 2026.10 Bluetooth proxy backend with real types.
-bleak-esphome==4.1.0
-# Required by homeassistant.components.usb import path pulled by bluetooth.
-aiousbwatcher>=1.1.2
-serialx>=1.15.1
-aioesphomeapi>=46.23.0
 pytest-homeassistant-custom-component==0.13.375
+serialx==1.11.0
+# END HA TEST STACK
+
+# Test and static-analysis tools independent of the selected HA release.
 pytest>=9.0.3,<10
 pytest-asyncio>=1.4.0,<2
 pytest-cov>=7.1.0,<8
