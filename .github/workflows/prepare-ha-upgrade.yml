@@ -1,0 +1,164 @@
+name: Prepare coordinated Home Assistant upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      ha-version:
+        description: Explicit Home Assistant release to select
+        required: true
+        type: string
+      fixture-version:
+        description: Explicit compatible pytest-homeassistant-custom-component release
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: prepare-ha-upgrade
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted devel code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: devel
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.5"
+          enable-cache: false
+
+      - name: Validate explicit version inputs
+        env:
+          HA_VERSION: ${{ inputs.ha-version }}
+          FIXTURE_VERSION: ${{ inputs.fixture-version }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          for key in ("HA_VERSION", "FIXTURE_VERSION"):
+              value = os.environ[key]
+              if re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:[a-zA-Z0-9.+-]*)", value) is None:
+                  raise SystemExit(f"{key} must be a plain three-part package version")
+          PY
+
+      - name: Create isolated Python 3.14 environment
+        run: uv venv --python 3.14 .venv
+
+      - name: Resolve selected Home Assistant and fixture
+        env:
+          HA_VERSION: ${{ inputs.ha-version }}
+          FIXTURE_VERSION: ${{ inputs.fixture-version }}
+        run: >-
+          uv pip install --python .venv/bin/python
+          "homeassistant==${HA_VERSION}"
+          "pytest-homeassistant-custom-component==${FIXTURE_VERSION}"
+
+      - name: Synchronize coordinated requirements
+        env:
+          HA_VERSION: ${{ inputs.ha-version }}
+          FIXTURE_VERSION: ${{ inputs.fixture-version }}
+        run: |
+          .venv/bin/python scripts/sync_ha_test_deps.py \
+            --sync --ha-version "$HA_VERSION" --fixture-version "$FIXTURE_VERSION"
+          HA_VERSION="$HA_VERSION" .venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+          Path("requirements/ha-candidate/requirements.txt").write_text(
+              "# Advisory only; requirements_test.txt remains the selected HA baseline.\n"
+              f"homeassistant=={os.environ['HA_VERSION']}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Install full selected test requirements and verify resolution
+        run: |
+          uv pip install --python .venv/bin/python -r requirements_test.txt
+          uv pip check --python .venv/bin/python
+          .venv/bin/python scripts/sync_ha_test_deps.py --check
+          .venv/bin/python scripts/validate_ha_candidate.py
+
+      - name: Run pre-commit hooks
+        run: .venv/bin/pre-commit run --all-files
+
+      - name: Validate generated upgrade
+        run: |
+          .venv/bin/python scripts/validate_repository.py
+          .venv/bin/ruff check custom_components scripts tests
+          .venv/bin/ruff format --check custom_components scripts tests
+
+      - name: Run fake HA/BLE tests
+        env:
+          USE_REAL_HOMEASSISTANT: "0"
+        run: >-
+          .venv/bin/pytest --ignore=tests/homeassistant
+          --basetemp="$RUNNER_TEMP/pytest-tmp-upgrade-unit"
+          -o cache_dir=.pytest_cache-upgrade-unit
+
+      - name: Run real Home Assistant lifecycle tests
+        env:
+          USE_REAL_HOMEASSISTANT: "1"
+        run: >-
+          .venv/bin/pytest tests/homeassistant
+          --basetemp="$RUNNER_TEMP/pytest-tmp-upgrade-homeassistant"
+          -o cache_dir=.pytest_cache-upgrade-homeassistant
+
+      - name: Confirm only coordinated manifests changed
+        run: .venv/bin/python scripts/validate_ha_candidate.py --check-upgrade-paths
+
+      - name: Create or update coordinated upgrade PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HA_VERSION: ${{ inputs.ha-version }}
+          FIXTURE_VERSION: ${{ inputs.fixture-version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          branch=automation/ha-stack-upgrade
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          gh auth setup-git
+          git add requirements_test.txt requirements/ha-candidate/requirements.txt
+          if git diff --cached --quiet; then
+            echo "The requested HA and fixture versions are already selected; no PR update is needed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git commit -m "build: coordinate Home Assistant ${HA_VERSION} test stack"
+          git push --force origin "HEAD:refs/heads/${branch}"
+          title="build: coordinate Home Assistant ${HA_VERSION} test stack"
+          body_file=$(mktemp)
+          cat > "$body_file" <<EOF
+          ## Summary
+
+          Selects Home Assistant ${HA_VERSION} with pytest-homeassistant-custom-component ${FIXTURE_VERSION} and synchronizes the HA-owned test pins from the selected component manifests.
+
+          This PR was prepared from trusted devel code after dependency resolution, uv pip check, the HA drift check, pre-commit, fake HA/BLE tests, and real Home Assistant lifecycle tests passed.
+
+          Review CI on this PR before merging. GitHub may require a maintainer to approve workflows started by GITHUB_TOKEN. Do not merge an informational ha-version-proposal Dependabot PR as the selected baseline.
+          EOF
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$existing" ]]; then
+            gh pr edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body_file"
+            url=$(gh pr view "$existing" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          else
+            url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base devel --head "$branch" --title "$title" --body-file "$body_file")
+          fi
+          echo "Coordinated upgrade PR: $url" >> "$GITHUB_STEP_SUMMARY"
