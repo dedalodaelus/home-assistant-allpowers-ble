@@ -443,7 +443,7 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
                             "outcome": "pass",
                             "session_generation_before": 1,
                             "session_generation_after": 2,
-                            "disconnect_observed": True,
+                            "disconnect_observed": False,
                             "connected": True,
                             "status_fresh": True,
                             "fresh_status_telemetry": True,
@@ -4164,7 +4164,9 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         origin = "https://ha.example.test"
 
         def __init__(self):
-            self.capabilities = iter(((True, 4), (False, 4), (True, 5)))
+            # The operator confirms after restoring the route, so the first
+            # poll may already see the new session without a transient down state.
+            self.capabilities = iter(((True, 4), (True, 5)))
             self.commands = []
 
         def hil_capabilities(self, entry_id):
@@ -4180,7 +4182,13 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         def websocket(self, commands):
             self.commands.extend(commands)
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "capture-safe"}]
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "capture-safe",
+                        "ttl_seconds": 120,
+                    }
+                ]
             return [
                 {
                     "schema_version": 2,
@@ -4228,17 +4236,148 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
 
     assert result == 0
     assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
-    assert api_fake.commands[1]["type"] == "allpowers_ble/hil/stop"
+    assert [command["type"] for command in api_fake.commands[1:]] == [
+        "allpowers_ble/hil/fetch",
+        "allpowers_ble/hil/stop",
+    ]
     assert all(
         command["type"] not in {"call_service", "allpowers_ble/command"}
         for command in api_fake.commands
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
-    assert stored["steps"][-1]["disconnect_observed"] is True
+    assert stored["steps"][-1]["disconnect_observed"] is False
     assert stored["steps"][-1]["session_generation_before"] == 4
     assert stored["steps"][-1]["session_generation_after"] == 5
     assert stored["steps"][-1]["physical_outcome"] == "yes"
+
+
+def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    class DelayedReconnectHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self, clock):
+            self.clock = clock
+            self.capture = None
+            self.capture_started_at = None
+            self.status_recorded = False
+            self.capability_calls = 0
+
+        def hil_capabilities(self, entry_id):
+            self.capability_calls += 1
+            generation = 4 if self.capability_calls == 1 else 5
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": generation,
+            }
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "entry-safe",
+                    "operator",
+                    "0123456789abcdef",
+                    "recovery_reconnect",
+                    "auto",
+                )
+                self.capture_started_at = self.clock[0]
+                self.capture.record("capture_started", session_generation=5)
+                self.capture.observe_route(
+                    5,
+                    ConnectedRoute(
+                        "active_proxy",
+                        "esphome",
+                        "esphome_scanner_binding",
+                        proxy_id="private-proxy-id",
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+
+            if command["type"].endswith("/fetch"):
+                if (
+                    not self.status_recorded
+                    and self.clock[0] - self.capture_started_at >= 8
+                ):
+                    self.capture.record(
+                        "notification_decoded",
+                        session_generation=5,
+                        decoded_packets=1,
+                        decoded_packet_types=["StatusData"],
+                        characteristic_uuid="0000fff1-0000-1000-8000-00805f9b34fb",
+                        inferred_model_profile="r600",
+                        session_hardware_revision="0.3",
+                        discarded_frames=0,
+                        discarded_bytes=0,
+                    )
+                    self.status_recorded = True
+                return [self.capture.snapshot()]
+
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+    clock = [100.0]
+    api_fake = DelayedReconnectHA(clock)
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "guided-delayed-status"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    observation = stored["steps"][-1]
+    assert result == 0
+    assert api_fake.capability_calls >= 2
+    assert api_fake.status_recorded is True
+    assert clock[0] - api_fake.capture_started_at >= 8
+    assert observation["disconnect_observed"] is False
+    assert observation["session_generation_before"] == 4
+    assert observation["session_generation_after"] == 5
+    assert observation["fresh_status_telemetry"] is True
+    assert observation["route_verified"] is True
+    assert observation["trace_complete"] is True
+    assert observation["physical_outcome"] == "yes"
+    assert observation["outcome"] == "pass"
 
 
 def test_recovery_transient_api_failure_does_not_prove_new_ble_session(

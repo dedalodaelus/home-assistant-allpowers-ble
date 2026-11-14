@@ -326,13 +326,13 @@ def _execute_recovery_suite(
             ):
                 capture_id = start["capture_id"]
                 try:
-                    if vendor_action:
+                    if vendor_action or guided_reconnect_required:
                         ttl_seconds = start.get("ttl_seconds")
                         if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 120:
                             raise HAAPIError("Invalid bounded recovery capture TTL")
                         capture_deadline = services.monotonic() + ttl_seconds - 1
                         print(
-                            "Waiting for new decoded status telemetry for up to",
+                            "Waiting for decoded status telemetry for up to",
                             ttl_seconds - 1,
                             "seconds (bounded by the trace TTL).",
                         )
@@ -491,8 +491,7 @@ def _execute_recovery_suite(
         and services.route_matches_request(args.route, trace.get("observed_route"))
     )
     reconnect_confirmed = bool(
-        saw_disconnect
-        and recovered is not None
+        recovered is not None
         and type(recovered.get("session_generation")) is int
         and recovered["session_generation"] != generation
     )
