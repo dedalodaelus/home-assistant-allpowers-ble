@@ -6510,8 +6510,10 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert segments[0]["reason"] == "GATT session generation changed"
         assert segments[0]["sample_count"] < minimum_samples
         assert segments[0]["measured_seconds"] < duration
+        assert segments[0]["trace_count"] < minimum_traces
         assert segments[1]["sample_count"] < minimum_samples
         assert segments[1]["measured_seconds"] < duration
+        assert segments[1]["trace_count"] < minimum_traces
         assert segments[1]["last_session_generation"] == 2
     if mode in {"cutoff", "repeated_cutoff", "missing_telemetry"}:
         terminal = checkpoint["steps"][-1]
