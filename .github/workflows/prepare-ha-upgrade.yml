@@ -23,6 +23,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     permissions:
       contents: write
       pull-requests: write
@@ -121,15 +123,7 @@ jobs:
           -o cache_dir=.pytest_cache-upgrade-homeassistant
 
       - name: Confirm only coordinated manifests changed
-        run: |
-          expected=$(printf '%s\n' \
-            requirements/ha-candidate/requirements.txt \
-            requirements_test.txt)
-          actual=$(git status --short | sed 's/^...//')
-          if [[ "$actual" != "$expected" ]]; then
-            printf 'Unexpected generated changes:\n%s\n' "$actual"
-            exit 1
-          fi
+        run: .venv/bin/python scripts/validate_ha_candidate.py --check-upgrade-paths
 
       - name: Create or update coordinated upgrade PR
         env:
