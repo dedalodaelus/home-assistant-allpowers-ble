@@ -335,7 +335,10 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
             actual = outcome if outcome in {"pass", "fail"} else "inconclusive"
     reason = step.get("reason")
     limitation = None
-    if isinstance(reason, str) and step.get("outcome") not in {"pass", "fail"}:
+    if isinstance(reason, str) and not (
+        scenario_id == "short_stability_observation"
+        and step.get("outcome") in {"pass", "fail"}
+    ):
         lowered = reason.lower()
         if "restart" in lowered or "unobserved interval" in lowered:
             limitation = "restart_discontinuity"
