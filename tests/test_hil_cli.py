@@ -3436,6 +3436,18 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         assert change["outcome"] == "inconclusive"
         assert change["cleanup_status"] == "restoration_inconclusive"
         assert restoration["outcome"] == "inconclusive"
+        if initial_state == "on":
+            archive = export_archive(output_dir.parent, confirmed=True)
+            _manifest, public, _digest = verify_public_archive(
+                archive, include_contents=True
+            )
+            scenario = json.loads(public["scenarios.json"])
+            public_change = next(
+                step for step in scenario["steps"] if step["step_id"] == "eco_mode_on"
+            )
+            assert public_change["expected"] == "off"
+            assert public_change["outcome"] == "inconclusive"
+            assert "expected `off`" in public["report.md"].decode()
 
 
 def test_public_eco_reversal_expected_value_requires_validated_reverse_edge():
@@ -3461,7 +3473,18 @@ def test_public_eco_reversal_expected_value_requires_validated_reverse_edge():
             "post_state": "off",
         },
     )
+    inconclusive_reverse = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "inconclusive",
+            "expected": "off",
+            "pre_state": "on",
+            "post_state": None,
+        },
+    )
     assert legitimate["expected"] == "off"
+    assert inconclusive_reverse["expected"] == "off"
     assert arbitrary["expected"] == "on"
 
 

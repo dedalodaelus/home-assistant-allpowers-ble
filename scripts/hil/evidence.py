@@ -285,15 +285,12 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
     executed_pre_state = step.get("pre_state")
     if executed_pre_state is None and isinstance(step.get("observation"), dict):
         executed_pre_state = step["observation"].get("pre_state")
-    executed_actual = step.get("post_state", step.get("actual"))
     if (
         scenario_id == "settings_eco_mode"
         and step_id == "eco_mode_on"
         and expected == "on"
         and step.get("expected") == "off"
         and executed_pre_state == "on"
-        and executed_actual == "off"
-        and step.get("outcome") == "pass"
     ):
         # The only alternate ECO action is the declared, reversible off edge
         # when the original value was already on. Never publish arbitrary
