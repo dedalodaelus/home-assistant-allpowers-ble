@@ -400,7 +400,12 @@ class AllpowersBLEClient:
     async def async_request_status(self) -> None:
         """Request a fresh status notification."""
         async with self._operation_lock:
-            await self._write_frame_unlocked(encode_status_request())
+            observation_id = (
+                self._observer.transaction_id() if self._observer is not None else None
+            )
+            await self._write_frame_unlocked(
+                encode_status_request(), observation_id=observation_id
+            )
             self._last_status_request_monotonic = self._loop_time()
 
     async def async_reconnect(self, reason: str = "Manual reconnect") -> None:

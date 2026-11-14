@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -358,6 +359,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
 def test_bronze_protocol_probe_requires_status_data_through_public_export(
     monkeypatch,
     tmp_path,
+    notification_builder,
     packet_types,
     write_completion,
     expected_probe,
@@ -367,8 +369,11 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     from datetime import UTC, datetime
 
     from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.hil_client import HilClientTracer
     from custom_components.allpowers_ble.route_attribution import ConnectedRoute
     from scripts.hil.evidence import export_archive, verify_public_archive
+    from tests.ha_stubs import FakeCharacteristic
+    from tests.test_client_logic import _connected_client
 
     run_id = "0123456789abcdef"
     status_request = bytes.fromhex("a565b1000106010000000000")
@@ -379,12 +384,20 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             "source": "ha_rest_entity_state",
         }
     }
+    real_status_client, fake_ble = _connected_client()
+    real_status_client._active_session_generation = 3
+    real_status_client._session_hardware_revision = ("0.3", 3)
+    real_write = fake_ble.write_gatt_char
+    use_production_client = (
+        packet_types == ["StatusData"] and write_completion == "write_ok"
+    )
 
     class BronzeProbeHA:
         origin = "https://ha.example.test"
 
         def __init__(self):
             self.capture = None
+            self.observer = None
 
         def websocket(self, commands):
             command = commands[0]
@@ -405,6 +418,10 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                         proxy_id="private-proxy-id",
                     ),
                 )
+                if use_production_client:
+                    self.capture.record("capture_started", session_generation=3)
+                    self.observer = HilClientTracer(self.capture)
+                    real_status_client.attach_observer(self.observer)
                 return [
                     {
                         "schema_version": 2,
@@ -412,11 +429,29 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                     }
                 ]
             assert command["type"].endswith("/stop")
+            if self.observer is not None:
+                real_status_client.detach_observer(self.observer)
+                self.capture.record("capture_stopped", session_generation=3)
             self.capture.stop()
             return [self.capture.snapshot()]
 
         def request_read_only_refresh(self, entity_id):
             assert entity_id == "button.station_refresh"
+            if use_production_client:
+
+                async def write_and_notify(characteristic, frame, *, response):
+                    await real_write(characteristic, frame, response=response)
+                    assert frame == status_request
+                    packet = notification_builder(
+                        0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90))
+                    )
+                    real_status_client._notification_handler(
+                        FakeCharacteristic(), bytearray(packet)
+                    )
+
+                fake_ble.write_gatt_char = write_and_notify
+                asyncio.run(real_status_client.async_request_status())
+                return
             self.capture.record(
                 "write_attempt",
                 session_generation=3,
@@ -527,6 +562,36 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     )
     assert decoded["event"] == expected_public_event
     assert "decoded_packet_types" not in decoded
+    if use_production_client:
+        private_events = [
+            json.loads(line)
+            for line in (run_dir / "traces/bronze_read_only/events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        lifecycle = [
+            row["event"]
+            for row in private_events
+            if row["event"]
+            in {
+                "write_attempt",
+                "notification_received",
+                "notification_decoded",
+                "write_ok",
+            }
+        ]
+        assert lifecycle == [
+            "write_attempt",
+            "notification_received",
+            "notification_decoded",
+            "write_ok",
+        ]
+        write_attempt = next(
+            row for row in private_events if row["event"] == "write_attempt"
+        )
+        write_ok = next(row for row in private_events if row["event"] == "write_ok")
+        assert write_attempt["transaction_id"]
+        assert write_ok["transaction_id"] == write_attempt["transaction_id"]
 
 
 @pytest.mark.parametrize("include_trace", [True, False])

@@ -606,6 +606,8 @@ def _execute_tier_suite(
                                 if frame.get("direction") == "tx"
                                 and frame.get("command_type") == "status_request"
                                 and frame.get("frame_validation") == "validated_tx"
+                                and isinstance(frame.get("transaction_id"), str)
+                                and frame["transaction_id"]
                             ),
                             None,
                         )
@@ -634,7 +636,7 @@ def _execute_tier_suite(
                                 and status_write_ok is not None
                                 and event.get("session_generation")
                                 == status_tx.get("session_generation")
-                                and event.get("seq", 0) > status_write_ok.get("seq", 0)
+                                and event.get("seq", 0) > status_tx.get("seq", 0)
                             ),
                             None,
                         )

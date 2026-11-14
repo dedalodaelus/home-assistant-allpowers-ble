@@ -1976,6 +1976,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     if frame.get("direction") == "tx"
                     and frame.get("command_type") == "status_request"
                     and frame.get("frame_validation") == "validated_tx"
+                    and isinstance(frame.get("transaction_id"), str)
+                    and frame["transaction_id"]
                 ),
                 None,
             )
@@ -2004,7 +2006,6 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     and event.get("transaction_id") == status_tx.get("transaction_id")
                     and event.get("seq", 0) > status_tx.get("seq", 0)
                     and decoded is not None
-                    and event.get("seq", 0) < decoded.get("seq", 0)
                 ),
                 None,
             )
@@ -2392,7 +2393,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     and status_event.get("event") == "write_attempt"
                     and isinstance(write_ok_event, dict)
                     and write_ok_event.get("event") == "write_ok"
-                    and status_seq < write_ok_seq < decoded_seq
+                    and status_seq < write_ok_seq
+                    and status_seq < decoded_seq
                     and isinstance(status_frame, dict)
                     and status_frame.get("direction") == "tx"
                     and status_frame.get("command_type") == "status_request"
@@ -3569,11 +3571,10 @@ def verify_public_archive(
                             is not int
                             or type(value.get("protocol_decoded_response_seq"))
                             is not int
-                            or not (
-                                value["protocol_status_request_seq"]
-                                < value["protocol_status_write_ok_seq"]
-                                < value["protocol_decoded_response_seq"]
-                            )
+                            or value["protocol_status_write_ok_seq"]
+                            <= value["protocol_status_request_seq"]
+                            or value["protocol_decoded_response_seq"]
+                            <= value["protocol_status_request_seq"]
                             or not isinstance(value.get("protocol_capture_id"), str)
                             or re.fullmatch(
                                 r"capture-[0-9]{4}", value["protocol_capture_id"]
@@ -3676,7 +3677,8 @@ def verify_public_archive(
                         and status_event.get("event") == "write_attempt"
                         and isinstance(write_ok_event, dict)
                         and write_ok_event.get("event") == "write_ok"
-                        and status_seq < write_ok_seq < decoded_seq
+                        and status_seq < write_ok_seq
+                        and status_seq < decoded_seq
                         and isinstance(decoded_event, dict)
                         and decoded_event.get("event") == "status_data_decoded"
                         and status_event.get("session_generation")

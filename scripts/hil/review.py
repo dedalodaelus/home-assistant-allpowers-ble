@@ -267,7 +267,8 @@ def _claim_support(
             and status
             and write_ok
             and decoded
-            and status_seq < write_ok_seq < decoded_seq
+            and status_seq < write_ok_seq
+            and status_seq < decoded_seq
             and frame
             and frame.get("direction") == "tx"
             and frame.get("command_type") == "status_request"
@@ -430,6 +431,7 @@ def review_imported_run(
                         "verdict": "ok",
                     },
                 ]
+                capture_rows.sort(key=lambda row: row["seq"])
                 files[root / capture_rel] = (
                     "".join(
                         json.dumps(row, sort_keys=True) + "\n" for row in capture_rows

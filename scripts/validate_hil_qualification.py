@@ -452,7 +452,7 @@ def _has_bound_bronze_probe(
             all(row.get(key) == value for key, value in scope.items())
             and row.get("capture_id") == request["capture_id"]
             and row.get("session_generation") == request["session_generation"]
-            and row.get("seq", 0) > write_ok["seq"]
+            and row.get("seq", 0) > request["seq"]
             and row.get("event") == "status_data_decoded"
             and row.get("direction") == "notify"
             and row.get("verdict") == "ok"

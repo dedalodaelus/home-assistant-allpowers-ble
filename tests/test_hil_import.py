@@ -384,37 +384,37 @@ def _captured_archive(
             }
             notification_event = {
                 **common,
-                "seq": 4 if bronze_write_completion != "missing" else 3,
+                "seq": 3,
                 "utc": stamp,
-                "elapsed_ms": 3.0,
+                "elapsed_ms": 2.0,
                 "event": "notification_received",
             }
             write_completion_event = {
                 **common,
-                "seq": 3,
+                "seq": 5,
                 "utc": stamp,
-                "elapsed_ms": 2.0,
+                "elapsed_ms": 4.0,
                 "event": bronze_write_completion,
                 "transaction_id": "bronze-tx-1",
             }
             decoded_event = {
                 **common,
-                "seq": 5 if bronze_write_completion != "missing" else 4,
+                "seq": 4,
                 "utc": stamp,
-                "elapsed_ms": 4.0,
+                "elapsed_ms": 3.0,
                 "event": "notification_decoded",
                 "decoded_packet_types": list(bronze_decoded_packet_types),
             }
             trace["events"] = [
                 route_event,
                 {**status_frame, "direction": "write"},
+                notification_event,
+                decoded_event,
                 *(
                     [write_completion_event]
                     if bronze_write_completion != "missing"
                     else []
                 ),
-                notification_event,
-                decoded_event,
             ]
             trace["frames"] = [
                 status_frame,
@@ -465,7 +465,7 @@ def _captured_archive(
                             "route": observed_route,
                             "session_generation": generation,
                             "status_request_seq": 2,
-                            "status_write_ok_seq": 3,
+                            "status_write_ok_seq": 5,
                             "decoded_response_seq": decoded_event["seq"],
                             "status_request_hex": "a565b1000106010000000000",
                         },
@@ -1445,8 +1445,8 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         assert [row["session_generation"] for row in capture_rows] == [7, 7, 7]
         assert [row["event"] for row in capture_rows] == [
             "write_attempt",
-            "write_ok",
             "status_data_decoded",
+            "write_ok",
         ]
         assert all("physical_outcome" not in row for row in capture_rows)
     errors, _ = validate_hil_qualification.validate_matrix(
