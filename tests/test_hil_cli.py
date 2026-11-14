@@ -18,6 +18,64 @@ import pytest
 from scripts.hil import api, cli, discovery, environment, storage
 
 
+def test_onboard_parser_declares_interactive_command():
+    args = cli.make_parser().parse_args(["onboard", "--ha-url", "https://ha.example"])
+    assert args.command == "onboard"
+    assert args.ha_url == "https://ha.example"
+    assert not hasattr(args, "token")
+
+
+def test_onboard_rejects_non_interactive_invocation(monkeypatch):
+    args = cli.make_parser().parse_args(["onboard"])
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(api.HAAPIError, match="interactive terminal"):
+        cli.execute(args)
+
+
+def test_onboard_prompts_for_origin_and_hides_missing_token(monkeypatch):
+    monkeypatch.delenv("HA_HIL_URL", raising=False)
+    monkeypatch.delenv("HA_HIL_TOKEN", raising=False)
+    prompts = iter(["https://ha.example"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
+    hidden_prompts = []
+
+    def hidden_input(prompt):
+        hidden_prompts.append(prompt)
+        return "secret-token"
+
+    monkeypatch.setattr(cli.getpass, "getpass", hidden_input)
+    args = cli.make_parser().parse_args(["onboard"])
+    args.onboarding = True
+    assert cli._credential(args) == ("https://ha.example", "secret-token")
+    assert hidden_prompts == ["Home Assistant long-lived access token: "]
+
+
+def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_path):
+    prompts = iter(["yes", "EXPORT"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
+    calls = []
+
+    def export_archive(_path, *, confirmed):
+        calls.append(confirmed)
+        if not confirmed:
+            raise api.HAAPIError("Export requires explicit confirmation")
+        return tmp_path / "hil-evidence.zip"
+
+    monkeypatch.setattr(cli, "export_archive", export_archive)
+    assert cli._onboard_export(tmp_path, 0) == 0
+    assert calls == [False, True]
+
+
+def test_onboard_export_decline_never_creates_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "no")
+    monkeypatch.setattr(
+        cli,
+        "export_archive",
+        lambda *_args, **_kwargs: pytest.fail("declined export must not be built"),
+    )
+    assert cli._onboard_export(tmp_path, 0) == 0
+
+
 @pytest.fixture
 def allpowers_registry():
     """Realistic 2026.10 registry data; IDs stay in memory."""

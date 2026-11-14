@@ -142,6 +142,11 @@ def make_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
+    commands.add_parser(
+        "onboard",
+        parents=[common],
+        help="Interactively prepare, run, and review a contributor HIL session",
+    )
     run_parser = commands.add_parser(
         "run",
         parents=[common],
@@ -198,6 +203,10 @@ def make_parser() -> argparse.ArgumentParser:
 
 def _credential(args: argparse.Namespace) -> tuple[str, str]:
     url = args.ha_url or os.environ.get("HA_HIL_URL", "")
+    if not url and getattr(args, "onboarding", False):
+        url = input(
+            "Home Assistant origin (for example https://home-assistant.local:8123): "
+        ).strip()
     if not url:
         raise HAAPIError("Set --ha-url or HA_HIL_URL to your Home Assistant origin")
     token = os.environ.get("HA_HIL_TOKEN", "")
@@ -1774,6 +1783,19 @@ def _execute_soak_suite(
 
 def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
+    if args.command == "onboard":
+        if args.non_interactive or not sys.stdin.isatty():
+            raise HAAPIError("Onboarding requires an interactive terminal")
+        args.onboarding = True
+        args.command = "run"
+        args.suite = "read-only"
+        args.tier = None
+        args.list_suites = False
+        args.resume = None
+        args.simulate = False
+        args.dry_run = False
+        args.scenario_id = None
+        args.allow_keepalive_disabled = False
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "review":
@@ -1993,6 +2015,48 @@ def execute(args: argparse.Namespace) -> int:
         return 2
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
+    if getattr(args, "onboarding", False):
+        print(
+            f"Selected {selected.model} (hardware {selected.hardware or 'unknown'}, "
+            f"firmware {selected.firmware or 'unknown'})."
+        )
+        print("Installed integration build:", integration["build_match"])
+        print("Connected BLE route: unknown until a connected-backend trace proves it.")
+        scanners = environment["home_assistant"]["bluetooth_scanner_candidates"]
+        scanner_counts = scanners.get("value") if isinstance(scanners, dict) else None
+        if isinstance(scanner_counts, dict):
+            inventory = (
+                ", ".join(
+                    f"{kind}: {count}"
+                    for kind, count in sorted(scanner_counts.items())
+                    if isinstance(kind, str) and type(count) is int
+                )
+                or "none reported"
+            )
+            print("HA scanner candidates (not connected-route proof):", inventory)
+        else:
+            print("HA scanner candidate inventory: unknown or unavailable")
+        print("Runner-host Bluetooth hardware does not identify the remote HA adapter.")
+        print(
+            "Choose desired tier: 1=Bronze (read-only), 2=Silver, 3=Gold, 4=Platinum (24-hour soak)"
+        )
+        tier_choice = input("Desired tier: ").strip()
+        tiers = {"1": "bronze", "2": "silver", "3": "gold", "4": "platinum"}
+        if tier_choice not in tiers:
+            raise HAAPIError("Invalid tier selection")
+        requested_tier = tiers[tier_choice]
+        print(f"Requested tier: {requested_tier.title()}")
+        if requested_tier == "platinum":
+            args.suite = "soak-24h"
+            print("Applicable plan: the existing Platinum 24-hour soak suite.")
+            print(
+                "Expected elapsed time: up to 24 hours; stay present for setup and checks."
+            )
+            if input("Type RUN to start this plan: ").strip() != "RUN":
+                print("Onboarding cancelled before tests started.")
+                return 2
+        else:
+            args.tier = requested_tier
     if resume_state is not None:
         fingerprint = _device_fingerprint(
             resume_state["run_id"], selected, api.origin, args.route
@@ -2088,6 +2152,13 @@ def execute(args: argparse.Namespace) -> int:
             )
             print("Verified route:", test_plan["device"]["verified_route"] or "unknown")
             print("Estimated operator actions:", test_plan["operator_actions_estimate"])
+            print(
+                "Expected time: varies by applicable steps; physical observations are manual."
+            )
+            print(
+                "Safety: disconnect critical loads, remain present, and authorize "
+                "each state change and restoration separately."
+            )
             for step in test_plan["steps"]:
                 reasons = (
                     "; ".join(step["reasons"]) or "ready for the existing guided suite"
@@ -2096,6 +2167,13 @@ def execute(args: argparse.Namespace) -> int:
                     f"  {step['eligibility']}: {step['id']} ({step['feature']}) — {reasons}"
                 )
             print("Restoration:", test_plan["restoration_plan"])
+            if getattr(args, "onboarding", False):
+                if (
+                    input("Type RUN after reviewing the plan to continue: ").strip()
+                    != "RUN"
+                ):
+                    print("Onboarding cancelled before tests started.")
+                    return 2
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     if resume_state is not None:
         if resume_dir is None:
@@ -2106,7 +2184,7 @@ def execute(args: argparse.Namespace) -> int:
             args.output_root, f"{timestamp}_{run_id}", environment, session
         )
     if args.command == "run" and tier_plan is not None:
-        return _execute_tier_suite(
+        result = _execute_tier_suite(
             api,
             args,
             selected,
@@ -2116,6 +2194,9 @@ def execute(args: argparse.Namespace) -> int:
             tier_plan,
             tier_capabilities,
         )
+        if getattr(args, "onboarding", False):
+            return _onboard_export(output_dir, result)
+        return result
     if args.command == "run" and args.suite == "outputs":
         return _execute_output_suite(
             api, args, selected, environment, output_dir, run_id
@@ -2127,9 +2208,12 @@ def execute(args: argparse.Namespace) -> int:
             api, args, selected, output_dir, run_id, resume_state
         )
     if args.command == "run" and args.suite == "soak-24h":
-        return _execute_soak_suite(
+        result = _execute_soak_suite(
             api, args, selected, output_dir, run_id, resume_state
         )
+        if getattr(args, "onboarding", False):
+            return _onboard_export(output_dir, result)
+        return result
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")
@@ -2205,6 +2289,60 @@ def execute(args: argparse.Namespace) -> int:
         "Qualification: inconclusive (no GATT trace, physical proof or verified route)"
     )
     return 0
+
+
+def _onboard_export(output_dir: Path, run_result: int) -> int:
+    """Offer a local privacy-reviewed export after the existing HIL run ends."""
+    execution_path = output_dir / "tier-execution.json"
+    if execution_path.is_file():
+        try:
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        except OSError, json.JSONDecodeError:
+            execution = {}
+        routes = (
+            execution.get("verified_routes", []) if isinstance(execution, dict) else []
+        )
+        if isinstance(routes, list):
+            observed = sorted(
+                route for route in routes if route in {"local_adapter", "active_proxy"}
+            )
+            print(
+                "Observed connected BLE route:",
+                ", ".join(observed) if observed else "unknown / not proven",
+            )
+    print("Attained evidence-backed tier: unqualified until independent review.")
+    if run_result != 0:
+        print(
+            "Run did not complete successfully; private checkpoint remains available."
+        )
+        return run_result
+    try:
+        export_choice = (
+            input("Review and create a privacy-safe evidence ZIP now? [y/N]: ")
+            .strip()
+            .casefold()
+        )
+    except EOFError, KeyboardInterrupt:
+        return 2
+    if export_choice not in {"y", "yes"}:
+        print("No archive created. The private run remains on this machine.")
+        return run_result
+    try:
+        export_archive(output_dir, confirmed=False)
+    except HAAPIError as ex:
+        if str(ex) != "Export requires explicit confirmation":
+            raise
+    if (
+        input(
+            "Type EXPORT after reviewing the ZIP contents to create it locally: "
+        ).strip()
+        != "EXPORT"
+    ):
+        print("Export cancelled; no archive created.")
+        return 2
+    export_archive(output_dir, confirmed=True)
+    print("Privacy-safe HIL evidence archive written locally; nothing was uploaded.")
+    return run_result
 
 
 def main(argv: list[str] | None = None) -> int:
