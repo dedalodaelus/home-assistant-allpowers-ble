@@ -221,6 +221,9 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
             session_hardware_version="0.3",
             session_raw_hardware_version=0x03,
             settings=settings,
+            status=SimpleNamespace(
+                ac_enabled=True, dc_enabled=False, light_enabled=True
+            ),
         ),
         settings_are_fresh=True,
         status_is_fresh=True,
@@ -322,6 +325,11 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
         "settings_fresh": True,
         "session_generation": 7,
         "pending_transaction": False,
+        "output_states": {
+            "ac_output": True,
+            "dc_output": False,
+            "light_output": True,
+        },
     }
     assert entry.entry_id not in str(result)
 
