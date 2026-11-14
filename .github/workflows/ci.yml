@@ -49,6 +49,13 @@ jobs:
       - name: Pre-commit hooks
         run: pre-commit run --all-files
 
+      # Repository validation rejects generated caches, so run it before tests
+      # create Python bytecode in the shared checkout.
+      - name: Validate repository
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/validate_repository.py
+
       # GitHub waits for every step in this group before continuing.
       # Keep this group at or below GitHub's ten-step parallel limit.
       - parallel:
@@ -98,9 +105,6 @@ jobs:
               pytest tests/homeassistant
               --basetemp=.pytest-tmp-homeassistant
               -o cache_dir=.pytest_cache-homeassistant
-
-          - name: Validate repository
-            run: python scripts/validate_repository.py
 
           - name: Validate HIL schema v2 and metadata (offline)
             run: python scripts/validate_hil_qualification.py
