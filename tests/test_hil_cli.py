@@ -3610,6 +3610,98 @@ def test_settings_scenario_blocks_before_write_without_fresh_safe_preflight(
         assert preflight["reason"]
 
 
+@pytest.mark.parametrize(
+    ("supported", "settings_fresh", "expected_outcome"),
+    [
+        (True, False, "inconclusive"),
+        (False, True, "not_applicable"),
+    ],
+)
+def test_settings_schema_v2_distinguishes_runtime_staleness_from_unsupported(
+    monkeypatch, tmp_path, supported, settings_fresh, expected_outcome
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from scripts.hil.discovery import Device
+
+    services_factory = cli._suite_services
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            services_factory(),
+            prompt=lambda _message: (_ for _ in ()).throw(
+                AssertionError("blocked preflight must not prompt")
+            ),
+        ),
+    )
+
+    class SchemaV2SettingsHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.actions = []
+
+        def hil_capabilities(self, _entry_id):
+            return {
+                "schema_version": 2,
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "pending_transaction": False,
+                "status_fresh": True,
+                "settings_fresh": settings_fresh,
+                "session_generation": 9,
+                "features": {
+                    "eco_mode": {
+                        "production_authorized": supported,
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": False,
+                        "runtime_ready": False,
+                    }
+                },
+            }
+
+        def control_state(self, _key, _entity_id):
+            return {"available": True, "state": "off", "options": ["off", "on"]}
+
+        def call_control(self, *args):
+            self.actions.append(args)
+
+    output_dir = tmp_path / f"schema-v2-{supported}-{settings_fresh}"
+    output_dir.mkdir(mode=0o700)
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"eco_mode": "switch.private_eco_mode"},
+        config_entry_id="entry-safe",
+    )
+    api_fake = SchemaV2SettingsHA()
+    result = cli._execute_settings_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False, route="auto", scenario_id="settings_eco_mode"
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+    checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    preflight = checkpoint["steps"][0]
+    assert result == 2
+    assert api_fake.actions == []
+    assert preflight["outcome"] == expected_outcome
+    if supported:
+        assert "stale" in preflight["reason"]
+    else:
+        assert "explicitly unsupported or unauthorized" in preflight["reason"]
+
+
 def test_no_ambient_http_proxy_can_receive_loopback_bearer(monkeypatch):
     """Use urllib's actual proxy dispatch with an in-memory HTTP transport.
 

@@ -370,20 +370,40 @@ def _execute_settings_suite(
             "control is unavailable; verify the entity is enabled and settings are fresh"
         )
     capability_ok = feature_write_authorized(caps, key, "write_settings_controls")
+    runtime_unavailable = False
     if caps.get("schema_version") == 2:
         feature_facts = caps.get("features")
-        feature_reported = isinstance(feature_facts, dict) and isinstance(
-            feature_facts.get(key), dict
+        feature_record = (
+            feature_facts.get(key) if isinstance(feature_facts, dict) else None
+        )
+        unsupported_capability = isinstance(feature_record, dict) and (
+            feature_record.get("production_authorized") is False
+            or feature_record.get("physical_presence") == "absent"
+        )
+        runtime_unavailable = (
+            isinstance(feature_record, dict)
+            and feature_record.get("production_authorized") is True
+            and feature_record.get("physical_presence") == "present"
+            and feature_record.get("runtime_ready") is False
         )
     else:
         reported_capabilities = caps.get("capabilities")
-        feature_reported = (
+        unsupported_capability = (
             isinstance(reported_capabilities, dict)
             and "write_settings_controls" in reported_capabilities
+            and reported_capabilities.get("write_settings_controls") is False
         )
-    unsupported_capability = feature_reported and not capability_ok
     if not capability_ok:
-        reasons.append("settings write capability is unsupported or not authorized")
+        if runtime_unavailable:
+            reasons.append(
+                "settings control is supported but not runtime-ready; refresh telemetry and retry"
+            )
+        elif unsupported_capability:
+            reasons.append(
+                "settings write capability is explicitly unsupported or unauthorized"
+            )
+        else:
+            reasons.append("settings write capability is unavailable or unverified")
     if reasons:
         preflight.update({"reason": "; ".join(reasons)})
         if unsupported_capability:
