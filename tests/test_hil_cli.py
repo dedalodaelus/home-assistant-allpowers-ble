@@ -18,6 +18,379 @@ import pytest
 from scripts.hil import api, cli, discovery, environment, storage
 
 
+def test_onboard_parser_declares_interactive_command():
+    args = cli.make_parser().parse_args(["onboard", "--ha-url", "https://ha.example"])
+    assert args.command == "onboard"
+    assert args.ha_url == "https://ha.example"
+    assert not hasattr(args, "token")
+
+
+def test_onboard_rejects_non_interactive_invocation(monkeypatch):
+    args = cli.make_parser().parse_args(["onboard"])
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(api.HAAPIError, match="interactive terminal"):
+        cli.execute(args)
+
+
+def test_onboard_prompts_for_origin_and_hides_missing_token(monkeypatch):
+    monkeypatch.delenv("HA_HIL_URL", raising=False)
+    monkeypatch.delenv("HA_HIL_TOKEN", raising=False)
+    prompts = iter(["https://ha.example"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
+    hidden_prompts = []
+
+    def hidden_input(prompt):
+        hidden_prompts.append(prompt)
+        return "secret-token"
+
+    monkeypatch.setattr(cli.getpass, "getpass", hidden_input)
+    args = cli.make_parser().parse_args(["onboard"])
+    args.onboarding = True
+    assert cli._credential(args) == ("https://ha.example", "secret-token")
+    assert hidden_prompts == ["Home Assistant long-lived access token: "]
+
+
+def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_path):
+    output_dir = storage.write_run(tmp_path, "export-run", {}, {})
+    prompts = iter(["yes", "EXPORT"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
+    calls = []
+
+    def export_archive(_path, *, confirmed):
+        calls.append(confirmed)
+        if not confirmed:
+            raise api.HAAPIError("Export requires explicit confirmation")
+        return tmp_path / "hil-evidence.zip"
+
+    monkeypatch.setattr(cli, "export_archive", export_archive)
+    assert cli._onboard_export(output_dir, 0) == 0
+    assert calls == [False, True]
+
+
+def test_onboard_export_decline_never_creates_archive(monkeypatch, tmp_path):
+    output_dir = storage.write_run(tmp_path, "declined-run", {}, {})
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "no")
+    monkeypatch.setattr(
+        cli,
+        "export_archive",
+        lambda *_args, **_kwargs: pytest.fail("declined export must not be built"),
+    )
+    assert cli._onboard_export(output_dir, 0) == 0
+
+
+def _onboard_tty(monkeypatch, responses):
+    answers = iter(responses)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+
+
+def test_onboard_bronze_drives_wizard_and_real_public_export(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = FakeHA(allpowers_registry)
+    fake.scanners = {"bluetooth": 2, "esphome": 1}
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    _onboard_tty(monkeypatch, ["1", "RUN", "yes", "EXPORT"])
+    output_root = tmp_path / "onboard-bronze"
+
+    def finish_existing_runner(
+        _api, _args, _device, _environment, _output_dir, _run_id, _plan, _capabilities
+    ):
+        return 0
+
+    monkeypatch.setattr(cli, "_execute_tier_suite", finish_existing_runner)
+    assert (
+        cli.main(
+            [
+                "onboard",
+                "--ha-url",
+                "https://example.test",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 0
+    )
+    (run_root,) = tuple(output_root.iterdir())
+    archive = run_root / "hil-evidence.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as exported:
+        content = b"".join(exported.read(name) for name in exported.namelist())
+    assert b"PRIVATE_TOKEN" not in content
+    assert b"secret-entry-1" not in content
+    assert b"secret-device-id-012345" not in content
+    assert fake.calls[0] == ("get", "/api/config")
+
+
+@pytest.mark.parametrize(
+    ("bronze_choice", "export_choice", "create_archive"),
+    [("BRONZE", "no", False), ("", "yes", True)],
+)
+def test_onboard_silver_unknown_route_offers_bronze_without_write(
+    monkeypatch,
+    tmp_path,
+    allpowers_registry,
+    capsys,
+    bronze_choice,
+    export_choice,
+    create_archive,
+):
+    fake = FakeHA(allpowers_registry)
+    fake.scanners = {"bluetooth": 1}
+    trace_calls = []
+
+    def unavailable_trace(commands):
+        trace_calls.extend(commands)
+        raise api.HAAPIError("trace API unavailable")
+
+    fake.websocket = unavailable_trace
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
+    monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
+    answers = ["2", "RUN", "1", bronze_choice, export_choice]
+    if export_choice == "yes":
+        answers.append("EXPORT")
+    _onboard_tty(monkeypatch, answers)
+    output_root = tmp_path / "onboard-silver"
+
+    result = cli.main(
+        [
+            "onboard",
+            "--ha-url",
+            "https://example.test",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+    assert result == 2
+    (run_root,) = tuple(output_root.iterdir())
+    private = run_root / "private"
+    execution = json.loads((private / "tier-execution.json").read_text())
+    saved_session = json.loads((private / "session.json").read_text())
+    assert execution["requested_tier"] == "silver"
+    assert execution["execution_tier"] == "bronze"
+    assert execution["verified_routes"] == []
+    assert saved_session["test_plan"]["device"]["verified_route"] is None
+    assert saved_session["test_plan"]["requested_tier"] == "silver"
+    assert saved_session["test_plan"]["execution_tier"] == "bronze"
+    assert [step["step_id"] for step in execution["steps"]] == [
+        "read_only_probe",
+        "physical_plausibility_observation",
+    ]
+    output = capsys.readouterr().out
+    assert "No Silver/Gold output step is currently achievable" in output
+    assert (
+        "Continuing as Bronze diagnostics" in output
+        if bronze_choice == "BRONZE"
+        else "Stopping after the Bronze diagnostics already collected" in output
+    )
+    assert not any(call[0] == "service" for call in fake.calls)
+    assert all(command["type"].endswith("/start") for command in trace_calls)
+    archive = run_root / "hil-evidence.zip"
+    assert archive.is_file() is create_archive
+    if create_archive:
+        from scripts.hil.evidence import verify_public_archive
+
+        _, public, _ = verify_public_archive(archive, include_contents=True)
+        public_tier = json.loads(public["tier-execution.json"])
+        public_session = json.loads(public["session.json"])
+        assert public_tier["requested_tier"] == "silver"
+        assert public_tier["execution_tier"] == "bronze"
+        assert [step["step_id"] for step in public_tier["steps"]] == [
+            "read_only_probe",
+            "physical_plausibility_observation",
+        ]
+        public_plan = public_session["data"]["test_plan"]
+        assert public_plan["requested_tier"] == "silver"
+        assert public_plan["execution_tier"] == "bronze"
+
+
+def test_candidate_control_preflight_does_not_require_production_permission():
+    class CandidateHA:
+        def control_state(self, _key, _entity):
+            raise AssertionError("HIL candidate state must come from the HIL snapshot")
+
+    capabilities = {
+        "schema_version": 2,
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "pending_transaction": False,
+        "session_generation": 12,
+        "output_states": {
+            "ac_output": False,
+            "dc_output": None,
+            "light_output": None,
+        },
+        "capabilities": {"write_output_controls": False},
+        "features": {
+            "ac_output": {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+                "runtime_ready": True,
+            }
+        },
+    }
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        control_entities={},
+    )
+
+    controls = cli._scenario_controls(CandidateHA(), device, capabilities)
+    step = {
+        "feature": "ac_output",
+        "reasons": ["candidate needs a fresh, single-use backend HIL grant"],
+    }
+    assert controls["ac_output"]["eligible"] is False
+    assert controls["ac_output"]["candidate_eligible"] is True
+    assert controls["ac_output"]["state"] == "off"
+    assert (
+        cli._candidate_step_needs_authorization(
+            step, capabilities, controls, "active_proxy"
+        )
+        is True
+    )
+    controls["ac_output"]["state"] = None
+    controls["ac_output"]["available"] = False
+    controls["ac_output"]["candidate_eligible"] = False
+    assert (
+        cli._candidate_step_needs_authorization(
+            step, capabilities, controls, "active_proxy"
+        )
+        is False
+    )
+
+    stale_caps = {**capabilities, "status_fresh": False}
+    stale_controls = cli._scenario_controls(CandidateHA(), device, stale_caps)
+    assert stale_controls["ac_output"]["candidate_eligible"] is False
+
+
+def test_onboard_never_dispatches_a_blocked_reconnect_step(tmp_path):
+    from argparse import Namespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="private-entry",
+    )
+    output_dir = storage.write_run(tmp_path, "blocked-reconnect", {}, {})
+
+    class NoCallHA:
+        def __getattr__(self, name):
+            pytest.fail(f"blocked plan must not call HA method {name}")
+
+    result = cli._execute_tier_suite(
+        NoCallHA(),
+        Namespace(
+            onboarding=True,
+            route="auto",
+            output_root=tmp_path,
+            non_interactive=False,
+        ),
+        device,
+        {},
+        output_dir,
+        "private-run",
+        {
+            "requested_tier": "silver",
+            "steps": [
+                {
+                    "id": "basic_reconnect",
+                    "action": "manual",
+                    "eligibility": "blocked",
+                    "reasons": ["connected GATT route has not been verified"],
+                }
+            ],
+        },
+        None,
+    )
+    execution = json.loads((output_dir / "tier-execution.json").read_text())
+    assert result == 2
+    assert execution["steps"] == [
+        {
+            "step_id": "basic_reconnect",
+            "outcome": "blocked",
+            "reason": "connected GATT route has not been verified",
+        }
+    ]
+
+
+def test_onboard_multiple_device_cancel_stops_before_run(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    entities, devices, entries = allpowers_registry
+    devices.append(
+        {
+            "id": "second-private-device",
+            "config_entry_id": "second-private-entry",
+            "identifiers": [["allpowers_ble", "second-private-identifier"]],
+            "model": "S500",
+            "hw_version": "0.1",
+            "sw_version": "1.0",
+        }
+    )
+    entries.append(
+        {
+            "entry_id": "second-private-entry",
+            "domain": "allpowers_ble",
+            "state": "loaded",
+        }
+    )
+    fake = FakeHA((entities, devices, entries))
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    _onboard_tty(monkeypatch, ["2", "1", "CANCEL"])
+    monkeypatch.setattr(
+        cli,
+        "_execute_tier_suite",
+        lambda *_args: pytest.fail("cancelled plan must not start the runner"),
+    )
+    result = cli.main(
+        [
+            "onboard",
+            "--ha-url",
+            "https://example.test",
+            "--output-root",
+            str(tmp_path / "cancelled"),
+        ]
+    )
+    assert result == 2
+    assert not (tmp_path / "cancelled").exists()
+
+
+def test_nonzero_platinum_run_offers_export_and_resume_command(
+    monkeypatch, tmp_path, capsys
+):
+    run_dir = storage.write_run(
+        tmp_path / "runs",
+        "platinum-run",
+        {"schema_version": 1},
+        {"schema_version": 1, "qualification_status": "inconclusive"},
+    )
+    (run_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    (run_dir / "checkpoint.json").chmod(0o600)
+    _onboard_tty(monkeypatch, ["yes", "EXPORT"])
+    command = (
+        "python -m scripts.hil run --suite soak-24h --resume "
+        f"{run_dir} --ha-url https://example.test"
+    )
+
+    assert cli._onboard_export(run_dir, 7, resume_command=command) == 7
+    assert (run_dir.parent / "hil-evidence.zip").is_file()
+    assert command in capsys.readouterr().out
+
+
 @pytest.fixture
 def allpowers_registry():
     """Realistic 2026.10 registry data; IDs stay in memory."""
@@ -1171,7 +1544,7 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
         firmware="1",
         state_entities={},
         entry_state="loaded",
-        control_entities={"dc_output": "switch.dc"},
+        control_entities={},
         config_entry_id="synthetic-entry",
     )
 
@@ -1189,17 +1562,21 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 9,
+                "schema_version": 2,
+                "output_states": {
+                    "ac_output": None,
+                    "dc_output": self.state == "on",
+                    "light_output": None,
+                },
                 "features": {
                     "dc_output": {
                         "physical_presence": "present",
                         "candidate_hil_eligible": True,
                         "production_authorized": False,
+                        "runtime_ready": True,
                     }
                 },
             }
-
-        def control_state(self, _feature, _entity):
-            return {"available": True, "state": self.state}
 
         def websocket(self, commands):
             command = commands[0]
@@ -1290,8 +1667,15 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
             assert "physical_outcome" not in evidence
 
 
-def test_tier_executor_dispatches_candidate_through_grant_and_restore(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("answers", "expected_writes", "expected_outcome"),
+    [
+        (["1", "1", "1", "1", "1"], [True, False], "pass"),
+        (["2"], [], "skipped"),
+    ],
+)
+def test_onboard_dispatches_candidate_through_separate_grant_consents(
+    monkeypatch, tmp_path, answers, expected_writes, expected_outcome
 ):
     """Exercise tier dispatch through the candidate HIL executor with Fake HA."""
     from argparse import Namespace
@@ -1305,7 +1689,7 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
         firmware="1",
         state_entities={},
         entry_state="loaded",
-        control_entities={"dc_output": "switch.dc"},
+        control_entities={},
         config_entry_id="synthetic-entry",
     )
 
@@ -1317,24 +1701,42 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
             self.writes = []
 
         def hil_capabilities(self, _entry):
+            features = {
+                name: {
+                    "physical_presence": "unknown",
+                    "candidate_hil_eligible": False,
+                    "production_authorized": False,
+                    "runtime_ready": True,
+                }
+                for name in (
+                    "ac_output",
+                    "dc_output",
+                    "light_output",
+                    "eco_mode",
+                    "work_mode",
+                    "eco_timeout",
+                    "car_charger",
+                    "telemetry",
+                )
+            }
+            features["dc_output"].update(
+                physical_presence="present", candidate_hil_eligible=True
+            )
             return {
+                "schema_version": 2,
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": True,
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 9,
-                "features": {
-                    "dc_output": {
-                        "physical_presence": "present",
-                        "candidate_hil_eligible": True,
-                        "production_authorized": False,
-                    }
+                "output_states": {
+                    "ac_output": None,
+                    "dc_output": self.state == "on",
+                    "light_output": None,
                 },
+                "features": features,
             }
-
-        def control_state(self, _feature, _entity):
-            return {"available": True, "state": self.state}
 
         def websocket(self, commands):
             command = commands[0]
@@ -1380,14 +1782,14 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
             }
 
     fake = FakeHA()
-    answers = iter(["1", "1", "1", "1", "1"])
+    prompt_answers = iter(answers)
     base_services = cli._suite_services()
     monkeypatch.setattr(
         cli,
         "_suite_services",
         lambda: replace(
             base_services,
-            prompt=lambda _question: next(answers),
+            prompt=lambda _question: next(prompt_answers),
             validate_trace_result=lambda *_args, **_kwargs: None,
             correlate_transaction=lambda *_args, **_kwargs: {
                 "session_generation": 9,
@@ -1396,34 +1798,50 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
         ),
     )
     root = storage.write_run(tmp_path, "guided-parent", {}, {})
-    plan = {"requested_tier": "silver", "steps": [{"id": "dc_output_cycle"}]}
-    capabilities = {
-        "features": {
-            "dc_output": {
-                "physical_presence": "present",
-                "candidate_hil_eligible": True,
-                "production_authorized": False,
-            }
-        }
-    }
-
-    assert (
-        cli._execute_tier_suite(
-            fake,
-            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
-            device,
-            {},
-            root,
-            "parent-run",
-            plan,
-            capabilities,
-        )
-        == 0
+    result = cli._execute_tier_suite(
+        fake,
+        Namespace(
+            route="auto",
+            output_root=tmp_path,
+            non_interactive=False,
+            onboarding=True,
+        ),
+        device,
+        {},
+        root,
+        "parent-run",
+        {
+            "requested_tier": "silver",
+            "steps": [
+                {
+                    "id": "dc_output_cycle",
+                    "action": "write",
+                    "eligibility": "pending_authorization",
+                    "reasons": [
+                        "candidate needs a fresh, single-use backend HIL grant"
+                    ],
+                }
+            ],
+        },
+        {
+            "schema_version": 2,
+            "features": {
+                "dc_output": {
+                    "physical_presence": "present",
+                    "candidate_hil_eligible": True,
+                    "production_authorized": False,
+                    "runtime_ready": True,
+                }
+            },
+        },
     )
-    assert fake.writes == [True, False]
+    assert result == (0 if expected_outcome == "pass" else 2)
+    assert fake.writes == expected_writes
     execution = json.loads((root / "tier-execution.json").read_text())
     assert execution["review_state"] == "pending"
-    assert execution["steps"][0]["outcome"] == "pass"
+    assert execution["steps"][0]["outcome"] == expected_outcome
+    if expected_outcome == "skipped":
+        return
     artifact = root / execution["steps"][0]["machine_evidence"][0]["path"]
     evidence = json.loads(artifact.read_text())
     assert evidence["outcome"] == "pass"
@@ -6467,6 +6885,11 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
         "settings_fresh": True,
         "session_generation": 1,
         "pending_transaction": False,
+        "output_states": {
+            "ac_output": False,
+            "dc_output": None,
+            "light_output": True,
+        },
         "features": {
             name: {
                 "physical_presence": "unknown",
@@ -6489,6 +6912,11 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
     monkeypatch.setattr(client, "websocket", lambda _commands: [response])
     normalized = client.hil_capabilities("entry-123")
     assert normalized["features"]["ac_output"]["runtime_ready"] is True
+    assert normalized["output_states"] == {
+        "ac_output": False,
+        "dc_output": None,
+        "light_output": True,
+    }
 
 
 @pytest.mark.parametrize(
