@@ -441,7 +441,12 @@ session changed, or a transaction remains pending, the CLI does not issue
 another write and instructs the operator to inspect and restore manually.
 The CLI repeats the live preflight after arming the restoration trace, records
 the last observed state and cleanup status in the private checkpoint, and
-never retries a cleanup write whose acknowledgement is ambiguous. Write
+never retries a cleanup write whose acknowledgement is ambiguous. Settings
+preflight also records the current value, requested value, proposed transition
+and original-value restoration before authorization. ECO already at target
+uses the currently supported reverse switch state; work mode and timeout
+already at target are skipped with an explicit prerequisite rather than an
+invented alternative. Missing or stale telemetry remains inconclusive. Write
 checkpoints are deliberately not resumable: after interruption, inspect a new
 read-only snapshot and the station before starting another write scenario.
 Restoration never upgrades an inconclusive original action to a pass.

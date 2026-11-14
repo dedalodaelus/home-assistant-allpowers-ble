@@ -7,7 +7,7 @@
   "steps": [
     {
       "id": "eco_timeout_two_hours",
-      "instruction": "Select a two-hour ECO timeout, observe fresh settings, then restore the original option.",
+      "instruction": "Select a two-hour ECO timeout only when different from the current value, observe fresh settings, then restore the original option.",
       "timeout_seconds": 30,
       "action": "select",
       "target": "eco_timeout",

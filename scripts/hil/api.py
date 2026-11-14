@@ -173,7 +173,9 @@ class HAClient:
             return {
                 "available": available,
                 "state": state if available else None,
-                "options": [],
+                # HA switches have a closed, domain-defined state set. Expose
+                # it so guided settings preflight can choose a verified reverse.
+                "options": ["off", "on"] if available else [],
             }
         attributes = payload.get("attributes")
         options = attributes.get("options") if isinstance(attributes, dict) else None

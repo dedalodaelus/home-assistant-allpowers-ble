@@ -335,60 +335,144 @@ def _execute_settings_suite(
         caps = {}
         state = {"available": False, "state": None, "options": []}
     target = declaration["expected"]
-    if (
-        caps.get("verified") is not True
-        or caps.get("identity_conflicted") is not False
-        or caps.get("connected") is not True
-        or caps.get("pending_transaction") is not False
-        or caps.get("settings_fresh") is not True
-        or not feature_write_authorized(caps, key, "write_settings_controls")
-        or type(caps.get("session_generation")) is not int
-        or state.get("available") is not True
-        or not services.control_value_available(key, state, target)
-    ):
-        steps.append(
-            {
-                "step_id": declaration["id"],
-                "target": key,
-                "outcome": "not_applicable",
-                "reason": "verified fresh settings control is unavailable",
-            }
+    preflight: dict[str, Any] = {
+        "step_id": "settings_preflight",
+        "target": key,
+        "requested_value": target,
+        "current_value": (
+            state.get("state") if state.get("available") is True else "unavailable"
+        ),
+        "first_transition": target,
+        "restoration_value": (
+            state.get("state") if state.get("available") is True else "unavailable"
+        ),
+        "outcome": "inconclusive",
+    }
+    steps.append(preflight)
+    checkpoint()
+    reasons: list[str] = []
+    if caps.get("verified") is not True:
+        reasons.append("installed integration identity is not verified")
+    if caps.get("identity_conflicted") is not False:
+        reasons.append("device identity is conflicting or unavailable")
+    if caps.get("connected") is not True:
+        reasons.append("device is not connected")
+    if caps.get("pending_transaction") is not False:
+        reasons.append("a BLE transaction is pending")
+    if caps.get("status_fresh") is not True or caps.get("settings_fresh") is not True:
+        reasons.append(
+            "settings/status telemetry is missing or stale; refresh telemetry"
         )
+    if type(caps.get("session_generation")) is not int:
+        reasons.append("same-session generation evidence is unavailable")
+    if state.get("available") is not True:
+        reasons.append(
+            "control is unavailable; verify the entity is enabled and settings are fresh"
+        )
+    capability_ok = feature_write_authorized(caps, key, "write_settings_controls")
+    if caps.get("schema_version") == 2:
+        feature_facts = caps.get("features")
+        feature_reported = isinstance(feature_facts, dict) and isinstance(
+            feature_facts.get(key), dict
+        )
+    else:
+        reported_capabilities = caps.get("capabilities")
+        feature_reported = (
+            isinstance(reported_capabilities, dict)
+            and "write_settings_controls" in reported_capabilities
+        )
+    unsupported_capability = feature_reported and not capability_ok
+    if not capability_ok:
+        reasons.append("settings write capability is unsupported or not authorized")
+    if reasons:
+        preflight.update({"reason": "; ".join(reasons)})
+        if unsupported_capability:
+            preflight["outcome"] = "not_applicable"
         checkpoint()
+        print(
+            f"Preflight {key}: current={preflight['current_value']}, "
+            f"requested={target}, first transition={preflight['first_transition']}, "
+            f"restoration={preflight['restoration_value']}"
+        )
+        print(f"Settings preflight blocked: {preflight['reason']}")
         return 2
     initial = state["state"]
+    first_target = target
     if initial == target:
-        steps.append(
+        if key == "eco_mode":
+            options = state.get("options")
+            reverse = "off" if target == "on" else "on"
+            if not isinstance(options, list) or reverse not in options:
+                preflight.update(
+                    {
+                        "current_value": initial,
+                        "first_transition": None,
+                        "restoration_value": initial,
+                        "outcome": "skipped",
+                        "reason": f"ECO is already {initial}; safe reversal requires the supported option {reverse}",
+                    }
+                )
+                checkpoint()
+                print(f"Settings preflight skipped: {preflight['reason']}")
+                return 2
+            first_target = reverse
+        else:
+            preflight.update(
+                {
+                    "current_value": initial,
+                    "first_transition": None,
+                    "restoration_value": initial,
+                    "outcome": "skipped",
+                    "reason": f"{key} is already {initial}; no safe alternative is declared; change it to a supported value other than {target} and rerun",
+                }
+            )
+            checkpoint()
+            print(f"Settings preflight skipped: {preflight['reason']}")
+            return 2
+    if not services.control_value_available(key, state, first_target):
+        preflight.update(
             {
-                "step_id": declaration["id"],
-                "target": key,
-                "pre_state": initial,
-                "expected": target,
-                "outcome": "skipped",
-                "reason": "selected option already matches the current setting",
+                "current_value": initial,
+                "first_transition": first_target,
+                "restoration_value": initial,
+                "outcome": "not_applicable",
+                "reason": f"requested transition {first_target} is not among the control's supported values",
             }
         )
         checkpoint()
+        print(f"Settings preflight blocked: {preflight['reason']}")
         return 2
+    preflight.update(
+        {
+            "current_value": initial,
+            "first_transition": first_target,
+            "restoration_value": initial,
+            "outcome": "skipped",
+            "reason": "read-only preflight complete; authorization required before each write",
+        }
+    )
+    checkpoint()
     print(f"Setting scenario: {scenario.title}")
-    print(f"Current {key}: {initial}; requested value: {target}")
+    print(
+        f"Preflight {key}: current={initial}, requested={target}, "
+        f"first transition={first_target}, restoration={initial}"
+    )
     try:
         authorized = services.prompt(
-            "Type 1 to authorize this single settings change: "
+            f"Type 1 to authorize the single settings change {initial} -> {first_target}: "
         ).strip()
     except EOFError, KeyboardInterrupt:
         authorized = ""
     if authorized != "1":
-        steps.append(
-            {
-                "step_id": declaration["id"],
-                "target": key,
-                "outcome": "skipped",
-                "reason": "authorization not granted",
-            }
+        preflight["authorization"] = "declined"
+        preflight["reason"] = (
+            "first settings write authorization declined; no write attempted"
         )
         checkpoint()
+        print(preflight["reason"])
         return 2
+    preflight["authorization"] = "granted"
+    checkpoint()
     change = _execute_settings_write(
         api,
         args,
@@ -398,7 +482,7 @@ def _execute_settings_suite(
         scenario,
         key,
         entity_id,
-        target,
+        first_target,
         initial,
         caps["session_generation"],
         declaration["id"],
@@ -434,8 +518,10 @@ def _execute_settings_suite(
             if can_restore and cleanup_state.get("state") == initial:
                 change["cleanup_status"] = "original_state_confirmed_no_restore_needed"
                 checkpoint_step(change)
-            elif can_restore and cleanup_state.get("state") == target:
+            elif can_restore and cleanup_state.get("state") == first_target:
                 change["cleanup_status"] = "awaiting_restoration_authorization"
+                checkpoint_step(change)
+                change["cleanup_authorization"] = "pending"
                 checkpoint_step(change)
                 try:
                     cleanup_authorized = (
@@ -449,6 +535,7 @@ def _execute_settings_suite(
                 except EOFError, KeyboardInterrupt:
                     cleanup_authorized = False
                 if cleanup_authorized:
+                    change["cleanup_authorization"] = "granted"
                     change["cleanup_status"] = "restoration_authorized"
                     checkpoint_step(change)
                     restoration = _execute_settings_write(
@@ -461,7 +548,7 @@ def _execute_settings_suite(
                         key,
                         entity_id,
                         initial,
-                        target,
+                        first_target,
                         caps["session_generation"],
                         "restore_after_ambiguous_write",
                         checkpoint_step,
@@ -479,6 +566,7 @@ def _execute_settings_suite(
                             "scenario remains inconclusive"
                         )
                 else:
+                    change["cleanup_authorization"] = "declined"
                     change["cleanup_status"] = "restoration_authorization_declined"
                     checkpoint_step(change)
             else:
@@ -490,6 +578,8 @@ def _execute_settings_suite(
                 checkpoint_step(change)
         print("Settings change inconclusive; inspect and restore manually if needed")
         return 2
+    preflight["restoration_authorization"] = "pending"
+    checkpoint()
     try:
         restore_authorized = services.prompt(
             "Type 1 to authorize restoring the original setting: "
@@ -497,6 +587,8 @@ def _execute_settings_suite(
     except EOFError, KeyboardInterrupt:
         restore_authorized = ""
     if restore_authorized != "1":
+        preflight["restoration_authorization"] = "declined"
+        checkpoint()
         steps.append(
             {
                 "step_id": "restore_original",
@@ -509,6 +601,8 @@ def _execute_settings_suite(
         checkpoint()
         print("Restore the original setting manually when safe")
         return 2
+    preflight["restoration_authorization"] = "granted"
+    checkpoint()
     restoration = _execute_settings_write(
         api,
         args,
@@ -519,7 +613,7 @@ def _execute_settings_suite(
         key,
         entity_id,
         initial,
-        target,
+        first_target,
         caps["session_generation"],
         "restore_original",
         checkpoint_step,
