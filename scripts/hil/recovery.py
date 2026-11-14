@@ -28,6 +28,9 @@ def _execute_recovery_suite(
         item for item in services.load_scenarios() if item.id == "recovery_reconnect"
     )
     entry_id = device.config_entry_id
+    guided_reconnect_required = (
+        getattr(args, "guided_reconnect_required", False) is True
+    )
     fingerprint = services.device_fingerprint(run_id, device, api.origin, args.route)
     steps: list[dict[str, Any]] = (
         [dict(step) for step in resume_state["steps"]]
@@ -143,6 +146,8 @@ def _execute_recovery_suite(
                 "Home Assistant or integration reload/upgrade",
             }
             or action_step.get("operator_confirmed") is not True
+            or guided_reconnect_required
+            and action_step.get("action") != "route interruption and restoration"
             or any(
                 step.get("outcome") != "inconclusive" for step in previous_observations
             )
@@ -163,15 +168,22 @@ def _execute_recovery_suite(
 
     if resume_state is None:
         print("Select the manual recovery action you will perform:")
-        print("  1. Interrupt and restore the selected BLE route")
-        print("  2. Use vendor-app contention, then close the app")
-        print("  3. Reload or upgrade Home Assistant / the integration")
-        choice = prompt("Action [1-3], or 0 to skip: ")
-        action = {
-            "1": "route interruption and restoration",
-            "2": "vendor-app contention",
-            "3": "Home Assistant or integration reload/upgrade",
-        }.get(choice)
+        if guided_reconnect_required:
+            print("  1. Interrupt and restore the selected BLE route")
+            choices = {"1": "route interruption and restoration"}
+            prompt_text = "Action [1], or 0 to skip: "
+        else:
+            print("  1. Interrupt and restore the selected BLE route")
+            print("  2. Use vendor-app contention, then close the app")
+            print("  3. Reload or upgrade Home Assistant / the integration")
+            choices = {
+                "1": "route interruption and restoration",
+                "2": "vendor-app contention",
+                "3": "Home Assistant or integration reload/upgrade",
+            }
+            prompt_text = "Action [1-3], or 0 to skip: "
+        choice = prompt(prompt_text)
+        action = choices.get(choice)
         if action is None:
             steps.append(
                 {
@@ -478,8 +490,17 @@ def _execute_recovery_suite(
         trace is not None
         and services.route_matches_request(args.route, trace.get("observed_route"))
     )
+    reconnect_confirmed = bool(
+        saw_disconnect
+        and recovered is not None
+        and type(recovered.get("session_generation")) is int
+        and recovered["session_generation"] != generation
+    )
     observation["outcome"] = services.recovery_verdict(
-        telemetry_matches=recovered is not None,
+        telemetry_matches=(
+            recovered is not None
+            and (not guided_reconnect_required or reconnect_confirmed)
+        ),
         physical_outcome=physical_outcome,
         route_verified=observation["route_verified"],
         trace_complete=bool(trace is not None and trace.get("complete") is True),

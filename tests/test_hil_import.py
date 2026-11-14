@@ -725,7 +725,7 @@ def test_conflicting_run_identity_fails_before_writing_fixtures(
     assert not (tmp_path / "tests" / "hil" / "fixtures").exists()
 
 
-def test_guided_child_capture_exports_with_child_identity(
+def test_gold_shared_recovery_exports_after_intervening_setting_step(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     parent_run_id = "0123456789abcdef"
@@ -760,7 +760,7 @@ def test_guided_child_capture_exports_with_child_identity(
         {
             "run_id": child_run_id,
             "parent_tier_run_id": parent_run_id,
-            "tier_step_id": "dc_output_cycle",
+            "tier_step_id": "basic_reconnect",
             "requested_route": "local_adapter",
             "device": parent_device,
         },
@@ -768,16 +768,42 @@ def test_guided_child_capture_exports_with_child_identity(
     write_scenario_progress(
         child_private,
         child_run_id,
-        "output_dc_cycle",
+        "recovery_reconnect",
         "a" * 64,
-        [{"step_id": "dc_on", "outcome": "pass"}],
+        [
+            {
+                "step_id": "baseline",
+                "outcome": "pass",
+                "session_generation": 1,
+                "connected": True,
+                "status_fresh": True,
+            },
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "route interruption and restoration",
+                "operator_confirmed": True,
+            },
+            {
+                "step_id": "recovered_session",
+                "outcome": "pass",
+                "session_generation_before": 1,
+                "session_generation_after": 2,
+                "disconnect_observed": True,
+                "connected": True,
+                "status_fresh": True,
+                "route_verified": True,
+                "trace_complete": True,
+                "fresh_status_telemetry": True,
+            },
+        ],
     )
 
     stamp = "2026-11-09T12:00:01+00:00"
     common = {
         "schema_version": 2,
         "run_id": child_run_id,
-        "scenario_id": "output_dc_cycle",
+        "scenario_id": "recovery_reconnect",
         "layer": "gatt_api",
         "session_generation": 1,
         "observed_route": "local_adapter",
@@ -809,7 +835,7 @@ def test_guided_child_capture_exports_with_child_identity(
         "capture_scope": "runtime_entry",
         "capture_id": f"capture-{child_run_id}",
         "run_id": child_run_id,
-        "scenario_id": "output_dc_cycle",
+        "scenario_id": "recovery_reconnect",
         "requested_route": "local_adapter",
         "capture_layer": "gatt_api_not_rf",
         "private_raw_bytes": True,
@@ -845,7 +871,7 @@ def test_guided_child_capture_exports_with_child_identity(
             }
         ],
     }
-    trace_dir = child_private / "traces" / "output_dc_cycle_1"
+    trace_dir = child_private / "traces" / "recovery_reconnect_1"
     trace_dir.mkdir(parents=True)
     _save_private_trace(trace_dir, trace)
     checkpoint = child_private / "checkpoint.json"
@@ -856,14 +882,14 @@ def test_guided_child_capture_exports_with_child_identity(
     execution = {
         "schema_version": 1,
         "run_id": parent_run_id,
-        "requested_tier": "silver",
+        "requested_tier": "gold",
         "requested_route": "local_adapter",
         "device": parent_device,
         "review_state": "pending",
         "steps": [
             {
-                "step_id": "dc_output_cycle",
-                "scenario_id": "output_dc_cycle",
+                "step_id": "basic_reconnect",
+                "scenario_id": "recovery_reconnect",
                 "outcome": "pass",
                 "human_review": "pending",
                 "evidence_run": f"../../tier_{child_run_id}/private",
@@ -874,7 +900,19 @@ def test_guided_child_capture_exports_with_child_identity(
                     }
                     for path in evidence_paths
                 ],
-            }
+            },
+            {
+                "step_id": "eco_mode_reversal",
+                "scenario_id": "settings_eco_mode",
+                "outcome": "blocked",
+                "human_review": "pending",
+            },
+            {
+                "step_id": "guarded_recovery",
+                "scenario_id": "recovery_reconnect",
+                "outcome": "shared_evidence",
+                "evidence_run": f"../../tier_{child_run_id}/private",
+            },
         ],
     }
     (parent_private / "tier-execution.json").write_text(json.dumps(execution))
@@ -884,7 +922,11 @@ def test_guided_child_capture_exports_with_child_identity(
     verified, public, _digest = verify_public_archive(archive, include_contents=True)
     assert verified["qualification_status"] == "inconclusive"
     tier = json.loads(public["tier-execution.json"])
-    assert tier["steps"][0]["outcome"] == "pass"
+    assert [step["outcome"] for step in tier["steps"]] == [
+        "pass",
+        "blocked",
+        "shared_evidence",
+    ]
     assert len(tier["steps"][0]["machine_evidence"]) == 4
     child_session_path = child_private / "session.json"
     child_session = json.loads(child_session_path.read_text())

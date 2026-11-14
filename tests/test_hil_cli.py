@@ -428,10 +428,46 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
     def fake_recovery(_api, args, _device, out, _run_id, _services, _resume):
         calls.append((args.suite, args.scenario_id))
         (out / "checkpoint.json").write_text(
-            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+            json.dumps(
+                {
+                    "steps": [
+                        {"step_id": "baseline", "outcome": "pass"},
+                        {
+                            "step_id": "operator_action",
+                            "outcome": "pass",
+                            "action": "route interruption and restoration",
+                            "operator_confirmed": True,
+                        },
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "session_generation_before": 1,
+                            "session_generation_after": 2,
+                            "disconnect_observed": True,
+                            "connected": True,
+                            "status_fresh": True,
+                            "fresh_status_telemetry": True,
+                            "route_verified": True,
+                            "trace_complete": True,
+                            "physical_outcome": "yes",
+                            "route": "local_adapter",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
         )
         if include_trace:
-            (out / "trace.json").write_text("{}", encoding="utf-8")
+            (out / "trace.json").write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "observed_route": "local_adapter",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        assert args.guided_reconnect_required is True
         return 0
 
     monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
@@ -613,6 +649,87 @@ def test_tier_executor_skips_absent_and_blocks_unknown_without_ble_write(
     assert "substantiates physical absence" in execution["steps"][0]["reason"]
     assert "unknown or unreviewed" in execution["steps"][1]["reason"]
     assert api.commands == []
+
+
+def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_path):
+    from argparse import Namespace
+
+    from scripts.hil import recovery
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    class FakeHA:
+        origin = "https://example.test"
+
+    def stable_vendor_observation(
+        _api, args, _device, output_dir, _run_id, _services, _resume
+    ):
+        assert args.guided_reconnect_required is True
+        (output_dir / "checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {"step_id": "baseline", "outcome": "pass"},
+                        {
+                            "step_id": "operator_action",
+                            "outcome": "pass",
+                            "action": "vendor-app contention",
+                            "operator_confirmed": True,
+                            "operator_app_result": "connected",
+                        },
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "session_generation_before": 4,
+                            "session_generation_after": 4,
+                            "disconnect_observed": False,
+                            "connected": True,
+                            "status_fresh": True,
+                            "fresh_status_telemetry": True,
+                            "route_verified": True,
+                            "trace_complete": True,
+                            "route": "local_adapter",
+                            "ha_observation": "ha_stable",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "trace.json").write_text(
+            json.dumps({"complete": True, "observed_route": "local_adapter"}),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(recovery, "_execute_recovery_suite", stable_vendor_observation)
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    parent = write_run(tmp_path, "guided-reconnect-parent", {}, {})
+    result = cli._execute_tier_suite(
+        FakeHA(),
+        Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False),
+        device,
+        {},
+        parent,
+        "0123456789abcdef",
+        {"requested_tier": "silver", "steps": [{"id": "basic_reconnect"}]},
+        {"features": {}},
+    )
+
+    execution = json.loads((parent / "tier-execution.json").read_text())
+    step = execution["steps"][0]
+    assert result == 2
+    assert step["outcome"] == "inconclusive"
+    assert "mandatory reconnect requires" in step["reason"]
 
 
 def test_noninteractive_tier_read_only_failure_records_inconclusive_without_writes(
@@ -4047,16 +4164,16 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         origin = "https://ha.example.test"
 
         def __init__(self):
-            self.generations = iter((4, 5))
+            self.capabilities = iter(((True, 4), (False, 4), (True, 5)))
             self.commands = []
 
         def hil_capabilities(self, entry_id):
-            generation = next(self.generations)
+            connected, generation = next(self.capabilities)
             return {
                 "verified": True,
                 "identity_conflicted": False,
-                "connected": True,
-                "status_fresh": True,
+                "connected": connected,
+                "status_fresh": connected,
                 "session_generation": generation,
             }
 
@@ -4069,6 +4186,13 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                     "schema_version": 2,
                     "observed_route": "local_adapter",
                     "complete": True,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 5,
+                            "decoded_packet_types": ["StatusData"],
+                        }
+                    ],
                 }
             ]
 
@@ -4092,7 +4216,11 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
 
     result = cli._execute_recovery_suite(
         api_fake,
-        SimpleNamespace(non_interactive=False, route="auto"),
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
         device,
         output_dir,
         "run-safe",
@@ -4107,6 +4235,10 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
+    assert stored["steps"][-1]["disconnect_observed"] is True
+    assert stored["steps"][-1]["session_generation_before"] == 4
+    assert stored["steps"][-1]["session_generation_after"] == 5
+    assert stored["steps"][-1]["physical_outcome"] == "yes"
 
 
 def test_recovery_transient_api_failure_does_not_prove_new_ble_session(

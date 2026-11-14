@@ -902,6 +902,7 @@ def _execute_tier_suite(
         child_args.suite = suite
         child_args.scenario_id = scenario_id if suite != "recovery" else None
         child_args.resume = None
+        child_args.guided_reconnect_required = step_id == "basic_reconnect"
         if suite == "outputs":
             status = _execute_output_suite(
                 api, child_args, device, environment, child_root, child_run_id, services
@@ -953,9 +954,43 @@ def _execute_tier_suite(
             and any(Path(item).name == "trace.json" for item in evidence_paths)
             and all(row.get("outcome") == "pass" for row in rows)
         )
+        reconnect_reason = None
+        if passed and step_id == "basic_reconnect":
+            action_row = next(
+                (row for row in rows if row.get("step_id") == "operator_action"),
+                {},
+            )
+            reconnect_row = next(
+                (row for row in rows if row.get("step_id") == "recovered_session"),
+                {},
+            )
+            before_generation = reconnect_row.get("session_generation_before")
+            after_generation = reconnect_row.get("session_generation_after")
+            reconnect_confirmed = bool(
+                action_row.get("action") == "route interruption and restoration"
+                and action_row.get("operator_confirmed") is True
+                and reconnect_row.get("disconnect_observed") is True
+                and type(before_generation) is int
+                and type(after_generation) is int
+                and after_generation != before_generation
+                and reconnect_row.get("connected") is True
+                and reconnect_row.get("status_fresh") is True
+                and reconnect_row.get("fresh_status_telemetry") is True
+                and reconnect_row.get("route_verified") is True
+                and reconnect_row.get("trace_complete") is True
+                and reconnect_row.get("physical_outcome") == "yes"
+                and reconnect_row.get("route") in verified_routes
+            )
+            if not reconnect_confirmed:
+                passed = False
+                reconnect_reason = (
+                    "mandatory reconnect requires a confirmed route interruption, "
+                    "observed disconnect, changed session generation, fresh status, "
+                    "verified route, and positive physical confirmation"
+                )
         failed = next((row for row in rows if row.get("outcome") != "pass"), None)
         failed_reason = failed.get("reason") if isinstance(failed, dict) else None
-        step_reason = (
+        step_reason = reconnect_reason or (
             failed_reason.strip()
             if isinstance(failed_reason, str) and failed_reason.strip()
             else "guided scenario did not complete with confirmed evidence"

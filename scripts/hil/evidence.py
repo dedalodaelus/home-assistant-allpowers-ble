@@ -1639,18 +1639,28 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     ) from exc
                 directory_run_id = child_private.parent.name.removeprefix("tier_")
                 expected_child_step_id = step["step_id"]
+                shared_reconnect = False
                 if (
                     step["outcome"] == "shared_evidence"
                     and step["step_id"] == "guarded_recovery"
-                    and step_index > 0
-                    and tier_execution["steps"][step_index - 1].get("step_id")
-                    == "basic_reconnect"
-                    and tier_execution["steps"][step_index - 1].get("evidence_run")
-                    == evidence_run
                 ):
-                    expected_child_step_id = "basic_reconnect"
+                    shared_reconnect = any(
+                        isinstance(previous, dict)
+                        and previous.get("step_id") == "basic_reconnect"
+                        and previous.get("scenario_id") == step.get("scenario_id")
+                        and previous.get("outcome") == "pass"
+                        and previous.get("evidence_run") == evidence_run
+                        for previous in tier_execution["steps"][:step_index]
+                    )
+                    if shared_reconnect:
+                        expected_child_step_id = "basic_reconnect"
                 if (
-                    child_private.name != "private"
+                    (
+                        step["outcome"] == "shared_evidence"
+                        and step["step_id"] == "guarded_recovery"
+                        and not shared_reconnect
+                    )
+                    or child_private.name != "private"
                     or re.fullmatch(r"[a-f0-9]{16}", directory_run_id) is None
                     or child_session.get("run_id") != directory_run_id
                     or child_session.get("parent_tier_run_id") != raw_run_id
