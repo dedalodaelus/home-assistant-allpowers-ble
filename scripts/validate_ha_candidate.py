@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import subprocess
 import sys
 
 import yaml
@@ -20,6 +21,12 @@ from scripts.sync_ha_test_deps import (  # noqa: E402
 
 ACTIVE_REQUIREMENTS = ROOT / "requirements_test.txt"
 CANDIDATE_REQUIREMENTS = ROOT / "requirements/ha-candidate/requirements.txt"
+UPGRADE_MANIFEST_PATHS = frozenset(
+    {
+        "requirements/ha-candidate/requirements.txt",
+        "requirements_test.txt",
+    }
+)
 
 
 def validate_candidate(active_text: str, candidate_text: str) -> list[str]:
@@ -108,6 +115,9 @@ def validate_upgrade_workflow(workflow_text: str, ci_text: str) -> list[str]:
         return errors
     if job.get("if") != "github.ref == 'refs/heads/main'":
         errors.append("HA upgrade workflow must dispatch from main")
+    job_env = job.get("env")
+    if not isinstance(job_env, dict) or job_env.get("PYTHONDONTWRITEBYTECODE") != "1":
+        errors.append("HA upgrade job must not create Python bytecode caches")
     if job.get("permissions") != {"contents": "write", "pull-requests": "write"}:
         errors.append(
             "HA upgrade job must request only contents and pull-request writes"
@@ -136,12 +146,50 @@ def validate_upgrade_workflow(workflow_text: str, ci_text: str) -> list[str]:
     return errors
 
 
+def validate_upgrade_paths(changed_paths: list[str]) -> list[str]:
+    """Allow zero, one, or both coordinated manifests to change, and nothing else."""
+    unexpected = sorted(set(changed_paths) - UPGRADE_MANIFEST_PATHS)
+    if unexpected:
+        return [f"unexpected generated upgrade file(s): {unexpected}"]
+    return []
+
+
 def main() -> int:
     """Validate the committed active and advisory manifests."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--active", type=Path, default=ACTIVE_REQUIREMENTS)
     parser.add_argument("--candidate", type=Path, default=CANDIDATE_REQUIREMENTS)
+    parser.add_argument(
+        "--check-upgrade-paths",
+        action="store_true",
+        help="allow only the coordinated HA and candidate manifests to change",
+    )
     args = parser.parse_args()
+    if args.check_upgrade_paths:
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as err:
+            print(
+                f"error: cannot inspect generated upgrade files: {err}", file=sys.stderr
+            )
+            return 1
+        changed_paths = [line[3:] for line in status.stdout.splitlines()]
+        errors = validate_upgrade_paths(changed_paths)
+        if errors:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+        print(
+            "Generated upgrade changed only allowed manifests "
+            f"({len(set(changed_paths))} file(s))"
+        )
+        return 0
+
     try:
         errors = validate_candidate(
             args.active.read_text(encoding="utf-8"),

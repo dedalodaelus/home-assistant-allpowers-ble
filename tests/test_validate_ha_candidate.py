@@ -3,6 +3,7 @@
 from scripts.validate_ha_candidate import (
     validate_candidate,
     validate_proposal_update,
+    validate_upgrade_paths,
     validate_upgrade_workflow,
 )
 
@@ -53,3 +54,28 @@ def test_upgrade_workflow_uses_trusted_code_and_waits_for_pr_ci() -> None:
     workflow = open(".github/workflows/prepare-ha-upgrade.yml", encoding="utf-8").read()
     ci = open(".github/workflows/ci.yml", encoding="utf-8").read()
     assert validate_upgrade_workflow(workflow, ci) == []
+
+
+def test_upgrade_path_guard_accepts_both_manifests() -> None:
+    assert (
+        validate_upgrade_paths(
+            [
+                "requirements/ha-candidate/requirements.txt",
+                "requirements_test.txt",
+            ]
+        )
+        == []
+    )
+
+
+def test_upgrade_path_guard_accepts_fixture_only_change() -> None:
+    assert validate_upgrade_paths(["requirements_test.txt"]) == []
+
+
+def test_upgrade_path_guard_accepts_clean_noop() -> None:
+    assert validate_upgrade_paths([]) == []
+
+
+def test_upgrade_path_guard_rejects_unexpected_file() -> None:
+    errors = validate_upgrade_paths(["requirements_test.txt", "scripts/unexpected.py"])
+    assert "scripts/unexpected.py" in errors[0]
