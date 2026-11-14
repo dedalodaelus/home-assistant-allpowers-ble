@@ -211,6 +211,39 @@ def soak_verdict(
     return "pass"
 
 
+def short_stability_verdict(
+    *,
+    measured_seconds: float,
+    required_seconds: int,
+    sample_count: int,
+    minimum_samples: int,
+    maximum_gap_seconds: float,
+    allowed_gap_seconds: int,
+    trace_count: int,
+    minimum_traces: int,
+    dropped_traces: int,
+    route_consistent: bool = True,
+    data_limit_hit: bool = False,
+    interrupted: bool = False,
+) -> str:
+    """Evaluate only the separately scoped short stability observation."""
+    if data_limit_hit or interrupted:
+        return "inconclusive"
+    if (
+        maximum_gap_seconds > allowed_gap_seconds
+        or dropped_traces
+        or not route_consistent
+    ):
+        return "inconclusive"
+    if (
+        measured_seconds < required_seconds
+        or sample_count < minimum_samples
+        or trace_count < minimum_traces
+    ):
+        return "inconclusive"
+    return "pass"
+
+
 def plan_as_dict(item: PlannedScenario) -> dict[str, Any]:
     """Return a safe, concise plan entry suitable for terminal output."""
     return {

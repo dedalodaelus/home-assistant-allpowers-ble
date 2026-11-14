@@ -44,6 +44,7 @@ from .runner import (
     recovery_verdict,
     route_matches_request,
     soak_verdict,
+    short_stability_verdict,
     verdict,
 )
 from .scenarios import SUITES, load_scenarios
@@ -1945,6 +1946,7 @@ def _suite_services() -> SuiteServices:
         verdict=verdict,
         recovery_verdict=recovery_verdict,
         soak_verdict=soak_verdict,
+        short_stability_verdict=short_stability_verdict,
         read_only_sample=read_only_sample,
         monotonic=monotonic,
         sleep=sleep,
@@ -2134,7 +2136,7 @@ def execute(args: argparse.Namespace) -> int:
                 print(f"  {suite}")
             return 0
         if args.resume is not None and (
-            args.suite not in {"recovery", "soak-24h"}
+            args.suite not in {"recovery", "soak-24h", "stability-short"}
             or args.dry_run
             or args.list_suites
         ):
@@ -2188,6 +2190,7 @@ def execute(args: argparse.Namespace) -> int:
             "settings",
             "recovery",
             "soak-24h",
+            "stability-short",
         ):
             raise HAAPIError(
                 "This suite is declarative but execution is not implemented yet; use --dry-run"
@@ -2206,6 +2209,7 @@ def execute(args: argparse.Namespace) -> int:
         expected_scenarios = {
             "recovery": "recovery_reconnect",
             "soak-24h": "soak_24h_observation",
+            "stability-short": "short_stability_observation",
         }
         if resume_state["scenario_id"] != expected_scenarios[args.suite]:
             raise HAAPIError("Checkpoint does not belong to the selected scenario")
@@ -2482,6 +2486,10 @@ def execute(args: argparse.Namespace) -> int:
             )
             return _onboard_export(output_dir, result, resume_command=resume_command)
         return result
+    if args.command == "run" and args.suite == "stability-short":
+        return _execute_soak_suite(
+            api, args, selected, output_dir, run_id, resume_state
+        )
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")

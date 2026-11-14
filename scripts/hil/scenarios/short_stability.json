@@ -1,0 +1,33 @@
+{
+  "id": "short_stability_observation",
+  "schema_version": 1,
+  "suite": "stability-short",
+  "title": "Observe fresh telemetry and verified route for 30 minutes",
+  "mode": "soak",
+  "steps": [
+    {
+      "id": "short_observation",
+      "instruction": "Sample read-only status every minute and capture a short route trace every five minutes.",
+      "timeout_seconds": 1800,
+      "action": "observe",
+      "target": null,
+      "expected": "30 minutes of uninterrupted measured observations"
+    }
+  ],
+  "required_evidence": [
+    "minimum_periodic_samples",
+    "maximum_sample_gap",
+    "complete_route_traces",
+    "continuous_monotonic_duration",
+    "bounded_private_storage"
+  ],
+  "parameters": {
+    "duration_seconds": 1800,
+    "sample_interval_seconds": 60,
+    "max_gap_seconds": 120,
+    "trace_interval_seconds": 300,
+    "trace_window_seconds": 15,
+    "max_bytes": 2097152,
+    "minimum_samples": 31
+  }
+}
