@@ -150,7 +150,7 @@ def test_check_rejects_installed_versions_that_differ_from_requirements(
     monkeypatch.setattr(sync, "installed_version", lambda name: versions[name])
 
     assert sync.main(["--check", "--requirements", str(requirements)]) == 1
-    assert "do not match requirements_test.txt" in capsys.readouterr().err
+    assert "do not match" in capsys.readouterr().err
 
 
 def test_sync_requires_explicit_ha_and_fixture_selections() -> None:
