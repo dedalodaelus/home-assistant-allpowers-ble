@@ -243,6 +243,11 @@ def validate_dependabot_ignores(
         ):
             errors.append("each pip Dependabot ignore must name one dependency")
             continue
+        if set(entry) != {"dependency-name"}:
+            errors.append(
+                "managed stack Dependabot ignores must exclude all versions "
+                "using dependency-name only"
+            )
         ignored_names.append(canonicalize_name(entry["dependency-name"]))
 
     if len(ignored_names) != len(set(ignored_names)):

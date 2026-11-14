@@ -236,6 +236,29 @@ def test_dependabot_ignore_validation_detects_new_generated_stack_pin() -> None:
     assert any("future-ha-library" in error for error in errors)
 
 
+def test_dependabot_ignore_validation_rejects_version_scoped_stack_ignores() -> None:
+    expected = _expected("old", ha_version="2026.10.4", fixture_version="0.13.375")
+    requirements = _requirements_text(expected)
+    ignored = "\n".join(
+        f'      - dependency-name: "{name}"' for name in sorted(expected)
+    )
+    dependabot = (
+        "version: 2\nupdates:\n"
+        "  - package-ecosystem: pip\n"
+        "    directory: /\n"
+        "    versioning-strategy: increase-if-necessary\n"
+        "    ignore:\n"
+        f"{ignored}\n"
+    ).replace(
+        '      - dependency-name: "bleak"',
+        '      - dependency-name: "bleak"\n        versions: ["*"]',
+    )
+
+    errors = sync.validate_dependabot_ignores(requirements, dependabot)
+
+    assert any("exclude all versions" in error for error in errors)
+
+
 def test_sync_requires_explicit_ha_and_fixture_selections() -> None:
     with pytest.raises(SystemExit):
         sync._parse_args(["--sync"])
