@@ -447,8 +447,7 @@ def _execute_settings_suite(
             "current_value": initial,
             "first_transition": first_target,
             "restoration_value": initial,
-            "outcome": "skipped",
-            "reason": "read-only preflight complete; authorization required before each write",
+            "outcome": "pass",
         }
     )
     checkpoint()
@@ -465,6 +464,7 @@ def _execute_settings_suite(
         authorized = ""
     if authorized != "1":
         preflight["authorization"] = "declined"
+        preflight["outcome"] = "skipped"
         preflight["reason"] = (
             "first settings write authorization declined; no write attempted"
         )

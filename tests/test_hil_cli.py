@@ -3140,8 +3140,9 @@ def test_ambiguous_settings_write_restores_only_with_fresh_idle_same_session(
 
 @pytest.mark.parametrize("include_control_frame", [True, False])
 @pytest.mark.parametrize("requested_route", ["auto", "active_proxy"])
+@pytest.mark.parametrize("initial_state", ["off", "on"])
 def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
-    monkeypatch, tmp_path, include_control_frame, requested_route
+    monkeypatch, tmp_path, include_control_frame, requested_route, initial_state
 ):
     from datetime import UTC, datetime
     from types import SimpleNamespace
@@ -3149,15 +3150,20 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
     from custom_components.allpowers_ble.protocol import SettingsData, WorkMode
     from custom_components.allpowers_ble.protocol import encode_settings_control
     from scripts.hil.discovery import Device
+    from scripts.hil.environment import build_environment, build_session
+    from scripts.hil.evidence import export_archive, verify_public_archive
+    from scripts.hil.storage import write_run
 
     class TracedSettingsHA:
         origin = "https://ha.example.test"
 
         def __init__(self):
-            self.state = "off"
+            self.state = initial_state
             self.capture = 0
             self.actions = []
             self.requested_route = requested_route
+            self.run_id = "0123456789abcdef"
+            self.scenario_id = "settings_eco_mode"
 
         def hil_capabilities(self, entry_id):
             return {
@@ -3186,6 +3192,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             command = commands[0]
             if command["type"].endswith("/start"):
                 self.capture += 1
+                self.run_id = command["run_id"]
+                self.scenario_id = command["scenario_id"]
                 return [{"schema_version": 2, "capture_id": f"eco-{self.capture}"}]
             return [self.trace(command["capture_id"])]
 
@@ -3195,8 +3203,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             common = {
                 "schema_version": 2,
                 "utc": utc,
-                "run_id": "0123456789abcdef",
-                "scenario_id": "settings_eco_mode",
+                "run_id": self.run_id,
+                "scenario_id": self.scenario_id,
                 "session_generation": 9,
                 "layer": "gatt_api",
                 "observed_route": "local_adapter",
@@ -3266,8 +3274,8 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
                 "schema_version": 2,
                 "capture_scope": "runtime_entry",
                 "capture_id": capture_id,
-                "run_id": "0123456789abcdef",
-                "scenario_id": "settings_eco_mode",
+                "run_id": self.run_id,
+                "scenario_id": self.scenario_id,
                 "requested_route": self.requested_route,
                 "observed_route": "local_adapter",
                 "capture_layer": "gatt_api_not_rf",
@@ -3299,8 +3307,6 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
             }
 
     api_fake = TracedSettingsHA()
-    output_dir = tmp_path / f"real-trace-{include_control_frame}"
-    output_dir.mkdir(mode=0o700)
     device = Device(
         device_id="private-device",
         model="R600",
@@ -3310,6 +3316,20 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         entry_state="loaded",
         control_entities={"eco_mode": "switch.private_eco_mode"},
         config_entry_id="entry-safe",
+    )
+    environment = build_environment({"version": "2026.10.4"}, None)
+    session = build_session(
+        run_id="0123456789abcdef",
+        requested_route=requested_route,
+        device=device,
+        environment=environment,
+        sample={},
+    )
+    output_dir = write_run(
+        tmp_path,
+        f"real-trace-{include_control_frame}-{requested_route}-{initial_state}",
+        environment,
+        session,
     )
     answers = iter(("1", "1", "1", "1"))
     monkeypatch.setattr(cli, "input", lambda _prompt: next(answers), raising=False)
@@ -3327,16 +3347,84 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
     )
 
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
+    first_target = "on" if initial_state == "off" else "off"
+    restored_actions = [
+        ("eco_mode", first_target),
+        ("eco_mode", initial_state),
+    ]
     if include_control_frame and requested_route == "auto":
         assert result == 0
-        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert api_fake.actions == restored_actions
         assert [step["outcome"] for step in checkpoint["steps"][-2:]] == [
             "pass",
             "pass",
         ]
+        assert checkpoint["steps"][0]["outcome"] == "pass"
+        if initial_state == "on":
+            archive = export_archive(output_dir.parent, confirmed=True)
+            manifest, public, _digest = verify_public_archive(
+                archive, include_contents=True
+            )
+            scenario = json.loads(public["scenarios.json"])
+            change = next(
+                step for step in scenario["steps"] if step["step_id"] == "eco_mode_on"
+            )
+            restoration = next(
+                step
+                for step in scenario["steps"]
+                if step["step_id"] == "restore_original"
+            )
+            assert manifest["qualification_status"] == "inconclusive"
+            assert change["expected"] == "off"
+            assert change["actual"] == "off"
+            assert change["outcome"] == "pass"
+            assert restoration["actual"] == "on"
+            assert restoration["outcome"] == "pass"
+            assert "expected `off`; observed `off`" in public["report.md"].decode()
+
+            # Exercise the real child settings runner through the Gold tier
+            # aggregator; its successful read-only preflight must not block Gold.
+            api_fake.state = initial_state
+            api_fake.actions.clear()
+            tier_root = tmp_path / "gold-tier"
+            parent_dir = write_run(
+                tier_root,
+                "gold-parent",
+                environment,
+                {"run_id": "abcdef0123456789"},
+            )
+            gold_answers = iter(("1", "1", "1", "1"))
+            monkeypatch.setattr(
+                cli, "input", lambda _prompt: next(gold_answers), raising=False
+            )
+            tier_result = cli._execute_tier_suite(
+                api_fake,
+                SimpleNamespace(
+                    route="auto", output_root=tier_root, non_interactive=False
+                ),
+                device,
+                environment,
+                parent_dir,
+                "abcdef0123456789",
+                {"requested_tier": "gold", "steps": [{"id": "eco_mode_reversal"}]},
+                {
+                    "features": {
+                        "eco_mode": {
+                            "physical_presence": "present",
+                            "production_authorized": True,
+                            "runtime_ready": True,
+                        }
+                    }
+                },
+            )
+            tier_execution = json.loads(
+                (parent_dir / "tier-execution.json").read_text()
+            )
+            assert tier_result == 0
+            assert tier_execution["steps"][0]["outcome"] == "pass"
     else:
         assert result == 2
-        assert api_fake.actions == [("eco_mode", "on"), ("eco_mode", "off")]
+        assert api_fake.actions == restored_actions
         change = next(
             step for step in checkpoint["steps"] if step["step_id"] == "eco_mode_on"
         )
@@ -3348,6 +3436,33 @@ def test_eco_scenario_requires_real_validated_trace_and_matching_control_frame(
         assert change["outcome"] == "inconclusive"
         assert change["cleanup_status"] == "restoration_inconclusive"
         assert restoration["outcome"] == "inconclusive"
+
+
+def test_public_eco_reversal_expected_value_requires_validated_reverse_edge():
+    from scripts.hil.evidence import _public_observation
+
+    legitimate = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "pass",
+            "expected": "off",
+            "pre_state": "on",
+            "post_state": "off",
+        },
+    )
+    arbitrary = _public_observation(
+        "settings_eco_mode",
+        {
+            "step_id": "eco_mode_on",
+            "outcome": "pass",
+            "expected": "off",
+            "pre_state": "off",
+            "post_state": "off",
+        },
+    )
+    assert legitimate["expected"] == "off"
+    assert arbitrary["expected"] == "on"
 
 
 @pytest.mark.parametrize(
