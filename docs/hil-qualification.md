@@ -417,8 +417,14 @@ and ECO-timeout setting checks with per-action authorization and private trace
 evidence. A
 recovery guide lets the operator perform a route interruption/restoration,
 vendor-app contention, or HA reload/upgrade while the CLI observes
-reconnection and current route evidence. No write, settings, or recovery
-scenario has been piloted on hardware;
+reconnection and current route evidence. For the optional vendor-app branch,
+the operator reports only could-not-connect, connected, or unable/unwilling to
+test. The runner can classify observed HA evidence as `ha_stable` or
+`ha_recovered`; a fresh decoded status packet plus complete, verified route
+trace is required, and a resumed observation gap cannot pass. The app result
+does not establish causality, nor does `ha_stable` claim continuity outside
+the observed interval. No write, settings, or recovery scenario has been
+piloted on hardware;
 missing route or physical evidence remains inconclusive. Checkpoint resume is
 available for interrupted recovery and soak observation on the same
 fingerprinted device. Resume starts a new soak segment and records a
