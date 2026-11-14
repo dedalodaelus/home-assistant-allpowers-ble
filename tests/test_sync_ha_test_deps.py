@@ -109,6 +109,55 @@ def test_check_rejects_a_fixture_not_selected_for_this_upgrade() -> None:
     assert any("pytest-homeassistant-custom-component" in error for error in errors)
 
 
+def test_check_cli_uses_requirement_versions_without_duplicated_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requirements = tmp_path / "requirements_test.txt"
+    original = _requirements_text(
+        _expected("old", ha_version="2026.10.4", fixture_version="0.13.375")
+    )
+    requirements.write_text(original, encoding="utf-8")
+    versions = {
+        sync.HA_DISTRIBUTION: "2026.10.4",
+        sync.FIXTURE_DISTRIBUTION: "0.13.375",
+    }
+    monkeypatch.setattr(sync, "installed_version", lambda name: versions[name])
+    monkeypatch.setattr(
+        sync,
+        "components_root_for_ha",
+        lambda: FIXTURES / "old" / "components",
+    )
+
+    assert sync.main(["--check", "--requirements", str(requirements)]) == 0
+    assert requirements.read_text(encoding="utf-8") == original
+    assert "2026.10.4" in capsys.readouterr().out
+
+
+def test_check_rejects_installed_versions_that_differ_from_requirements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requirements = tmp_path / "requirements_test.txt"
+    requirements.write_text(
+        _requirements_text(
+            _expected("old", ha_version="2026.10.4", fixture_version="0.13.375")
+        ),
+        encoding="utf-8",
+    )
+    versions = {
+        sync.HA_DISTRIBUTION: "2026.10.4",
+        sync.FIXTURE_DISTRIBUTION: "0.13.400",
+    }
+    monkeypatch.setattr(sync, "installed_version", lambda name: versions[name])
+
+    assert sync.main(["--check", "--requirements", str(requirements)]) == 1
+    assert "do not match requirements_test.txt" in capsys.readouterr().err
+
+
+def test_sync_requires_explicit_ha_and_fixture_selections() -> None:
+    with pytest.raises(SystemExit):
+        sync._parse_args(["--sync"])
+
+
 def test_manifest_conflicts_across_components_are_rejected(tmp_path: Path) -> None:
     for component in sync.COMPONENTS:
         path = tmp_path / component / "manifest.json"

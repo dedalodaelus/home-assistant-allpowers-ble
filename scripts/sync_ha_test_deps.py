@@ -203,6 +203,38 @@ def installed_version(distribution: str) -> str:
         ) from err
 
 
+def selected_versions_from_requirements(text: str) -> tuple[str, str]:
+    """Read the exact HA and fixture pins selected in the managed block."""
+    lines = text.splitlines()
+    start, end = _block_bounds(lines)
+    requirements = _requirement_map(
+        [
+            line.strip()
+            for line in lines[start + 1 : end]
+            if line.strip() and not line.strip().startswith("#")
+        ],
+        source="managed requirements block",
+    )
+    versions: list[str] = []
+    for distribution, label in (
+        (HA_DISTRIBUTION, "Home Assistant"),
+        (FIXTURE_DISTRIBUTION, "pytest fixture"),
+    ):
+        raw = requirements.get(canonicalize_name(distribution))
+        if raw is None:
+            raise SyncError(f"managed requirements block is missing {distribution}")
+        requirement = Requirement(raw)
+        specifiers = list(requirement.specifier)
+        if (
+            len(specifiers) != 1
+            or specifiers[0].operator != "=="
+            or "*" in specifiers[0].version
+        ):
+            raise SyncError(f"managed {label} requirement must use one exact == pin")
+        versions.append(_validated_version(specifiers[0].version, label=label))
+    return versions[0], versions[1]
+
+
 def components_root_for_ha() -> Path:
     """Locate manifests from the installed Home Assistant distribution."""
     try:
@@ -227,13 +259,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ha-version",
-        required=True,
-        help="explicit HA release selected for this stack and CI drift gate",
+        help="explicit HA release selected for --sync",
     )
     parser.add_argument(
         "--fixture-version",
-        required=True,
-        help="explicit compatible pytest-homeassistant-custom-component selection",
+        help="explicit compatible pytest fixture selection for --sync",
     )
     parser.add_argument(
         "--requirements",
@@ -241,28 +271,45 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_REQUIREMENTS,
         help="requirements file to update or check (default: requirements_test.txt)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.sync and (args.ha_version is None or args.fixture_version is None):
+        parser.error("--sync requires both --ha-version and --fixture-version")
+    if args.check and (args.ha_version is not None or args.fixture_version is not None):
+        parser.error("--check reads HA and fixture versions from the requirements file")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        selected_ha = _validated_version(args.ha_version, label="Home Assistant")
-        selected_fixture = _validated_version(
-            args.fixture_version, label="pytest fixture"
-        )
-        installed_ha = installed_version(HA_DISTRIBUTION)
-        installed_fixture = installed_version(FIXTURE_DISTRIBUTION)
-        if installed_ha != selected_ha:
-            raise SyncError(
-                f"selected HA {selected_ha} is not installed (found {installed_ha}); "
-                "install the selected release before synchronizing"
+        if args.sync:
+            installed_ha = installed_version(HA_DISTRIBUTION)
+            installed_fixture = installed_version(FIXTURE_DISTRIBUTION)
+            selected_ha = _validated_version(args.ha_version, label="Home Assistant")
+            selected_fixture = _validated_version(
+                args.fixture_version, label="pytest fixture"
             )
-        if installed_fixture != selected_fixture:
-            raise SyncError(
-                f"selected pytest fixture {selected_fixture} is not installed "
-                f"(found {installed_fixture}); resolve the selected fixture first"
-            )
+            if installed_ha != selected_ha:
+                raise SyncError(
+                    f"selected HA {selected_ha} is not installed (found {installed_ha}); "
+                    "install the selected release before synchronizing"
+                )
+            if installed_fixture != selected_fixture:
+                raise SyncError(
+                    f"selected pytest fixture {selected_fixture} is not installed "
+                    f"(found {installed_fixture}); resolve the selected fixture first"
+                )
+        else:
+            text = args.requirements.read_text(encoding="utf-8")
+            selected_ha, selected_fixture = selected_versions_from_requirements(text)
+            installed_ha = installed_version(HA_DISTRIBUTION)
+            installed_fixture = installed_version(FIXTURE_DISTRIBUTION)
+            if installed_ha != selected_ha or installed_fixture != selected_fixture:
+                raise SyncError(
+                    "installed Home Assistant/fixture versions do not match "
+                    f"{args.requirements} (HA {selected_ha}, fixture {selected_fixture}; "
+                    f"installed HA {installed_ha}, fixture {installed_fixture})"
+                )
         expected = expected_stack(
             components_root_for_ha(),
             ha_version=selected_ha,
@@ -283,7 +330,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"HA {selected_ha} test dependencies are already synchronized")
             return 0
 
-        text = args.requirements.read_text(encoding="utf-8")
         errors = validate_requirements_text(text, expected)
         if errors:
             for error in errors:

@@ -46,21 +46,21 @@ python scripts/sync_ha_test_deps.py \
   --fixture-version "$FIXTURE_VERSION"
 uv pip install --python "$(command -v python)" -r requirements_test.txt
 uv pip check --python "$(command -v python)"
-python scripts/sync_ha_test_deps.py \
-  --check \
-  --ha-version "$HA_VERSION" \
-  --fixture-version "$FIXTURE_VERSION"
+python scripts/sync_ha_test_deps.py --check
 USE_REAL_HOMEASSISTANT=1 pytest tests/homeassistant
 ```
 
 Review the generated diff against those exact installed manifests, then run the
-ordinary CI suite. The CI check pins both the selected HA and fixture versions,
-checks every managed direct requirement against the installed manifests, and
-runs `uv pip check`; changing a requirement without repeating the explicit
-selection and synchronization fails the gate. Never infer fixture compatibility
-from recency alone. If an HA manifest pin cannot support required tests, stop and
-document a minimal HA-version-specific exception with a resolved install and
-relevant real-HA coverage before changing the synchronizer. Revisit the three
+ordinary CI suite. `requirements_test.txt` is the single source for HA and fixture
+versions: CI installs those pins, then `--check` confirms the installed versions
+and every managed direct requirement match the installed HA manifests before
+running `uv pip check`. Version values are not duplicated in the workflow or
+check command. Never infer fixture compatibility
+from recency alone: upgrade mode requires an explicit `--fixture-version`, and
+the resolved install plus real-HA suite validates that choice. If an HA manifest
+pin cannot support required tests, stop and document a minimal HA-version-specific
+exception with a resolved install and relevant real-HA coverage before changing
+the synchronizer. Revisit the three
 Dependabot `ignore` entries only when deliberately changing this policy. Other
 pip dependencies, including independent test and static-analysis tools, remain
 eligible for routine updates.
