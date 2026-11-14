@@ -6223,6 +6223,7 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
         ("stability-short", "overlong_gap", "inconclusive"),
         ("stability-short", "clock_jump", "inconclusive"),
         ("stability-short", "storage_cap", "inconclusive"),
+        ("stability-short", "recovering_gap", "pass"),
         ("stability-short", "resumed", "pass"),
     ],
 )
@@ -6244,8 +6245,11 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
 
         def sleep(self, seconds):
             self.value += seconds
-            if mode == "overlong_gap" and not self.overlong_gap_injected:
-                self.value += 700
+            if (
+                mode in {"overlong_gap", "recovering_gap"}
+                and not self.overlong_gap_injected
+            ):
+                self.value += 700 if mode == "overlong_gap" else 120
                 self.overlong_gap_injected = True
             if mode == "interrupted" and self.value - 10_000 >= 600:
                 raise KeyboardInterrupt
@@ -6533,6 +6537,16 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert any(
             step.get("maximum_gap_seconds", 0) > 120 for step in checkpoint["steps"]
         )
+    if mode == "recovering_gap":
+        segments = [
+            step for step in checkpoint["steps"] if step["step_id"] == "soak_segment"
+        ]
+        assert len(segments) == 2
+        assert segments[0]["outcome"] == "inconclusive"
+        assert segments[1]["outcome"] == "pass"
+        assert segments[1]["measured_seconds"] >= duration
+        assert segments[1]["trace_count"] >= minimum_traces
+        assert segments[1]["maximum_gap_seconds"] <= 120
     if mode == "clock_jump":
         assert any(
             step.get("clock_discontinuities", 0) > 0 for step in checkpoint["steps"]

@@ -384,7 +384,8 @@ def _execute_soak_suite(
                 and type(capabilities["session_generation"]) is int
                 and services.has_verified_telemetry(snapshot)
             )
-            if gap is not None and gap > parameters["max_gap_seconds"]:
+            overlong_gap = gap is not None and gap > parameters["max_gap_seconds"]
+            if overlong_gap:
                 maximum_gap = max(maximum_gap, gap)
                 append_record(
                     {
@@ -436,6 +437,10 @@ def _execute_soak_suite(
                     else "fresh connected status or verified telemetry unavailable"
                 )
             else:
+                if is_short and overlong_gap:
+                    gap = None
+                    previous_sample_monotonic = None
+                    previous_sample_utc = None
                 if segment_started is None:
                     begin_segment(now, utc_now)
                 if (
@@ -661,6 +666,13 @@ def _execute_soak_suite(
             and previous_sample_monotonic is not None
             and previous_sample_monotonic - segment_started
             >= parameters["duration_seconds"]
+            and (
+                not is_short
+                or (
+                    sample_count >= parameters["minimum_samples"]
+                    and trace_count >= trace_required
+                )
+            )
         ):
             verdict = (
                 services.short_stability_verdict if is_short else services.soak_verdict
@@ -699,9 +711,10 @@ def _execute_soak_suite(
 
         next_event = next_sample
         if active_segment is not None:
-            next_event = min(
-                next_event, next_trace, segment_started + parameters["duration_seconds"]
-            )
+            next_event = min(next_event, next_trace)
+            duration_deadline = segment_started + parameters["duration_seconds"]
+            if services.monotonic() < duration_deadline:
+                next_event = min(next_event, duration_deadline)
         if is_short and runtime_deadline is not None:
             next_event = min(next_event, runtime_deadline)
         delay = max(0.1, next_event - services.monotonic())
