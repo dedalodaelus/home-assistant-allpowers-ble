@@ -71,6 +71,28 @@ A remote host and HA OS are also supported using the REST/WebSocket APIs. `netwo
 
 ## Commands
 
+### Contributor paths and evidence tiers
+
+Use `onboard` for an interactive, capability-aware Bronze, Silver, or Gold plan;
+Platinum uses the existing 24-hour read-only soak. Bronze is read-only and short.
+Silver adds supervised basic output checks only for physically present,
+explicitly eligible controls, followed by physical confirmation and reconnect.
+Gold adds declared supported settings/functions and applicable recovery checks.
+Durations shown by plans are guidance, and a single observed BLE route can
+support a scoped qualification. A feature confirmed absent is skipped as not
+applicable; unknown or untested claimed features remain blocked or inconclusive.
+
+Before an experimental candidate action, the CLI identifies the exact operation
+and displays a concise safety notice: the device behavior is not fully qualified;
+disconnect critical loads, stay present, and be ready for unexpected power
+changes or manual restoration. This notice requests informed consent and does
+not replace technical safeguards. Only pre-reviewed candidate operations are
+offered, each state-changing action and restoration requires separate consent,
+and the integration enforces a temporary HIL grant. Unknown opcodes, unsafe or
+unpreservable bits, and physically absent features cannot be tested by accepting
+the notice. Normal Home Assistant entities remain unchanged. See
+[hardware support tiers](compatibility.md#write-authorization-and-hardware-support-tiers).
+
 - `onboard`: from this prepared checkout, start an interactive contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and asks for the desired Bronze/Silver/Gold tier or the existing 24-hour Platinum soak. It displays known identity/build/route facts and the applicable plan before asking you to type `RUN`. Each state change and restoration still needs its own explicit consent and the existing server-side HIL grant. At the end, you can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.

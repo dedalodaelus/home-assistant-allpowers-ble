@@ -23,6 +23,19 @@ marked as `Blocked` with an issue reference, or `N/A` with an explicit rationale
 | IQS-06 stable promotion is blocked until release blockers are cleared | Stable milestone close requires zero open `release-blocker` issues and all criteria marked `Done` or justified `N/A` | [Release checklist](release-checklist.md), [Merge gate workflow](../.github/workflows/merge-gate.yml), [Issue #55](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/55) | Done | None |
 | IQS-07 Home Assistant Core maintainership requirement | Not applicable to this repository because it is intentionally distributed as a custom integration through HACS/manual install | [Roadmap quality flow](roadmap.md#release-and-quality-flow) | N/A | Not applicable by scope |
 
+## Project hardware support tiers
+
+Bronze, Silver, Gold, and Platinum are internal evidence classifications, not
+Home Assistant Integration Quality Scale ratings or runtime permissions. The
+HIL evaluator computes a result for each exact model, hardware revision,
+firmware, and observed route from reviewed evidence; it reports `unqualified`
+when the requirements are unmet. One route is sufficient for that scoped result.
+Confirmed absent features are not applicable, while unknown or untested claimed
+features do not count as absent. Platinum requires a reviewed, uninterrupted
+86,400-second read-only soak in addition to Gold. See the
+[compatibility guide](compatibility.md#write-authorization-and-hardware-support-tiers)
+and [HIL runbook](hil-qualification.md).
+
 ## Stable release review cadence
 
 The readiness contract is reviewed on every stable promotion PR from `devel` to
