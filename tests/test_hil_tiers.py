@@ -187,7 +187,12 @@ def _capture(run: dict[str, Any], revision: dict[str, Any], root: Path) -> str:
 
 
 def _bronze_records(
-    run: dict[str, Any], revision: dict[str, Any], root: Path, capture: str
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    root: Path,
+    capture: str,
+    *,
+    decoded_event: str = "status_data_decoded",
 ) -> dict[str, Any]:
     protocol_rows = [
         {
@@ -210,7 +215,7 @@ def _bronze_records(
             "seq": 2,
             "scenario": "read_only_snapshot",
             "operation_id": "read_only_snapshot",
-            "event": "notification_decoded",
+            "event": decoded_event,
             "direction": "notify",
             "verdict": "ok",
             "physical_outcome": "pass",
@@ -466,6 +471,7 @@ def _matrix_fixture(
     soak_mode: str = "normal",
     run_id: str = "tier-run",
     captured_at: datetime | None = None,
+    bronze_decoded_event: str = "status_data_decoded",
 ) -> dict[str, Any]:
     revision = dict(REVISION)
     run_time = captured_at or datetime.now(UTC).replace(microsecond=0)
@@ -489,7 +495,9 @@ def _matrix_fixture(
     }
     capture = _capture(run, revision, root)
     run["evidence"] = [capture]
-    run["bronze_evidence"] = _bronze_records(run, revision, root, capture)
+    run["bronze_evidence"] = _bronze_records(
+        run, revision, root, capture, decoded_event=bronze_decoded_event
+    )
     absent = "tests/hil/fixtures/light-absence.md"
     (root / absent).parent.mkdir(parents=True, exist_ok=True)
     (root / absent).write_text(
@@ -565,6 +573,25 @@ def _validate_and_evaluate(
         max_age_days=None,
     )
     return errors, evaluate_tiers(matrix)
+
+
+@pytest.mark.parametrize(
+    ("decoded_event", "expected_tier"),
+    [("status_data_decoded", "bronze"), ("notification_decoded", "unqualified")],
+)
+def test_qualification_requires_status_typed_bronze_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decoded_event: str,
+    expected_tier: str,
+):
+    matrix = _matrix_fixture(tmp_path, "bronze", bronze_decoded_event=decoded_event)
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert result["tiers"][0]["tier"] == expected_tier
+    if expected_tier == "bronze":
+        assert errors == []
+    else:
+        assert errors
 
 
 def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(

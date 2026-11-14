@@ -614,6 +614,8 @@ def _execute_tier_suite(
                                 event
                                 for event in events
                                 if event.get("event") == "notification_decoded"
+                                and isinstance(event.get("decoded_packet_types"), list)
+                                and "StatusData" in event["decoded_packet_types"]
                                 and status_tx is not None
                                 and event.get("session_generation")
                                 == status_tx.get("session_generation")

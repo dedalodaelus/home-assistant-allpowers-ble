@@ -436,7 +436,7 @@ def _has_bound_bronze_probe(
             and row.get("capture_id") == request["capture_id"]
             and row.get("session_generation") == request["session_generation"]
             and row.get("seq", 0) > request["seq"]
-            and row.get("event") == "notification_decoded"
+            and row.get("event") == "status_data_decoded"
             and row.get("direction") == "notify"
             and row.get("verdict") == "ok"
             for row in rows

@@ -99,6 +99,7 @@ EVENT_NAMES = {
     "probe_disconnect_failed",
     "client_stopped",
 }
+PUBLIC_EVENT_NAMES = EVENT_NAMES | {"status_data_decoded"}
 DECLARATIONS = load_scenarios()
 SCENARIO_IDS = {scenario.id for scenario in DECLARATIONS}
 DECLARATION_BY_ID = {scenario.id: scenario for scenario in DECLARATIONS}
@@ -1983,6 +1984,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     event
                     for event in trace_events
                     if event.get("event") == "notification_decoded"
+                    and isinstance(event.get("decoded_packet_types"), list)
+                    and "StatusData" in event["decoded_packet_types"]
                     and status_tx is not None
                     and event.get("session_generation")
                     == status_tx.get("session_generation")
@@ -2140,7 +2143,13 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 capture_rows.append(
                     (
                         seq,
-                        event,
+                        (
+                            "status_data_decoded"
+                            if event == "notification_decoded"
+                            and isinstance(item.get("decoded_packet_types"), list)
+                            and "StatusData" in item["decoded_packet_types"]
+                            else event
+                        ),
                         item["utc"],
                         item["elapsed_ms"],
                         item["session_generation"],
@@ -2365,6 +2374,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     and status_frame.get("frame_validation") == "validated_tx"
                     and isinstance(decoded_event, dict)
                     and decoded_event.get("event") == "notification_decoded"
+                    and isinstance(decoded_event.get("decoded_packet_types"), list)
+                    and "StatusData" in decoded_event["decoded_packet_types"]
                     and decoded_event.get("session_generation")
                     == status_event.get("session_generation")
                 ):
@@ -3617,7 +3628,7 @@ def verify_public_archive(
                         isinstance(status_event, dict)
                         and status_event.get("event") == "write_attempt"
                         and isinstance(decoded_event, dict)
-                        and decoded_event.get("event") == "notification_decoded"
+                        and decoded_event.get("event") == "status_data_decoded"
                         and status_event.get("session_generation")
                         == decoded_event.get("session_generation")
                         and isinstance(status_frame, dict)
@@ -3710,7 +3721,7 @@ def verify_public_archive(
                         or type(event.get("seq")) is not int
                         or event.get("seq") < 1
                         or not isinstance(event.get("event"), str)
-                        or event.get("event") not in EVENT_NAMES
+                        or event.get("event") not in PUBLIC_EVENT_NAMES
                         or event.get("layer") != "gatt_api"
                         or not isinstance(event.get("utc"), str)
                         or datetime.fromisoformat(event["utc"]).utcoffset() is None

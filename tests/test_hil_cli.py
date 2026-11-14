@@ -345,6 +345,168 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 
 
+@pytest.mark.parametrize(
+    ("packet_types", "expected_probe", "expected_public_event"),
+    [
+        (["SettingsData"], "inconclusive", "notification_decoded"),
+        ([], "inconclusive", "notification_decoded"),
+        (["StatusData"], "pass", "status_data_decoded"),
+    ],
+)
+def test_bronze_protocol_probe_requires_status_data_through_public_export(
+    monkeypatch,
+    tmp_path,
+    packet_types,
+    expected_probe,
+    expected_public_event,
+):
+    from argparse import Namespace
+    from datetime import UTC, datetime
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from scripts.hil.evidence import export_archive, verify_public_archive
+
+    run_id = "0123456789abcdef"
+    status_request = bytes.fromhex("a565b1000106010000000000")
+    sample = {
+        "battery": {
+            "value": 55,
+            "verified": True,
+            "source": "ha_rest_entity_state",
+        }
+    }
+
+    class BronzeProbeHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.capture = None
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "private-entry",
+                    "private-user",
+                    run_id,
+                    "read_only_snapshot",
+                    "active_proxy",
+                )
+                self.capture.observe_route(
+                    3,
+                    ConnectedRoute(
+                        "active_proxy",
+                        "esphome",
+                        "esphome_scanner_binding",
+                        proxy_id="private-proxy-id",
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                    }
+                ]
+            assert command["type"].endswith("/stop")
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+        def request_read_only_refresh(self, entity_id):
+            assert entity_id == "button.station_refresh"
+            self.capture.record(
+                "write_attempt",
+                session_generation=3,
+                frame=status_request,
+                direction="tx",
+            )
+            self.capture.record(
+                "notification_received",
+                session_generation=3,
+                frame=b"\xaa\x55",
+                direction="rx",
+            )
+            self.capture.record(
+                "notification_decoded",
+                session_generation=3,
+                decoded_packets=len(packet_types),
+                decoded_packet_types=packet_types,
+                characteristic_uuid="0000fff1-0000-1000-8000-00805f9b34fb",
+                inferred_model_profile="r600",
+                session_hardware_revision="0.3",
+                discarded_frames=0,
+                discarded_bytes=0,
+            )
+
+    api_fake = BronzeProbeHA()
+    device = discovery.Device(
+        device_id="private-device-id",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="private-entry",
+        refresh_entity="button.station_refresh",
+    )
+    environment_data = {
+        "schema_version": 1,
+        "home_assistant": {},
+        "runner_host": {},
+        "integration": {},
+    }
+    session = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "qualification_status": "inconclusive",
+        "mode": "read_only_preflight",
+        "scenario_id": "read_only_snapshot",
+        "started_at": datetime.now(UTC).isoformat(),
+        "device": {
+            "model": {"value": "R600", "verified": True},
+            "hardware_version": {"value": "0.3", "verified": True},
+            "firmware_version": {"value": "0.2", "verified": True},
+        },
+    }
+    run_dir = storage.write_run(
+        tmp_path / "bronze-runs", "runner", environment_data, session
+    )
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: sample)
+    monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
+    monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+    plan = {
+        "requested_tier": "bronze",
+        "steps": [{"id": "read_only_probe"}],
+        "device": {"build_provenance": {}},
+    }
+
+    result = cli._execute_tier_suite(
+        api_fake,
+        Namespace(route="active_proxy", non_interactive=False),
+        device,
+        environment_data,
+        run_dir,
+        run_id,
+        plan,
+        None,
+    )
+
+    assert result == (0 if expected_probe == "pass" else 2)
+    private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
+    assert private_bronze["protocol_probe"]["outcome"] == expected_probe
+    archive = export_archive(run_dir.parent, confirmed=True)
+    _, public, _ = verify_public_archive(archive, include_contents=True)
+    public_bronze = json.loads(public["tier-bronze-read-only.json"])
+    public_events = [json.loads(line) for line in public["events.jsonl"].splitlines()]
+    decoded = next(row for row in public_events if row["seq"] == 4)
+    assert public_bronze["protocol_probe"] == (
+        "verified" if expected_probe == "pass" else "inconclusive"
+    )
+    assert decoded["event"] == expected_public_event
+    assert "decoded_packet_types" not in decoded
+
+
 @pytest.mark.parametrize("include_trace", [True, False])
 def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
     monkeypatch, tmp_path, include_trace

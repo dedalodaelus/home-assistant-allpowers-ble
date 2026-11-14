@@ -235,7 +235,7 @@ def _claim_support(
                 for row in events
                 if row.get("capture_id") == capture_id
                 and row.get("seq") == decoded_seq
-                and row.get("event") == "notification_decoded"
+                and row.get("event") == "status_data_decoded"
             ),
             None,
         )
@@ -398,7 +398,7 @@ def review_imported_run(
                         "seq": decoded_seq,
                         "scenario": "read_only_snapshot",
                         "operation_id": "read_only_snapshot",
-                        "event": "notification_decoded",
+                        "event": "status_data_decoded",
                         "direction": "notify",
                         "verdict": "ok",
                     },
