@@ -464,13 +464,15 @@ been piloted on hardware.
 
 The `recovery` suite is a guided observation. It asks the operator to choose
 and perform a route interruption/restoration, vendor-app contention, or HA
-reload/upgrade; the CLI does not initiate any of those actions. Reconnection
-actions require a fresh connected session with a changed generation or an
-observed disconnect. The vendor-app branch can instead report `ha_stable` for
-the same verified session when it captures genuinely new status telemetry and
-complete verified GATT route evidence; it reports `ha_recovered` when a
-changed session is observed and that evidence is complete. It captures a
-bounded route trace and asks for a numeric physical outcome where applicable.
+reload/upgrade; the CLI does not initiate any of those actions. For route
+interruption/restoration and HA reload/upgrade, successful recovery requires a
+verified connected session with a new generation; an observed disconnect
+alone is insufficient. The optional vendor-app branch can instead report
+`ha_stable` for the same verified session when it captures genuinely new
+status telemetry and complete verified GATT route evidence. It reports
+`ha_recovered` when a changed session is observed and that evidence is
+complete. It captures a bounded route trace and asks for a numeric physical
+outcome where applicable.
 Missing route proof, incomplete trace, or missing recovery confirmation
 remains inconclusive. The evidence is not build-level HIL qualification.
 
