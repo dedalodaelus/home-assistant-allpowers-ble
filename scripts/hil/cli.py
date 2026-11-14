@@ -13,6 +13,7 @@ import os
 import re
 from time import monotonic, sleep
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Callable
 
@@ -282,6 +283,51 @@ def _scenario_controls(
             ),
         }
     return result
+
+
+def _pending_plan_status(step: dict[str, Any]) -> tuple[str, str]:
+    """Explain checks that still need evidence separately from hard blockers."""
+    if step.get("eligibility") != "blocked":
+        return str(step.get("eligibility", "blocked")), "; ".join(
+            step.get("reasons", [])
+        )
+    reasons = set(step.get("reasons", []))
+    pending = {
+        "connected GATT route has not been verified",
+        "candidate needs a fresh, single-use backend HIL grant",
+    }
+    if reasons and reasons <= pending:
+        return "pending verification/consent", "; ".join(sorted(reasons))
+    return "blocked", "; ".join(sorted(reasons))
+
+
+def _candidate_step_needs_authorization(
+    step: dict[str, Any],
+    capabilities: dict[str, Any] | None,
+    controls: dict[str, Any],
+    observed_route: str | None,
+) -> bool:
+    """Recognize an otherwise eligible output candidate awaiting its backend grant."""
+    feature = step.get("feature")
+    if feature not in {"ac_output", "dc_output", "light_output"}:
+        return False
+    snapshot = capabilities if isinstance(capabilities, dict) else {}
+    features = snapshot.get("features", {})
+    facts = features.get(feature, {}) if isinstance(features, dict) else {}
+    control_key = "light" if feature == "light_output" else feature
+    control = controls.get(control_key, {})
+    if not isinstance(facts, dict) or not isinstance(control, dict):
+        return False
+    reasons = set(step.get("reasons", []))
+    reasons.discard("candidate needs a fresh, single-use backend HIL grant")
+    return bool(
+        facts.get("physical_presence") == "present"
+        and facts.get("candidate_hil_eligible") is True
+        and facts.get("production_authorized") is not True
+        and control.get("eligible") is True
+        and observed_route in {"local_adapter", "active_proxy"}
+        and not reasons
+    )
 
 
 def _device_fingerprint(
@@ -570,6 +616,7 @@ def _execute_tier_suite(
         "schema_version": 1,
         "run_id": run_id,
         "requested_tier": plan["requested_tier"],
+        "execution_tier": plan["requested_tier"],
         "requested_route": args.route,
         "device": {
             "model": device.model,
@@ -586,7 +633,8 @@ def _execute_tier_suite(
     recovery_completed = False
     recovery_evidence_run: str | None = None
     stop_reason: str | None = None
-    for planned in plan["steps"]:
+    plan_steps = plan["steps"]
+    for planned in plan_steps:
         step_id = planned["id"]
         if stop_reason is not None:
             execution["steps"].append(
@@ -596,6 +644,26 @@ def _execute_tier_suite(
                     "reason": f"not attempted because an earlier step stopped execution: {stop_reason}",
                 }
             )
+            continue
+        if (
+            getattr(args, "onboarding", False)
+            and planned.get("action") in {"write", "manual"}
+            and planned.get("eligibility")
+            not in (
+                {"eligible", "pending_authorization"}
+                if planned.get("action") == "write"
+                else {"eligible"}
+            )
+        ):
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "blocked",
+                    "reason": "; ".join(planned.get("reasons", []))
+                    or "the refreshed plan does not authorize this step",
+                }
+            )
+            overall = 2
             continue
         if step_id == "read_only_probe":
             if args.non_interactive:
@@ -887,6 +955,144 @@ def _execute_tier_suite(
                     "human_review": "pending",
                 }
             )
+            if getattr(args, "onboarding", False) and plan.get("requested_tier") in {
+                "silver",
+                "gold",
+            }:
+                from .guided import build_tier_plan
+
+                observed_route = (
+                    protocol_probe.get("route")
+                    if protocol_probe.get("outcome") == "pass"
+                    else None
+                )
+                refreshed_capabilities = None
+                if device.config_entry_id is not None:
+                    try:
+                        refreshed_capabilities = api.hil_capabilities(
+                            device.config_entry_id
+                        )
+                    except HAAPIError:
+                        pass
+                refreshed_controls = _scenario_controls(
+                    api, device, refreshed_capabilities
+                )
+                requested_tier = plan["requested_tier"]
+                build_provenance = plan.get("device", {}).get("build_provenance", {})
+                refreshed_plan = build_tier_plan(
+                    requested_tier,
+                    refreshed_capabilities,
+                    refreshed_controls,
+                    observed_route=observed_route,
+                    build_provenance=build_provenance,
+                )
+                for refreshed_step in refreshed_plan["steps"]:
+                    if _candidate_step_needs_authorization(
+                        refreshed_step,
+                        refreshed_capabilities,
+                        refreshed_controls,
+                        observed_route,
+                    ):
+                        refreshed_step["eligibility"] = "pending_authorization"
+                        refreshed_step["reasons"] = [
+                            "requires a fresh single-use backend grant and separate operator consent"
+                        ]
+                print(
+                    "Updated plan after the Bronze connected-route and capability check:"
+                )
+                for refreshed_step in refreshed_plan["steps"]:
+                    status, reasons = _pending_plan_status(refreshed_step)
+                    print(
+                        f"  {status}: {refreshed_step['id']} "
+                        f"({refreshed_step['feature']}) — "
+                        f"{reasons or 'ready for the existing guided suite'}"
+                    )
+                output_steps = [
+                    step
+                    for step in refreshed_plan["steps"]
+                    if step.get("action") == "write"
+                    and step.get("feature")
+                    in {"ac_output", "dc_output", "light_output"}
+                    and step.get("eligibility") in {"eligible", "pending_authorization"}
+                ]
+                if not bronze_pass:
+                    output_steps = []
+                if not output_steps:
+                    print(
+                        f"No Silver/Gold output step is currently achievable for "
+                        f"{requested_tier.title()}; output qualification cannot be claimed."
+                    )
+                    try:
+                        continue_bronze = (
+                            services.prompt(
+                                "Type BRONZE to keep only the read-only diagnostics, or press Enter to stop: "
+                            ).strip()
+                            == "BRONZE"
+                        )
+                    except EOFError, KeyboardInterrupt:
+                        continue_bronze = False
+                    if continue_bronze:
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
+                        )
+                        execution["execution_tier"] = "bronze"
+                        print(
+                            f"Continuing as Bronze diagnostics; requested tier "
+                            f"remains {requested_tier.title()}. No Silver/Gold evidence is claimed."
+                        )
+                    else:
+                        stop_reason = "operator declined the Bronze-only fallback"
+                        execution["steps"].append(
+                            {
+                                "step_id": "higher_tier_plan",
+                                "outcome": "blocked",
+                                "reason": stop_reason,
+                            }
+                        )
+                        overall = 2
+                        continue
+                else:
+                    try:
+                        proceed = (
+                            services.prompt(
+                                "Type RUN after reviewing the refreshed plan to authorize proceeding to individually consented steps: "
+                            ).strip()
+                            == "RUN"
+                        )
+                    except EOFError, KeyboardInterrupt:
+                        proceed = False
+                    if not proceed:
+                        stop_reason = "operator did not confirm the refreshed plan"
+                        overall = 2
+                        continue
+                    print(
+                        "A pending authorization still requires the backend grant "
+                        "and a separate consent for every action and restoration."
+                    )
+                refreshed_plan["requested_tier"] = requested_tier
+                refreshed_plan["execution_tier"] = execution["execution_tier"]
+                session_path = output_dir / "session.json"
+                try:
+                    saved_session = json.loads(session_path.read_text(encoding="utf-8"))
+                    if isinstance(saved_session, dict):
+                        saved_session["test_plan"] = refreshed_plan
+                        session_path.write_text(
+                            json.dumps(saved_session, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+                        session_path.chmod(0o600)
+                except OSError, json.JSONDecodeError:
+                    pass
+                features = (
+                    refreshed_capabilities.get("features", {})
+                    if isinstance(refreshed_capabilities, dict)
+                    else {}
+                )
+                plan_steps[:] = refreshed_plan["steps"]
             if not bronze_pass:
                 overall = 2
             continue
@@ -2160,14 +2366,14 @@ def execute(args: argparse.Namespace) -> int:
                 "each state change and restoration separately."
             )
             for step in test_plan["steps"]:
-                reasons = (
-                    "; ".join(step["reasons"]) or "ready for the existing guided suite"
-                )
-                print(
-                    f"  {step['eligibility']}: {step['id']} ({step['feature']}) — {reasons}"
-                )
+                status, reasons = _pending_plan_status(step)
+                reasons = reasons or "ready for the existing guided suite"
+                print(f"  {status}: {step['id']} ({step['feature']}) — {reasons}")
             print("Restoration:", test_plan["restoration_plan"])
             if getattr(args, "onboarding", False):
+                print(
+                    "Attained evidence-backed tier: unqualified until independent review."
+                )
                 if (
                     input("Type RUN after reviewing the plan to continue: ").strip()
                     != "RUN"
@@ -2212,7 +2418,11 @@ def execute(args: argparse.Namespace) -> int:
             api, args, selected, output_dir, run_id, resume_state
         )
         if getattr(args, "onboarding", False):
-            return _onboard_export(output_dir, result)
+            resume_command = (
+                "python -m scripts.hil run --suite soak-24h --resume "
+                f"{shlex.quote(str(output_dir))} --ha-url {shlex.quote(api.origin)}"
+            )
+            return _onboard_export(output_dir, result, resume_command=resume_command)
         return result
     if args.command == "trace":
         if entry_id is None:
@@ -2291,7 +2501,9 @@ def execute(args: argparse.Namespace) -> int:
     return 0
 
 
-def _onboard_export(output_dir: Path, run_result: int) -> int:
+def _onboard_export(
+    output_dir: Path, run_result: int, *, resume_command: str | None = None
+) -> int:
     """Offer a local privacy-reviewed export after the existing HIL run ends."""
     execution_path = output_dir / "tier-execution.json"
     if execution_path.is_file():
@@ -2315,7 +2527,31 @@ def _onboard_export(output_dir: Path, run_result: int) -> int:
         print(
             "Run did not complete successfully; private checkpoint remains available."
         )
-        return run_result
+        if resume_command is not None and (output_dir / "checkpoint.json").is_file():
+            print("To resume the existing Platinum soak, run:")
+            print(resume_command)
+        if execution_path.is_file():
+            try:
+                execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            except OSError, json.JSONDecodeError:
+                execution = {}
+            execution_steps = (
+                execution.get("steps", []) if isinstance(execution, dict) else []
+            )
+            unsafe = isinstance(execution_steps, list) and any(
+                step.get("state_safe_to_continue") is False
+                for step in execution_steps
+                if isinstance(step, dict)
+            )
+            if unsafe:
+                print(
+                    "SAFETY WARNING: a control may not have been restored. "
+                    "Inspect the station physically before any further action; "
+                    "the wizard will not retry or restore it automatically."
+                )
+    if not (output_dir / "session.json").is_file():
+        print("No valid private run is available for export.")
+        return run_result or 2
     try:
         export_choice = (
             input("Review and create a privacy-safe evidence ZIP now? [y/N]: ")
@@ -2323,7 +2559,7 @@ def _onboard_export(output_dir: Path, run_result: int) -> int:
             .casefold()
         )
     except EOFError, KeyboardInterrupt:
-        return 2
+        return run_result or 2
     if export_choice not in {"y", "yes"}:
         print("No archive created. The private run remains on this machine.")
         return run_result
@@ -2331,16 +2567,25 @@ def _onboard_export(output_dir: Path, run_result: int) -> int:
         export_archive(output_dir, confirmed=False)
     except HAAPIError as ex:
         if str(ex) != "Export requires explicit confirmation":
-            raise
-    if (
-        input(
-            "Type EXPORT after reviewing the ZIP contents to create it locally: "
-        ).strip()
-        != "EXPORT"
-    ):
+            print("The available run could not be exported:", ex)
+            return run_result or 2
+    try:
+        confirmed = (
+            input(
+                "Type EXPORT after reviewing the ZIP contents to create it locally: "
+            ).strip()
+            == "EXPORT"
+        )
+    except EOFError, KeyboardInterrupt:
+        return run_result or 2
+    if not confirmed:
         print("Export cancelled; no archive created.")
-        return 2
-    export_archive(output_dir, confirmed=True)
+        return run_result or 2
+    try:
+        export_archive(output_dir, confirmed=True)
+    except HAAPIError as ex:
+        print("The reviewed archive could not be created:", ex)
+        return run_result or 2
     print("Privacy-safe HIL evidence archive written locally; nothing was uploaded.")
     return run_result
 

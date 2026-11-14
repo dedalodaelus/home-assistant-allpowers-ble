@@ -31,6 +31,32 @@ Set `HA_HIL_TOKEN` in the process environment first, or omit `--non-interactive`
 
 `HA_HIL_URL` may be used instead of `--ha-url`. Only the HA origin is valid, without `/api`, user info, query strings or embedded tokens. HTTPS uses normal certificate verification; there is **no** option to disable it. Plain HTTP to a non-loopback address requires `--allow-insecure-http` and exposes the token on the network; only use it on an explicitly trusted, isolated test network. **The CLI deliberately ignores environment proxy variables** (`http_proxy`, `https_proxy`, `ALL_PROXY`, etc.) for both REST and WebSocket transport: this prevents a token intended for a loopback HA server from leaking to an ambient proxy. A reverse proxy at the explicitly selected HA URL still works; upstream HTTP CONNECT proxies are not supported. Do not expose the token in shell history or screenshots.
 
+### Contributor quickstart
+
+From the prepared checkout and activated `.venv-hil`, the wizard asks for a Home Assistant origin and securely prompts for a missing token:
+
+Linux/macOS:
+
+```bash
+source .venv-hil/bin/activate
+python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv-hil\Scripts\Activate.ps1
+python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
+```
+
+If a Platinum soak is interrupted, the wizard prints a resume command. It uses the existing private checkpoint, for example:
+
+```bash
+python -m scripts.hil run --suite soak-24h --resume 'hil-results/<run>/private' --ha-url https://home-assistant.example:8123
+```
+
+The resume command prompts for the token again when `HA_HIL_TOKEN` is unset; the token is never written into the checkpoint.
+
 For a local HA Container installation:
 
 ```bash

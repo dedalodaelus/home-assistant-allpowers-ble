@@ -51,6 +51,7 @@ def test_onboard_prompts_for_origin_and_hides_missing_token(monkeypatch):
 
 
 def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_path):
+    output_dir = storage.write_run(tmp_path, "export-run", {}, {})
     prompts = iter(["yes", "EXPORT"])
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
     calls = []
@@ -62,18 +63,228 @@ def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_pat
         return tmp_path / "hil-evidence.zip"
 
     monkeypatch.setattr(cli, "export_archive", export_archive)
-    assert cli._onboard_export(tmp_path, 0) == 0
+    assert cli._onboard_export(output_dir, 0) == 0
     assert calls == [False, True]
 
 
 def test_onboard_export_decline_never_creates_archive(monkeypatch, tmp_path):
+    output_dir = storage.write_run(tmp_path, "declined-run", {}, {})
     monkeypatch.setattr(builtins, "input", lambda _prompt: "no")
     monkeypatch.setattr(
         cli,
         "export_archive",
         lambda *_args, **_kwargs: pytest.fail("declined export must not be built"),
     )
-    assert cli._onboard_export(tmp_path, 0) == 0
+    assert cli._onboard_export(output_dir, 0) == 0
+
+
+def _onboard_tty(monkeypatch, responses):
+    answers = iter(responses)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+
+
+def test_onboard_bronze_drives_wizard_and_real_public_export(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = FakeHA(allpowers_registry)
+    fake.scanners = {"bluetooth": 2, "esphome": 1}
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    _onboard_tty(monkeypatch, ["1", "RUN", "yes", "EXPORT"])
+    output_root = tmp_path / "onboard-bronze"
+
+    def finish_existing_runner(
+        _api, _args, _device, _environment, _output_dir, _run_id, _plan, _capabilities
+    ):
+        return 0
+
+    monkeypatch.setattr(cli, "_execute_tier_suite", finish_existing_runner)
+    assert (
+        cli.main(
+            [
+                "onboard",
+                "--ha-url",
+                "https://example.test",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 0
+    )
+    (run_root,) = tuple(output_root.iterdir())
+    archive = run_root / "hil-evidence.zip"
+    assert archive.is_file()
+    with zipfile.ZipFile(archive) as exported:
+        content = b"".join(exported.read(name) for name in exported.namelist())
+    assert b"PRIVATE_TOKEN" not in content
+    assert b"secret-entry-1" not in content
+    assert b"secret-device-id-012345" not in content
+    assert fake.calls[0] == ("get", "/api/config")
+
+
+def test_onboard_silver_unknown_route_offers_bronze_without_write(
+    monkeypatch, tmp_path, allpowers_registry, capsys
+):
+    fake = FakeHA(allpowers_registry)
+    fake.scanners = {"bluetooth": 1}
+    trace_calls = []
+
+    def unavailable_trace(commands):
+        trace_calls.extend(commands)
+        raise api.HAAPIError("trace API unavailable")
+
+    fake.websocket = unavailable_trace
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
+    monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
+    _onboard_tty(monkeypatch, ["2", "RUN", "1", "BRONZE", "no"])
+    output_root = tmp_path / "onboard-silver"
+
+    result = cli.main(
+        [
+            "onboard",
+            "--ha-url",
+            "https://example.test",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+    assert result == 2
+    (run_root,) = tuple(output_root.iterdir())
+    private = run_root / "private"
+    execution = json.loads((private / "tier-execution.json").read_text())
+    saved_session = json.loads((private / "session.json").read_text())
+    assert execution["requested_tier"] == "silver"
+    assert execution["execution_tier"] == "bronze"
+    assert execution["verified_routes"] == []
+    assert saved_session["test_plan"]["device"]["verified_route"] is None
+    assert saved_session["test_plan"]["requested_tier"] == "silver"
+    assert saved_session["test_plan"]["execution_tier"] == "bronze"
+    output = capsys.readouterr().out
+    assert "No Silver/Gold output step is currently achievable" in output
+    assert "Continuing as Bronze diagnostics" in output
+    assert not any(call[0] == "service" for call in fake.calls)
+    assert all(command["type"].endswith("/start") for command in trace_calls)
+
+
+def test_onboard_never_dispatches_a_blocked_reconnect_step(tmp_path):
+    from argparse import Namespace
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="private-entry",
+    )
+    output_dir = storage.write_run(tmp_path, "blocked-reconnect", {}, {})
+
+    class NoCallHA:
+        def __getattr__(self, name):
+            pytest.fail(f"blocked plan must not call HA method {name}")
+
+    result = cli._execute_tier_suite(
+        NoCallHA(),
+        Namespace(
+            onboarding=True,
+            route="auto",
+            output_root=tmp_path,
+            non_interactive=False,
+        ),
+        device,
+        {},
+        output_dir,
+        "private-run",
+        {
+            "requested_tier": "silver",
+            "steps": [
+                {
+                    "id": "basic_reconnect",
+                    "action": "manual",
+                    "eligibility": "blocked",
+                    "reasons": ["connected GATT route has not been verified"],
+                }
+            ],
+        },
+        None,
+    )
+    execution = json.loads((output_dir / "tier-execution.json").read_text())
+    assert result == 2
+    assert execution["steps"] == [
+        {
+            "step_id": "basic_reconnect",
+            "outcome": "blocked",
+            "reason": "connected GATT route has not been verified",
+        }
+    ]
+
+
+def test_onboard_multiple_device_cancel_stops_before_run(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    entities, devices, entries = allpowers_registry
+    devices.append(
+        {
+            "id": "second-private-device",
+            "config_entry_id": "second-private-entry",
+            "identifiers": [["allpowers_ble", "second-private-identifier"]],
+            "model": "S500",
+            "hw_version": "0.1",
+            "sw_version": "1.0",
+        }
+    )
+    entries.append(
+        {
+            "entry_id": "second-private-entry",
+            "domain": "allpowers_ble",
+            "state": "loaded",
+        }
+    )
+    fake = FakeHA((entities, devices, entries))
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    _onboard_tty(monkeypatch, ["2", "1", "CANCEL"])
+    monkeypatch.setattr(
+        cli,
+        "_execute_tier_suite",
+        lambda *_args: pytest.fail("cancelled plan must not start the runner"),
+    )
+    result = cli.main(
+        [
+            "onboard",
+            "--ha-url",
+            "https://example.test",
+            "--output-root",
+            str(tmp_path / "cancelled"),
+        ]
+    )
+    assert result == 2
+    assert not (tmp_path / "cancelled").exists()
+
+
+def test_nonzero_platinum_run_offers_export_and_resume_command(
+    monkeypatch, tmp_path, capsys
+):
+    run_dir = storage.write_run(
+        tmp_path / "runs",
+        "platinum-run",
+        {"schema_version": 1},
+        {"schema_version": 1, "qualification_status": "inconclusive"},
+    )
+    (run_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
+    (run_dir / "checkpoint.json").chmod(0o600)
+    _onboard_tty(monkeypatch, ["yes", "EXPORT"])
+    command = (
+        "python -m scripts.hil run --suite soak-24h --resume "
+        f"{run_dir} --ha-url https://example.test"
+    )
+
+    assert cli._onboard_export(run_dir, 7, resume_command=command) == 7
+    assert (run_dir.parent / "hil-evidence.zip").is_file()
+    assert command in capsys.readouterr().out
 
 
 @pytest.fixture
