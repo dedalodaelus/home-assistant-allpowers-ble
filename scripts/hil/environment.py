@@ -435,11 +435,20 @@ def read_only_sample(api: HAClient, device: Device) -> dict[str, Any]:
             values[key] = unknown("entity state request failed")
             continue
         data = safe_state_value(key, state.get("state") if state else None)
-        values[key] = (
-            observed(data, "ha_rest_entity_state")
-            if data is not None
-            else unknown("state not available or not safely representable")
-        )
+        if data is None:
+            values[key] = unknown("state not available or not safely representable")
+            continue
+        record = observed(data, "ha_rest_entity_state")
+        updated = state.get("last_updated") if isinstance(state, dict) else None
+        try:
+            updated_at = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        except AttributeError, TypeError, ValueError:
+            updated_at = None
+        if updated_at is not None and updated_at.tzinfo is not None:
+            age = (datetime.now(UTC) - updated_at.astimezone(UTC)).total_seconds()
+            if 0 <= age <= 86_400:
+                record["sample_age_seconds"] = int(age)
+        values[key] = record
     return values
 
 

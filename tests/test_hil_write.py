@@ -646,6 +646,343 @@ async def test_websocket_grant_executes_exact_packet_on_fake_ble(
     assert connection.results[-1][1]["revoked"] is False
 
 
+@pytest.mark.parametrize(
+    ("answers", "failure", "expected_outcome", "expected_write_count"),
+    [
+        (["1", "1", "1", "1", "1"], None, "pass", 2),
+        (["2"], None, "skipped", 0),
+        (["1", "1"], "trace_start_denied", "inconclusive", 0),
+        (["1", "1"], "grant_denied", "inconclusive", 0),
+        (["1", "1"], "disconnect", "inconclusive", 1),
+        (["1", "1", "1", "1", "1"], "change_trace_corrupt", "inconclusive", 2),
+        (["1", "1", "1", "1", "1"], "restore_ambiguous", "inconclusive", 2),
+    ],
+)
+def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
+    notification_builder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    answers,
+    failure,
+    expected_outcome,
+    expected_write_count,
+) -> None:
+    """Drive the CLI executor through real grant handlers and the Fake BLE client."""
+    import asyncio
+    import hashlib
+    import json
+    from contextlib import contextmanager
+    from dataclasses import replace
+    from time import monotonic
+
+    from scripts.hil import api as hil_api
+    from scripts.hil import cli as hil_cli
+    from scripts.hil.discovery import Device
+    from custom_components.allpowers_ble.const import (
+        NOTIFY_UUID,
+        SERVICE_UUID,
+        WRITE_UUID,
+    )
+    from custom_components.allpowers_ble.protocol import encode_output_control
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from tests.test_client_logic import _connected_client, _settings, _status
+    from tests.ha_stubs import FakeCharacteristic
+
+    client, fake_ble = _connected_client()
+    client._status = _status()
+    client._status_monotonic = monotonic()
+    client._settings = _settings(firmware_version="test-fw")
+    client._settings_monotonic = monotonic()
+    client._session_hardware_revision = ("test-hw", 1)
+    client._connected_route = (
+        1,
+        ConnectedRoute("local_adapter", "bluez", "bluez_device_path", "hci0"),
+    )
+    client._schedule_status_refresh = lambda: None
+    support = SimpleNamespace(model="SYNTHETIC TEST MODEL", profile="synthetic-v1")
+    client._runtime_model_support = lambda: support
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            session_hardware_version="test-hw",
+            settings=_settings(firmware_version="test-fw"),
+            identity_conflicted=False,
+        ),
+        settings_are_fresh=True,
+        status_is_fresh=True,
+    )
+    hass = _FakeHass(SimpleNamespace(client=client, coordinator=coordinator))
+    monkeypatch.setattr(
+        hil_write, "runtime_model_support", lambda _coordinator: support
+    )
+    candidate = SimpleNamespace(
+        hil_candidate_eligible=True, physical_presence=PhysicalPresence.PRESENT
+    )
+    monkeypatch.setattr(
+        hil_write, "model_feature_capability", lambda _support, _feature: candidate
+    )
+    monkeypatch.setattr(
+        client_module, "model_feature_capability", lambda _support, _feature: candidate
+    )
+
+    def validator(profile, status):
+        return profile == "synthetic-v1" and isinstance(status, type(_status()))
+
+    policy = hil_write.CandidatePolicy(
+        model=support.model,
+        hardware="test-hw",
+        firmware="test-fw",
+        profile=support.profile,
+        feature=ModelFeature.DC_OUTPUT,
+        gatt_contract=(SERVICE_UUID, WRITE_UUID, NOTIFY_UUID),
+        physical_presence=PhysicalPresence.PRESENT,
+        semantic_validator=validator,
+    )
+    monkeypatch.setattr(
+        hil_write,
+        "CANDIDATE_POLICIES",
+        {(support.model, "test-hw", "test-fw", ModelFeature.DC_OUTPUT): policy},
+    )
+    original_write = fake_ble.write_gatt_char
+    loop = asyncio.new_event_loop()
+
+    async def write_and_confirm(characteristic, data, *, response):
+        await original_write(characteristic, data, response=response)
+        write_number = len(fake_ble.writes)
+        if failure == "disconnect" and write_number == 1:
+            from bleak.exc import BleakError
+
+            raise BleakError("synthetic disconnect after GATT write")
+        if failure == "restore_ambiguous" and write_number == 2:
+            from bleak.exc import BleakError
+
+            raise BleakError("synthetic ambiguous restoration write")
+        output_flags = data[7]
+        status_flags = (
+            (0x01 if output_flags & 0x01 else 0)
+            | (0x02 if output_flags & 0x02 else 0)
+            | (0x10 if output_flags & 0x20 else 0)
+        )
+        status_packet = notification_builder(
+            0x01, bytes((status_flags, 50, 0, 100, 0, 25, 0, 90))
+        )
+        client._notification_handler(FakeCharacteristic(), bytearray(status_packet))
+
+    monkeypatch.setattr(fake_ble, "write_gatt_char", write_and_confirm)
+
+    class FakeHA:
+        origin = "https://example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.trace_stops = 0
+
+        def hil_capabilities(self, _entry_id):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "pending_transaction": False,
+                "session_generation": 1,
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                },
+            }
+
+        def control_state(self, _feature, _entity_id):
+            return {"available": True, "state": self.state}
+
+        def websocket(self, commands):
+            from custom_components.allpowers_ble import hil_trace
+
+            connection = _Connection()
+            command = commands[0]
+            if failure == "trace_start_denied" and command["type"].endswith("/start"):
+                raise hil_api.HAAPIError("synthetic trace start denial")
+            handler = (
+                hil_trace.ws_start
+                if command["type"].endswith("/start")
+                else hil_trace.ws_stop
+            )
+            loop.run_until_complete(handler(hass, connection, {"id": 40, **command}))
+            if connection.errors:
+                raise hil_api.HAAPIError("synthetic trace command rejected")
+            result = connection.results[-1][1]
+            if command["type"].endswith("/stop"):
+                self.trace_stops += 1
+                if failure == "change_trace_corrupt" and self.trace_stops == 1:
+                    result["event_count"] += 1
+            return [result]
+
+        @contextmanager
+        def websocket_session(self):
+            yield self
+
+        def experimental_output(
+            self,
+            entry_id,
+            feature,
+            target,
+            *,
+            authorization_confirmed,
+            execution_confirmed,
+        ):
+            connection = _Connection()
+
+            async def execute_backend():
+                await hil_write.ws_write_authorize(
+                    hass,
+                    connection,
+                    {
+                        "id": 30,
+                        "entry_id": entry_id,
+                        "feature": feature,
+                        "target": target,
+                    },
+                )
+                if connection.errors:
+                    raise hil_api.HAAPIError("synthetic authorization denied")
+                token = connection.results[-1][1]["token"]
+                if failure == "grant_denied":
+                    hil_write.store(hass).grants.pop(token)
+                await hil_write.ws_write_execute(
+                    hass,
+                    connection,
+                    {"id": 31, "entry_id": entry_id, "token": token},
+                )
+                if connection.errors:
+                    raise hil_api.HAAPIError("synthetic grant execution denied")
+                result = connection.results[-1][1]
+                await hil_write.ws_write_revoke(
+                    hass, connection, {"id": 32, "token": token}
+                )
+                return result
+
+            assert authorization_confirmed is True
+            assert execution_confirmed is True
+            result = loop.run_until_complete(execute_backend())
+            if result.get("confirmed") is True:
+                self.state = "on" if target else "off"
+            return result
+
+    device = Device(
+        device_id="synthetic-device",
+        model="S500",
+        hardware="1",
+        firmware="1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"dc_output": "switch.dc"},
+        config_entry_id="entry-a",
+    )
+    service_answers = iter(answers)
+    services = replace(
+        hil_cli._suite_services(), prompt=lambda _question: next(service_answers)
+    )
+    from scripts.hil.storage import write_run
+
+    api = FakeHA()
+    monkeypatch.setattr(hil_cli, "_suite_services", lambda: services)
+    parent = write_run(tmp_path, "guided-parent", {}, {})
+    plan_steps = [{"id": "dc_output_cycle"}]
+    if failure in {"grant_denied", "restore_ambiguous"}:
+        plan_steps.append({"id": "dc_output_cycle"})
+    try:
+        tier_status = hil_cli._execute_tier_suite(
+            api,
+            SimpleNamespace(route="auto", output_root=tmp_path, non_interactive=False),
+            device,
+            {},
+            parent,
+            "0123456789abcdef",
+            {"requested_tier": "gold", "steps": plan_steps},
+            {
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                }
+            },
+        )
+    finally:
+        loop.close()
+    execution = json.loads((parent / "tier-execution.json").read_text())
+    result = execution["steps"][0]
+    if expected_outcome == "pass":
+        assert tier_status == 0
+        assert execution["review_state"] == "pending"
+        assert result["human_review"] == "pending"
+        assert execution["device"] == {
+            "model": "S500",
+            "hardware_version": "1",
+            "firmware_version": "1",
+        }
+        assert execution["requested_route"] == "auto"
+        assert execution["verified_routes"] == ["local_adapter"]
+        assert result["observed_routes"] == ["local_adapter"]
+    else:
+        assert tier_status == 2
+    if failure in {"grant_denied", "restore_ambiguous"}:
+        assert execution["steps"][1]["outcome"] == "blocked"
+        assert result["reason"] in execution["steps"][1]["reason"]
+    if failure == "restore_ambiguous":
+        assert "restor" in result["reason"].lower()
+        assert len(fake_ble.writes) == 2
+    if failure == "grant_denied":
+        assert len(fake_ble.writes) == 0
+        assert "denied" in result["reason"].lower()
+    assert result["outcome"] == expected_outcome, result
+    assert len(fake_ble.writes) == expected_write_count
+    expected_packets = [
+        encode_output_control(dc=True, ac=False, light=True),
+        encode_output_control(dc=False, ac=False, light=True),
+    ][:expected_write_count]
+    assert fake_ble.writes == expected_packets
+    if expected_outcome == "pass":
+        evidence = json.loads((parent / "tier-dc_output_cycle.json").read_text())
+        assert evidence["outcome"] == "pass"
+        assert [action["confirmed"] for action in evidence["actions"]] == [True, True]
+        assert all(action["trace_complete"] for action in evidence["actions"])
+        assert all(
+            action["transaction"]["kind"] == "output"
+            and action["transaction"]["session_generation"] == 1
+            for action in evidence["actions"]
+        )
+        trace_artifacts = [
+            item for action in evidence["actions"] for item in action["trace_evidence"]
+        ]
+        assert {item["path"].rsplit("/", 1)[-1] for item in trace_artifacts} == {
+            "trace.json",
+            "events.jsonl",
+            "frames.jsonl",
+        }
+        for item in trace_artifacts:
+            path = parent / item["path"]
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"]
+        metadata = json.loads(
+            (parent / evidence["actions"][0]["trace_path"] / "trace.json").read_text()
+        )
+        assert metadata["observed_route"] == "local_adapter"
+        assert metadata["route_observations"][0]["session_generation"] == 1
+        assert "token" not in json.dumps(evidence).lower()
+    else:
+        evidence_path = parent / "tier-dc_output_cycle.json"
+        if evidence_path.exists():
+            evidence = json.loads(evidence_path.read_text())
+            assert evidence["outcome"] == "inconclusive"
+            if failure == "change_trace_corrupt":
+                assert evidence["actions"][0]["trace_valid"] is False
+                assert evidence["actions"][1]["trace_complete"] is True
+                assert evidence["restored_state"] == "off"
+        assert result["outcome"] != "pass"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",

@@ -1616,11 +1616,10 @@ async def test_interleaved_status_and_controls_join_exact_frame_id(monkeypatch):
     tx_frames = [row for row in capture.frames if row["event"] == "write_attempt"]
     assert len(tx_frames) == 4
     ids = [row["transaction_id"] for row in tx_frames]
-    assert ids[0] is None and ids[2] is None
-    assert isinstance(ids[1], str) and isinstance(ids[3], str)
-    assert ids[1].endswith("-1") and ids[3].endswith("-2")
-    assert ids[1].rsplit("-", 1)[0] == ids[3].rsplit("-", 1)[0]
-    assert capture.capture_id not in ids[1]
+    assert all(isinstance(value, str) for value in ids)
+    assert [value.rsplit("-", 1)[1] for value in ids] == ["1", "2", "3", "4"]
+    assert len({value.rsplit("-", 1)[0] for value in ids}) == 1
+    assert capture.capture_id not in ids[0]
     assert [row["command_type"] for row in tx_frames] == [
         "status_request",
         "output_control",
@@ -1639,7 +1638,7 @@ async def test_interleaved_status_and_controls_join_exact_frame_id(monkeypatch):
         row["transaction_id"] for row in capture.events if row["event"] == "write_ok"
     ]
     assert write_ok == ids
-    assert len({value for value in ids if value is not None}) == 2
+    assert len(set(ids)) == 4
     await client.async_stop()
 
 
@@ -1763,7 +1762,7 @@ async def test_write_error_cannot_replace_an_existing_disconnect_cause(monkeypat
         await client.async_request_status()
     assert client._disconnect_reason_category == "manual"
     assert any(
-        row["event"] == "write_error" and row["transaction_id"] is None
+        row["event"] == "write_error" and isinstance(row["transaction_id"], str)
         for row in capture.events
     )
     await client._disconnect_client()
@@ -2524,7 +2523,7 @@ async def test_all_attempted_gatt_failures_have_one_safe_terminal_error(
             for r in capture.events
         )
     else:
-        assert attempts[0]["transaction_id"] is None
+        assert attempts[0]["transaction_id"] is not None
 
 
 @pytest.mark.asyncio

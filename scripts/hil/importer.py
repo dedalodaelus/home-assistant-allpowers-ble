@@ -311,7 +311,9 @@ def _build_proposal(
         ),
         "capture_completeness": completeness,
         "qualification_status": "inconclusive",
-        "session_id": session.get("session_id", "unknown"),
+        # The source session identifier is intentionally not exported. Use a
+        # stable pseudonym so later review artifacts can bind to this import.
+        "session_id": f"archive-session-{content_sha256[:32]}",
         "build_fingerprint": manifest["build_provenance"].get("checkout_fingerprint")
         or "unknown",
         "feature_presence": {
@@ -370,11 +372,22 @@ def _build_proposal(
         if prior is not None:
             if prior.get("content_sha256") != content_sha256:
                 raise HAAPIError("Source run identity conflicts with existing contents")
-            prior_without_artifact_hash = dict(prior)
-            run_without_artifact_hash = dict(run)
-            prior_without_artifact_hash.pop("archive_sha256", None)
-            run_without_artifact_hash.pop("archive_sha256", None)
-            if prior_without_artifact_hash != run_without_artifact_hash:
+            # Independent Bronze review adds qualification and evidence fields
+            # after import. Compare every source-derived field while preserving
+            # that reviewed enrichment for an idempotent re-import.
+            review_fields = {
+                "archive_sha256",
+                "qualification_status",
+                "authorization_context",
+                "authorization_context_source",
+                "bronze_evidence",
+                "evidence",
+            }
+            if any(
+                prior.get(key) != value
+                for key, value in run.items()
+                if key not in review_fields
+            ) or any(key not in run and key not in review_fields for key in prior):
                 raise HAAPIError("Source run identity conflicts with existing contents")
             run = prior
         if prior is None:

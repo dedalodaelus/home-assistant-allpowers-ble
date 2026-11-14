@@ -187,8 +187,61 @@ def _capture(run: dict[str, Any], revision: dict[str, Any], root: Path) -> str:
 
 
 def _bronze_records(
-    run: dict[str, Any], revision: dict[str, Any], root: Path, capture: str
+    run: dict[str, Any],
+    revision: dict[str, Any],
+    root: Path,
+    capture: str,
+    *,
+    decoded_event: str = "status_data_decoded",
+    write_completion_event: str | None = "write_ok",
 ) -> dict[str, Any]:
+    protocol_rows = [
+        {
+            **_scope(run, revision),
+            "capture_id": f"bronze-{run['run_id']}",
+            "session_generation": 1,
+            "seq": 1,
+            "scenario": "read_only_snapshot",
+            "operation_id": "read_only_snapshot",
+            "event": "write_attempt",
+            "direction": "write",
+            "frame_hex": validator.STATUS_REQUEST.hex(),
+            "verdict": "ok",
+            "physical_outcome": "pass",
+        },
+    ]
+    if write_completion_event is not None:
+        protocol_rows.append(
+            {
+                **_scope(run, revision),
+                "capture_id": f"bronze-{run['run_id']}",
+                "session_generation": 1,
+                "seq": 2,
+                "scenario": "read_only_snapshot",
+                "operation_id": "read_only_snapshot",
+                "event": write_completion_event,
+                "direction": "write",
+                "verdict": "ok",
+                "physical_outcome": "pass",
+            }
+        )
+    protocol_rows.append(
+        {
+            **_scope(run, revision),
+            "capture_id": f"bronze-{run['run_id']}",
+            "session_generation": 1,
+            "seq": 3 if write_completion_event is not None else 2,
+            "scenario": "read_only_snapshot",
+            "operation_id": "read_only_snapshot",
+            "event": decoded_event,
+            "direction": "notify",
+            "verdict": "ok",
+            "physical_outcome": "pass",
+        },
+    )
+    with (root / capture).open("a", encoding="utf-8") as stream:
+        for row in protocol_rows:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
     records = {}
     claims = {
         "identity": {"identity_confirmed": True},
@@ -436,6 +489,8 @@ def _matrix_fixture(
     soak_mode: str = "normal",
     run_id: str = "tier-run",
     captured_at: datetime | None = None,
+    bronze_decoded_event: str = "status_data_decoded",
+    bronze_write_completion_event: str | None = "write_ok",
 ) -> dict[str, Any]:
     revision = dict(REVISION)
     run_time = captured_at or datetime.now(UTC).replace(microsecond=0)
@@ -459,7 +514,14 @@ def _matrix_fixture(
     }
     capture = _capture(run, revision, root)
     run["evidence"] = [capture]
-    run["bronze_evidence"] = _bronze_records(run, revision, root, capture)
+    run["bronze_evidence"] = _bronze_records(
+        run,
+        revision,
+        root,
+        capture,
+        decoded_event=bronze_decoded_event,
+        write_completion_event=bronze_write_completion_event,
+    )
     absent = "tests/hil/fixtures/light-absence.md"
     (root / absent).parent.mkdir(parents=True, exist_ok=True)
     (root / absent).write_text(
@@ -505,11 +567,6 @@ def _matrix_fixture(
                 capabilities[feature] = _setting_result(
                     run, revision, root, capture, feature
                 )
-        for scenario in (
-            "rapid_consecutive_writes",
-            "stale_timeout_recovery",
-        ):
-            scenarios[scenario] = _reviewed(root, "pass", [capture])
     if tier == "platinum":
         soak = _soak_artifact(run, revision, root, soak_mode)
         scenarios["soak_24h"] = _reviewed(
@@ -542,6 +599,41 @@ def _validate_and_evaluate(
     return errors, evaluate_tiers(matrix)
 
 
+@pytest.mark.parametrize(
+    ("decoded_event", "expected_tier"),
+    [("status_data_decoded", "bronze"), ("notification_decoded", "unqualified")],
+)
+def test_qualification_requires_status_typed_bronze_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decoded_event: str,
+    expected_tier: str,
+):
+    matrix = _matrix_fixture(tmp_path, "bronze", bronze_decoded_event=decoded_event)
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert result["tiers"][0]["tier"] == expected_tier
+    if expected_tier == "bronze":
+        assert errors == []
+    else:
+        assert errors
+
+
+@pytest.mark.parametrize("completion_event", [None, "write_error"])
+def test_qualification_requires_successful_bronze_status_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_event: str | None,
+):
+    matrix = _matrix_fixture(
+        tmp_path,
+        "bronze",
+        bronze_write_completion_event=completion_event,
+    )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors
+    assert result["tiers"][0]["tier"] == "unqualified"
+
+
 def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -554,6 +646,30 @@ def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(
         for proof in matrix["revisions"][0]["runs"][0]["bronze_evidence"].values()
         for path in proof["evidence"]
     }
+
+
+def test_read_only_review_can_earn_bronze_but_never_write_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "bronze")
+    run = matrix["revisions"][0]["runs"][0]
+    run["authorization_context"] = "read_only"
+    run["authorization_context_source"] = "verified_read_only_session"
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors == []
+    assert result["tiers"][0]["tier"] == "bronze"
+
+    run["write_capabilities"]["ac_output"] = _output_result(
+        run,
+        matrix["revisions"][0],
+        tmp_path,
+        run["evidence"][0],
+        "ac_output",
+    )
+    errors, _ = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert any(
+        "read_only authorization cannot contain write-capability" in e for e in errors
+    )
 
 
 def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(
@@ -675,6 +791,21 @@ def test_gold_requires_reviewed_feature_restoration(
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
+    assert result["tiers"][0]["offline_regression_gate"] == (
+        "run --suite transaction-safety --simulate"
+    )
+    assert (
+        matrix["revisions"][0]["runs"][0]["scenarios"]["rapid_consecutive_writes"][
+            "status"
+        ]
+        == "pending"
+    )
+    assert (
+        matrix["revisions"][0]["runs"][0]["scenarios"]["stale_timeout_recovery"][
+            "status"
+        ]
+        == "pending"
+    )
 
 
 def test_gold_rejects_malformed_restoration_row_even_with_other_valid_write(

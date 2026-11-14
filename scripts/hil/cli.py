@@ -130,6 +130,15 @@ def make_parser() -> argparse.ArgumentParser:
         "tiers", help="Calculate evidence-backed hardware support tiers as JSON"
     )
     tiers_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    review_parser = commands.add_parser(
+        "review", help="Review an imported Bronze archive with independent claims"
+    )
+    review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    review_parser.add_argument("--run-id", required=True)
+    review_parser.add_argument("--review-file", type=Path, required=True)
+    review_mode = review_parser.add_mutually_exclusive_group()
+    review_mode.add_argument("--dry-run", action="store_true")
+    review_mode.add_argument("--apply", action="store_true")
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
@@ -139,6 +148,11 @@ def make_parser() -> argparse.ArgumentParser:
         help="Capture a read-only snapshot or guided scenario suite",
     )
     run_parser.add_argument("--suite", choices=(*SUITES, "all"))
+    run_parser.add_argument(
+        "--tier",
+        choices=("bronze", "silver", "gold"),
+        help="Build and persist a capability-aware guided tier plan",
+    )
     run_parser.add_argument(
         "--allow-keepalive-disabled",
         action="store_true",
@@ -454,6 +468,1195 @@ def _execute_probe_trace(
     )
 
 
+def _bronze_status_exchange(
+    events: list[dict[str, Any]], frames: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
+    """Find a correlated status write, its completion, and a later decoded reply."""
+    events = [event for event in events if isinstance(event, dict)]
+    frames = [frame for frame in frames if isinstance(frame, dict)]
+    status_tx = next(
+        (
+            frame
+            for frame in frames
+            if frame.get("direction") == "tx"
+            and frame.get("command_type") == "status_request"
+            and frame.get("frame_validation") == "validated_tx"
+            and isinstance(frame.get("transaction_id"), str)
+            and frame["transaction_id"]
+        ),
+        None,
+    )
+    status_write_ok = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "write_ok"
+            and status_tx is not None
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("transaction_id") == status_tx.get("transaction_id")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+        ),
+        None,
+    )
+    decoded = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "notification_decoded"
+            and isinstance(event.get("decoded_packet_types"), list)
+            and "StatusData" in event["decoded_packet_types"]
+            and status_tx is not None
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+        ),
+        None,
+    )
+    write_failed = bool(
+        status_tx is not None
+        and any(
+            event.get("event") == "write_error"
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("transaction_id") == status_tx.get("transaction_id")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+            for event in events
+        )
+    )
+    return status_tx, status_write_ok, decoded, write_failed
+
+
+def _execute_tier_suite(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    environment: dict[str, Any],
+    output_dir: Path,
+    run_id: str,
+    plan: dict[str, Any],
+    capabilities: dict[str, Any] | None,
+) -> int:
+    """Dispatch applicable guided steps through the existing scenario runners."""
+    import copy
+    import json
+    import secrets
+
+    from .outputs import _execute_output_suite
+    from .recovery import _execute_recovery_suite
+    from .settings import _execute_settings_suite
+
+    services = _suite_services()
+    features = (
+        capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    )
+    declarations = {item.id: item for item in load_scenarios()}
+    step_scenarios = {
+        "ac_output_cycle": ("outputs", "output_ac_cycle", "ac_output"),
+        "dc_output_cycle": ("outputs", "output_dc_cycle", "dc_output"),
+        "light_output_cycle": ("outputs", "output_light_cycle", "light_output"),
+        "eco_mode_reversal": ("settings", "settings_eco_mode", "eco_mode"),
+        "work_mode_reversal": ("settings", "settings_work_mode", "work_mode"),
+        "eco_timeout_reversal": ("settings", "settings_eco_timeout", "eco_timeout"),
+        "car_charger_reversal": ("outputs", "output_car_charger_cycle", "car_charger"),
+    }
+    execution: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "requested_tier": plan["requested_tier"],
+        "requested_route": args.route,
+        "device": {
+            "model": device.model,
+            "hardware_version": device.hardware,
+            "firmware_version": device.firmware,
+        },
+        "build_provenance": plan.get("device", {}).get("build_provenance", {})
+        if isinstance(plan.get("device"), dict)
+        else {},
+        "review_state": "pending",
+        "steps": [],
+    }
+    overall = 0
+    recovery_completed = False
+    recovery_evidence_run: str | None = None
+    stop_reason: str | None = None
+    for planned in plan["steps"]:
+        step_id = planned["id"]
+        if stop_reason is not None:
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "blocked",
+                    "reason": f"not attempted because an earlier step stopped execution: {stop_reason}",
+                }
+            )
+            continue
+        if step_id == "read_only_probe":
+            if args.non_interactive:
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "inconclusive",
+                        "reason": "interactive observation is required",
+                    }
+                )
+                overall = 2
+                continue
+            first_sampled_at = services.datetime.now(UTC).isoformat()
+            try:
+                first_sample = services.read_only_sample(api, device)
+            except HAAPIError:
+                first_sample = {}
+            second_sampled_at = services.datetime.now(UTC).isoformat()
+            second_sample: dict[str, Any] = {}
+            protocol_probe: dict[str, Any] = {"outcome": "inconclusive"}
+            if (
+                device.entry_state == "loaded"
+                and device.config_entry_id is not None
+                and device.refresh_entity is not None
+            ):
+                capture_id = None
+                try:
+                    started = api.websocket(
+                        [
+                            {
+                                "type": "allpowers_ble/hil/start",
+                                "entry_id": device.config_entry_id,
+                                "run_id": run_id,
+                                "scenario_id": "read_only_snapshot",
+                                "requested_route": args.route,
+                            }
+                        ]
+                    )[0]
+                    if (
+                        isinstance(started, dict)
+                        and started.get("schema_version") == 2
+                        and isinstance(started.get("capture_id"), str)
+                        and type(started.get("ttl_seconds")) is int
+                        and started["ttl_seconds"] >= 2
+                    ):
+                        capture_id = started["capture_id"]
+                        api.request_read_only_refresh(device.refresh_entity)
+                        wait_budget = min(12.0, started["ttl_seconds"] - 1.0)
+                        deadline = services.monotonic() + wait_budget
+                        maximum_polls = min(25, math.ceil(wait_budget / 0.5) + 1)
+                        for poll_index in range(maximum_polls):
+                            trace_snapshot = api.websocket(
+                                [
+                                    {
+                                        "type": "allpowers_ble/hil/fetch",
+                                        "entry_id": device.config_entry_id,
+                                        "capture_id": capture_id,
+                                    }
+                                ]
+                            )[0]
+                            if (
+                                not isinstance(trace_snapshot, dict)
+                                or trace_snapshot.get("capture_id") != capture_id
+                                or not isinstance(trace_snapshot.get("events"), list)
+                                or not isinstance(trace_snapshot.get("frames"), list)
+                            ):
+                                raise HAAPIError(
+                                    "Invalid Bronze status capture snapshot"
+                                )
+                            (
+                                poll_status_tx,
+                                poll_write_ok,
+                                poll_decoded,
+                                write_failed,
+                            ) = _bronze_status_exchange(
+                                trace_snapshot["events"], trace_snapshot["frames"]
+                            )
+                            disconnected = bool(
+                                poll_status_tx is not None
+                                and any(
+                                    event.get("event") == "disconnected"
+                                    and event.get("session_generation")
+                                    == poll_status_tx.get("session_generation")
+                                    and event.get("seq", 0)
+                                    > poll_status_tx.get("seq", 0)
+                                    for event in trace_snapshot["events"]
+                                )
+                            )
+                            if (
+                                (
+                                    poll_write_ok is not None
+                                    and poll_decoded is not None
+                                    and not write_failed
+                                )
+                                or write_failed
+                                or disconnected
+                            ):
+                                break
+                            remaining = deadline - services.monotonic()
+                            if poll_index + 1 >= maximum_polls or remaining <= 0:
+                                break
+                            services.sleep(min(0.5, remaining))
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
+                        second_sample = services.read_only_sample(api, device)
+                        stop_command = {
+                            "type": "allpowers_ble/hil/stop",
+                            "entry_id": device.config_entry_id,
+                            "capture_id": capture_id,
+                        }
+                        try:
+                            trace = api.websocket([stop_command])[0]
+                        except HAAPIError:
+                            trace = api.websocket(
+                                [{**stop_command, "type": "allpowers_ble/hil/fetch"}]
+                            )[0]
+                        services.validate_trace_result(
+                            trace,
+                            run_id=run_id,
+                            scenario_id="read_only_snapshot",
+                            capture_id=capture_id,
+                            requested_route=args.route,
+                            expected_version=2,
+                        )
+                        events = trace.get("events", [])
+                        frames = trace.get("frames", [])
+                        status_tx, status_write_ok, decoded, write_failed = (
+                            _bronze_status_exchange(events, frames)
+                        )
+                        route = trace.get("observed_route")
+                        protocol_verified = bool(
+                            trace.get("complete") is True
+                            and trace.get("dropped_events", 0) == 0
+                            and trace.get("dropped_frames", 0) == 0
+                            and route in {"local_adapter", "active_proxy"}
+                            and services.route_matches_request(args.route, route)
+                            and status_tx is not None
+                            and status_write_ok is not None
+                            and decoded is not None
+                            and not write_failed
+                            and not any(
+                                event.get("event") == "disconnected"
+                                and event.get("session_generation")
+                                == status_tx.get("session_generation")
+                                and event.get("seq", 0) > status_tx.get("seq", 0)
+                                for event in events
+                            )
+                        )
+                        trace_dir = output_dir / "traces" / "bronze_read_only"
+                        trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+                        trace_dir.mkdir(mode=0o700, exist_ok=False)
+                        services.save_private_trace(trace_dir, trace)
+                        protocol_probe = {
+                            "outcome": "pass" if protocol_verified else "inconclusive",
+                            "trace": str(trace_dir.relative_to(output_dir)),
+                            "trace_sha256": hashlib.sha256(
+                                (trace_dir / "trace.json").read_bytes()
+                            ).hexdigest(),
+                            "route": route
+                            if route in {"local_adapter", "active_proxy"}
+                            else "unverified",
+                            "session_generation": status_tx.get("session_generation")
+                            if status_tx
+                            else None,
+                            "status_request_seq": status_tx.get("seq")
+                            if status_tx
+                            else None,
+                            "status_write_ok_seq": status_write_ok.get("seq")
+                            if status_write_ok
+                            else None,
+                            "decoded_response_seq": decoded.get("seq")
+                            if decoded
+                            else None,
+                            "status_request_hex": status_tx.get("hex")
+                            if status_tx
+                            else None,
+                        }
+                    else:
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
+                        second_sample = services.read_only_sample(api, device)
+                except HAAPIError, OSError, TypeError, ValueError, KeyError:
+                    second_sample = {}
+                    protocol_probe = {"outcome": "inconclusive"}
+                    if capture_id is not None:
+                        try:
+                            api.websocket(
+                                [
+                                    {
+                                        "type": "allpowers_ble/hil/stop",
+                                        "entry_id": device.config_entry_id,
+                                        "capture_id": capture_id,
+                                    }
+                                ]
+                            )
+                        except HAAPIError:
+                            pass
+            else:
+                services.sleep(1)
+                try:
+                    second_sampled_at = services.datetime.now(UTC).isoformat()
+                    second_sample = services.read_only_sample(api, device)
+                except HAAPIError:
+                    second_sampled_at = services.datetime.now(UTC).isoformat()
+                    second_sample = {}
+            samples_valid = services.has_verified_telemetry(
+                first_sample
+            ) and services.has_verified_telemetry(second_sample)
+            try:
+                physical = services.prompt(
+                    "Physical plausibility: 1=telemetry matches the attended station, 2=does not match, 3=unable to observe: "
+                ).strip()
+            except EOFError, KeyboardInterrupt:
+                physical = "3"
+            sample_hashes = [
+                hashlib.sha256(
+                    json.dumps(item, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()
+                for item in (first_sample, second_sample)
+            ]
+            bronze_evidence = {
+                "schema_version": 1,
+                "step_id": step_id,
+                "sample_sha256": sample_hashes,
+                "samples": [
+                    {
+                        "sampled_at_utc": first_sampled_at,
+                        "telemetry": first_sample,
+                    },
+                    {
+                        "sampled_at_utc": second_sampled_at,
+                        "telemetry": second_sample,
+                    },
+                ],
+                "fresh_verified_samples": bool(samples_valid),
+                "protocol_probe": protocol_probe,
+                "physical_observation": {
+                    "1": "plausible",
+                    "2": "implausible",
+                    "3": "unable_to_observe",
+                }.get(physical, "unable_to_observe"),
+            }
+            bronze_path = output_dir / "tier-bronze-read-only.json"
+            bronze_path.write_text(
+                json.dumps(bronze_evidence, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            bronze_path.chmod(0o600)
+            bronze_pass = (
+                samples_valid
+                and physical == "1"
+                and protocol_probe.get("outcome") == "pass"
+            )
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "pass" if bronze_pass else "inconclusive",
+                    "observed_routes": [
+                        protocol_probe["route"]
+                        if protocol_probe.get("outcome") == "pass"
+                        else None
+                    ],
+                    "machine_evidence": [
+                        {
+                            "path": bronze_path.name,
+                            "sha256": hashlib.sha256(
+                                bronze_path.read_bytes()
+                            ).hexdigest(),
+                        }
+                    ],
+                    "human_review": "pending",
+                }
+            )
+            execution["steps"].append(
+                {
+                    "step_id": "physical_plausibility_observation",
+                    "outcome": "pass" if bronze_pass else "inconclusive",
+                    "observed_routes": [
+                        protocol_probe["route"]
+                        if protocol_probe.get("outcome") == "pass"
+                        else None
+                    ],
+                    "machine_evidence": [
+                        {
+                            "path": bronze_path.name,
+                            "sha256": hashlib.sha256(
+                                bronze_path.read_bytes()
+                            ).hexdigest(),
+                        }
+                    ],
+                    "human_review": "pending",
+                }
+            )
+            if not bronze_pass:
+                overall = 2
+            continue
+        if step_id == "physical_plausibility_observation":
+            continue
+        if step_id == "minimum_output_requirement":
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "pending_review",
+                    "reason": "minimum output qualification is computed after evidence import and independent review",
+                    "human_review": "pending",
+                }
+            )
+            continue
+        if step_id == "guarded_recovery" and recovery_completed:
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "scenario_id": "recovery_reconnect",
+                    "outcome": "shared_evidence",
+                    "evidence_run": recovery_evidence_run,
+                }
+            )
+            continue
+        if step_id in {"basic_reconnect", "guarded_recovery"}:
+            scenario_id = "recovery_reconnect"
+            suite = "recovery"
+            feature = "telemetry"
+        else:
+            mapping = step_scenarios.get(step_id)
+            if mapping is None:
+                continue
+            suite, scenario_id, feature = mapping
+            facts = features.get(feature, {}) if isinstance(features, dict) else {}
+            if isinstance(facts, dict) and facts.get("physical_presence") == "absent":
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "not_applicable",
+                        "reason": "reviewed profile substantiates physical absence",
+                    }
+                )
+                continue
+            if (
+                not isinstance(facts, dict)
+                or facts.get("physical_presence") != "present"
+            ):
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "blocked",
+                        "reason": "physical presence is unknown or unreviewed",
+                    }
+                )
+                overall = 2
+                continue
+            if facts.get("production_authorized") is not True:
+                if (
+                    feature in {"ac_output", "dc_output", "light_output"}
+                    and facts.get("candidate_hil_eligible") is True
+                ):
+                    candidate_result = _execute_experimental_output_step(
+                        api,
+                        args,
+                        device,
+                        output_dir,
+                        run_id,
+                        step_id,
+                        feature,
+                        services,
+                    )
+                    execution["steps"].append(candidate_result)
+                    if candidate_result.get("outcome") != "pass":
+                        overall = 2
+                    if (
+                        candidate_result.get("outcome") != "pass"
+                        or candidate_result.get("state_safe_to_continue") is False
+                    ):
+                        reason = candidate_result.get("reason")
+                        stop_reason = (
+                            reason.strip()
+                            if isinstance(reason, str) and reason.strip()
+                            else "candidate was denied or did not complete with confirmed restoration"
+                        )
+                    continue
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "blocked",
+                        "reason": "production capability absent; experimental grant execution unavailable for this control",
+                    }
+                )
+                overall = 2
+                continue
+        declaration = declarations.get(scenario_id)
+        if declaration is None:
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "blocked",
+                    "reason": "reviewed scenario declaration missing",
+                }
+            )
+            overall = 2
+            continue
+        # Checkpoints and trace validators require the same 16-hex run IDs
+        # used by standalone scenario runs.
+        child_run_id = secrets.token_hex(8)
+        child_session = {
+            "run_id": child_run_id,
+            "parent_tier_run_id": run_id,
+            "tier_step_id": step_id,
+            "requested_route": args.route,
+            "device": {
+                "model": device.model,
+                "hardware_version": device.hardware,
+                "firmware_version": device.firmware,
+            },
+        }
+        child_root = write_run(
+            args.output_root,
+            f"tier_{child_run_id}",
+            environment,
+            child_session,
+        )
+        child_args = copy.copy(args)
+        child_args.suite = suite
+        child_args.scenario_id = scenario_id if suite != "recovery" else None
+        child_args.resume = None
+        child_args.guided_reconnect_required = step_id == "basic_reconnect"
+        if suite == "outputs":
+            status = _execute_output_suite(
+                api, child_args, device, environment, child_root, child_run_id, services
+            )
+        elif suite == "settings":
+            status = _execute_settings_suite(
+                api, child_args, device, child_root, child_run_id, services
+            )
+        else:
+            status = _execute_recovery_suite(
+                api, child_args, device, child_root, child_run_id, services, None
+            )
+            recovery_completed = True
+        try:
+            checkpoint = json.loads(
+                (child_root / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            rows = checkpoint.get("steps", [])
+        except OSError, ValueError:
+            rows = []
+        evidence_paths = sorted(
+            {
+                str(path.relative_to(child_root))
+                for path in child_root.rglob("*")
+                if path.is_file()
+                and (path.name == "trace.json" or path.name == "checkpoint.json")
+            }
+        )
+        verified_routes: set[str] = set()
+        for evidence_path in evidence_paths:
+            if Path(evidence_path).name != "trace.json":
+                continue
+            try:
+                trace_metadata = json.loads(
+                    (child_root / evidence_path).read_text(encoding="utf-8")
+                )
+            except OSError, UnicodeError, ValueError:
+                continue
+            route = trace_metadata.get("observed_route")
+            if (
+                trace_metadata.get("complete") is True
+                and route in {"local_adapter", "active_proxy"}
+                and services.route_matches_request(args.route, route)
+            ):
+                verified_routes.add(route)
+        passed = (
+            status == 0
+            and bool(rows)
+            and any(Path(item).name == "trace.json" for item in evidence_paths)
+            and all(row.get("outcome") == "pass" for row in rows)
+        )
+        reconnect_reason = None
+        if passed and step_id == "basic_reconnect":
+            action_row = next(
+                (row for row in rows if row.get("step_id") == "operator_action"),
+                {},
+            )
+            reconnect_row = next(
+                (row for row in rows if row.get("step_id") == "recovered_session"),
+                {},
+            )
+            before_generation = reconnect_row.get("session_generation_before")
+            after_generation = reconnect_row.get("session_generation_after")
+            reconnect_confirmed = bool(
+                action_row.get("action") == "route interruption and restoration"
+                and action_row.get("operator_confirmed") is True
+                and type(before_generation) is int
+                and type(after_generation) is int
+                and after_generation != before_generation
+                and reconnect_row.get("connected") is True
+                and reconnect_row.get("status_fresh") is True
+                and reconnect_row.get("fresh_status_telemetry") is True
+                and reconnect_row.get("route_verified") is True
+                and reconnect_row.get("trace_complete") is True
+                and reconnect_row.get("physical_outcome") == "yes"
+                and reconnect_row.get("route") in verified_routes
+            )
+            if not reconnect_confirmed:
+                passed = False
+                reconnect_reason = (
+                    "mandatory reconnect requires a confirmed route interruption, "
+                    "changed session generation, fresh status, "
+                    "verified route, and positive physical confirmation"
+                )
+        failed = next((row for row in rows if row.get("outcome") != "pass"), None)
+        failed_reason = failed.get("reason") if isinstance(failed, dict) else None
+        step_reason = reconnect_reason or (
+            failed_reason.strip()
+            if isinstance(failed_reason, str) and failed_reason.strip()
+            else "guided scenario did not complete with confirmed evidence"
+        )
+        execution["steps"].append(
+            {
+                "step_id": step_id,
+                "scenario_id": scenario_id,
+                "outcome": "pass" if passed else "inconclusive",
+                **({} if passed else {"reason": step_reason}),
+                "observed_routes": sorted(verified_routes),
+                "human_review": "pending",
+                "machine_evidence": [
+                    {
+                        "path": f"../../tier_{child_run_id}/private/{item}",
+                        "sha256": hashlib.sha256(
+                            (child_root / item).read_bytes()
+                        ).hexdigest(),
+                    }
+                    for item in evidence_paths
+                ],
+                "evidence_run": f"../../tier_{child_run_id}/private",
+            }
+        )
+        if suite == "recovery":
+            recovery_evidence_run = f"../../tier_{child_run_id}/private"
+        if not passed:
+            overall = 2
+            stop_reason = step_reason
+    target = output_dir / "tier-execution.json"
+    execution["verified_routes"] = sorted(
+        {
+            route
+            for step in execution["steps"]
+            for route in step.get("observed_routes", [])
+            if route in {"local_adapter", "active_proxy"}
+        }
+    )
+    target.write_text(
+        json.dumps(execution, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    target.chmod(0o600)
+    print("Guided execution saved to:", target)
+    print(
+        "Requested tier is not an attained qualification; independent review remains pending."
+    )
+    return overall
+
+
+def _execute_experimental_output_step(
+    api: HAClient,
+    args: argparse.Namespace,
+    device: Device,
+    output_dir: Path,
+    run_id: str,
+    step_id: str,
+    feature: str,
+    services: SuiteServices,
+) -> dict[str, Any]:
+    """Execute one candidate output and its separately authorized restoration."""
+    import json
+
+    entity_key = {"light_output": "light"}.get(feature, feature)
+    entry_id = device.config_entry_id
+    if entry_id is None or args.non_interactive or device.entry_state != "loaded":
+        return {
+            "step_id": step_id,
+            "outcome": "blocked",
+            "reason": "interactive loaded entry required",
+        }
+    try:
+        before_caps = api.hil_capabilities(entry_id)
+        before_state = api.control_state(
+            entity_key, device.control_entities.get(entity_key)
+        )
+    except HAAPIError:
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "fresh candidate preflight unavailable",
+        }
+    facts = before_caps.get("features", {}).get(feature, {})
+    generation = before_caps.get("session_generation")
+    initial = before_state.get("state")
+    if (
+        before_caps.get("verified") is not True
+        or before_caps.get("identity_conflicted") is not False
+        or before_caps.get("connected") is not True
+        or before_caps.get("status_fresh") is not True
+        or before_caps.get("pending_transaction") is not False
+        or type(generation) is not int
+        or not isinstance(facts, dict)
+        or facts.get("physical_presence") != "present"
+        or facts.get("candidate_hil_eligible") is not True
+        or facts.get("production_authorized") is True
+        or before_state.get("available") is not True
+        or initial not in {"on", "off"}
+    ):
+        return {
+            "step_id": step_id,
+            "outcome": "blocked",
+            "reason": "candidate capability or state is not eligible",
+        }
+    target = initial != "on"
+    target_name = "on" if target else "off"
+    print(
+        f"Experimental HIL only: verify a noncritical load is safe; "
+        f"{feature} will change to {target_name} and then restore to {initial}."
+    )
+    try:
+        if (
+            services.prompt(
+                "Type 1 to authorize this single experimental action: "
+            ).strip()
+            != "1"
+        ):
+            return {
+                "step_id": step_id,
+                "outcome": "skipped",
+                "reason": "experimental action denied",
+            }
+        if (
+            services.prompt(
+                "Type 1 again to request and execute the single-use backend grant: "
+            ).strip()
+            != "1"
+        ):
+            return {
+                "step_id": step_id,
+                "outcome": "skipped",
+                "reason": "grant execution denied",
+            }
+    except EOFError, KeyboardInterrupt:
+        return {
+            "step_id": step_id,
+            "outcome": "skipped",
+            "reason": "experimental action consent interrupted",
+        }
+    try:
+        current_caps = api.hil_capabilities(entry_id)
+        current_state = api.control_state(
+            entity_key, device.control_entities.get(entity_key)
+        )
+    except HAAPIError:
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "pre-write state unavailable; no BLE action sent",
+        }
+    current_facts = current_caps.get("features", {}).get(feature, {})
+    if (
+        current_caps.get("verified") is not True
+        or current_caps.get("identity_conflicted") is not False
+        or current_caps.get("connected") is not True
+        or current_caps.get("status_fresh") is not True
+        or current_caps.get("pending_transaction") is not False
+        or current_caps.get("session_generation") != generation
+        or not isinstance(current_facts, dict)
+        or current_facts.get("candidate_hil_eligible") is not True
+        or current_state.get("available") is not True
+        or current_state.get("state") != initial
+    ):
+        return {
+            "step_id": step_id,
+            "outcome": "inconclusive",
+            "reason": "same-session pre-write recheck failed; no BLE action sent",
+        }
+
+    machine_actions: list[dict[str, Any]] = []
+
+    def execute(target_state: bool) -> dict[str, Any]:
+        phase = "change" if not machine_actions else "restore"
+        scenario_id = {
+            "ac_output": "output_ac_cycle",
+            "dc_output": "output_dc_cycle",
+            "light_output": "output_light_cycle",
+        }[feature]
+        try:
+            started = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/start",
+                        "entry_id": entry_id,
+                        "run_id": run_id,
+                        "scenario_id": scenario_id,
+                        "requested_route": args.route,
+                    }
+                ]
+            )[0]
+        except HAAPIError:
+            machine_actions.append(
+                {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "trace_error": "capture_start_failed",
+                    "trace_evidence": [],
+                }
+            )
+            return {
+                "outcome": "inconclusive",
+                "confirmed": False,
+                "trace_error": "capture_start_failed",
+            }
+        capture_id = started.get("capture_id") if isinstance(started, dict) else None
+        if not isinstance(capture_id, str) or started.get("schema_version") != 2:
+            machine_actions.append(
+                {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "trace_error": "capture_start_invalid",
+                    "trace_evidence": [],
+                }
+            )
+            return {
+                "outcome": "inconclusive",
+                "confirmed": False,
+                "trace_error": "capture_start_invalid",
+            }
+        backend_result: dict[str, Any] | None = None
+        backend_failed = False
+        try:
+            with api.websocket_session() as connection:
+                backend_result = connection.experimental_output(
+                    entry_id,
+                    feature,
+                    target_state,
+                    authorization_confirmed=True,
+                    execution_confirmed=True,
+                )
+        except HAAPIError:
+            backend_failed = True
+        try:
+            trace = api.websocket(
+                [
+                    {
+                        "type": "allpowers_ble/hil/stop",
+                        "entry_id": entry_id,
+                        "capture_id": capture_id,
+                    }
+                ]
+            )[0]
+        except HAAPIError:
+            try:
+                trace = api.websocket(
+                    [
+                        {
+                            "type": "allpowers_ble/hil/fetch",
+                            "entry_id": entry_id,
+                            "capture_id": capture_id,
+                        }
+                    ]
+                )[0]
+            except HAAPIError:
+                trace = None
+        transaction = None
+        trace_path = None
+        trace_valid = False
+        if isinstance(trace, dict):
+            try:
+                services.validate_trace_result(
+                    trace,
+                    run_id=run_id,
+                    scenario_id=scenario_id,
+                    capture_id=capture_id,
+                    requested_route=args.route,
+                    expected_version=2,
+                )
+                trace_valid = True
+                transaction = services.correlate_transaction(
+                    trace,
+                    expected_generation=generation,
+                    kind="output",
+                )
+                trace_dir = output_dir / "traces" / f"{step_id}_{phase}"
+                trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
+                trace_dir.mkdir(mode=0o700, exist_ok=False)
+                services.save_private_trace(trace_dir, trace)
+                trace_path = str(trace_dir.relative_to(output_dir))
+            except HAAPIError, OSError, TypeError, ValueError:
+                trace_valid = False
+                transaction = None
+        trace_evidence = []
+        if trace_path is not None:
+            for filename in ("trace.json", "events.jsonl", "frames.jsonl"):
+                path = output_dir / trace_path / filename
+                if path.is_file():
+                    trace_evidence.append(
+                        {
+                            "path": f"{trace_path}/{filename}",
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                    )
+        action_result = backend_result or {
+            "outcome": "inconclusive",
+            "confirmed": False,
+        }
+        action_result = {
+            **action_result,
+            "trace_valid": trace_valid,
+            "trace_complete": trace_valid and trace.get("complete") is True,
+            "trace_route": trace.get("observed_route") if trace_valid else None,
+            "trace_path": trace_path,
+            "trace_evidence": trace_evidence,
+            "transaction": transaction,
+            "backend_failed": backend_failed,
+        }
+        machine_actions.append(
+            {
+                "outcome": action_result["outcome"],
+                "confirmed": action_result["confirmed"],
+                "route": action_result.get("route"),
+                "session_generation": action_result.get("session_generation"),
+                "trace_route": action_result.get("trace_route"),
+                "trace_complete": action_result.get("trace_complete"),
+                "trace_valid": action_result.get("trace_valid"),
+                "trace_path": action_result.get("trace_path"),
+                "trace_evidence": action_result.get("trace_evidence", []),
+                "transaction": action_result.get("transaction"),
+                "backend_failed": backend_failed,
+            }
+        )
+        return action_result
+
+    try:
+        changed = execute(target)
+    except HAAPIError:
+        evidence = {
+            "schema_version": 1,
+            "step_id": step_id,
+            "actions": machine_actions,
+            "outcome": "inconclusive",
+        }
+        outcome = "inconclusive"
+        reason = "backend grant denied, expired, or execution unconfirmed; no retry"
+    else:
+        try:
+            after_caps = api.hil_capabilities(entry_id)
+            after_state = api.control_state(
+                entity_key, device.control_entities.get(entity_key)
+            )
+        except HAAPIError:
+            after_caps, after_state = {}, {"available": False}
+        change_readback_confirmed = (
+            changed.get("outcome") == "confirmed"
+            and changed.get("confirmed") is True
+            and changed.get("session_generation") == generation
+            and changed.get("route") in {"local_adapter", "active_proxy"}
+            and after_caps.get("verified") is True
+            and after_caps.get("identity_conflicted") is False
+            and after_caps.get("connected") is True
+            and after_caps.get("status_fresh") is True
+            and after_caps.get("pending_transaction") is False
+            and after_caps.get("session_generation") == generation
+            and after_caps.get("features", {})
+            .get(feature, {})
+            .get("candidate_hil_eligible")
+            is True
+            and after_state.get("available") is True
+            and after_state.get("state") == target_name
+        )
+        change_evidence_complete = (
+            changed.get("trace_valid") is True
+            and changed.get("trace_complete") is True
+            and changed.get("trace_route") == changed.get("route")
+            and services.route_matches_request(args.route, changed.get("trace_route"))
+            and isinstance(changed.get("transaction"), dict)
+            and changed["transaction"].get("session_generation") == generation
+        )
+        if not change_readback_confirmed:
+            evidence = {
+                "schema_version": 1,
+                "step_id": step_id,
+                "initial_state": initial,
+                "target_state": target_name,
+                "actions": machine_actions,
+                "readback_state": after_state.get("state"),
+                "outcome": "inconclusive",
+            }
+            outcome = "inconclusive"
+            if changed.get("backend_failed"):
+                reason = (
+                    "backend grant denied, expired, or execution unconfirmed; no retry"
+                )
+            elif changed.get("trace_error"):
+                reason = "GATT trace could not be armed; no write was sent"
+            else:
+                reason = (
+                    "write/readback is ambiguous; no automatic restoration or retry"
+                )
+        else:
+            try:
+                physical_change = services.prompt(
+                    f"Physical result for {feature}={target_name}: 1=correct, 2=incorrect, 3=unable to observe: "
+                ).strip()
+            except EOFError, KeyboardInterrupt:
+                physical_change = "3"
+            try:
+                restore_consent = (
+                    services.prompt(
+                        f"Fresh readback confirms {target_name}. Type 1 to authorize a separate restoration to {initial}: "
+                    ).strip()
+                    == "1"
+                )
+            except EOFError, KeyboardInterrupt:
+                restore_consent = False
+            if not restore_consent:
+                evidence = {
+                    "schema_version": 1,
+                    "step_id": step_id,
+                    "initial_state": initial,
+                    "target_state": target_name,
+                    "actions": machine_actions,
+                    "physical_change_outcome": {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_change, "unable_to_observe"),
+                    "outcome": "inconclusive",
+                }
+                outcome = "inconclusive"
+                reason = "restoration was not authorized; manual inspection required"
+            else:
+                try:
+                    restore_caps = api.hil_capabilities(entry_id)
+                    restore_state = api.control_state(
+                        entity_key, device.control_entities.get(entity_key)
+                    )
+                    if (
+                        restore_caps.get("verified") is not True
+                        or restore_caps.get("identity_conflicted") is not False
+                        or restore_caps.get("connected") is not True
+                        or restore_caps.get("status_fresh") is not True
+                        or restore_caps.get("pending_transaction") is not False
+                        or restore_caps.get("session_generation") != generation
+                        or restore_caps.get("features", {})
+                        .get(feature, {})
+                        .get("candidate_hil_eligible")
+                        is not True
+                        or restore_state.get("available") is not True
+                        or restore_state.get("state") != target_name
+                    ):
+                        raise HAAPIError("Restoration preflight changed")
+                    restored = execute(initial == "on")
+                    final_caps = api.hil_capabilities(entry_id)
+                    final_state = api.control_state(
+                        entity_key, device.control_entities.get(entity_key)
+                    )
+                    restoration_readback_confirmed = (
+                        restored.get("outcome") == "confirmed"
+                        and restored.get("confirmed") is True
+                        and restored.get("session_generation") == generation
+                        and restored.get("route") in {"local_adapter", "active_proxy"}
+                        and final_caps.get("verified") is True
+                        and final_caps.get("identity_conflicted") is False
+                        and final_caps.get("connected") is True
+                        and final_caps.get("status_fresh") is True
+                        and final_caps.get("pending_transaction") is False
+                        and final_caps.get("session_generation") == generation
+                        and final_caps.get("features", {})
+                        .get(feature, {})
+                        .get("candidate_hil_eligible")
+                        is True
+                        and final_state.get("available") is True
+                        and final_state.get("state") == initial
+                    )
+                    restoration_evidence_complete = (
+                        restored.get("trace_valid") is True
+                        and restored.get("trace_complete") is True
+                        and restored.get("trace_route") == restored.get("route")
+                        and services.route_matches_request(
+                            args.route, restored.get("trace_route")
+                        )
+                        and isinstance(restored.get("transaction"), dict)
+                        and restored["transaction"].get("session_generation")
+                        == generation
+                    )
+                except HAAPIError:
+                    restoration_readback_confirmed = False
+                    restoration_evidence_complete = False
+                    final_state = {"state": None}
+                evidence = {
+                    "schema_version": 1,
+                    "step_id": step_id,
+                    "initial_state": initial,
+                    "target_state": target_name,
+                    "actions": machine_actions,
+                    "physical_change_outcome": {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_change, "unable_to_observe"),
+                    "restored_state": final_state.get("state"),
+                    "outcome": "inconclusive",
+                }
+                outcome = "inconclusive"
+                reason = "restoration lacks confirmed same-session readback"
+                if restoration_readback_confirmed:
+                    try:
+                        physical_restore = services.prompt(
+                            "Physical restoration result: 1=original state restored, 2=incorrect, 3=unable to observe: "
+                        ).strip()
+                    except EOFError, KeyboardInterrupt:
+                        physical_restore = "3"
+                    evidence["physical_restore_outcome"] = {
+                        "1": "correct",
+                        "2": "incorrect",
+                        "3": "unable_to_observe",
+                    }.get(physical_restore, "unable_to_observe")
+                    if (
+                        evidence["physical_change_outcome"] == "correct"
+                        and evidence["physical_restore_outcome"] == "correct"
+                    ):
+                        if change_evidence_complete and restoration_evidence_complete:
+                            evidence["outcome"] = "pass"
+                            outcome = "pass"
+                            reason = None
+                        else:
+                            reason = (
+                                "physical change and restoration were observed, but "
+                                "complete trace-bound transaction evidence is missing"
+                            )
+    evidence_path = output_dir / f"tier-{step_id}.json"
+    evidence_path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    evidence_path.chmod(0o600)
+    result = {
+        "step_id": step_id,
+        "outcome": outcome,
+        "observed_routes": sorted(
+            {
+                action["trace_route"]
+                for action in machine_actions
+                if action.get("trace_valid") is True
+                and action.get("trace_complete") is True
+                and action.get("trace_route") == action.get("route")
+                and action.get("trace_route") in {"local_adapter", "active_proxy"}
+                and services.route_matches_request(args.route, action.get("route"))
+            }
+        ),
+        "state_safe_to_continue": (
+            not machine_actions
+            or (
+                len(machine_actions) >= 2
+                and evidence.get("restored_state") == initial
+                and evidence.get("physical_restore_outcome") == "correct"
+            )
+        ),
+        "machine_evidence": [
+            {
+                "path": evidence_path.name,
+                "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+            }
+        ],
+        "human_review": "pending",
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
 def _suite_services() -> SuiteServices:
     """Build the injected runtime dependencies for suite executors."""
     return SuiteServices(
@@ -573,6 +1776,15 @@ def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
+    if args.command == "review":
+        from .review import review_imported_run
+
+        return review_imported_run(
+            args.matrix,
+            run_id=args.run_id,
+            review_file=args.review_file,
+            apply=args.apply,
+        )
     if args.command == "tiers":
         from .tiers import evaluate_tiers
         from scripts.validate_hil_qualification import validate_matrix
@@ -626,6 +1838,10 @@ def execute(args: argparse.Namespace) -> int:
         print("HIL evidence archive written to: hil-evidence.zip")
         return 0
     if args.command == "run":
+        if args.tier is not None and args.suite not in (None, "read-only"):
+            raise HAAPIError(
+                "--tier currently accompanies the read-only evidence capture"
+            )
         if args.list_suites:
             print("Available HIL suites:")
             for suite in SUITES:
@@ -828,7 +2044,9 @@ def execute(args: argparse.Namespace) -> int:
         environment=environment,
         sample=sample,
     )
-    if args.command == "run" and args.suite == "read-only":
+    tier_plan: dict[str, Any] | None = None
+    tier_capabilities: dict[str, Any] | None = None
+    if args.command == "run" and (args.suite == "read-only" or args.tier is not None):
         capabilities: dict[str, Any] | None = None
         unavailable_reason = "no unique loaded integration entry found"
         if selected.config_entry_id is not None:
@@ -840,6 +2058,44 @@ def execute(args: argparse.Namespace) -> int:
             capabilities if capabilities is not None else unknown(unavailable_reason)
         )
         session["controls"] = _scenario_controls(api, selected, capabilities)
+        if args.tier is not None:
+            from .guided import build_tier_plan
+
+            # The requested route is not route evidence. The plan remains
+            # blocked until a connected backend has been attributed by trace.
+            test_plan = build_tier_plan(
+                args.tier,
+                capabilities,
+                session["controls"],
+                observed_route=None,
+                build_provenance={
+                    "checkout_commit": integration.get(
+                        "runner_checkout_commit", {}
+                    ).get("value"),
+                    "installed_commit": integration.get("installed_commit", {}).get(
+                        "value"
+                    ),
+                    "build_match": integration.get("build_match"),
+                },
+            )
+            tier_plan = test_plan
+            tier_capabilities = capabilities
+            session["test_plan"] = test_plan
+            print(
+                f"Guided {args.tier.title()} plan for {test_plan['device']['model']} "
+                f"(hardware {test_plan['device']['hardware_revision'] or 'unknown'}, "
+                f"firmware {test_plan['device']['firmware_revision'] or 'unknown'})"
+            )
+            print("Verified route:", test_plan["device"]["verified_route"] or "unknown")
+            print("Estimated operator actions:", test_plan["operator_actions_estimate"])
+            for step in test_plan["steps"]:
+                reasons = (
+                    "; ".join(step["reasons"]) or "ready for the existing guided suite"
+                )
+                print(
+                    f"  {step['eligibility']}: {step['id']} ({step['feature']}) — {reasons}"
+                )
+            print("Restoration:", test_plan["restoration_plan"])
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     if resume_state is not None:
         if resume_dir is None:
@@ -848,6 +2104,17 @@ def execute(args: argparse.Namespace) -> int:
     else:
         output_dir = write_run(
             args.output_root, f"{timestamp}_{run_id}", environment, session
+        )
+    if args.command == "run" and tier_plan is not None:
+        return _execute_tier_suite(
+            api,
+            args,
+            selected,
+            environment,
+            output_dir,
+            run_id,
+            tier_plan,
+            tier_capabilities,
         )
     if args.command == "run" and args.suite == "outputs":
         return _execute_output_suite(

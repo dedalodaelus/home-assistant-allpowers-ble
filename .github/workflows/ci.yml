@@ -76,6 +76,14 @@ jobs:
               --cov-report=term-missing
               --cov-report=xml:coverage.xml
 
+          - name: HIL transaction-safety completeness gate
+            env:
+              USE_REAL_HOMEASSISTANT: "0"
+              PYTHONDONTWRITEBYTECODE: "1"
+            run: >-
+              python -m scripts.hil run --suite transaction-safety --simulate
+              --output-root .pytest-tmp-transaction-safety --non-interactive
+
           - name: Config flow coverage gate
             env:
               COVERAGE_FILE: .coverage.config-flow
@@ -98,11 +106,16 @@ jobs:
               --basetemp=.pytest-tmp-homeassistant
               -o cache_dir=.pytest_cache-homeassistant
 
-          - name: Validate repository
-            run: python scripts/validate_repository.py
-
           - name: Validate HIL schema v2 and metadata (offline)
             run: python scripts/validate_hil_qualification.py
+
+      - name: Remove generated Python caches
+        run: |
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+      - name: Validate repository contents
+        run: python scripts/validate_repository.py
 
       - name: Upload coverage report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

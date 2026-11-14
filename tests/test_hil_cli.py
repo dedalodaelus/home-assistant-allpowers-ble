@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
 import sys
 import subprocess
+import builtins
 from types import ModuleType
 from urllib.error import HTTPError
 import zipfile
@@ -224,7 +227,6 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
                 "read-only",
                 "--ha-url",
                 "https://example.test",
-                "--non-interactive",
                 "--output-root",
                 str(output_root),
             ]
@@ -272,6 +274,1171 @@ def test_guided_read_only_run_saves_allowlisted_runtime_capabilities(
     assert b"10.0.0.100" not in combined
     assert b"PRIVATE_TOKEN" not in combined
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+def test_tier_plan_is_persisted_and_privacy_safe_on_export(
+    monkeypatch, tmp_path, allpowers_registry
+):
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
+    monkeypatch.setattr(
+        cli, "_has_verified_telemetry", lambda sample: sample == {"sample": "fresh"}
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "1")
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / "guided-tier"
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--tier",
+                "bronze",
+                "--route",
+                "active_proxy",
+                "--ha-url",
+                "https://example.test",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+        == 2
+    )
+
+    (run_dir,) = tuple(output_root.iterdir())
+    private_session = json.loads((run_dir / "private" / "session.json").read_text())
+    assert private_session["test_plan"]["requested_tier"] == "bronze"
+    assert private_session["test_plan"]["attained_tier"] is None
+    tier_execution = json.loads(
+        (run_dir / "private" / "tier-execution.json").read_text()
+    )
+    assert tier_execution["device"] == {
+        "model": "R600",
+        "hardware_version": "0.3",
+        "firmware_version": "0.2",
+    }
+    assert tier_execution["requested_route"] == "active_proxy"
+    assert tier_execution["verified_routes"] == []
+    assert (
+        tier_execution["build_provenance"]
+        == private_session["test_plan"]["device"]["build_provenance"]
+    )
+
+    from scripts.hil.evidence import export_archive, verify_public_archive
+
+    archive = export_archive(run_dir, confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        public = {name: exported.read(name) for name in exported.namelist()}
+    session = json.loads(public["public/session.json"])
+    bronze_evidence = json.loads(public["public/tier-bronze-read-only.json"])
+    combined = b"".join(public.values())
+    tier_plan = session["data"]["test_plan"]
+    assert tier_plan["requested_tier"] == "bronze"
+    assert tier_plan["attained_tier"] is None
+    assert tier_plan["device"]["verified_route"] is None
+    assert bronze_evidence["protocol_probe"] == "inconclusive"
+    assert bronze_evidence["qualification_status"] == "inconclusive"
+    assert session["data"]["route"]["requested"] == "active_proxy"
+    assert b"secret-device-id-012345" not in combined
+    assert b"secret-entry-1" not in combined
+    assert b"PRIVATE_TOKEN" not in combined
+    assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    (
+        "packet_types",
+        "write_completion",
+        "notification_mode",
+        "expected_probe",
+        "expected_public_event",
+    ),
+    [
+        (
+            ["SettingsData"],
+            "write_ok",
+            "synthetic",
+            "inconclusive",
+            "notification_decoded",
+        ),
+        ([], "write_ok", "synthetic", "inconclusive", "notification_decoded"),
+        ([], "write_ok", "no_response", "inconclusive", None),
+        (
+            ["StatusData"],
+            "write_ok",
+            "during_write",
+            "pass",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "missing",
+            "synthetic",
+            "inconclusive",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "write_error",
+            "synthetic",
+            "inconclusive",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "write_ok",
+            "delayed_after_write",
+            "pass",
+            "status_data_decoded",
+        ),
+    ],
+)
+def test_bronze_protocol_probe_requires_status_data_through_public_export(
+    monkeypatch,
+    tmp_path,
+    notification_builder,
+    packet_types,
+    write_completion,
+    notification_mode,
+    expected_probe,
+    expected_public_event,
+):
+    from argparse import Namespace
+    from datetime import UTC, datetime
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.hil_client import HilClientTracer
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from scripts.hil.evidence import export_archive, verify_public_archive
+    from tests.ha_stubs import FakeCharacteristic
+    from tests.test_client_logic import _connected_client
+
+    run_id = "0123456789abcdef"
+    status_request = bytes.fromhex("a565b1000106010000000000")
+    sample = {
+        "battery": {
+            "value": 55,
+            "verified": True,
+            "source": "ha_rest_entity_state",
+        }
+    }
+    real_status_client, fake_ble = _connected_client()
+    real_status_client._active_session_generation = 3
+    real_status_client._session_hardware_revision = ("0.3", 3)
+    real_write = fake_ble.write_gatt_char
+    use_production_client = (
+        packet_types == ["StatusData"] and write_completion == "write_ok"
+    )
+    elapsed_sleep = [0.0]
+
+    def advance_sleep(seconds):
+        elapsed_sleep[0] += seconds
+
+    def deliver_status_notification():
+        packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+        real_status_client._notification_handler(
+            FakeCharacteristic(), bytearray(packet)
+        )
+
+    class BronzeProbeHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.capture = None
+            self.observer = None
+            self.notification_delivered = False
+            self.fetch_count = 0
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "private-entry",
+                    "private-user",
+                    run_id,
+                    "read_only_snapshot",
+                    "active_proxy",
+                )
+                self.capture.observe_route(
+                    3,
+                    ConnectedRoute(
+                        "active_proxy",
+                        "esphome",
+                        "esphome_scanner_binding",
+                        proxy_id="private-proxy-id",
+                    ),
+                )
+                if use_production_client:
+                    self.capture.record("capture_started", session_generation=3)
+                    self.observer = HilClientTracer(self.capture)
+                    real_status_client.attach_observer(self.observer)
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+            if command["type"].endswith("/fetch"):
+                self.fetch_count += 1
+                if (
+                    use_production_client
+                    and notification_mode == "delayed_after_write"
+                    and not self.notification_delivered
+                    and elapsed_sleep[0] >= 1.5
+                ):
+                    deliver_status_notification()
+                    self.notification_delivered = True
+                return [self.capture.snapshot()]
+            assert command["type"].endswith("/stop")
+            if self.observer is not None:
+                real_status_client.detach_observer(self.observer)
+                self.capture.record("capture_stopped", session_generation=3)
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+        def request_read_only_refresh(self, entity_id):
+            assert entity_id == "button.station_refresh"
+            if use_production_client:
+
+                async def write_and_notify(characteristic, frame, *, response):
+                    await real_write(characteristic, frame, response=response)
+                    assert frame == status_request
+                    if notification_mode == "during_write":
+                        deliver_status_notification()
+                        self.notification_delivered = True
+
+                fake_ble.write_gatt_char = write_and_notify
+                asyncio.run(real_status_client.async_request_status())
+                return
+            self.capture.record(
+                "write_attempt",
+                session_generation=3,
+                frame=status_request,
+                direction="tx",
+                transaction_id="bronze-tx-1",
+            )
+            if write_completion == "write_ok":
+                self.capture.record(
+                    "write_ok",
+                    session_generation=3,
+                    transaction_id="bronze-tx-1",
+                )
+            elif write_completion == "write_error":
+                self.capture.record(
+                    "write_error",
+                    session_generation=3,
+                    transaction_id="bronze-tx-1",
+                    error_type="FakeTransportError",
+                    reason_category="transport_failure",
+                )
+            if notification_mode == "no_response":
+                return
+            self.capture.record(
+                "notification_received",
+                session_generation=3,
+                frame=b"\xaa\x55",
+                direction="rx",
+            )
+            self.capture.record(
+                "notification_decoded",
+                session_generation=3,
+                decoded_packets=len(packet_types),
+                decoded_packet_types=packet_types,
+                characteristic_uuid="0000fff1-0000-1000-8000-00805f9b34fb",
+                inferred_model_profile="r600",
+                session_hardware_revision="0.3",
+                discarded_frames=0,
+                discarded_bytes=0,
+            )
+
+    api_fake = BronzeProbeHA()
+    device = discovery.Device(
+        device_id="private-device-id",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="private-entry",
+        refresh_entity="button.station_refresh",
+    )
+    environment_data = {
+        "schema_version": 1,
+        "home_assistant": {},
+        "runner_host": {},
+        "integration": {},
+    }
+    session = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "qualification_status": "inconclusive",
+        "mode": "read_only_preflight",
+        "scenario_id": "read_only_snapshot",
+        "started_at": datetime.now(UTC).isoformat(),
+        "device": {
+            "model": {"value": "R600", "verified": True},
+            "hardware_version": {"value": "0.3", "verified": True},
+            "firmware_version": {"value": "0.2", "verified": True},
+        },
+    }
+    run_dir = storage.write_run(
+        tmp_path / "bronze-runs", "runner", environment_data, session
+    )
+
+    sample_times = []
+
+    def read_sample(*_args):
+        sample_times.append(elapsed_sleep[0])
+        return sample
+
+    monkeypatch.setattr(cli, "read_only_sample", read_sample)
+    monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
+    monkeypatch.setattr(cli, "sleep", advance_sleep)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+    plan = {
+        "requested_tier": "bronze",
+        "steps": [{"id": "read_only_probe"}],
+        "device": {"build_provenance": {}},
+    }
+
+    result = cli._execute_tier_suite(
+        api_fake,
+        Namespace(route="active_proxy", non_interactive=False),
+        device,
+        environment_data,
+        run_dir,
+        run_id,
+        plan,
+        None,
+    )
+
+    assert result == (0 if expected_probe == "pass" else 2)
+    private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
+    assert private_bronze["protocol_probe"]["outcome"] == expected_probe
+    archive = export_archive(run_dir.parent, confirmed=True)
+    _, public, _ = verify_public_archive(archive, include_contents=True)
+    public_bronze = json.loads(public["tier-bronze-read-only.json"])
+    public_events = [json.loads(line) for line in public["events.jsonl"].splitlines()]
+    decoded = next(
+        (
+            row
+            for row in public_events
+            if row["event"] in {"status_data_decoded", "notification_decoded"}
+        ),
+        None,
+    )
+    assert public_bronze["protocol_probe"] == (
+        "verified" if expected_probe == "pass" else "inconclusive"
+    )
+    if expected_public_event is None:
+        assert decoded is None
+    else:
+        assert decoded is not None
+        assert decoded["event"] == expected_public_event
+        assert "decoded_packet_types" not in decoded
+    if use_production_client:
+        private_events = [
+            json.loads(line)
+            for line in (run_dir / "traces/bronze_read_only/events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        lifecycle = [
+            row["event"]
+            for row in private_events
+            if row["event"]
+            in {
+                "write_attempt",
+                "notification_received",
+                "notification_decoded",
+                "write_ok",
+            }
+        ]
+        assert lifecycle == (
+            [
+                "write_attempt",
+                "notification_received",
+                "notification_decoded",
+                "write_ok",
+            ]
+            if notification_mode == "during_write"
+            else [
+                "write_attempt",
+                "write_ok",
+                "notification_received",
+                "notification_decoded",
+            ]
+        )
+        if notification_mode == "delayed_after_write":
+            assert elapsed_sleep[0] >= 1.5
+            assert sample_times[1] >= 1.5
+        write_attempt = next(
+            row for row in private_events if row["event"] == "write_attempt"
+        )
+        write_ok = next(row for row in private_events if row["event"] == "write_ok")
+        assert write_attempt["transaction_id"]
+        assert write_ok["transaction_id"] == write_attempt["transaction_id"]
+    if notification_mode == "no_response":
+        assert api_fake.fetch_count <= 25
+        assert elapsed_sleep[0] <= 12.0
+
+
+@pytest.mark.parametrize("include_trace", [True, False])
+def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
+    monkeypatch, tmp_path, include_trace
+):
+    from argparse import Namespace
+
+    from scripts.hil import outputs, recovery, settings
+    from scripts.hil.guided import build_tier_plan
+
+    api = type("FakeHA", (), {"origin": "https://example.test"})()
+    device = discovery.Device(
+        device_id="fake-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={
+            "ac_output": "switch.ac",
+            "dc_output": "switch.dc",
+            "light": "switch.light",
+            "eco_mode": "switch.eco",
+            "work_mode": "select.mode",
+            "eco_timeout": "select.timeout",
+            "car_charger": "switch.car",
+        },
+        config_entry_id="fake-entry",
+    )
+    capabilities = {
+        "model": "R600",
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.0",
+        "features": {
+            key: {"physical_presence": "present", "production_authorized": True}
+            for key in (
+                "ac_output",
+                "dc_output",
+                "light_output",
+                "eco_mode",
+                "work_mode",
+                "eco_timeout",
+                "car_charger",
+            )
+        },
+    }
+    controls = {
+        key: {"available": True, "eligible": True, "state": "off"}
+        for key in (
+            "ac_output",
+            "dc_output",
+            "light",
+            "eco_mode",
+            "work_mode",
+            "eco_timeout",
+            "car_charger",
+        )
+    }
+    plan = build_tier_plan(
+        "gold", capabilities, controls, observed_route="local_adapter"
+    )
+    calls = []
+
+    def fake_output(_api, args, _device, _environment, out, _run_id, _services):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        if include_trace:
+            (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    def fake_settings(_api, args, _device, out, _run_id, _services):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps({"steps": [{"outcome": "pass"}]}), encoding="utf-8"
+        )
+        if include_trace:
+            (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    def fake_recovery(_api, args, _device, out, _run_id, _services, _resume):
+        calls.append((args.suite, args.scenario_id))
+        (out / "checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {"step_id": "baseline", "outcome": "pass"},
+                        {
+                            "step_id": "operator_action",
+                            "outcome": "pass",
+                            "action": "route interruption and restoration",
+                            "operator_confirmed": True,
+                        },
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "session_generation_before": 1,
+                            "session_generation_after": 2,
+                            "disconnect_observed": False,
+                            "connected": True,
+                            "status_fresh": True,
+                            "fresh_status_telemetry": True,
+                            "route_verified": True,
+                            "trace_complete": True,
+                            "physical_outcome": "yes",
+                            "route": "local_adapter",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        if include_trace:
+            (out / "trace.json").write_text(
+                json.dumps(
+                    {
+                        "complete": True,
+                        "observed_route": "local_adapter",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        assert args.guided_reconnect_required is True
+        return 0
+
+    monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
+    monkeypatch.setattr(settings, "_execute_settings_suite", fake_settings)
+    monkeypatch.setattr(recovery, "_execute_recovery_suite", fake_recovery)
+    from dataclasses import replace
+
+    base_services = cli._suite_services()
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            base_services,
+            read_only_sample=lambda *_args: {"sample": "fresh"},
+            has_verified_telemetry=lambda sample: sample == {"sample": "fresh"},
+            prompt=lambda _question: "1",
+        ),
+    )
+    args = Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False)
+    root = storage.write_run(tmp_path, "tier-parent", {}, {})
+
+    assert (
+        cli._execute_tier_suite(
+            api, args, device, {}, root, "parent-run", plan, capabilities
+        )
+        == 2
+    )
+    assert calls.count(("recovery", None)) == (1 if include_trace else 0)
+    assert ("outputs", "output_ac_cycle") in calls
+    assert (("settings", "settings_eco_mode") in calls) is include_trace
+    child_runs = list(tmp_path.glob("tier_*/private/session.json"))
+    assert child_runs
+    for session_path in child_runs:
+        child_session = json.loads(session_path.read_text())
+        assert re.fullmatch(r"[a-f0-9]{16}", child_session["run_id"])
+        assert session_path.parent.parent.name == f"tier_{child_session['run_id']}"
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["review_state"] == "pending"
+    scenario_steps = [
+        step
+        for step in execution["steps"]
+        if step.get("scenario_id") in {"output_ac_cycle", "settings_eco_mode"}
+    ]
+    assert all((step["outcome"] == "pass") is include_trace for step in scenario_steps)
+    assert all(
+        step["machine_evidence"]
+        for step in execution["steps"]
+        if step["outcome"] == "pass"
+    )
+    for step in execution["steps"]:
+        for artifact in step.get("machine_evidence", []):
+            path = (root / artifact["path"]).resolve()
+            assert path.is_file()
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"]
+
+
+def test_tier_executor_stops_after_unrestored_candidate_mutation(monkeypatch, tmp_path):
+    from argparse import Namespace
+
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    calls = []
+
+    def uncertain(*args, **kwargs):
+        calls.append(args[5])
+        return {
+            "step_id": args[5],
+            "outcome": "inconclusive",
+            "state_safe_to_continue": False,
+            "reason": "restoration was not authorized; manual inspection required",
+        }
+
+    monkeypatch.setattr(cli, "_execute_experimental_output_step", uncertain)
+    root = write_run(tmp_path, "stop-after-uncertain", {}, {})
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware=None,
+        firmware=None,
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    capabilities = {
+        "features": {
+            name: {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+            }
+            for name in ("dc_output", "ac_output")
+        }
+    }
+    plan = {
+        "requested_tier": "gold",
+        "steps": [{"id": "dc_output_cycle"}, {"id": "ac_output_cycle"}],
+    }
+
+    assert (
+        cli._execute_tier_suite(
+            object(),
+            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+            device,
+            {},
+            root,
+            "parent-run",
+            plan,
+            capabilities,
+        )
+        == 2
+    )
+
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert calls == ["dc_output_cycle"]
+    assert [step["outcome"] for step in execution["steps"]] == [
+        "inconclusive",
+        "blocked",
+    ]
+    assert "not attempted" in execution["steps"][1]["reason"]
+
+
+def test_tier_executor_skips_absent_and_blocks_unknown_without_ble_write(
+    tmp_path,
+):
+    from argparse import Namespace
+
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    class FakeHA:
+        def __init__(self):
+            self.commands = []
+
+        def websocket(self, commands):
+            self.commands.extend(commands)
+            raise AssertionError("ineligible controls must not start a GATT trace")
+
+    api = FakeHA()
+    device = Device(
+        device_id="fake-device",
+        model="R1500 LITE",
+        hardware="0.1",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={"light": "switch.light", "ac_output": "switch.ac"},
+    )
+    root = write_run(tmp_path, "profile-eligibility", {}, {})
+    capabilities = {
+        "features": {
+            "light_output": {"physical_presence": "absent"},
+            "ac_output": {"physical_presence": "unknown"},
+        }
+    }
+
+    result = cli._execute_tier_suite(
+        api,
+        Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+        device,
+        {},
+        root,
+        "parent-run",
+        {
+            "requested_tier": "silver",
+            "steps": [{"id": "light_output_cycle"}, {"id": "ac_output_cycle"}],
+        },
+        capabilities,
+    )
+
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert result == 2
+    assert [step["outcome"] for step in execution["steps"]] == [
+        "not_applicable",
+        "blocked",
+    ]
+    assert "substantiates physical absence" in execution["steps"][0]["reason"]
+    assert "unknown or unreviewed" in execution["steps"][1]["reason"]
+    assert api.commands == []
+
+
+def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_path):
+    from argparse import Namespace
+
+    from scripts.hil import recovery
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    class FakeHA:
+        origin = "https://example.test"
+
+    def stable_vendor_observation(
+        _api, args, _device, output_dir, _run_id, _services, _resume
+    ):
+        assert args.guided_reconnect_required is True
+        (output_dir / "checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {"step_id": "baseline", "outcome": "pass"},
+                        {
+                            "step_id": "operator_action",
+                            "outcome": "pass",
+                            "action": "vendor-app contention",
+                            "operator_confirmed": True,
+                            "operator_app_result": "connected",
+                        },
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "session_generation_before": 4,
+                            "session_generation_after": 4,
+                            "disconnect_observed": False,
+                            "connected": True,
+                            "status_fresh": True,
+                            "fresh_status_telemetry": True,
+                            "route_verified": True,
+                            "trace_complete": True,
+                            "route": "local_adapter",
+                            "ha_observation": "ha_stable",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "trace.json").write_text(
+            json.dumps({"complete": True, "observed_route": "local_adapter"}),
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(recovery, "_execute_recovery_suite", stable_vendor_observation)
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    parent = write_run(tmp_path, "guided-reconnect-parent", {}, {})
+    result = cli._execute_tier_suite(
+        FakeHA(),
+        Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False),
+        device,
+        {},
+        parent,
+        "0123456789abcdef",
+        {"requested_tier": "silver", "steps": [{"id": "basic_reconnect"}]},
+        {"features": {}},
+    )
+
+    execution = json.loads((parent / "tier-execution.json").read_text())
+    step = execution["steps"][0]
+    assert result == 2
+    assert step["outcome"] == "inconclusive"
+    assert "mandatory reconnect requires" in step["reason"]
+
+
+def test_noninteractive_tier_read_only_failure_records_inconclusive_without_writes(
+    monkeypatch, tmp_path
+):
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from scripts.hil import outputs
+    from scripts.hil.discovery import Device
+    from scripts.hil.storage import write_run
+
+    def fake_output(_api, _args, _device, _environment, out, _run_id, _services):
+        (out / "checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "outcome": "inconclusive",
+                            "reason": "no interactive authorization was given",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (out / "trace.json").write_text("{}", encoding="utf-8")
+        return 2
+
+    monkeypatch.setattr(outputs, "_execute_output_suite", fake_output)
+    base_services = cli._suite_services()
+    monkeypatch.setattr(cli, "_suite_services", lambda: base_services)
+    root = write_run(tmp_path, "noninteractive-tier", {}, {})
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware=None,
+        firmware=None,
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={},
+    )
+    plan = {
+        "requested_tier": "silver",
+        "steps": [{"id": "read_only_probe"}, {"id": "dc_output_cycle"}],
+    }
+    capabilities = {
+        "features": {
+            "dc_output": {
+                "physical_presence": "present",
+                "production_authorized": True,
+            }
+        }
+    }
+
+    result = cli._execute_tier_suite(
+        SimpleNamespace(origin="https://example.test"),
+        Namespace(route="local_adapter", output_root=tmp_path, non_interactive=True),
+        device,
+        {},
+        root,
+        "parent-run",
+        plan,
+        capabilities,
+    )
+
+    assert result == 2
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["steps"][0]["outcome"] == "inconclusive"
+    assert execution["steps"][1]["outcome"] == "inconclusive"
+    assert "no interactive authorization" in execution["steps"][1]["reason"]
+    assert not list(tmp_path.rglob("frames.jsonl"))
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected", "writes", "failure_mode"),
+    [
+        (["1", "1", "1", "1", "1"], "pass", [True, False], None),
+        (["2"], "skipped", [], None),
+        (["1", "2"], "skipped", [], None),
+        (["1", "1"], "inconclusive", [], "grant_denied"),
+        (["1", "1"], "inconclusive", [True], "disconnect"),
+        (["1", "1", "1", "1"], "inconclusive", [True, False], "restore_ambiguous"),
+        (["1", "1", "1", "2"], "inconclusive", [True], None),
+    ],
+)
+def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
+    monkeypatch, tmp_path, answers, expected, writes, failure_mode
+):
+    from argparse import Namespace
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    device = discovery.Device(
+        device_id="synthetic-device",
+        model="S500",
+        hardware="1",
+        firmware="1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"dc_output": "switch.dc"},
+        config_entry_id="synthetic-entry",
+    )
+
+    class FakeHA:
+        origin = "https://example.test"
+        state = "off"
+        writes = []
+        connected = True
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": self.connected,
+                "status_fresh": True,
+                "pending_transaction": False,
+                "session_generation": 9,
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                },
+            }
+
+        def control_state(self, _feature, _entity):
+            return {"available": True, "state": self.state}
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                return [{"schema_version": 2, "capture_id": "capture-change"}]
+            return [
+                {
+                    "schema_version": 2,
+                    "run_id": "0123456789abcdef",
+                    "scenario_id": "output_dc_cycle",
+                    "capture_id": command["capture_id"],
+                    "requested_route": "auto",
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                    "events": [],
+                    "frames": [],
+                }
+            ]
+
+        @contextmanager
+        def websocket_session(self):
+            yield self
+
+        def experimental_output(
+            self,
+            _entry,
+            _feature,
+            target,
+            *,
+            authorization_confirmed,
+            execution_confirmed,
+        ):
+            if failure_mode == "grant_denied":
+                raise api.HAAPIError("synthetic expired grant")
+            assert authorization_confirmed is True
+            assert execution_confirmed is True
+            self.writes.append(target)
+            if failure_mode == "disconnect":
+                self.connected = False
+            elif failure_mode != "restore_ambiguous" or target:
+                self.state = "on" if target else "off"
+            if failure_mode == "restore_ambiguous" and not target:
+                return {
+                    "outcome": "inconclusive",
+                    "confirmed": False,
+                    "route": "local_adapter",
+                    "session_generation": 9,
+                }
+            return {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "route": "local_adapter",
+                "session_generation": 9,
+            }
+
+    fake = FakeHA()
+    prompt_answers = iter(answers)
+    services = replace(
+        cli._suite_services(),
+        prompt=lambda _question: next(prompt_answers),
+        validate_trace_result=lambda *_args, **_kwargs: None,
+        correlate_transaction=lambda *_args, **_kwargs: {
+            "session_generation": 9,
+            "kind": "output",
+        },
+    )
+    result = cli._execute_experimental_output_step(
+        fake,
+        Namespace(route="auto", non_interactive=False),
+        device,
+        tmp_path,
+        "synthetic-run",
+        "dc_output_cycle",
+        "dc_output",
+        services,
+    )
+    assert result["outcome"] == expected
+    assert fake.writes == writes
+    if writes:
+        evidence = json.loads((tmp_path / "tier-dc_output_cycle.json").read_text())
+        if expected == "pass":
+            assert len(evidence["actions"]) == 2
+            assert all(action["confirmed"] for action in evidence["actions"])
+            assert evidence["physical_change_outcome"] == "correct"
+            assert evidence["physical_restore_outcome"] == "correct"
+        else:
+            assert evidence["outcome"] == "inconclusive"
+            assert "physical_outcome" not in evidence
+
+
+def test_tier_executor_dispatches_candidate_through_grant_and_restore(
+    monkeypatch, tmp_path
+):
+    """Exercise tier dispatch through the candidate HIL executor with Fake HA."""
+    from argparse import Namespace
+    from contextlib import contextmanager
+    from dataclasses import replace
+
+    device = discovery.Device(
+        device_id="synthetic-device",
+        model="S500",
+        hardware="1",
+        firmware="1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"dc_output": "switch.dc"},
+        config_entry_id="synthetic-entry",
+    )
+
+    class FakeHA:
+        origin = "https://example.test"
+
+        def __init__(self):
+            self.state = "off"
+            self.writes = []
+
+        def hil_capabilities(self, _entry):
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "pending_transaction": False,
+                "session_generation": 9,
+                "features": {
+                    "dc_output": {
+                        "physical_presence": "present",
+                        "candidate_hil_eligible": True,
+                        "production_authorized": False,
+                    }
+                },
+            }
+
+        def control_state(self, _feature, _entity):
+            return {"available": True, "state": self.state}
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture_id = "capture-guided"
+                return [{"schema_version": 2, "capture_id": self.capture_id}]
+            return [
+                {
+                    "schema_version": 2,
+                    "run_id": "parent-run",
+                    "scenario_id": "output_dc_cycle",
+                    "capture_id": command["capture_id"],
+                    "requested_route": "auto",
+                    "observed_route": "local_adapter",
+                    "complete": True,
+                    "events": [],
+                    "frames": [],
+                }
+            ]
+
+        @contextmanager
+        def websocket_session(self):
+            yield self
+
+        def experimental_output(
+            self,
+            _entry,
+            _feature,
+            target,
+            *,
+            authorization_confirmed,
+            execution_confirmed,
+        ):
+            assert authorization_confirmed is True
+            assert execution_confirmed is True
+            self.writes.append(target)
+            self.state = "on" if target else "off"
+            return {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "route": "local_adapter",
+                "session_generation": 9,
+            }
+
+    fake = FakeHA()
+    answers = iter(["1", "1", "1", "1", "1"])
+    base_services = cli._suite_services()
+    monkeypatch.setattr(
+        cli,
+        "_suite_services",
+        lambda: replace(
+            base_services,
+            prompt=lambda _question: next(answers),
+            validate_trace_result=lambda *_args, **_kwargs: None,
+            correlate_transaction=lambda *_args, **_kwargs: {
+                "session_generation": 9,
+                "kind": "output",
+            },
+        ),
+    )
+    root = storage.write_run(tmp_path, "guided-parent", {}, {})
+    plan = {"requested_tier": "silver", "steps": [{"id": "dc_output_cycle"}]}
+    capabilities = {
+        "features": {
+            "dc_output": {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+            }
+        }
+    }
+
+    assert (
+        cli._execute_tier_suite(
+            fake,
+            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+            device,
+            {},
+            root,
+            "parent-run",
+            plan,
+            capabilities,
+        )
+        == 0
+    )
+    assert fake.writes == [True, False]
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert execution["review_state"] == "pending"
+    assert execution["steps"][0]["outcome"] == "pass"
+    artifact = root / execution["steps"][0]["machine_evidence"][0]["path"]
+    evidence = json.loads(artifact.read_text())
+    assert evidence["outcome"] == "pass"
+    assert [action["route"] for action in evidence["actions"]] == [
+        "local_adapter",
+        "local_adapter",
+    ]
+    for action in evidence["actions"]:
+        assert action["trace_complete"] is True
+        for trace_artifact in action["trace_evidence"]:
+            trace_path = root / trace_artifact["path"]
+            assert (
+                hashlib.sha256(trace_path.read_bytes()).hexdigest()
+                == trace_artifact["sha256"]
+            )
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
@@ -3148,6 +4315,40 @@ def test_discovery_maps_only_unambiguous_integration_control_entities():
     assert device.config_entry_id == "entry-1"
 
 
+def test_discovery_maps_only_linked_integration_read_only_refresh_button():
+    entities = [
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "button.device_refresh",
+            "unique_id": "registry_refresh",
+            "config_entry_id": "entry-1",
+            "disabled_by": None,
+        },
+        {
+            "device_id": "device-1",
+            "platform": "allpowers_ble",
+            "entity_id": "button.foreign_refresh",
+            "unique_id": "registry_refresh",
+            "config_entry_id": "entry-2",
+            "disabled_by": None,
+        },
+    ]
+    devices = [
+        {
+            "id": "device-1",
+            "config_entry_id": "entry-1",
+            "identifiers": [["allpowers_ble", "private-registry-id"]],
+            "model": "R600",
+        }
+    ]
+    entries = [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}]
+
+    (device,) = discovery.find_devices(entities, devices, entries)
+
+    assert device.refresh_entity == "button.device_refresh"
+
+
 def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatch):
     """Only current values and select choices defined by the integration survive."""
     client = api.HAClient("http://127.0.0.1:8123", "token")
@@ -3198,6 +4399,29 @@ def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
             "target": {"entity_id": "select.station_mode"},
         },
     ]
+
+
+def test_request_read_only_refresh_uses_only_the_integration_button(monkeypatch):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    commands = []
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda rows: commands.extend(rows) or [{"context": {}}],
+    )
+
+    client.request_read_only_refresh("button.station_refresh")
+
+    assert commands == [
+        {
+            "type": "call_service",
+            "domain": "button",
+            "service": "press",
+            "target": {"entity_id": "button.station_refresh"},
+        }
+    ]
+    with pytest.raises(api.HAAPIError):
+        client.request_read_only_refresh("button.other_domain_press")
 
 
 @pytest.mark.parametrize(
@@ -3280,28 +4504,43 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         origin = "https://ha.example.test"
 
         def __init__(self):
-            self.generations = iter((4, 5))
+            # The operator confirms after restoring the route, so the first
+            # poll may already see the new session without a transient down state.
+            self.capabilities = iter(((True, 4), (True, 5)))
             self.commands = []
 
         def hil_capabilities(self, entry_id):
-            generation = next(self.generations)
+            connected, generation = next(self.capabilities)
             return {
                 "verified": True,
                 "identity_conflicted": False,
-                "connected": True,
-                "status_fresh": True,
+                "connected": connected,
+                "status_fresh": connected,
                 "session_generation": generation,
             }
 
         def websocket(self, commands):
             self.commands.extend(commands)
             if commands[0]["type"].endswith("/start"):
-                return [{"schema_version": 2, "capture_id": "capture-safe"}]
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "capture-safe",
+                        "ttl_seconds": 120,
+                    }
+                ]
             return [
                 {
                     "schema_version": 2,
                     "observed_route": "local_adapter",
                     "complete": True,
+                    "events": [
+                        {
+                            "event": "notification_decoded",
+                            "session_generation": 5,
+                            "decoded_packet_types": ["StatusData"],
+                        }
+                    ],
                 }
             ]
 
@@ -3325,7 +4564,11 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
 
     result = cli._execute_recovery_suite(
         api_fake,
-        SimpleNamespace(non_interactive=False, route="auto"),
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
         device,
         output_dir,
         "run-safe",
@@ -3333,13 +4576,148 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
 
     assert result == 0
     assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
-    assert api_fake.commands[1]["type"] == "allpowers_ble/hil/stop"
+    assert [command["type"] for command in api_fake.commands[1:]] == [
+        "allpowers_ble/hil/fetch",
+        "allpowers_ble/hil/stop",
+    ]
     assert all(
         command["type"] not in {"call_service", "allpowers_ble/command"}
         for command in api_fake.commands
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
+    assert stored["steps"][-1]["disconnect_observed"] is False
+    assert stored["steps"][-1]["session_generation_before"] == 4
+    assert stored["steps"][-1]["session_generation_after"] == 5
+    assert stored["steps"][-1]["physical_outcome"] == "yes"
+
+
+def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+
+    class DelayedReconnectHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self, clock):
+            self.clock = clock
+            self.capture = None
+            self.capture_started_at = None
+            self.status_recorded = False
+            self.capability_calls = 0
+
+        def hil_capabilities(self, entry_id):
+            self.capability_calls += 1
+            generation = 4 if self.capability_calls == 1 else 5
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": generation,
+            }
+
+        def websocket(self, commands):
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "entry-safe",
+                    "operator",
+                    "0123456789abcdef",
+                    "recovery_reconnect",
+                    "auto",
+                )
+                self.capture_started_at = self.clock[0]
+                self.capture.record("capture_started", session_generation=5)
+                self.capture.observe_route(
+                    5,
+                    ConnectedRoute(
+                        "active_proxy",
+                        "esphome",
+                        "esphome_scanner_binding",
+                        proxy_id="private-proxy-id",
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+
+            if command["type"].endswith("/fetch"):
+                if (
+                    not self.status_recorded
+                    and self.clock[0] - self.capture_started_at >= 8
+                ):
+                    self.capture.record(
+                        "notification_decoded",
+                        session_generation=5,
+                        decoded_packets=1,
+                        decoded_packet_types=["StatusData"],
+                        characteristic_uuid="0000fff1-0000-1000-8000-00805f9b34fb",
+                        inferred_model_profile="r600",
+                        session_hardware_revision="0.3",
+                        discarded_frames=0,
+                        discarded_bytes=0,
+                    )
+                    self.status_recorded = True
+                return [self.capture.snapshot()]
+
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+    clock = [100.0]
+    api_fake = DelayedReconnectHA(clock)
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "guided-delayed-status"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
+        device,
+        output_dir,
+        "0123456789abcdef",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    observation = stored["steps"][-1]
+    assert result == 0
+    assert api_fake.capability_calls >= 2
+    assert api_fake.status_recorded is True
+    assert clock[0] - api_fake.capture_started_at >= 8
+    assert observation["disconnect_observed"] is False
+    assert observation["session_generation_before"] == 4
+    assert observation["session_generation_after"] == 5
+    assert observation["fresh_status_telemetry"] is True
+    assert observation["route_verified"] is True
+    assert observation["trace_complete"] is True
+    assert observation["physical_outcome"] == "yes"
+    assert observation["outcome"] == "pass"
 
 
 def test_recovery_transient_api_failure_does_not_prove_new_ble_session(
