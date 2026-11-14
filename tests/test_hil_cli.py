@@ -6634,6 +6634,7 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
         ("stability-short", "mixed_routes", "inconclusive"),
         ("stability-short", "trace_incomplete", "inconclusive"),
         ("stability-short", "missing_telemetry", "inconclusive"),
+        ("stability-short", "cached_notifications", "inconclusive"),
         ("stability-short", "cutoff", "inconclusive"),
         ("stability-short", "session_change", "inconclusive"),
         ("stability-short", "repeated_cutoff", "inconclusive"),
@@ -6699,15 +6700,30 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
                     and (600 <= elapsed < 900 or 1500 <= elapsed < 2400)
                 )
             )
+            status_fresh = connected and not (
+                mode == "cached_notifications" and elapsed >= 600
+            )
             return {
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": connected,
-                "status_fresh": connected,
+                "status_fresh": status_fresh,
                 "settings_fresh": True,
                 "session_generation": 2
                 if mode == "session_change" and elapsed >= 900
                 else 1,
+                "status_notification_count": (
+                    12
+                    if mode == "cached_notifications"
+                    else int(
+                        (
+                            elapsed - 900
+                            if mode == "session_change" and elapsed >= 900
+                            else elapsed
+                        )
+                        // 60
+                    )
+                ),
                 "model": "R600",
                 "profile": "r600-hw-0.3",
                 "settings_options": {
@@ -6937,6 +6953,31 @@ def test_soak_fake_clock_preserves_scope_and_fails_closed(
         assert segments[1]["measured_seconds"] < duration
         assert segments[1]["trace_count"] < minimum_traces
         assert segments[1]["last_session_generation"] == 2
+    if mode == "cached_notifications":
+        segment = next(
+            step for step in checkpoint["steps"] if step.get("sample_count", 0) > 0
+        )
+        assert segment["fresh_status_sample_count"] > 0
+        assert segment["status_notification_marker_available"] is True
+        assert segment["status_notifications_observed"] == 0
+        sample_rows = []
+        for sample_path in sorted(output_dir.glob("stability_samples_*.jsonl")):
+            sample_rows.extend(
+                json.loads(line)
+                for line in sample_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "sample"
+            )
+        assert len(sample_rows) > 1
+        assert all(row["status_fresh"] is True for row in sample_rows)
+        assert all(row["status_notification_count"] == 12 for row in sample_rows)
+        assert all(
+            row["status_notifications_since_previous_poll"] == 0 for row in sample_rows
+        )
+        from scripts.hil.evidence import _public_observation
+
+        public = _public_observation(checkpoint["scenario_id"], segment)
+        assert public["observation"]["status_notification_marker_available"] is True
+        assert public["observation"]["status_notifications_observed"] == 0
     if mode in {"cutoff", "repeated_cutoff", "missing_telemetry"}:
         terminal = checkpoint["steps"][-1]
         assert terminal["measured_seconds"] == 0
@@ -7051,6 +7092,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 4,
+        "status_notification_count": 12,
         "pending_transaction": False,
         "entry_id": "private-entry",
         "raw_address": "AA:BB:CC:DD:EE:FF",
@@ -7067,6 +7109,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
     ]
     assert normalized["model"] == "R600"
     assert normalized["session_generation"] == 4
+    assert normalized["status_notification_count"] == 12
     assert "entry_id" not in normalized
     assert "raw_address" not in normalized
 
@@ -7093,6 +7136,37 @@ def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
     )
 
     with pytest.raises(api.HAAPIError):
+        client.hil_capabilities("entry-123")
+
+
+@pytest.mark.parametrize("count", [True, -1, 1_000_000_001])
+def test_capability_snapshot_rejects_malformed_status_notification_count(
+    monkeypatch, count
+):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    response = {
+        "schema_version": 1,
+        "model": "R600",
+        "profile": "r600-hw-0.3",
+        "classification": "verified",
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "session_generation": 1,
+        "status_notification_count": count,
+        "pending_transaction": False,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
+    }
+    monkeypatch.setattr(client, "websocket", lambda _commands: [response])
+    with pytest.raises(api.HAAPIError, match="status notification count"):
         client.hil_capabilities("entry-123")
 
 

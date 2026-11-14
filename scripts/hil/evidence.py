@@ -238,6 +238,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
+        "status_notification_marker_available",
         "restart_discontinuity",
         "data_limit_hit",
     ):
@@ -253,6 +254,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "dropped_traces",
         "clock_discontinuities",
         "fresh_status_sample_count",
+        "status_notifications_observed",
     ):
         value = step.get(name)
         if type(value) is int and 0 <= value <= 1_000_000:
@@ -374,6 +376,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
+        "status_notification_marker_available",
         "restart_discontinuity",
         "data_limit_hit",
         "session_generation",
@@ -385,6 +388,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "dropped_traces",
         "clock_discontinuities",
         "fresh_status_sample_count",
+        "status_notifications_observed",
         "measured_seconds",
         "maximum_gap_seconds",
         "route",

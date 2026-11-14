@@ -1428,6 +1428,8 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
             "dropped_traces": 0,
             "clock_discontinuities": 0,
             "fresh_status_sample_count": 8,
+            "status_notification_marker_available": True,
+            "status_notifications_observed": 0,
             "route_verified": True,
             "trace_complete": False,
             "disconnect_observed": True,
@@ -1446,6 +1448,10 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert short_stability["actual"] == "inconclusive"
     assert short_stability["observation"]["measured_seconds"] == 420.0
     assert short_stability["observation"]["fresh_status_sample_count"] == 8
+    assert (
+        short_stability["observation"]["status_notification_marker_available"] is True
+    )
+    assert short_stability["observation"]["status_notifications_observed"] == 0
     assert short_stability["observation"]["route_verified"] is True
     assert short_stability["observation"]["trace_complete"] is False
     assert short_stability["observation"]["disconnect_observed"] is True

@@ -104,6 +104,7 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
             settings_stale_timeout=600,
         ),
         active_session_generation=7,
+        session_status_notification_count=12,
         has_pending_transaction=True,
     )
     entry = _entry(runtime_data=SimpleNamespace(coordinator=coordinator, client=client))
@@ -127,6 +128,7 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert result["firmware_revision"] == "2.1"
     assert result["raw_firmware_revision"] == 21
     assert result["session_generation"] == 7
+    assert result["status_notification_count"] == 12
     assert result["output_states"] == {
         "ac_output": True,
         "dc_output": False,
@@ -140,6 +142,48 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert result["pending_transaction"] is True
     assert result["capabilities"]["car_charger_enabled"] is True
     assert entry.entry_id not in str(result)
+
+    await ws_capabilities(hass, connection, {"id": 14, "entry_id": "private-entry"})
+    assert connection.results[-1][1]["status_notification_count"] == 12
+
+
+@pytest.mark.asyncio
+async def test_capability_endpoint_does_not_expose_notification_count_without_session() -> (
+    None
+):
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(
+            model_identity="R600",
+            identity_conflicted=False,
+            session_hardware_version=None,
+            session_raw_hardware_version=None,
+            settings=None,
+            status=None,
+        ),
+        settings_are_fresh=False,
+        status_is_fresh=False,
+        connected=False,
+    )
+    client = SimpleNamespace(
+        options=SimpleNamespace(
+            enable_car_charger=False,
+            settings_keepalive=False,
+            settings_keepalive_interval=540,
+            settings_stale_timeout=600,
+        ),
+        active_session_generation=None,
+        session_status_notification_count=0,
+        has_pending_transaction=False,
+    )
+    entry = _entry(runtime_data=SimpleNamespace(coordinator=coordinator, client=client))
+    connection = _Connection()
+    await ws_capabilities(
+        SimpleNamespace(config_entries=_Entries(entry)),
+        connection,
+        {"id": 15, "entry_id": "private-entry"},
+    )
+    assert connection.results[0][1]["session_generation"] is None
+    assert connection.results[0][1]["status_notification_count"] is None
 
 
 @pytest.mark.asyncio
