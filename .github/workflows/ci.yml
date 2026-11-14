@@ -42,6 +42,7 @@ jobs:
       - name: Validate synchronized Home Assistant test stack
         run: |
           python scripts/sync_ha_test_deps.py --check
+          python scripts/validate_ha_candidate.py
           uv pip check --python "$(command -v python)"
 
       # Pre-commit contains autofix hooks and must finish before readers start.

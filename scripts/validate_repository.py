@@ -24,6 +24,7 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/hassfest.yml",
     ".github/workflows/merge-gate.yml",
     ".github/workflows/promote-devel.yml",
+    ".github/workflows/prepare-ha-upgrade.yml",
     ".github/workflows/release.yml",
     ".github/PULL_REQUEST_TEMPLATE/promotion.md",
     "CHANGELOG.md",
@@ -37,10 +38,12 @@ REQUIRED_REPOSITORY_FILES = {
     "pyproject.toml",
     "scripts/validate_release_metadata.py",
     "scripts/sync_ha_test_deps.py",
+    "scripts/validate_ha_candidate.py",
     "scripts/promote_devel.py",
     "scripts/promotion_metadata.py",
     "tests/test_promote_devel.py",
     "tests/test_sync_ha_test_deps.py",
+    "tests/test_validate_ha_candidate.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
@@ -521,6 +524,21 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             errors.extend(validate_dependabot_ignores(requirements, dependabot))
         except OSError as ex:
             errors.append(f"failed reading requirements_test.txt: {ex}")
+
+    try:
+        from scripts.validate_ha_candidate import (
+            validate_candidate,
+            validate_proposal_update,
+        )
+
+        active = (ROOT / "requirements_test.txt").read_text(encoding="utf-8")
+        candidate = (ROOT / "requirements/ha-candidate/requirements.txt").read_text(
+            encoding="utf-8"
+        )
+        errors.extend(validate_candidate(active, candidate))
+        errors.extend(validate_proposal_update(dependabot))
+    except OSError as ex:
+        errors.append(f"failed reading HA candidate requirements: {ex}")
 
     try:
         release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
