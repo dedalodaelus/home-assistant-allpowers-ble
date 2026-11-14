@@ -16,6 +16,7 @@ SUITES = (
     "transaction-safety",
     "recovery",
     "soak-24h",
+    "stability-short",
 )
 OUTCOMES = {"pass", "fail", "inconclusive", "skipped", "not_applicable"}
 ACTION_TARGETS = {
@@ -133,7 +134,7 @@ def _validate(raw: Any) -> Scenario:
     ):
         raise ValueError("Invalid required evidence")
     parameters = raw.get("parameters", {})
-    if raw["suite"] == "soak-24h":
+    if raw["suite"] in {"soak-24h", "stability-short"}:
         expected_parameters = {
             "duration_seconds",
             "sample_interval_seconds",
@@ -147,9 +148,18 @@ def _validate(raw: Any) -> Scenario:
             raw["mode"] != "soak"
             or not isinstance(parameters, dict)
             or set(parameters) != expected_parameters
-            or parameters.get("duration_seconds") != 86400
+            or type(parameters.get("duration_seconds")) is not int
+            or (
+                parameters["duration_seconds"] != 86400
+                if raw["suite"] == "soak-24h"
+                else parameters["duration_seconds"] != 1800
+            )
             or type(parameters.get("sample_interval_seconds")) is not int
-            or not 60 <= parameters["sample_interval_seconds"] <= 1800
+            or not (
+                60 <= parameters["sample_interval_seconds"] <= 1800
+                if raw["suite"] == "soak-24h"
+                else 10 <= parameters["sample_interval_seconds"] <= 1800
+            )
             or type(parameters.get("max_gap_seconds")) is not int
             or not parameters["sample_interval_seconds"]
             < parameters["max_gap_seconds"]
@@ -166,6 +176,14 @@ def _validate(raw: Any) -> Scenario:
             + 1
         ):
             raise ValueError("Invalid bounded soak parameters")
+        if raw["suite"] == "stability-short" and (
+            parameters["sample_interval_seconds"] != 60
+            or parameters["trace_interval_seconds"] != 300
+            or parameters["minimum_samples"] != 31
+        ):
+            raise ValueError("The short stability observation scope is fixed")
+        if raw["suite"] == "soak-24h" and parameters["sample_interval_seconds"] != 300:
+            raise ValueError("The 24-hour soak sample interval is fixed")
     elif "parameters" in raw:
         raise ValueError("Only the soak scenario may declare runner parameters")
     return Scenario(

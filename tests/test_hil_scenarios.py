@@ -23,6 +23,7 @@ def test_bundled_read_only_scenario_is_valid_and_bounded() -> None:
         "settings_eco_mode",
         "settings_eco_timeout",
         "settings_work_mode",
+        "short_stability_observation",
         "soak_24h_observation",
         "transaction_safety_simulation",
     ]
@@ -214,6 +215,34 @@ def test_soak_verdict_requires_full_duration_samples_and_complete_traces() -> No
     assert soak_verdict(**{**evidence, "maximum_gap_seconds": 601}) == "inconclusive"
     assert soak_verdict(**{**evidence, "dropped_traces": 1}) == "inconclusive"
     assert soak_verdict(**{**evidence, "interrupted": True}) == "inconclusive"
+
+
+def test_short_stability_verdict_is_scoped_to_its_declared_duration() -> None:
+    from scripts.hil.runner import short_stability_verdict
+
+    evidence = {
+        "measured_seconds": 1800,
+        "required_seconds": 1800,
+        "sample_count": 31,
+        "minimum_samples": 31,
+        "maximum_gap_seconds": 60,
+        "allowed_gap_seconds": 120,
+        "trace_count": 6,
+        "minimum_traces": 6,
+        "dropped_traces": 0,
+    }
+    assert short_stability_verdict(**evidence) == "pass"
+    assert (
+        short_stability_verdict(**{**evidence, "measured_seconds": 1799})
+        == "inconclusive"
+    )
+    assert (
+        short_stability_verdict(**{**evidence, "dropped_traces": 1}) == "inconclusive"
+    )
+    assert (
+        short_stability_verdict(**{**evidence, "data_limit_hit": True})
+        == "inconclusive"
+    )
 
 
 def test_transaction_correlation_requires_submitted_then_confirmed_same_session():

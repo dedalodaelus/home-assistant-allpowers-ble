@@ -372,6 +372,19 @@ continues observation only; it never repeats an operator action or replays an
 output write. Output checkpoints are not resumable because an interrupted
 service call may be ambiguous.
 
+For a lower-commitment, read-only observation, run
+`python -m scripts.hil run --device 1 --suite stability-short`. It observes for
+30 uninterrupted minutes, samples every minute, captures a 15-second verified
+route trace every five minutes, and records its own `short_stability` result.
+It does not count as `soak_24h`, cannot qualify Platinum, and never changes
+keepalive or station outputs. A BLE/runtime disconnect with unknown physical
+cause is `inconclusive`; missing freshness, route proof, trace
+completeness, or an interrupted run is also `inconclusive`. Samples are
+read-only polls of fresh Home Assistant telemetry; their count does not claim
+new device notifications. A global 40-minute monotonic budget bounds retries
+and unavailable telemetry. Interrupted short runs can be resumed only as a new
+segment; the missing interval never counts toward a pass.
+
 ### Qualify station stability before a 24-hour soak
 
 `run --suite soak-24h` is a read-only observer. It never enables or changes
