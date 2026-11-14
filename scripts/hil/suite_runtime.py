@@ -22,6 +22,7 @@ class SuiteServices:
     verdict: Callable[..., str]
     recovery_verdict: Callable[..., str]
     soak_verdict: Callable[..., str]
+    short_stability_verdict: Callable[..., str]
     read_only_sample: Callable[..., dict[str, Any]]
     monotonic: Callable[[], float]
     sleep: Callable[[float], None]

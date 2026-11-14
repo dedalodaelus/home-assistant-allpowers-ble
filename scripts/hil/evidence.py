@@ -181,11 +181,12 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
     """Project only typed values and declaration-backed expectations."""
     declaration = DECLARATION_BY_ID.get(scenario_id)
     step_id = step.get("step_id")
-    declared_step_id = (
-        "periodic_observation"
-        if scenario_id == "soak_24h_observation" and step_id == "soak_segment"
-        else step_id
-    )
+    declared_step_id = step_id
+    if step_id == "soak_segment":
+        if scenario_id == "soak_24h_observation":
+            declared_step_id = "periodic_observation"
+        elif scenario_id == "short_stability_observation":
+            declared_step_id = "short_observation"
     declared_step = (
         next(
             (item for item in declaration.steps if item.get("id") == declared_step_id),
@@ -239,6 +240,8 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "fresh_status_telemetry",
         "restart_discontinuity",
         "data_limit_hit",
+        "route_verified",
+        "trace_complete",
     ):
         if type(step.get(name)) is bool:
             observation[name] = step[name]
@@ -251,6 +254,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "trace_count",
         "dropped_traces",
         "clock_discontinuities",
+        "fresh_sample_count",
     ):
         value = step.get(name)
         if type(value) is int and 0 <= value <= 1_000_000:
@@ -266,6 +270,21 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
     route = step.get("route")
     if route in {"local_adapter", "active_proxy", "unverified", "mixed"}:
         observation["route"] = route
+    for source, target in (
+        ("station_model", "station_model"),
+        ("station_hardware_revision", "station_hardware_revision"),
+        ("station_firmware_revision", "station_firmware_revision"),
+    ):
+        value = step.get(source)
+        if source == "station_model":
+            safe = safe_model(value)
+        else:
+            safe = safe_version(value)
+        if safe is not None:
+            observation[target] = safe
+    operator_mode = step.get("operator_mode")
+    if operator_mode in {"interactive", "non_interactive"}:
+        observation["operator_mode"] = operator_mode
     action = step.get("action")
     if action in {
         "route interruption and restoration",
@@ -310,7 +329,8 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         elif step.get("trace_complete") is False:
             actual = "observation_incomplete"
     if actual is None and step.get("step_id") == "soak_segment":
-        actual = "completed" if step.get("outcome") == "pass" else "inconclusive"
+        outcome = step.get("outcome")
+        actual = outcome if outcome in {"pass", "fail"} else "inconclusive"
     reason = step.get("reason")
     limitation = None
     if isinstance(reason, str):
@@ -360,9 +380,14 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "trace_count",
         "dropped_traces",
         "clock_discontinuities",
+        "fresh_sample_count",
         "measured_seconds",
         "maximum_gap_seconds",
         "route",
+        "station_model",
+        "station_hardware_revision",
+        "station_firmware_revision",
+        "operator_mode",
         "operator_action",
         "target",
         "expected",
@@ -481,6 +506,22 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "active_proxy",
         "unverified",
         "mixed",
+    }:
+        return False
+    for key in {"route_verified", "trace_complete"} & set(value):
+        if type(value[key]) is not bool:
+            return False
+    if (
+        "station_model" in value
+        and safe_model(value["station_model"]) != value["station_model"]
+    ):
+        return False
+    for key in {"station_hardware_revision", "station_firmware_revision"} & set(value):
+        if safe_version(value[key]) != value[key]:
+            return False
+    if "operator_mode" in value and value["operator_mode"] not in {
+        "interactive",
+        "non_interactive",
     }:
         return False
     if "operator_action" in value and value["operator_action"] not in {

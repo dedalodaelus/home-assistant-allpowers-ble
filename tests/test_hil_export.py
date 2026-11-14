@@ -1411,6 +1411,41 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert soak["observation"]["maximum_gap_seconds"] == 300.0
     assert soak["limitation_reason"] == "restart_discontinuity"
 
+    short_stability = _public_observation(
+        "short_stability_observation",
+        {
+            "step_id": "soak_segment",
+            "outcome": "fail",
+            "segment": 1,
+            "sample_count": 8,
+            "measured_seconds": 420.0,
+            "maximum_gap_seconds": 60.0,
+            "trace_count": 1,
+            "dropped_traces": 0,
+            "clock_discontinuities": 0,
+            "fresh_sample_count": 8,
+            "route_verified": True,
+            "trace_complete": False,
+            "route": "local_adapter",
+            "station_model": "R600",
+            "station_hardware_revision": "0.3",
+            "station_firmware_revision": "0.2",
+            "operator_mode": "interactive",
+            "reason": "verified station disconnect observed",
+        },
+    )
+    assert (
+        short_stability["expected"]
+        == "30 minutes of uninterrupted measured observations"
+    )
+    assert short_stability["actual"] == "fail"
+    assert short_stability["observation"]["measured_seconds"] == 420.0
+    assert short_stability["observation"]["fresh_sample_count"] == 8
+    assert short_stability["observation"]["route_verified"] is True
+    assert short_stability["observation"]["trace_complete"] is False
+    assert short_stability["observation"]["station_model"] == "R600"
+    assert short_stability["observation"]["operator_mode"] == "interactive"
+
 
 def test_recovery_route_observation_exports_with_controlled_scenario_summary(
     tmp_path: Path,

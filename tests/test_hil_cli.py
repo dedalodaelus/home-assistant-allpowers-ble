@@ -6208,7 +6208,8 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
     assert api_fake.websocket_calls == []
 
 
-def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_path):
+@pytest.mark.parametrize("suite", ["soak-24h", "stability-short"])
+def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, suite):
     from datetime import UTC, datetime, timedelta
     import os
     from types import SimpleNamespace
@@ -6277,6 +6278,9 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
             ]
 
     clock = FakeClock()
+    duration = 1800 if suite == "stability-short" else 86400
+    minimum_samples = 31 if suite == "stability-short" else 289
+    minimum_traces = 6 if suite == "stability-short" else 24
     api_fake = SoakHA()
     device = Device(
         device_id="private-device",
@@ -6312,7 +6316,7 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
 
     result = cli._execute_soak_suite(
         api_fake,
-        SimpleNamespace(route="auto"),
+        SimpleNamespace(route="auto", suite=suite),
         device,
         output_dir,
         "0123456789abcdef",
@@ -6322,15 +6326,16 @@ def test_soak_fake_clock_requires_and_records_full_24_hours(monkeypatch, tmp_pat
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
     segment = checkpoint["steps"][-1]
     assert segment["outcome"] == "pass"
-    assert segment["measured_seconds"] >= 86400
-    assert segment["sample_count"] == 289
-    assert segment["trace_count"] >= 24
-    assert len(api_fake.commands) == 48
+    assert segment["measured_seconds"] >= duration
+    assert segment["sample_count"] == minimum_samples
+    assert segment["trace_count"] >= minimum_traces
+    assert len(api_fake.commands) == minimum_traces * 2
     assert all(
         command in {"allpowers_ble/hil/start", "allpowers_ble/hil/stop"}
         for command in api_fake.commands
     )
-    assert (output_dir / "soak_samples_001.jsonl").exists()
+    sample_prefix = "stability" if suite == "stability-short" else "soak"
+    assert (output_dir / f"{sample_prefix}_samples_001.jsonl").exists()
 
 
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():
