@@ -136,6 +136,14 @@ def validate_upgrade_workflow(workflow_text: str, ci_text: str) -> list[str]:
     run_commands = "\n".join(
         step.get("run", "") for step in steps if isinstance(step, dict)
     )
+    for temp_dir in (
+        "pytest-tmp-upgrade-unit",
+        "pytest-tmp-upgrade-homeassistant",
+    ):
+        if f'--basetemp="$RUNNER_TEMP/{temp_dir}"' not in run_commands:
+            errors.append(
+                "HA upgrade pytest basetemp directories must be under RUNNER_TEMP"
+            )
     for required in ("git push", "gh pr create", "--base devel", "uv pip check"):
         if required not in run_commands:
             errors.append(

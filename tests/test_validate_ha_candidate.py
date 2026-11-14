@@ -56,6 +56,19 @@ def test_upgrade_workflow_uses_trusted_code_and_waits_for_pr_ci() -> None:
     assert validate_upgrade_workflow(workflow, ci) == []
 
 
+def test_upgrade_workflow_keeps_pytest_temporary_files_outside_checkout() -> None:
+    workflow = open(".github/workflows/prepare-ha-upgrade.yml", encoding="utf-8").read()
+    ci = open(".github/workflows/ci.yml", encoding="utf-8").read()
+    workflow = workflow.replace(
+        '--basetemp="$RUNNER_TEMP/pytest-tmp-upgrade-unit"',
+        "--basetemp=.pytest-tmp-upgrade-unit",
+    )
+
+    errors = validate_upgrade_workflow(workflow, ci)
+
+    assert "HA upgrade pytest basetemp directories must be under RUNNER_TEMP" in errors
+
+
 def test_upgrade_path_guard_accepts_both_manifests() -> None:
     assert (
         validate_upgrade_paths(
