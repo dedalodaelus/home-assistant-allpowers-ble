@@ -1,0 +1,9 @@
+{
+  "domain": "esphome",
+  "name": "ESPHome",
+  "requirements": [
+    "aioesphomeapi==46.28.0",
+    "esphome-dashboard-api==1.5.0",
+    "bleak-esphome==4.1.0"
+  ]
+}

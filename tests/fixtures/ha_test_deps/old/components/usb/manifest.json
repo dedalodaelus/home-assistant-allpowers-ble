@@ -1,0 +1,8 @@
+{
+  "domain": "usb",
+  "name": "USB",
+  "requirements": [
+    "aiousbwatcher==1.1.2",
+    "serialx==1.11.0"
+  ]
+}

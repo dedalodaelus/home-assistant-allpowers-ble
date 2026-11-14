@@ -18,13 +18,52 @@ runtime it uses the Bleak and retry connector versions supplied by Home Assistan
 ## Coordinated test-stack upgrades
 
 Dependabot leaves `homeassistant`, `pytest-homeassistant-custom-component`, and
-`bleak-esphome` out of routine version updates. Upgrade these three together in a
-reviewed change: choose the new HA baseline, update all three requirements, then
-run dependency resolution (`pip check`) and the real Home Assistant lifecycle
-suite as well as the ordinary CI checks. Revisit those three `ignore` entries in
-`.github/dependabot.yml` only when the project deliberately changes this policy.
-Other pip dependencies, including independent test and static-analysis tools,
-remain eligible for Dependabot updates.
+`bleak-esphome` out of routine version updates. The managed block in
+`requirements_test.txt` is generated from the selected Home Assistant release's
+`bluetooth`, `esphome`, and `usb` component manifests, plus a separately selected
+pytest fixture. It contains only these components' direct requirements; Home
+Assistant core and transitive dependencies remain resolver-managed.
+
+The current baseline is HA `2026.10.4` and fixture `0.13.375`. The BLE/ESPHome
+and USB pins match the HA manifests (`bleak-esphome==4.0.0`,
+`aioesphomeapi==46.6.0`, and `serialx==1.11.0`). This exact stack resolves and
+passes the real-HA lifecycle and proxy-route tests, so no version-specific
+exceptions are currently needed.
+
+To deliberately select another HA release, first choose and resolve a compatible
+`pytest-homeassistant-custom-component` version. Install both selections, then
+generate the component pins and resolve the full test requirements:
+
+```bash
+HA_VERSION=2026.x.y
+FIXTURE_VERSION=x.y.z
+uv pip install --python "$(command -v python)" \
+  "homeassistant==$HA_VERSION" \
+  "pytest-homeassistant-custom-component==$FIXTURE_VERSION"
+python scripts/sync_ha_test_deps.py \
+  --sync \
+  --ha-version "$HA_VERSION" \
+  --fixture-version "$FIXTURE_VERSION"
+uv pip install --python "$(command -v python)" -r requirements_test.txt
+uv pip check --python "$(command -v python)"
+python scripts/sync_ha_test_deps.py \
+  --check \
+  --ha-version "$HA_VERSION" \
+  --fixture-version "$FIXTURE_VERSION"
+USE_REAL_HOMEASSISTANT=1 pytest tests/homeassistant
+```
+
+Review the generated diff against those exact installed manifests, then run the
+ordinary CI suite. The CI check pins both the selected HA and fixture versions,
+checks every managed direct requirement against the installed manifests, and
+runs `uv pip check`; changing a requirement without repeating the explicit
+selection and synchronization fails the gate. Never infer fixture compatibility
+from recency alone. If an HA manifest pin cannot support required tests, stop and
+document a minimal HA-version-specific exception with a resolved install and
+relevant real-HA coverage before changing the synchronizer. Revisit the three
+Dependabot `ignore` entries only when deliberately changing this policy. Other
+pip dependencies, including independent test and static-analysis tools, remain
+eligible for routine updates.
 
 ## Fast unit suite
 

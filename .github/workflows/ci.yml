@@ -39,6 +39,14 @@ jobs:
       - name: Install test dependencies
         run: uv pip install --python "$(command -v python)" -r requirements_test.txt
 
+      - name: Validate synchronized Home Assistant test stack
+        run: |
+          python scripts/sync_ha_test_deps.py \
+            --check \
+            --ha-version 2026.10.4 \
+            --fixture-version 0.13.375
+          uv pip check --python "$(command -v python)"
+
       # Pre-commit contains autofix hooks and must finish before readers start.
       - name: Pre-commit hooks
         run: pre-commit run --all-files

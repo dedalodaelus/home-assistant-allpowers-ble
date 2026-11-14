@@ -36,9 +36,11 @@ REQUIRED_REPOSITORY_FILES = {
     "hacs.json",
     "pyproject.toml",
     "scripts/validate_release_metadata.py",
+    "scripts/sync_ha_test_deps.py",
     "scripts/promote_devel.py",
     "scripts/promotion_metadata.py",
     "tests/test_promote_devel.py",
+    "tests/test_sync_ha_test_deps.py",
 }
 REQUIRED_INTEGRATION_FILES = {
     "__init__.py",
