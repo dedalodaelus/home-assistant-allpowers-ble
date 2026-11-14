@@ -41,11 +41,13 @@ in a follow-up pull request.
   unsigned commits.
 - Use a Conventional Commits pull request title, target `devel` except for an
   authorized hotfix, and link the assigned issue.
-- Preserve every heading and checkbox state in
-  `.github/PULL_REQUEST_TEMPLATE.md`; do not check or uncheck its boxes unless
-  explicitly instructed. Describe the change, rationale, actual validation,
-  safety impact, and known limitations. Distinguish simulation from physical
-  hardware evidence. Do not edit `CHANGELOG.md`; release tooling owns it.
+- Preserve every heading in `.github/PULL_REQUEST_TEMPLATE.md`. Evaluate each
+  checkbox against the actual change and validation: mark `[x]` only when the
+  item is satisfied, and leave incomplete, unverified, or inapplicable items
+  unchecked. Explain any inapplicable or incomplete items in the PR description.
+  Describe the change, rationale, actual validation, safety impact, and known
+  limitations. Distinguish simulation from physical hardware evidence. Do not
+  edit `CHANGELOG.md`; release tooling owns it.
 - A mature pull request may be opened before remote CI finishes. Fix CI failures
   on the same pull request. Opening a pull request is not approval; passing CI
   alone does not prove correctness or authorize merging.
@@ -87,6 +89,7 @@ automatically. Report remaining criteria directly to the maintainer.
 
 Do not post issue comments unless explicitly instructed, including progress or
 completion notes. This does not restrict necessary discussion on an active PR.
-PR-template checkboxes stay as provided; issue acceptance checkboxes are updated
-only after verified post-merge completion. A merged PR does not by itself mean
-the issue is complete.
+PR-template checkboxes reflect verified work and validation, with unsatisfied
+items left unchecked. Issue acceptance checkboxes are updated only after
+verified post-merge completion. A merged PR does not by itself mean the issue is
+complete.
