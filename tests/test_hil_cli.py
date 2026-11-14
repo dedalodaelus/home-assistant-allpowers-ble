@@ -5155,7 +5155,7 @@ def test_vendor_app_stability_is_inconclusive_without_complete_fresh_route_evide
     )
     output_dir = tmp_path / "vendor-stale"
     output_dir.mkdir(mode=0o700)
-    answers = iter(("2", "1", "3"))
+    answers = iter(("2", "1", "1"))
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     clock = [100.0]
     monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
@@ -5174,7 +5174,16 @@ def test_vendor_app_stability_is_inconclusive_without_complete_fresh_route_evide
     )
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert result == 2
-    assert stored["steps"][-1]["outcome"] == "inconclusive"
+    observation = stored["steps"][-1]
+    assert observation["operator_app_result"] == "could_not_connect"
+    assert observation["outcome"] == "inconclusive"
+    assert observation["ha_observation"] == "inconclusive"
+    if packet_types == ["SettingsData"]:
+        assert observation["fresh_status_telemetry"] is False
+    if observed_route == "unverified":
+        assert observation["route_verified"] is False
+    if not complete:
+        assert observation["trace_complete"] is False
 
 
 def test_vendor_app_observed_disconnect_requires_and_records_new_session(
