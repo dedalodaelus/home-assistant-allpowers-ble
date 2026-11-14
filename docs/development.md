@@ -17,9 +17,11 @@ runtime it uses the Bleak and retry connector versions supplied by Home Assistan
 
 ## Coordinated test-stack upgrades
 
-Dependabot leaves `homeassistant`, `pytest-homeassistant-custom-component`, and
-`bleak-esphome` out of routine version updates. The managed block in
-`requirements_test.txt` is generated from the selected Home Assistant release's
+Dependabot excludes every package in the managed `requirements_test.txt` block
+from independent routine updates, while tooling outside the block remains
+eligible. Repository validation checks that the ignore list matches the managed
+pins, so adding or removing an HA component dependency requires a reviewed policy
+update too. The block is generated from the selected Home Assistant release's
 `bluetooth`, `esphome`, and `usb` component manifests, plus a separately selected
 pytest fixture. It contains only these components' direct requirements; Home
 Assistant core and transitive dependencies remain resolver-managed.
@@ -60,10 +62,8 @@ from recency alone: upgrade mode requires an explicit `--fixture-version`, and
 the resolved install plus real-HA suite validates that choice. If an HA manifest
 pin cannot support required tests, stop and document a minimal HA-version-specific
 exception with a resolved install and relevant real-HA coverage before changing
-the synchronizer. Revisit the three
-Dependabot `ignore` entries only when deliberately changing this policy. Other
-pip dependencies, including independent test and static-analysis tools, remain
-eligible for routine updates.
+the synchronizer. Other pip dependencies, including independent test and
+static-analysis tools, remain eligible for routine updates.
 
 ## Fast unit suite
 

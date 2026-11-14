@@ -13,6 +13,7 @@ from typing import Sequence
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REQUIREMENTS = ROOT / "requirements_test.txt"
@@ -190,6 +191,71 @@ def validate_requirements_text(text: str, expected: dict[str, str]) -> list[str]
             errors.append(
                 f"{requirement.name} is also specified outside the managed block"
             )
+    return errors
+
+
+def validate_dependabot_ignores(
+    requirements_text: str, dependabot_text: str
+) -> list[str]:
+    """Require routine Dependabot ignores to match the complete managed stack."""
+    lines = requirements_text.splitlines()
+    try:
+        start, end = _block_bounds(lines)
+    except SyncError as err:
+        return [str(err)]
+
+    managed_names: set[str] = set()
+    try:
+        for raw in lines[start + 1 : end]:
+            stripped = raw.strip()
+            if stripped and not stripped.startswith("#"):
+                managed_names.add(canonicalize_name(Requirement(stripped).name))
+    except InvalidRequirement as err:
+        return [f"invalid managed requirement while checking Dependabot ignores: {err}"]
+
+    try:
+        config = yaml.safe_load(dependabot_text)
+    except yaml.YAMLError as err:
+        return [f"invalid .github/dependabot.yml: {err}"]
+    if not isinstance(config, dict) or not isinstance(config.get("updates"), list):
+        return [".github/dependabot.yml must define an updates list"]
+    pip_updates = [
+        item
+        for item in config["updates"]
+        if isinstance(item, dict)
+        and item.get("package-ecosystem") == "pip"
+        and item.get("directory") == "/"
+    ]
+    if len(pip_updates) != 1:
+        return [".github/dependabot.yml must define exactly one root pip update"]
+
+    pip_update = pip_updates[0]
+    errors: list[str] = []
+    if pip_update.get("versioning-strategy") != "increase-if-necessary":
+        errors.append("pip Dependabot updates must use increase-if-necessary")
+    ignored_names: list[str] = []
+    raw_ignores = pip_update.get("ignore", [])
+    if not isinstance(raw_ignores, list):
+        return [*errors, "pip Dependabot ignore must be a list"]
+    for entry in raw_ignores:
+        if not isinstance(entry, dict) or not isinstance(
+            entry.get("dependency-name"), str
+        ):
+            errors.append("each pip Dependabot ignore must name one dependency")
+            continue
+        ignored_names.append(canonicalize_name(entry["dependency-name"]))
+
+    if len(ignored_names) != len(set(ignored_names)):
+        errors.append("pip Dependabot ignore list contains duplicate dependencies")
+    ignored = set(ignored_names)
+    missing = sorted(managed_names - ignored)
+    extra = sorted(ignored - managed_names)
+    if missing:
+        errors.append(
+            f"Dependabot must ignore all managed stack pins; missing {missing}"
+        )
+    if extra:
+        errors.append(f"Dependabot ignores unmanaged packages; remove {extra}")
     return errors
 
 
