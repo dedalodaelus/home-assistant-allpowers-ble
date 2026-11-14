@@ -347,13 +347,51 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
 
 
 @pytest.mark.parametrize(
-    ("packet_types", "write_completion", "expected_probe", "expected_public_event"),
+    (
+        "packet_types",
+        "write_completion",
+        "notification_mode",
+        "expected_probe",
+        "expected_public_event",
+    ),
     [
-        (["SettingsData"], "write_ok", "inconclusive", "notification_decoded"),
-        ([], "write_ok", "inconclusive", "notification_decoded"),
-        (["StatusData"], "write_ok", "pass", "status_data_decoded"),
-        (["StatusData"], "missing", "inconclusive", "status_data_decoded"),
-        (["StatusData"], "write_error", "inconclusive", "status_data_decoded"),
+        (
+            ["SettingsData"],
+            "write_ok",
+            "synthetic",
+            "inconclusive",
+            "notification_decoded",
+        ),
+        ([], "write_ok", "synthetic", "inconclusive", "notification_decoded"),
+        ([], "write_ok", "no_response", "inconclusive", None),
+        (
+            ["StatusData"],
+            "write_ok",
+            "during_write",
+            "pass",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "missing",
+            "synthetic",
+            "inconclusive",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "write_error",
+            "synthetic",
+            "inconclusive",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "write_ok",
+            "delayed_after_write",
+            "pass",
+            "status_data_decoded",
+        ),
     ],
 )
 def test_bronze_protocol_probe_requires_status_data_through_public_export(
@@ -362,6 +400,7 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     notification_builder,
     packet_types,
     write_completion,
+    notification_mode,
     expected_probe,
     expected_public_event,
 ):
@@ -391,6 +430,16 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     use_production_client = (
         packet_types == ["StatusData"] and write_completion == "write_ok"
     )
+    elapsed_sleep = [0.0]
+
+    def advance_sleep(seconds):
+        elapsed_sleep[0] += seconds
+
+    def deliver_status_notification():
+        packet = notification_builder(0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90)))
+        real_status_client._notification_handler(
+            FakeCharacteristic(), bytearray(packet)
+        )
 
     class BronzeProbeHA:
         origin = "https://ha.example.test"
@@ -398,6 +447,8 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
         def __init__(self):
             self.capture = None
             self.observer = None
+            self.notification_delivered = False
+            self.fetch_count = 0
 
         def websocket(self, commands):
             command = commands[0]
@@ -426,8 +477,20 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                     {
                         "schema_version": 2,
                         "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
                     }
                 ]
+            if command["type"].endswith("/fetch"):
+                self.fetch_count += 1
+                if (
+                    use_production_client
+                    and notification_mode == "delayed_after_write"
+                    and not self.notification_delivered
+                    and elapsed_sleep[0] >= 1.5
+                ):
+                    deliver_status_notification()
+                    self.notification_delivered = True
+                return [self.capture.snapshot()]
             assert command["type"].endswith("/stop")
             if self.observer is not None:
                 real_status_client.detach_observer(self.observer)
@@ -442,12 +505,9 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                 async def write_and_notify(characteristic, frame, *, response):
                     await real_write(characteristic, frame, response=response)
                     assert frame == status_request
-                    packet = notification_builder(
-                        0x01, bytes((0x11, 50, 0, 100, 0, 25, 0, 90))
-                    )
-                    real_status_client._notification_handler(
-                        FakeCharacteristic(), bytearray(packet)
-                    )
+                    if notification_mode == "during_write":
+                        deliver_status_notification()
+                        self.notification_delivered = True
 
                 fake_ble.write_gatt_char = write_and_notify
                 asyncio.run(real_status_client.async_request_status())
@@ -473,6 +533,8 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                     error_type="FakeTransportError",
                     reason_category="transport_failure",
                 )
+            if notification_mode == "no_response":
+                return
             self.capture.record(
                 "notification_received",
                 session_generation=3,
@@ -524,9 +586,16 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     run_dir = storage.write_run(
         tmp_path / "bronze-runs", "runner", environment_data, session
     )
-    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: sample)
+
+    sample_times = []
+
+    def read_sample(*_args):
+        sample_times.append(elapsed_sleep[0])
+        return sample
+
+    monkeypatch.setattr(cli, "read_only_sample", read_sample)
     monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
-    monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(cli, "sleep", advance_sleep)
     monkeypatch.setattr("builtins.input", lambda _prompt: "1")
     plan = {
         "requested_tier": "bronze",
@@ -553,15 +622,22 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     public_bronze = json.loads(public["tier-bronze-read-only.json"])
     public_events = [json.loads(line) for line in public["events.jsonl"].splitlines()]
     decoded = next(
-        row
-        for row in public_events
-        if row["event"] in {"status_data_decoded", "notification_decoded"}
+        (
+            row
+            for row in public_events
+            if row["event"] in {"status_data_decoded", "notification_decoded"}
+        ),
+        None,
     )
     assert public_bronze["protocol_probe"] == (
         "verified" if expected_probe == "pass" else "inconclusive"
     )
-    assert decoded["event"] == expected_public_event
-    assert "decoded_packet_types" not in decoded
+    if expected_public_event is None:
+        assert decoded is None
+    else:
+        assert decoded is not None
+        assert decoded["event"] == expected_public_event
+        assert "decoded_packet_types" not in decoded
     if use_production_client:
         private_events = [
             json.loads(line)
@@ -580,18 +656,33 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                 "write_ok",
             }
         ]
-        assert lifecycle == [
-            "write_attempt",
-            "notification_received",
-            "notification_decoded",
-            "write_ok",
-        ]
+        assert lifecycle == (
+            [
+                "write_attempt",
+                "notification_received",
+                "notification_decoded",
+                "write_ok",
+            ]
+            if notification_mode == "during_write"
+            else [
+                "write_attempt",
+                "write_ok",
+                "notification_received",
+                "notification_decoded",
+            ]
+        )
+        if notification_mode == "delayed_after_write":
+            assert elapsed_sleep[0] >= 1.5
+            assert sample_times[1] >= 1.5
         write_attempt = next(
             row for row in private_events if row["event"] == "write_attempt"
         )
         write_ok = next(row for row in private_events if row["event"] == "write_ok")
         assert write_attempt["transaction_id"]
         assert write_ok["transaction_id"] == write_attempt["transaction_id"]
+    if notification_mode == "no_response":
+        assert api_fake.fetch_count <= 25
+        assert elapsed_sleep[0] <= 12.0
 
 
 @pytest.mark.parametrize("include_trace", [True, False])

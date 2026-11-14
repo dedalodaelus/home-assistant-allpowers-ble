@@ -468,6 +468,62 @@ def _execute_probe_trace(
     )
 
 
+def _bronze_status_exchange(
+    events: list[dict[str, Any]], frames: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
+    """Find a correlated status write, its completion, and a later decoded reply."""
+    events = [event for event in events if isinstance(event, dict)]
+    frames = [frame for frame in frames if isinstance(frame, dict)]
+    status_tx = next(
+        (
+            frame
+            for frame in frames
+            if frame.get("direction") == "tx"
+            and frame.get("command_type") == "status_request"
+            and frame.get("frame_validation") == "validated_tx"
+            and isinstance(frame.get("transaction_id"), str)
+            and frame["transaction_id"]
+        ),
+        None,
+    )
+    status_write_ok = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "write_ok"
+            and status_tx is not None
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("transaction_id") == status_tx.get("transaction_id")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+        ),
+        None,
+    )
+    decoded = next(
+        (
+            event
+            for event in events
+            if event.get("event") == "notification_decoded"
+            and isinstance(event.get("decoded_packet_types"), list)
+            and "StatusData" in event["decoded_packet_types"]
+            and status_tx is not None
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+        ),
+        None,
+    )
+    write_failed = bool(
+        status_tx is not None
+        and any(
+            event.get("event") == "write_error"
+            and event.get("session_generation") == status_tx.get("session_generation")
+            and event.get("transaction_id") == status_tx.get("transaction_id")
+            and event.get("seq", 0) > status_tx.get("seq", 0)
+            for event in events
+        )
+    )
+    return status_tx, status_write_ok, decoded, write_failed
+
+
 def _execute_tier_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -549,6 +605,7 @@ def _execute_tier_suite(
             except HAAPIError:
                 first_sample = {}
             second_sampled_at = services.datetime.now(UTC).isoformat()
+            second_sample: dict[str, Any] = {}
             protocol_probe: dict[str, Any] = {"outcome": "inconclusive"}
             if (
                 device.entry_state == "loaded"
@@ -572,10 +629,66 @@ def _execute_tier_suite(
                         isinstance(started, dict)
                         and started.get("schema_version") == 2
                         and isinstance(started.get("capture_id"), str)
+                        and type(started.get("ttl_seconds")) is int
+                        and started["ttl_seconds"] >= 2
                     ):
                         capture_id = started["capture_id"]
                         api.request_read_only_refresh(device.refresh_entity)
-                        services.sleep(1)
+                        wait_budget = min(12.0, started["ttl_seconds"] - 1.0)
+                        deadline = services.monotonic() + wait_budget
+                        maximum_polls = min(25, math.ceil(wait_budget / 0.5) + 1)
+                        for poll_index in range(maximum_polls):
+                            trace_snapshot = api.websocket(
+                                [
+                                    {
+                                        "type": "allpowers_ble/hil/fetch",
+                                        "entry_id": device.config_entry_id,
+                                        "capture_id": capture_id,
+                                    }
+                                ]
+                            )[0]
+                            if (
+                                not isinstance(trace_snapshot, dict)
+                                or trace_snapshot.get("capture_id") != capture_id
+                                or not isinstance(trace_snapshot.get("events"), list)
+                                or not isinstance(trace_snapshot.get("frames"), list)
+                            ):
+                                raise HAAPIError(
+                                    "Invalid Bronze status capture snapshot"
+                                )
+                            (
+                                poll_status_tx,
+                                poll_write_ok,
+                                poll_decoded,
+                                write_failed,
+                            ) = _bronze_status_exchange(
+                                trace_snapshot["events"], trace_snapshot["frames"]
+                            )
+                            disconnected = bool(
+                                poll_status_tx is not None
+                                and any(
+                                    event.get("event") == "disconnected"
+                                    and event.get("session_generation")
+                                    == poll_status_tx.get("session_generation")
+                                    and event.get("seq", 0)
+                                    > poll_status_tx.get("seq", 0)
+                                    for event in trace_snapshot["events"]
+                                )
+                            )
+                            if (
+                                (
+                                    poll_write_ok is not None
+                                    and poll_decoded is not None
+                                    and not write_failed
+                                )
+                                or write_failed
+                                or disconnected
+                            ):
+                                break
+                            remaining = deadline - services.monotonic()
+                            if poll_index + 1 >= maximum_polls or remaining <= 0:
+                                break
+                            services.sleep(min(0.5, remaining))
                         second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
                         stop_command = {
@@ -599,46 +712,8 @@ def _execute_tier_suite(
                         )
                         events = trace.get("events", [])
                         frames = trace.get("frames", [])
-                        status_tx = next(
-                            (
-                                frame
-                                for frame in frames
-                                if frame.get("direction") == "tx"
-                                and frame.get("command_type") == "status_request"
-                                and frame.get("frame_validation") == "validated_tx"
-                                and isinstance(frame.get("transaction_id"), str)
-                                and frame["transaction_id"]
-                            ),
-                            None,
-                        )
-                        status_write_ok = next(
-                            (
-                                event
-                                for event in events
-                                if event.get("event") == "write_ok"
-                                and status_tx is not None
-                                and event.get("session_generation")
-                                == status_tx.get("session_generation")
-                                and event.get("transaction_id")
-                                == status_tx.get("transaction_id")
-                                and event.get("seq", 0) > status_tx.get("seq", 0)
-                            ),
-                            None,
-                        )
-                        decoded = next(
-                            (
-                                event
-                                for event in events
-                                if event.get("event") == "notification_decoded"
-                                and isinstance(event.get("decoded_packet_types"), list)
-                                and "StatusData" in event["decoded_packet_types"]
-                                and status_tx is not None
-                                and status_write_ok is not None
-                                and event.get("session_generation")
-                                == status_tx.get("session_generation")
-                                and event.get("seq", 0) > status_tx.get("seq", 0)
-                            ),
-                            None,
+                        status_tx, status_write_ok, decoded, write_failed = (
+                            _bronze_status_exchange(events, frames)
                         )
                         route = trace.get("observed_route")
                         protocol_verified = bool(
@@ -650,6 +725,14 @@ def _execute_tier_suite(
                             and status_tx is not None
                             and status_write_ok is not None
                             and decoded is not None
+                            and not write_failed
+                            and not any(
+                                event.get("event") == "disconnected"
+                                and event.get("session_generation")
+                                == status_tx.get("session_generation")
+                                and event.get("seq", 0) > status_tx.get("seq", 0)
+                                for event in events
+                            )
                         )
                         trace_dir = output_dir / "traces" / "bronze_read_only"
                         trace_dir.parent.mkdir(mode=0o700, exist_ok=True)
