@@ -784,17 +784,21 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 1,
+                "schema_version": 2,
+                "output_states": {
+                    "ac_output": None,
+                    "dc_output": self.state == "on",
+                    "light_output": None,
+                },
                 "features": {
                     "dc_output": {
                         "physical_presence": "present",
                         "candidate_hil_eligible": True,
                         "production_authorized": False,
+                        "runtime_ready": True,
                     }
                 },
             }
-
-        def control_state(self, _feature, _entity_id):
-            return {"available": True, "state": self.state}
 
         def websocket(self, commands):
             from custom_components.allpowers_ble import hil_trace
@@ -876,7 +880,7 @@ def test_guided_candidate_executor_uses_backend_grants_and_fake_ble(
         firmware="1",
         state_entities={},
         entry_state="loaded",
-        control_entities={"dc_output": "switch.dc"},
+        control_entities={},
         config_entry_id="entry-a",
     )
     service_answers = iter(answers)

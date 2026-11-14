@@ -75,6 +75,14 @@ async def ws_capabilities(
         generation = None
 
     capability_flags = support.capabilities
+    status = getattr(data, "status", None)
+    output_states = {
+        "ac_output": status.ac_enabled if status is not None else None,
+        "dc_output": status.dc_enabled if status is not None else None,
+        "light_output": status.light_enabled if status is not None else None,
+    }
+    if not coordinator.status_is_fresh:
+        output_states = dict.fromkeys(output_states)
     feature_snapshots = {}
     for feature in ModelFeature:
         fact = model_feature_capability(support, feature)
@@ -136,6 +144,10 @@ async def ws_capabilities(
         "settings_fresh": bool(settings_fresh),
         "session_generation": generation,
         "pending_transaction": bool(runtime.client.has_pending_transaction),
+        # Candidate HIL controls may intentionally have no production switch
+        # entity. Expose only the current, fresh protocol booleans needed for
+        # guarded preflight/readback; stale values remain explicitly unknown.
+        "output_states": output_states,
     }
     connection.send_result(msg["id"], result)
 

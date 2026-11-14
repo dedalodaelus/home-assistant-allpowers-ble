@@ -13,6 +13,7 @@ import os
 import re
 from time import monotonic, sleep
 from pathlib import Path
+import shlex
 import sys
 from typing import Any, Callable
 
@@ -142,6 +143,11 @@ def make_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor", parents=[common], help="Check read-only prerequisites"
     )
+    commands.add_parser(
+        "onboard",
+        parents=[common],
+        help="Interactively prepare, run, and review a contributor HIL session",
+    )
     run_parser = commands.add_parser(
         "run",
         parents=[common],
@@ -198,6 +204,10 @@ def make_parser() -> argparse.ArgumentParser:
 
 def _credential(args: argparse.Namespace) -> tuple[str, str]:
     url = args.ha_url or os.environ.get("HA_HIL_URL", "")
+    if not url and getattr(args, "onboarding", False):
+        url = input(
+            "Home Assistant origin (for example https://home-assistant.local:8123): "
+        ).strip()
     if not url:
         raise HAAPIError("Set --ha-url or HA_HIL_URL to your Home Assistant origin")
     token = os.environ.get("HA_HIL_TOKEN", "")
@@ -215,6 +225,37 @@ def _discovery(
     check_ha_version(config.get("version"))
     entities, devices, manifest, entries = api.discovery()
     return config, manifest, find_devices(entities, devices, entries)
+
+
+def _candidate_output_state(
+    capabilities: dict[str, Any] | None, feature: str
+) -> dict[str, Any]:
+    """Read one output state from the fresh, entry-scoped HIL snapshot."""
+    snapshot = capabilities if isinstance(capabilities, dict) else {}
+    output_states = snapshot.get("output_states")
+    features = snapshot.get("features", {})
+    facts = features.get(feature, {}) if isinstance(features, dict) else {}
+    state = output_states.get(feature) if isinstance(output_states, dict) else None
+    ready = bool(
+        snapshot.get("schema_version") == 2
+        and snapshot.get("verified") is True
+        and snapshot.get("identity_conflicted") is False
+        and snapshot.get("connected") is True
+        and snapshot.get("status_fresh") is True
+        and snapshot.get("pending_transaction") is False
+        and type(snapshot.get("session_generation")) is int
+        and snapshot["session_generation"] >= 1
+        and isinstance(facts, dict)
+        and facts.get("runtime_ready") is True
+        and type(state) is bool
+    )
+    if not ready:
+        return {"available": False, "state": None, "options": []}
+    return {
+        "available": True,
+        "state": "on" if state else "off",
+        "options": ["off", "on"],
+    }
 
 
 def _scenario_controls(
@@ -248,6 +289,14 @@ def _scenario_controls(
         settings_key = key in settings_controls
         feature_key = "light_output" if key == "light" else key
         feature = feature_facts.get(feature_key)
+        candidate_observed = (
+            _candidate_output_state(facts, feature_key)
+            if not settings_key
+            else {"available": False, "state": None, "options": []}
+        )
+        plan_observed = (
+            candidate_observed if candidate_observed["available"] else observed
+        )
         control_capable = feature_write_authorized(
             facts,
             key,
@@ -262,7 +311,7 @@ def _scenario_controls(
                 "car_charger_enabled", False
             )
         result[key] = {
-            **observed,
+            **plan_observed,
             "eligible": bool(
                 facts.get("connected") is True
                 and facts.get("pending_transaction") is False
@@ -271,8 +320,71 @@ def _scenario_controls(
                 and control_capable is True
                 and observed["available"] is True
             ),
+            "candidate_eligible": bool(
+                not settings_key
+                and facts.get("schema_version") == 2
+                and facts.get("verified") is True
+                and facts.get("identity_conflicted") is False
+                and facts.get("connected") is True
+                and facts.get("status_fresh") is True
+                and facts.get("pending_transaction") is False
+                and type(facts.get("session_generation")) is int
+                and facts["session_generation"] >= 1
+                and isinstance(feature, dict)
+                and feature.get("physical_presence") == "present"
+                and feature.get("candidate_hil_eligible") is True
+                and feature.get("production_authorized") is False
+                and feature.get("runtime_ready") is True
+                and candidate_observed["available"] is True
+                and candidate_observed.get("state") in {"on", "off"}
+            ),
         }
     return result
+
+
+def _pending_plan_status(step: dict[str, Any]) -> tuple[str, str]:
+    """Explain checks that still need evidence separately from hard blockers."""
+    if step.get("eligibility") != "blocked":
+        return str(step.get("eligibility", "blocked")), "; ".join(
+            step.get("reasons", [])
+        )
+    reasons = set(step.get("reasons", []))
+    pending = {
+        "connected GATT route has not been verified",
+        "candidate needs a fresh, single-use backend HIL grant",
+    }
+    if reasons and reasons <= pending:
+        return "pending verification/consent", "; ".join(sorted(reasons))
+    return "blocked", "; ".join(sorted(reasons))
+
+
+def _candidate_step_needs_authorization(
+    step: dict[str, Any],
+    capabilities: dict[str, Any] | None,
+    controls: dict[str, Any],
+    observed_route: str | None,
+) -> bool:
+    """Recognize an otherwise eligible output candidate awaiting its backend grant."""
+    feature = step.get("feature")
+    if feature not in {"ac_output", "dc_output", "light_output"}:
+        return False
+    snapshot = capabilities if isinstance(capabilities, dict) else {}
+    features = snapshot.get("features", {})
+    facts = features.get(feature, {}) if isinstance(features, dict) else {}
+    control_key = "light" if feature == "light_output" else feature
+    control = controls.get(control_key, {})
+    if not isinstance(facts, dict) or not isinstance(control, dict):
+        return False
+    reasons = set(step.get("reasons", []))
+    reasons.discard("candidate needs a fresh, single-use backend HIL grant")
+    return bool(
+        facts.get("physical_presence") == "present"
+        and facts.get("candidate_hil_eligible") is True
+        and facts.get("production_authorized") is not True
+        and control.get("candidate_eligible") is True
+        and observed_route in {"local_adapter", "active_proxy"}
+        and not reasons
+    )
 
 
 def _device_fingerprint(
@@ -561,6 +673,7 @@ def _execute_tier_suite(
         "schema_version": 1,
         "run_id": run_id,
         "requested_tier": plan["requested_tier"],
+        "execution_tier": plan["requested_tier"],
         "requested_route": args.route,
         "device": {
             "model": device.model,
@@ -577,7 +690,8 @@ def _execute_tier_suite(
     recovery_completed = False
     recovery_evidence_run: str | None = None
     stop_reason: str | None = None
-    for planned in plan["steps"]:
+    plan_steps = plan["steps"]
+    for planned in plan_steps:
         step_id = planned["id"]
         if stop_reason is not None:
             execution["steps"].append(
@@ -587,6 +701,26 @@ def _execute_tier_suite(
                     "reason": f"not attempted because an earlier step stopped execution: {stop_reason}",
                 }
             )
+            continue
+        if (
+            getattr(args, "onboarding", False)
+            and planned.get("action") in {"write", "manual"}
+            and planned.get("eligibility")
+            not in (
+                {"eligible", "pending_authorization"}
+                if planned.get("action") == "write"
+                else {"eligible"}
+            )
+        ):
+            execution["steps"].append(
+                {
+                    "step_id": step_id,
+                    "outcome": "blocked",
+                    "reason": "; ".join(planned.get("reasons", []))
+                    or "the refreshed plan does not authorize this step",
+                }
+            )
+            overall = 2
             continue
         if step_id == "read_only_probe":
             if args.non_interactive:
@@ -878,6 +1012,155 @@ def _execute_tier_suite(
                     "human_review": "pending",
                 }
             )
+            if getattr(args, "onboarding", False) and plan.get("requested_tier") in {
+                "silver",
+                "gold",
+            }:
+                from .guided import build_tier_plan
+
+                observed_route = (
+                    protocol_probe.get("route")
+                    if protocol_probe.get("outcome") == "pass"
+                    else None
+                )
+                refreshed_capabilities = None
+                if device.config_entry_id is not None:
+                    try:
+                        refreshed_capabilities = api.hil_capabilities(
+                            device.config_entry_id
+                        )
+                    except HAAPIError:
+                        pass
+                refreshed_controls = _scenario_controls(
+                    api, device, refreshed_capabilities
+                )
+                requested_tier = plan["requested_tier"]
+                build_provenance = plan.get("device", {}).get("build_provenance", {})
+                refreshed_plan = build_tier_plan(
+                    requested_tier,
+                    refreshed_capabilities,
+                    refreshed_controls,
+                    observed_route=observed_route,
+                    build_provenance=build_provenance,
+                )
+                for refreshed_step in refreshed_plan["steps"]:
+                    if _candidate_step_needs_authorization(
+                        refreshed_step,
+                        refreshed_capabilities,
+                        refreshed_controls,
+                        observed_route,
+                    ):
+                        refreshed_step["eligibility"] = "pending_authorization"
+                        refreshed_step["reasons"] = [
+                            "candidate needs a fresh, single-use backend HIL grant"
+                        ]
+                print(
+                    "Updated plan after the Bronze connected-route and capability check:"
+                )
+                for refreshed_step in refreshed_plan["steps"]:
+                    status, reasons = _pending_plan_status(refreshed_step)
+                    print(
+                        f"  {status}: {refreshed_step['id']} "
+                        f"({refreshed_step['feature']}) — "
+                        f"{reasons or 'ready for the existing guided suite'}"
+                    )
+                output_steps = [
+                    step
+                    for step in refreshed_plan["steps"]
+                    if step.get("action") == "write"
+                    and step.get("feature")
+                    in {"ac_output", "dc_output", "light_output"}
+                    and step.get("eligibility") in {"eligible", "pending_authorization"}
+                ]
+                if not bronze_pass:
+                    output_steps = []
+                if not output_steps:
+                    print(
+                        f"No Silver/Gold output step is currently achievable for "
+                        f"{requested_tier.title()}; output qualification cannot be claimed."
+                    )
+                    try:
+                        continue_bronze = (
+                            services.prompt(
+                                "Type BRONZE to keep only the read-only diagnostics, or press Enter to stop: "
+                            ).strip()
+                            == "BRONZE"
+                        )
+                    except EOFError, KeyboardInterrupt:
+                        continue_bronze = False
+                    if continue_bronze:
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
+                        )
+                        execution["execution_tier"] = "bronze"
+                        print(
+                            f"Continuing as Bronze diagnostics; requested tier "
+                            f"remains {requested_tier.title()}. No Silver/Gold evidence is claimed."
+                        )
+                    else:
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
+                        )
+                        execution["execution_tier"] = "bronze"
+                        overall = 2
+                        print(
+                            "Stopping after the Bronze diagnostics already collected; "
+                            "no Silver/Gold steps will run."
+                        )
+                else:
+                    try:
+                        proceed = (
+                            services.prompt(
+                                "Type RUN after reviewing the refreshed plan to authorize proceeding to individually consented steps: "
+                            ).strip()
+                            == "RUN"
+                        )
+                    except EOFError, KeyboardInterrupt:
+                        proceed = False
+                    if not proceed:
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
+                        )
+                        execution["execution_tier"] = "bronze"
+                        overall = 2
+                        print("Plan not confirmed; stopping after Bronze diagnostics.")
+                    else:
+                        print(
+                            "A pending authorization still requires the backend grant "
+                            "and a separate consent for every action and restoration."
+                        )
+                refreshed_plan["requested_tier"] = requested_tier
+                refreshed_plan["execution_tier"] = execution["execution_tier"]
+                session_path = output_dir / "session.json"
+                try:
+                    saved_session = json.loads(session_path.read_text(encoding="utf-8"))
+                    if isinstance(saved_session, dict):
+                        saved_session["test_plan"] = refreshed_plan
+                        session_path.write_text(
+                            json.dumps(saved_session, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+                        session_path.chmod(0o600)
+                except OSError, json.JSONDecodeError:
+                    pass
+                features = (
+                    refreshed_capabilities.get("features", {})
+                    if isinstance(refreshed_capabilities, dict)
+                    else {}
+                )
+                plan_steps[:] = refreshed_plan["steps"]
             if not bronze_pass:
                 overall = 2
             continue
@@ -1158,7 +1441,6 @@ def _execute_experimental_output_step(
     """Execute one candidate output and its separately authorized restoration."""
     import json
 
-    entity_key = {"light_output": "light"}.get(feature, feature)
     entry_id = device.config_entry_id
     if entry_id is None or args.non_interactive or device.entry_state != "loaded":
         return {
@@ -1168,15 +1450,13 @@ def _execute_experimental_output_step(
         }
     try:
         before_caps = api.hil_capabilities(entry_id)
-        before_state = api.control_state(
-            entity_key, device.control_entities.get(entity_key)
-        )
     except HAAPIError:
         return {
             "step_id": step_id,
             "outcome": "inconclusive",
             "reason": "fresh candidate preflight unavailable",
         }
+    before_state = _candidate_output_state(before_caps, feature)
     facts = before_caps.get("features", {}).get(feature, {})
     generation = before_caps.get("session_generation")
     initial = before_state.get("state")
@@ -1236,15 +1516,13 @@ def _execute_experimental_output_step(
         }
     try:
         current_caps = api.hil_capabilities(entry_id)
-        current_state = api.control_state(
-            entity_key, device.control_entities.get(entity_key)
-        )
     except HAAPIError:
         return {
             "step_id": step_id,
             "outcome": "inconclusive",
             "reason": "pre-write state unavailable; no BLE action sent",
         }
+    current_state = _candidate_output_state(current_caps, feature)
     current_facts = current_caps.get("features", {}).get(feature, {})
     if (
         current_caps.get("verified") is not True
@@ -1433,11 +1711,10 @@ def _execute_experimental_output_step(
     else:
         try:
             after_caps = api.hil_capabilities(entry_id)
-            after_state = api.control_state(
-                entity_key, device.control_entities.get(entity_key)
-            )
         except HAAPIError:
             after_caps, after_state = {}, {"available": False}
+        else:
+            after_state = _candidate_output_state(after_caps, feature)
         change_readback_confirmed = (
             changed.get("outcome") == "confirmed"
             and changed.get("confirmed") is True
@@ -1520,9 +1797,7 @@ def _execute_experimental_output_step(
             else:
                 try:
                     restore_caps = api.hil_capabilities(entry_id)
-                    restore_state = api.control_state(
-                        entity_key, device.control_entities.get(entity_key)
-                    )
+                    restore_state = _candidate_output_state(restore_caps, feature)
                     if (
                         restore_caps.get("verified") is not True
                         or restore_caps.get("identity_conflicted") is not False
@@ -1540,9 +1815,7 @@ def _execute_experimental_output_step(
                         raise HAAPIError("Restoration preflight changed")
                     restored = execute(initial == "on")
                     final_caps = api.hil_capabilities(entry_id)
-                    final_state = api.control_state(
-                        entity_key, device.control_entities.get(entity_key)
-                    )
+                    final_state = _candidate_output_state(final_caps, feature)
                     restoration_readback_confirmed = (
                         restored.get("outcome") == "confirmed"
                         and restored.get("confirmed") is True
@@ -1774,6 +2047,19 @@ def _execute_soak_suite(
 
 def execute(args: argparse.Namespace) -> int:
     """Execute a validated command; credentials stay in memory for live commands."""
+    if args.command == "onboard":
+        if args.non_interactive or not sys.stdin.isatty():
+            raise HAAPIError("Onboarding requires an interactive terminal")
+        args.onboarding = True
+        args.command = "run"
+        args.suite = "read-only"
+        args.tier = None
+        args.list_suites = False
+        args.resume = None
+        args.simulate = False
+        args.dry_run = False
+        args.scenario_id = None
+        args.allow_keepalive_disabled = False
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "review":
@@ -1993,6 +2279,48 @@ def execute(args: argparse.Namespace) -> int:
         return 2
 
     selected = choose_device(devices, args.device, non_interactive=args.non_interactive)
+    if getattr(args, "onboarding", False):
+        print(
+            f"Selected {selected.model} (hardware {selected.hardware or 'unknown'}, "
+            f"firmware {selected.firmware or 'unknown'})."
+        )
+        print("Installed integration build:", integration["build_match"])
+        print("Connected BLE route: unknown until a connected-backend trace proves it.")
+        scanners = environment["home_assistant"]["bluetooth_scanner_candidates"]
+        scanner_counts = scanners.get("value") if isinstance(scanners, dict) else None
+        if isinstance(scanner_counts, dict):
+            inventory = (
+                ", ".join(
+                    f"{kind}: {count}"
+                    for kind, count in sorted(scanner_counts.items())
+                    if isinstance(kind, str) and type(count) is int
+                )
+                or "none reported"
+            )
+            print("HA scanner candidates (not connected-route proof):", inventory)
+        else:
+            print("HA scanner candidate inventory: unknown or unavailable")
+        print("Runner-host Bluetooth hardware does not identify the remote HA adapter.")
+        print(
+            "Choose desired tier: 1=Bronze (read-only), 2=Silver, 3=Gold, 4=Platinum (24-hour soak)"
+        )
+        tier_choice = input("Desired tier: ").strip()
+        tiers = {"1": "bronze", "2": "silver", "3": "gold", "4": "platinum"}
+        if tier_choice not in tiers:
+            raise HAAPIError("Invalid tier selection")
+        requested_tier = tiers[tier_choice]
+        print(f"Requested tier: {requested_tier.title()}")
+        if requested_tier == "platinum":
+            args.suite = "soak-24h"
+            print("Applicable plan: the existing Platinum 24-hour soak suite.")
+            print(
+                "Expected elapsed time: up to 24 hours; stay present for setup and checks."
+            )
+            if input("Type RUN to start this plan: ").strip() != "RUN":
+                print("Onboarding cancelled before tests started.")
+                return 2
+        else:
+            args.tier = requested_tier
     if resume_state is not None:
         fingerprint = _device_fingerprint(
             resume_state["run_id"], selected, api.origin, args.route
@@ -2088,14 +2416,28 @@ def execute(args: argparse.Namespace) -> int:
             )
             print("Verified route:", test_plan["device"]["verified_route"] or "unknown")
             print("Estimated operator actions:", test_plan["operator_actions_estimate"])
+            print(
+                "Expected time: varies by applicable steps; physical observations are manual."
+            )
+            print(
+                "Safety: disconnect critical loads, remain present, and authorize "
+                "each state change and restoration separately."
+            )
             for step in test_plan["steps"]:
-                reasons = (
-                    "; ".join(step["reasons"]) or "ready for the existing guided suite"
-                )
-                print(
-                    f"  {step['eligibility']}: {step['id']} ({step['feature']}) — {reasons}"
-                )
+                status, reasons = _pending_plan_status(step)
+                reasons = reasons or "ready for the existing guided suite"
+                print(f"  {status}: {step['id']} ({step['feature']}) — {reasons}")
             print("Restoration:", test_plan["restoration_plan"])
+            if getattr(args, "onboarding", False):
+                print(
+                    "Attained evidence-backed tier: unqualified until independent review."
+                )
+                if (
+                    input("Type RUN after reviewing the plan to continue: ").strip()
+                    != "RUN"
+                ):
+                    print("Onboarding cancelled before tests started.")
+                    return 2
     timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     if resume_state is not None:
         if resume_dir is None:
@@ -2106,7 +2448,7 @@ def execute(args: argparse.Namespace) -> int:
             args.output_root, f"{timestamp}_{run_id}", environment, session
         )
     if args.command == "run" and tier_plan is not None:
-        return _execute_tier_suite(
+        result = _execute_tier_suite(
             api,
             args,
             selected,
@@ -2116,6 +2458,9 @@ def execute(args: argparse.Namespace) -> int:
             tier_plan,
             tier_capabilities,
         )
+        if getattr(args, "onboarding", False):
+            return _onboard_export(output_dir, result)
+        return result
     if args.command == "run" and args.suite == "outputs":
         return _execute_output_suite(
             api, args, selected, environment, output_dir, run_id
@@ -2127,9 +2472,16 @@ def execute(args: argparse.Namespace) -> int:
             api, args, selected, output_dir, run_id, resume_state
         )
     if args.command == "run" and args.suite == "soak-24h":
-        return _execute_soak_suite(
+        result = _execute_soak_suite(
             api, args, selected, output_dir, run_id, resume_state
         )
+        if getattr(args, "onboarding", False):
+            resume_command = (
+                "python -m scripts.hil run --suite soak-24h --resume "
+                f"{shlex.quote(str(output_dir))} --ha-url {shlex.quote(api.origin)}"
+            )
+            return _onboard_export(output_dir, result, resume_command=resume_command)
+        return result
     if args.command == "trace":
         if entry_id is None:
             raise HAAPIError("Missing HIL config entry")
@@ -2205,6 +2557,95 @@ def execute(args: argparse.Namespace) -> int:
         "Qualification: inconclusive (no GATT trace, physical proof or verified route)"
     )
     return 0
+
+
+def _onboard_export(
+    output_dir: Path, run_result: int, *, resume_command: str | None = None
+) -> int:
+    """Offer a local privacy-reviewed export after the existing HIL run ends."""
+    execution_path = output_dir / "tier-execution.json"
+    if execution_path.is_file():
+        try:
+            execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        except OSError, json.JSONDecodeError:
+            execution = {}
+        routes = (
+            execution.get("verified_routes", []) if isinstance(execution, dict) else []
+        )
+        if isinstance(routes, list):
+            observed = sorted(
+                route for route in routes if route in {"local_adapter", "active_proxy"}
+            )
+            print(
+                "Observed connected BLE route:",
+                ", ".join(observed) if observed else "unknown / not proven",
+            )
+    print("Attained evidence-backed tier: unqualified until independent review.")
+    if run_result != 0:
+        print(
+            "Run did not complete successfully; private checkpoint remains available."
+        )
+        if resume_command is not None and (output_dir / "checkpoint.json").is_file():
+            print("To resume the existing Platinum soak, run:")
+            print(resume_command)
+        if execution_path.is_file():
+            try:
+                execution = json.loads(execution_path.read_text(encoding="utf-8"))
+            except OSError, json.JSONDecodeError:
+                execution = {}
+            execution_steps = (
+                execution.get("steps", []) if isinstance(execution, dict) else []
+            )
+            unsafe = isinstance(execution_steps, list) and any(
+                step.get("state_safe_to_continue") is False
+                for step in execution_steps
+                if isinstance(step, dict)
+            )
+            if unsafe:
+                print(
+                    "SAFETY WARNING: a control may not have been restored. "
+                    "Inspect the station physically before any further action; "
+                    "the wizard will not retry or restore it automatically."
+                )
+    if not (output_dir / "session.json").is_file():
+        print("No valid private run is available for export.")
+        return run_result or 2
+    try:
+        export_choice = (
+            input("Review and create a privacy-safe evidence ZIP now? [y/N]: ")
+            .strip()
+            .casefold()
+        )
+    except EOFError, KeyboardInterrupt:
+        return run_result or 2
+    if export_choice not in {"y", "yes"}:
+        print("No archive created. The private run remains on this machine.")
+        return run_result
+    try:
+        export_archive(output_dir, confirmed=False)
+    except HAAPIError as ex:
+        if str(ex) != "Export requires explicit confirmation":
+            print("The available run could not be exported:", ex)
+            return run_result or 2
+    try:
+        confirmed = (
+            input(
+                "Type EXPORT after reviewing the ZIP contents to create it locally: "
+            ).strip()
+            == "EXPORT"
+        )
+    except EOFError, KeyboardInterrupt:
+        return run_result or 2
+    if not confirmed:
+        print("Export cancelled; no archive created.")
+        return run_result or 2
+    try:
+        export_archive(output_dir, confirmed=True)
+    except HAAPIError as ex:
+        print("The reviewed archive could not be created:", ex)
+        return run_result or 2
+    print("Privacy-safe HIL evidence archive written locally; nothing was uploaded.")
+    return run_result
 
 
 def main(argv: list[str] | None = None) -> int:
