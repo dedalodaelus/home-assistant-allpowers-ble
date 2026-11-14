@@ -235,6 +235,7 @@ def _captured_archive(
     bronze_reviewable: bool = False,
     bronze_decoded_packet_types: tuple[str, ...] = ("StatusData",),
     bronze_protocol_outcome: str = "pass",
+    bronze_write_completion: str = "write_ok",
 ) -> Path:
     environment = {
         "schema_version": 1,
@@ -379,25 +380,39 @@ def _captured_archive(
                 "command_type": "status_request",
                 "frame_validation": "validated_tx",
                 "hex": "a565b1000106010000000000",
+                "transaction_id": "bronze-tx-1",
             }
             notification_event = {
+                **common,
+                "seq": 4 if bronze_write_completion != "missing" else 3,
+                "utc": stamp,
+                "elapsed_ms": 3.0,
+                "event": "notification_received",
+            }
+            write_completion_event = {
                 **common,
                 "seq": 3,
                 "utc": stamp,
                 "elapsed_ms": 2.0,
-                "event": "notification_received",
+                "event": bronze_write_completion,
+                "transaction_id": "bronze-tx-1",
             }
             decoded_event = {
                 **common,
-                "seq": 4,
+                "seq": 5 if bronze_write_completion != "missing" else 4,
                 "utc": stamp,
-                "elapsed_ms": 3.0,
+                "elapsed_ms": 4.0,
                 "event": "notification_decoded",
                 "decoded_packet_types": list(bronze_decoded_packet_types),
             }
             trace["events"] = [
                 route_event,
                 {**status_frame, "direction": "write"},
+                *(
+                    [write_completion_event]
+                    if bronze_write_completion != "missing"
+                    else []
+                ),
                 notification_event,
                 decoded_event,
             ]
@@ -411,7 +426,7 @@ def _captured_archive(
                     "hex": "aa55",
                 },
             ]
-            trace["event_count"] = 4
+            trace["event_count"] = len(trace["events"])
             trace["frame_count"] = 2
         trace_dir = private / "traces" / f"read_only_snapshot_{index}"
         trace_dir.mkdir(parents=True)
@@ -450,7 +465,8 @@ def _captured_archive(
                             "route": observed_route,
                             "session_generation": generation,
                             "status_request_seq": 2,
-                            "decoded_response_seq": 4,
+                            "status_write_ok_seq": 3,
+                            "decoded_response_seq": decoded_event["seq"],
                             "status_request_hex": "a565b1000106010000000000",
                         },
                         "physical_observation": "plausible",
@@ -475,6 +491,21 @@ def test_private_export_rejects_bronze_pass_without_decoded_status(
             bronze_reviewable=True,
             bronze_decoded_packet_types=packet_types,
             bronze_protocol_outcome="pass",
+        )
+
+
+@pytest.mark.parametrize("write_completion", ["missing", "write_error"])
+def test_private_export_rejects_bronze_pass_without_successful_status_write(
+    tmp_path: Path, write_completion: str
+) -> None:
+    with pytest.raises(HAAPIError, match="Bronze protocol evidence binding failed"):
+        _captured_archive(
+            tmp_path / "source",
+            "local_adapter",
+            "1.1",
+            "0123456789abcdef",
+            bronze_reviewable=True,
+            bronze_write_completion=write_completion,
         )
 
 
@@ -508,6 +539,101 @@ def test_public_verifier_rejects_bronze_response_without_status_type(
         HAAPIError, match="Bronze protocol evidence is not capture-bound"
     ):
         verify_public_archive(rewritten)
+
+
+def test_public_verifier_rejects_bronze_response_without_write_completion(
+    tmp_path: Path,
+) -> None:
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+    )
+    with zipfile.ZipFile(archive) as source:
+        event_rows = [
+            json.loads(line) for line in source.read("public/events.jsonl").splitlines()
+        ]
+    completion = next(row for row in event_rows if row["event"] == "write_ok")
+    completion["event"] = "write_error"
+    rewritten = _rewrite_capture_archive(
+        archive,
+        tmp_path / "uncompleted-bronze-write.zip",
+        capture_updates={},
+        member_updates={
+            "events.jsonl": "".join(
+                json.dumps(row, sort_keys=True) + "\n" for row in event_rows
+            ).encode()
+        },
+    )
+    with pytest.raises(
+        HAAPIError, match="Bronze protocol evidence is not capture-bound"
+    ):
+        verify_public_archive(rewritten)
+
+
+@pytest.mark.parametrize("write_completion", ["missing", "write_error"])
+def test_bronze_review_stays_inconclusive_without_successful_status_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    write_completion: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_protocol_outcome="inconclusive",
+        bronze_write_completion=write_completion,
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]
+    review_path = tmp_path / "uncompleted-write-review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archive_sha256": imported["archive_sha256"],
+                "run_id": imported["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=imported["run_id"],
+            review_file=review_path,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+    assert '"tier": "unqualified"' in capsys.readouterr().out
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]
+    assert reviewed["bronze_evidence"]["protocol_probe"]["status"] == "inconclusive"
 
 
 def test_import_defaults_to_preview_and_apply_is_idempotent(
@@ -1208,7 +1334,11 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
     public_events = [
         json.loads(line) for line in public_members["events.jsonl"].splitlines()
     ]
-    decoded_event = next(row for row in public_events if row["seq"] == 4)
+    decoded_event = next(
+        row
+        for row in public_events
+        if row["event"] in {"status_data_decoded", "notification_decoded"}
+    )
     if packet_types == ("StatusData",):
         assert bronze_public["protocol_probe"] == "verified"
         assert decoded_event["event"] == "status_data_decoded"
@@ -1312,8 +1442,12 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         capture_rows = [
             json.loads(line) for line in capture_path.read_text().splitlines() if line
         ]
-        assert [row["session_generation"] for row in capture_rows] == [7, 7]
-        assert capture_rows[1]["event"] == "status_data_decoded"
+        assert [row["session_generation"] for row in capture_rows] == [7, 7, 7]
+        assert [row["event"] for row in capture_rows] == [
+            "write_attempt",
+            "write_ok",
+            "status_data_decoded",
+        ]
         assert all("physical_outcome" not in row for row in capture_rows)
     errors, _ = validate_hil_qualification.validate_matrix(
         json.loads(matrix_path.read_text()),

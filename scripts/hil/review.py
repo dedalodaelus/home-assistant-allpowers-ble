@@ -201,6 +201,7 @@ def _claim_support(
     capture_id = bronze.get("protocol_capture_id")
     generation = bronze.get("protocol_session_generation")
     status_seq = bronze.get("protocol_status_request_seq")
+    write_ok_seq = bronze.get("protocol_status_write_ok_seq")
     decoded_seq = bronze.get("protocol_decoded_response_seq")
     if (
         bronze.get("protocol_probe") == "verified"
@@ -211,6 +212,7 @@ def _claim_support(
         and type(generation) is int
         and generation > 0
         and type(status_seq) is int
+        and type(write_ok_seq) is int
         and type(decoded_seq) is int
     ):
         captures = manifest.get("captures", {}).get("by_capture", [])
@@ -226,6 +228,16 @@ def _claim_support(
                 if row.get("capture_id") == capture_id
                 and row.get("seq") == status_seq
                 and row.get("event") == "write_attempt"
+            ),
+            None,
+        )
+        write_ok = next(
+            (
+                row
+                for row in events
+                if row.get("capture_id") == capture_id
+                and row.get("seq") == write_ok_seq
+                and row.get("event") == "write_ok"
             ),
             None,
         )
@@ -253,14 +265,17 @@ def _claim_support(
             and capture.get("complete") is True
             and capture.get("route") == run.get("route")
             and status
+            and write_ok
             and decoded
-            and decoded_seq > status_seq
+            and status_seq < write_ok_seq < decoded_seq
             and frame
             and frame.get("direction") == "tx"
             and frame.get("command_type") == "status_request"
             and frame.get("frame_validation") == "validated_tx"
             and status.get("session_generation") == decoded.get("session_generation")
+            and status.get("session_generation") == write_ok.get("session_generation")
             and status.get("observed_route") == run.get("route")
+            and write_ok.get("observed_route") == run.get("route")
             and decoded.get("observed_route") == run.get("route")
         )
         if protocol:
@@ -365,6 +380,7 @@ def review_imported_run(
                 bronze = json.loads(members["tier-bronze-read-only.json"])
                 capture_id = bronze["protocol_capture_id"]
                 status_seq = bronze["protocol_status_request_seq"]
+                write_ok_seq = bronze["protocol_status_write_ok_seq"]
                 decoded_seq = bronze["protocol_decoded_response_seq"]
                 generation = bronze["protocol_session_generation"]
                 scope = {
@@ -389,6 +405,17 @@ def review_imported_run(
                         "event": "write_attempt",
                         "direction": "write",
                         "frame_hex": STATUS_REQUEST_HEX,
+                        "verdict": "ok",
+                    },
+                    {
+                        **scope,
+                        "capture_id": capture_id,
+                        "session_generation": generation,
+                        "seq": write_ok_seq,
+                        "scenario": "read_only_snapshot",
+                        "operation_id": "read_only_snapshot",
+                        "event": "write_ok",
+                        "direction": "write",
                         "verdict": "ok",
                     },
                     {

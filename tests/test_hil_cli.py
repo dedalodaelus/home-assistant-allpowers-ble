@@ -346,17 +346,20 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
 
 
 @pytest.mark.parametrize(
-    ("packet_types", "expected_probe", "expected_public_event"),
+    ("packet_types", "write_completion", "expected_probe", "expected_public_event"),
     [
-        (["SettingsData"], "inconclusive", "notification_decoded"),
-        ([], "inconclusive", "notification_decoded"),
-        (["StatusData"], "pass", "status_data_decoded"),
+        (["SettingsData"], "write_ok", "inconclusive", "notification_decoded"),
+        ([], "write_ok", "inconclusive", "notification_decoded"),
+        (["StatusData"], "write_ok", "pass", "status_data_decoded"),
+        (["StatusData"], "missing", "inconclusive", "status_data_decoded"),
+        (["StatusData"], "write_error", "inconclusive", "status_data_decoded"),
     ],
 )
 def test_bronze_protocol_probe_requires_status_data_through_public_export(
     monkeypatch,
     tmp_path,
     packet_types,
+    write_completion,
     expected_probe,
     expected_public_event,
 ):
@@ -419,7 +422,22 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                 session_generation=3,
                 frame=status_request,
                 direction="tx",
+                transaction_id="bronze-tx-1",
             )
+            if write_completion == "write_ok":
+                self.capture.record(
+                    "write_ok",
+                    session_generation=3,
+                    transaction_id="bronze-tx-1",
+                )
+            elif write_completion == "write_error":
+                self.capture.record(
+                    "write_error",
+                    session_generation=3,
+                    transaction_id="bronze-tx-1",
+                    error_type="FakeTransportError",
+                    reason_category="transport_failure",
+                )
             self.capture.record(
                 "notification_received",
                 session_generation=3,
@@ -499,7 +517,11 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     _, public, _ = verify_public_archive(archive, include_contents=True)
     public_bronze = json.loads(public["tier-bronze-read-only.json"])
     public_events = [json.loads(line) for line in public["events.jsonl"].splitlines()]
-    decoded = next(row for row in public_events if row["seq"] == 4)
+    decoded = next(
+        row
+        for row in public_events
+        if row["event"] in {"status_data_decoded", "notification_decoded"}
+    )
     assert public_bronze["protocol_probe"] == (
         "verified" if expected_probe == "pass" else "inconclusive"
     )

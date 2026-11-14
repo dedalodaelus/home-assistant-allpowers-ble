@@ -609,6 +609,20 @@ def _execute_tier_suite(
                             ),
                             None,
                         )
+                        status_write_ok = next(
+                            (
+                                event
+                                for event in events
+                                if event.get("event") == "write_ok"
+                                and status_tx is not None
+                                and event.get("session_generation")
+                                == status_tx.get("session_generation")
+                                and event.get("transaction_id")
+                                == status_tx.get("transaction_id")
+                                and event.get("seq", 0) > status_tx.get("seq", 0)
+                            ),
+                            None,
+                        )
                         decoded = next(
                             (
                                 event
@@ -617,9 +631,10 @@ def _execute_tier_suite(
                                 and isinstance(event.get("decoded_packet_types"), list)
                                 and "StatusData" in event["decoded_packet_types"]
                                 and status_tx is not None
+                                and status_write_ok is not None
                                 and event.get("session_generation")
                                 == status_tx.get("session_generation")
-                                and event.get("seq", 0) > status_tx.get("seq", 0)
+                                and event.get("seq", 0) > status_write_ok.get("seq", 0)
                             ),
                             None,
                         )
@@ -631,6 +646,7 @@ def _execute_tier_suite(
                             and route in {"local_adapter", "active_proxy"}
                             and services.route_matches_request(args.route, route)
                             and status_tx is not None
+                            and status_write_ok is not None
                             and decoded is not None
                         )
                         trace_dir = output_dir / "traces" / "bronze_read_only"
@@ -651,6 +667,9 @@ def _execute_tier_suite(
                             else None,
                             "status_request_seq": status_tx.get("seq")
                             if status_tx
+                            else None,
+                            "status_write_ok_seq": status_write_ok.get("seq")
+                            if status_write_ok
                             else None,
                             "decoded_response_seq": decoded.get("seq")
                             if decoded

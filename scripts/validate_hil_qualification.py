@@ -404,7 +404,7 @@ def _has_bound_bronze_probe(
     session_id: Any,
     build_fingerprint: Any,
 ) -> bool:
-    """Require a scoped status request and its later decoded response event."""
+    """Require a scoped status write, successful GATT completion, and response."""
     rows = _capture_rows(values)
     if rows is None:
         return False
@@ -431,11 +431,28 @@ def _has_bound_bronze_probe(
         and type(row.get("seq")) is int
     ]
     for request in requests:
+        write_ok = next(
+            (
+                row
+                for row in rows
+                if all(row.get(key) == value for key, value in scope.items())
+                and row.get("capture_id") == request["capture_id"]
+                and row.get("session_generation") == request["session_generation"]
+                and type(row.get("seq")) is int
+                and row["seq"] > request["seq"]
+                and row.get("event") == "write_ok"
+                and row.get("direction") == "write"
+                and row.get("verdict") == "ok"
+            ),
+            None,
+        )
+        if write_ok is None:
+            continue
         if any(
             all(row.get(key) == value for key, value in scope.items())
             and row.get("capture_id") == request["capture_id"]
             and row.get("session_generation") == request["session_generation"]
-            and row.get("seq", 0) > request["seq"]
+            and row.get("seq", 0) > write_ok["seq"]
             and row.get("event") == "status_data_decoded"
             and row.get("direction") == "notify"
             and row.get("verdict") == "ok"

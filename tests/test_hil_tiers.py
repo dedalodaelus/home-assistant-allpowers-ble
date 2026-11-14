@@ -193,6 +193,7 @@ def _bronze_records(
     capture: str,
     *,
     decoded_event: str = "status_data_decoded",
+    write_completion_event: str | None = "write_ok",
 ) -> dict[str, Any]:
     protocol_rows = [
         {
@@ -208,11 +209,28 @@ def _bronze_records(
             "verdict": "ok",
             "physical_outcome": "pass",
         },
+    ]
+    if write_completion_event is not None:
+        protocol_rows.append(
+            {
+                **_scope(run, revision),
+                "capture_id": f"bronze-{run['run_id']}",
+                "session_generation": 1,
+                "seq": 2,
+                "scenario": "read_only_snapshot",
+                "operation_id": "read_only_snapshot",
+                "event": write_completion_event,
+                "direction": "write",
+                "verdict": "ok",
+                "physical_outcome": "pass",
+            }
+        )
+    protocol_rows.append(
         {
             **_scope(run, revision),
             "capture_id": f"bronze-{run['run_id']}",
             "session_generation": 1,
-            "seq": 2,
+            "seq": 3 if write_completion_event is not None else 2,
             "scenario": "read_only_snapshot",
             "operation_id": "read_only_snapshot",
             "event": decoded_event,
@@ -220,7 +238,7 @@ def _bronze_records(
             "verdict": "ok",
             "physical_outcome": "pass",
         },
-    ]
+    )
     with (root / capture).open("a", encoding="utf-8") as stream:
         for row in protocol_rows:
             stream.write(json.dumps(row, sort_keys=True) + "\n")
@@ -472,6 +490,7 @@ def _matrix_fixture(
     run_id: str = "tier-run",
     captured_at: datetime | None = None,
     bronze_decoded_event: str = "status_data_decoded",
+    bronze_write_completion_event: str | None = "write_ok",
 ) -> dict[str, Any]:
     revision = dict(REVISION)
     run_time = captured_at or datetime.now(UTC).replace(microsecond=0)
@@ -496,7 +515,12 @@ def _matrix_fixture(
     capture = _capture(run, revision, root)
     run["evidence"] = [capture]
     run["bronze_evidence"] = _bronze_records(
-        run, revision, root, capture, decoded_event=bronze_decoded_event
+        run,
+        revision,
+        root,
+        capture,
+        decoded_event=bronze_decoded_event,
+        write_completion_event=bronze_write_completion_event,
     )
     absent = "tests/hil/fixtures/light-absence.md"
     (root / absent).parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +616,22 @@ def test_qualification_requires_status_typed_bronze_event(
         assert errors == []
     else:
         assert errors
+
+
+@pytest.mark.parametrize("completion_event", [None, "write_error"])
+def test_qualification_requires_successful_bronze_status_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_event: str | None,
+):
+    matrix = _matrix_fixture(
+        tmp_path,
+        "bronze",
+        bronze_write_completion_event=completion_event,
+    )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors
+    assert result["tiers"][0]["tier"] == "unqualified"
 
 
 def test_validator_and_evaluator_allow_bronze_while_write_gates_are_pending(

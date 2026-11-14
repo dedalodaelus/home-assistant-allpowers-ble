@@ -1993,6 +1993,21 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 ),
                 None,
             )
+            status_write_ok = next(
+                (
+                    event
+                    for event in trace_events
+                    if event.get("event") == "write_ok"
+                    and status_tx is not None
+                    and event.get("session_generation")
+                    == status_tx.get("session_generation")
+                    and event.get("transaction_id") == status_tx.get("transaction_id")
+                    and event.get("seq", 0) > status_tx.get("seq", 0)
+                    and decoded is not None
+                    and event.get("seq", 0) < decoded.get("seq", 0)
+                ),
+                None,
+            )
             protocol_pass = bool(
                 trace_meta.get("complete") is True
                 and trace_meta.get("dropped_events", 0) == 0
@@ -2004,12 +2019,14 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 and protocol.get("status_request_hex", "").lower()
                 == BRONZE_STATUS_REQUEST
                 and decoded is not None
+                and status_write_ok is not None
                 and hashlib.sha256((trace_dir / "trace.json").read_bytes()).hexdigest()
                 == protocol_digest
                 and protocol.get("route") == trace_meta.get("observed_route")
                 and protocol.get("session_generation")
                 == status_tx.get("session_generation")
                 and protocol.get("status_request_seq") == status_tx.get("seq")
+                and protocol.get("status_write_ok_seq") == status_write_ok.get("seq")
                 and protocol.get("decoded_response_seq") == decoded.get("seq")
             )
             if not protocol_pass:
@@ -2034,6 +2051,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     if protocol_pass
                     else None,
                     "protocol_status_request_seq": protocol.get("status_request_seq")
+                    if protocol_pass
+                    else None,
+                    "protocol_status_write_ok_seq": protocol.get("status_write_ok_seq")
                     if protocol_pass
                     else None,
                     "protocol_decoded_response_seq": protocol.get(
@@ -2359,8 +2379,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 )
                 capture_id = all_refs[0].split(":", 1)[0] if all_refs else None
                 status_seq = bronze_public["protocol_status_request_seq"]
+                write_ok_seq = bronze_public["protocol_status_write_ok_seq"]
                 decoded_seq = bronze_public["protocol_decoded_response_seq"]
                 status_event = source_events.get(status_seq)
+                write_ok_event = source_events.get(write_ok_seq)
                 status_frame = source_frames.get(status_seq)
                 decoded_event = source_events.get(decoded_seq)
                 if (
@@ -2368,6 +2390,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     and capture_id is not None
                     and isinstance(status_event, dict)
                     and status_event.get("event") == "write_attempt"
+                    and isinstance(write_ok_event, dict)
+                    and write_ok_event.get("event") == "write_ok"
+                    and status_seq < write_ok_seq < decoded_seq
                     and isinstance(status_frame, dict)
                     and status_frame.get("direction") == "tx"
                     and status_frame.get("command_type") == "status_request"
@@ -2378,10 +2403,13 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     and "StatusData" in decoded_event["decoded_packet_types"]
                     and decoded_event.get("session_generation")
                     == status_event.get("session_generation")
+                    and write_ok_event.get("session_generation")
+                    == status_event.get("session_generation")
                 ):
                     bronze_public["protocol_capture_id"] = capture_id
                     bronze_public["protocol_evidence"] = [
                         f"{capture_id}:{status_seq}",
+                        f"{capture_id}:{write_ok_seq}",
                         f"{capture_id}:{decoded_seq}",
                     ]
                 else:
@@ -2392,6 +2420,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         "protocol_route",
                         "protocol_session_generation",
                         "protocol_status_request_seq",
+                        "protocol_status_write_ok_seq",
                         "protocol_decoded_response_seq",
                     ):
                         bronze_public[key] = None
@@ -3473,6 +3502,7 @@ def verify_public_archive(
                         "protocol_route",
                         "protocol_session_generation",
                         "protocol_status_request_seq",
+                        "protocol_status_write_ok_seq",
                         "protocol_decoded_response_seq",
                         "protocol_capture_id",
                         "protocol_evidence",
@@ -3535,10 +3565,15 @@ def verify_public_archive(
                             != BRONZE_STATUS_REQUEST
                             or type(value.get("protocol_session_generation")) is not int
                             or type(value.get("protocol_status_request_seq")) is not int
+                            or type(value.get("protocol_status_write_ok_seq"))
+                            is not int
                             or type(value.get("protocol_decoded_response_seq"))
                             is not int
-                            or value["protocol_status_request_seq"]
-                            >= value["protocol_decoded_response_seq"]
+                            or not (
+                                value["protocol_status_request_seq"]
+                                < value["protocol_status_write_ok_seq"]
+                                < value["protocol_decoded_response_seq"]
+                            )
                             or not isinstance(value.get("protocol_capture_id"), str)
                             or re.fullmatch(
                                 r"capture-[0-9]{4}", value["protocol_capture_id"]
@@ -3547,6 +3582,7 @@ def verify_public_archive(
                             or value.get("protocol_evidence")
                             != [
                                 f"{value['protocol_capture_id']}:{value['protocol_status_request_seq']}",
+                                f"{value['protocol_capture_id']}:{value['protocol_status_write_ok_seq']}",
                                 f"{value['protocol_capture_id']}:{value['protocol_decoded_response_seq']}",
                             ]
                         )
@@ -3561,6 +3597,7 @@ def verify_public_archive(
                                 "protocol_route",
                                 "protocol_session_generation",
                                 "protocol_status_request_seq",
+                                "protocol_status_write_ok_seq",
                                 "protocol_decoded_response_seq",
                                 "protocol_capture_id",
                             )
@@ -3588,6 +3625,7 @@ def verify_public_archive(
                         ) from exc
                     capture_id = value["protocol_capture_id"]
                     status_seq = value["protocol_status_request_seq"]
+                    write_ok_seq = value["protocol_status_write_ok_seq"]
                     decoded_seq = value["protocol_decoded_response_seq"]
                     status_event = next(
                         (
@@ -3604,6 +3642,15 @@ def verify_public_archive(
                             for row in public_events
                             if row.get("capture_id") == capture_id
                             and row.get("seq") == decoded_seq
+                        ),
+                        None,
+                    )
+                    write_ok_event = next(
+                        (
+                            row
+                            for row in public_events
+                            if row.get("capture_id") == capture_id
+                            and row.get("seq") == write_ok_seq
                         ),
                         None,
                     )
@@ -3627,10 +3674,15 @@ def verify_public_archive(
                     if not (
                         isinstance(status_event, dict)
                         and status_event.get("event") == "write_attempt"
+                        and isinstance(write_ok_event, dict)
+                        and write_ok_event.get("event") == "write_ok"
+                        and status_seq < write_ok_seq < decoded_seq
                         and isinstance(decoded_event, dict)
                         and decoded_event.get("event") == "status_data_decoded"
                         and status_event.get("session_generation")
                         == decoded_event.get("session_generation")
+                        and write_ok_event.get("session_generation")
+                        == status_event.get("session_generation")
                         and isinstance(status_frame, dict)
                         and status_frame.get("direction") == "tx"
                         and status_frame.get("command_type") == "status_request"
