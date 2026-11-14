@@ -281,6 +281,24 @@ def _scenario_controls(
                 and control_capable is True
                 and observed["available"] is True
             ),
+            "candidate_eligible": bool(
+                not settings_key
+                and facts.get("schema_version") == 2
+                and facts.get("verified") is True
+                and facts.get("identity_conflicted") is False
+                and facts.get("connected") is True
+                and facts.get("status_fresh") is True
+                and facts.get("pending_transaction") is False
+                and type(facts.get("session_generation")) is int
+                and facts["session_generation"] >= 1
+                and isinstance(feature, dict)
+                and feature.get("physical_presence") == "present"
+                and feature.get("candidate_hil_eligible") is True
+                and feature.get("production_authorized") is False
+                and feature.get("runtime_ready") is True
+                and observed["available"] is True
+                and observed.get("state") in {"on", "off"}
+            ),
         }
     return result
 
@@ -324,7 +342,7 @@ def _candidate_step_needs_authorization(
         facts.get("physical_presence") == "present"
         and facts.get("candidate_hil_eligible") is True
         and facts.get("production_authorized") is not True
-        and control.get("eligible") is True
+        and control.get("candidate_eligible") is True
         and observed_route in {"local_adapter", "active_proxy"}
         and not reasons
     )
@@ -995,7 +1013,7 @@ def _execute_tier_suite(
                     ):
                         refreshed_step["eligibility"] = "pending_authorization"
                         refreshed_step["reasons"] = [
-                            "requires a fresh single-use backend grant and separate operator consent"
+                            "candidate needs a fresh, single-use backend HIL grant"
                         ]
                 print(
                     "Updated plan after the Bronze connected-route and capability check:"
@@ -1045,16 +1063,19 @@ def _execute_tier_suite(
                             f"remains {requested_tier.title()}. No Silver/Gold evidence is claimed."
                         )
                     else:
-                        stop_reason = "operator declined the Bronze-only fallback"
-                        execution["steps"].append(
-                            {
-                                "step_id": "higher_tier_plan",
-                                "outcome": "blocked",
-                                "reason": stop_reason,
-                            }
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
                         )
+                        execution["execution_tier"] = "bronze"
                         overall = 2
-                        continue
+                        print(
+                            "Stopping after the Bronze diagnostics already collected; "
+                            "no Silver/Gold steps will run."
+                        )
                 else:
                     try:
                         proceed = (
@@ -1066,13 +1087,21 @@ def _execute_tier_suite(
                     except EOFError, KeyboardInterrupt:
                         proceed = False
                     if not proceed:
-                        stop_reason = "operator did not confirm the refreshed plan"
+                        refreshed_plan = build_tier_plan(
+                            "bronze",
+                            refreshed_capabilities,
+                            refreshed_controls,
+                            observed_route=observed_route,
+                            build_provenance=build_provenance,
+                        )
+                        execution["execution_tier"] = "bronze"
                         overall = 2
-                        continue
-                    print(
-                        "A pending authorization still requires the backend grant "
-                        "and a separate consent for every action and restoration."
-                    )
+                        print("Plan not confirmed; stopping after Bronze diagnostics.")
+                    else:
+                        print(
+                            "A pending authorization still requires the backend grant "
+                            "and a separate consent for every action and restoration."
+                        )
                 refreshed_plan["requested_tier"] = requested_tier
                 refreshed_plan["execution_tier"] = execution["execution_tier"]
                 session_path = output_dir / "session.json"

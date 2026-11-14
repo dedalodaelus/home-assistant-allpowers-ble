@@ -82,7 +82,11 @@ def build_tier_plan(
             if control.get("available") is not True:
                 status = "blocked"
                 reasons.append("control state is unavailable")
-            if control.get("eligible") is not True:
+            candidate_preflight = bool(
+                facts.get("candidate_hil_eligible") is True
+                and control.get("candidate_eligible") is True
+            )
+            if control.get("eligible") is not True and not candidate_preflight:
                 status = "blocked"
                 reasons.append("fresh same-session capability preflight is not ready")
         route_required = action == "write" or step_id in {

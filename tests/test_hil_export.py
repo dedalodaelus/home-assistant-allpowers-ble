@@ -97,7 +97,7 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
     tmp_path: Path,
 ) -> None:
     run = tmp_path / "guided"
-    private = run / "private"
+    private = run
     private.mkdir(parents=True)
     (private / "environment.json").write_text(
         json.dumps({"schema_version": 1}), encoding="utf-8"
@@ -241,7 +241,7 @@ def test_public_guided_artifacts_reject_tampered_private_paths(
     tmp_path: Path,
 ) -> None:
     run = tmp_path / "guided"
-    private = run / "private"
+    private = run
     private.mkdir(parents=True)
     (private / "environment.json").write_text(
         json.dumps({"schema_version": 1}), encoding="utf-8"
@@ -1701,4 +1701,83 @@ def test_verified_build_provenance_survives_report_and_public_zip(
     assert public_integration["build_match"]["verified"] is True
     assert public_integration["installed_commit"]["value"] == commit
     assert commit in members["report.md"].decode()
+    assert manifest["qualification_status"] == "inconclusive"
+
+
+def test_candidate_pending_authorization_survives_real_public_preview_and_export(
+    tmp_path: Path,
+) -> None:
+    run = write_run(
+        tmp_path,
+        "candidate-plan",
+        {"schema_version": 1},
+        {
+            "schema_version": 1,
+            "run_id": "0123456789abcdef",
+            "qualification_status": "inconclusive",
+            "mode": "guided_tier",
+            "test_plan": {
+                "schema_version": 1,
+                "requested_tier": "silver",
+                "execution_tier": "silver",
+                "attained_tier": None,
+                "review_state": "pending",
+                "device": {
+                    "model": "S500",
+                    "hardware_revision": "0.1",
+                    "firmware_revision": "1.0",
+                    "profile": "s500-reviewed-candidate",
+                    "verified_route": "local_adapter",
+                    "build_provenance": {},
+                },
+                "operator_actions_estimate": 7,
+                "restoration_plan": "restore only after separate consent",
+                "steps": [
+                    {
+                        "id": "dc_output_cycle",
+                        "feature": "dc_output",
+                        "eligibility": "pending_authorization",
+                        "outcome": "pending",
+                        "reasons": [
+                            "candidate needs a fresh, single-use backend HIL grant"
+                        ],
+                        "human_review": "pending",
+                    }
+                ],
+            },
+        },
+    )
+    private = run
+    (private / "tier-execution.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "0123456789abcdef",
+                "requested_tier": "silver",
+                "execution_tier": "silver",
+                "attained_tier": None,
+                "review_state": "pending",
+                "requested_route": "auto",
+                "device": {
+                    "model": "S500",
+                    "hardware_version": "0.1",
+                    "firmware_version": "1.0",
+                },
+                "steps": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(HAAPIError, match="explicit confirmation"):
+        export_archive(run, confirmed=False)
+    archive = export_archive(run, confirmed=True)
+
+    manifest, members, _ = verify_public_archive(archive, include_contents=True)
+    public_session = json.loads(members["session.json"])
+    plan = public_session["data"]["test_plan"]
+    assert plan["steps"][0]["eligibility"] == "pending_authorization"
+    assert plan["steps"][0]["reasons"] == [
+        "candidate needs a fresh, single-use backend HIL grant"
+    ]
+    assert plan.get("execution_tier", plan["requested_tier"]) == "silver"
     assert manifest["qualification_status"] == "inconclusive"

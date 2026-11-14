@@ -123,8 +123,18 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
     assert fake.calls[0] == ("get", "/api/config")
 
 
+@pytest.mark.parametrize(
+    ("bronze_choice", "export_choice", "create_archive"),
+    [("BRONZE", "no", False), ("", "yes", True)],
+)
 def test_onboard_silver_unknown_route_offers_bronze_without_write(
-    monkeypatch, tmp_path, allpowers_registry, capsys
+    monkeypatch,
+    tmp_path,
+    allpowers_registry,
+    capsys,
+    bronze_choice,
+    export_choice,
+    create_archive,
 ):
     fake = FakeHA(allpowers_registry)
     fake.scanners = {"bluetooth": 1}
@@ -139,7 +149,10 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
     monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
     monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
     monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
-    _onboard_tty(monkeypatch, ["2", "RUN", "1", "BRONZE", "no"])
+    answers = ["2", "RUN", "1", bronze_choice, export_choice]
+    if export_choice == "yes":
+        answers.append("EXPORT")
+    _onboard_tty(monkeypatch, answers)
     output_root = tmp_path / "onboard-silver"
 
     result = cli.main(
@@ -162,11 +175,92 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
     assert saved_session["test_plan"]["device"]["verified_route"] is None
     assert saved_session["test_plan"]["requested_tier"] == "silver"
     assert saved_session["test_plan"]["execution_tier"] == "bronze"
+    assert [step["step_id"] for step in execution["steps"]] == [
+        "read_only_probe",
+        "physical_plausibility_observation",
+    ]
     output = capsys.readouterr().out
     assert "No Silver/Gold output step is currently achievable" in output
-    assert "Continuing as Bronze diagnostics" in output
+    assert (
+        "Continuing as Bronze diagnostics" in output
+        if bronze_choice == "BRONZE"
+        else "Stopping after the Bronze diagnostics already collected" in output
+    )
     assert not any(call[0] == "service" for call in fake.calls)
     assert all(command["type"].endswith("/start") for command in trace_calls)
+    archive = run_root / "hil-evidence.zip"
+    assert archive.is_file() is create_archive
+    if create_archive:
+        from scripts.hil.evidence import verify_public_archive
+
+        _, public, _ = verify_public_archive(archive, include_contents=True)
+        public_tier = json.loads(public["tier-execution.json"])
+        public_session = json.loads(public["session.json"])
+        assert public_tier["requested_tier"] == "silver"
+        assert public_tier["execution_tier"] == "bronze"
+        assert [step["step_id"] for step in public_tier["steps"]] == [
+            "read_only_probe",
+            "physical_plausibility_observation",
+        ]
+        public_plan = public_session["data"]["test_plan"]
+        assert public_plan["requested_tier"] == "silver"
+        assert public_plan["execution_tier"] == "bronze"
+
+
+def test_candidate_control_preflight_does_not_require_production_permission():
+    class CandidateHA:
+        def control_state(self, _key, _entity):
+            return {"available": True, "state": "off", "options": ["off", "on"]}
+
+    capabilities = {
+        "schema_version": 2,
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "pending_transaction": False,
+        "session_generation": 12,
+        "capabilities": {"write_output_controls": False},
+        "features": {
+            "ac_output": {
+                "physical_presence": "present",
+                "candidate_hil_eligible": True,
+                "production_authorized": False,
+                "runtime_ready": True,
+            }
+        },
+    }
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        control_entities={"ac_output": "switch.private_ac"},
+    )
+
+    controls = cli._scenario_controls(CandidateHA(), device, capabilities)
+    step = {
+        "feature": "ac_output",
+        "reasons": ["candidate needs a fresh, single-use backend HIL grant"],
+    }
+    assert controls["ac_output"]["eligible"] is False
+    assert controls["ac_output"]["candidate_eligible"] is True
+    assert (
+        cli._candidate_step_needs_authorization(
+            step, capabilities, controls, "active_proxy"
+        )
+        is True
+    )
+    controls["ac_output"]["state"] = None
+    controls["ac_output"]["available"] = False
+    controls["ac_output"]["candidate_eligible"] = False
+    assert (
+        cli._candidate_step_needs_authorization(
+            step, capabilities, controls, "active_proxy"
+        )
+        is False
+    )
 
 
 def test_onboard_never_dispatches_a_blocked_reconnect_step(tmp_path):
@@ -1559,8 +1653,15 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
             assert "physical_outcome" not in evidence
 
 
-def test_tier_executor_dispatches_candidate_through_grant_and_restore(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("answers", "expected_writes", "expected_outcome"),
+    [
+        (["1", "1", "1", "1", "1"], [True, False], "pass"),
+        (["2"], [], "skipped"),
+    ],
+)
+def test_onboard_dispatches_candidate_through_separate_grant_consents(
+    monkeypatch, tmp_path, answers, expected_writes, expected_outcome
 ):
     """Exercise tier dispatch through the candidate HIL executor with Fake HA."""
     from argparse import Namespace
@@ -1586,20 +1687,36 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
             self.writes = []
 
         def hil_capabilities(self, _entry):
+            features = {
+                name: {
+                    "physical_presence": "unknown",
+                    "candidate_hil_eligible": False,
+                    "production_authorized": False,
+                    "runtime_ready": True,
+                }
+                for name in (
+                    "ac_output",
+                    "dc_output",
+                    "light_output",
+                    "eco_mode",
+                    "work_mode",
+                    "eco_timeout",
+                    "car_charger",
+                    "telemetry",
+                )
+            }
+            features["dc_output"].update(
+                physical_presence="present", candidate_hil_eligible=True
+            )
             return {
+                "schema_version": 2,
                 "verified": True,
                 "identity_conflicted": False,
                 "connected": True,
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 9,
-                "features": {
-                    "dc_output": {
-                        "physical_presence": "present",
-                        "candidate_hil_eligible": True,
-                        "production_authorized": False,
-                    }
-                },
+                "features": features,
             }
 
         def control_state(self, _feature, _entity):
@@ -1649,14 +1766,14 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
             }
 
     fake = FakeHA()
-    answers = iter(["1", "1", "1", "1", "1"])
+    prompt_answers = iter(answers)
     base_services = cli._suite_services()
     monkeypatch.setattr(
         cli,
         "_suite_services",
         lambda: replace(
             base_services,
-            prompt=lambda _question: next(answers),
+            prompt=lambda _question: next(prompt_answers),
             validate_trace_result=lambda *_args, **_kwargs: None,
             correlate_transaction=lambda *_args, **_kwargs: {
                 "session_generation": 9,
@@ -1665,34 +1782,50 @@ def test_tier_executor_dispatches_candidate_through_grant_and_restore(
         ),
     )
     root = storage.write_run(tmp_path, "guided-parent", {}, {})
-    plan = {"requested_tier": "silver", "steps": [{"id": "dc_output_cycle"}]}
-    capabilities = {
-        "features": {
-            "dc_output": {
-                "physical_presence": "present",
-                "candidate_hil_eligible": True,
-                "production_authorized": False,
-            }
-        }
-    }
-
-    assert (
-        cli._execute_tier_suite(
-            fake,
-            Namespace(route="auto", output_root=tmp_path, non_interactive=False),
-            device,
-            {},
-            root,
-            "parent-run",
-            plan,
-            capabilities,
-        )
-        == 0
+    result = cli._execute_tier_suite(
+        fake,
+        Namespace(
+            route="auto",
+            output_root=tmp_path,
+            non_interactive=False,
+            onboarding=True,
+        ),
+        device,
+        {},
+        root,
+        "parent-run",
+        {
+            "requested_tier": "silver",
+            "steps": [
+                {
+                    "id": "dc_output_cycle",
+                    "action": "write",
+                    "eligibility": "pending_authorization",
+                    "reasons": [
+                        "candidate needs a fresh, single-use backend HIL grant"
+                    ],
+                }
+            ],
+        },
+        {
+            "schema_version": 2,
+            "features": {
+                "dc_output": {
+                    "physical_presence": "present",
+                    "candidate_hil_eligible": True,
+                    "production_authorized": False,
+                    "runtime_ready": True,
+                }
+            },
+        },
     )
-    assert fake.writes == [True, False]
+    assert result == (0 if expected_outcome == "pass" else 2)
+    assert fake.writes == expected_writes
     execution = json.loads((root / "tier-execution.json").read_text())
     assert execution["review_state"] == "pending"
-    assert execution["steps"][0]["outcome"] == "pass"
+    assert execution["steps"][0]["outcome"] == expected_outcome
+    if expected_outcome == "skipped":
+        return
     artifact = root / execution["steps"][0]["machine_evidence"][0]["path"]
     evidence = json.loads(artifact.read_text())
     assert evidence["outcome"] == "pass"
