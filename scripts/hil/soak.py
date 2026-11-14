@@ -15,6 +15,8 @@ from .discovery import Device
 from .suite_runtime import SuiteServices
 from .storage import run_root
 
+SHORT_STABILITY_RUNTIME_MARGIN_SECONDS = 600
+
 
 def _private_run_size(run_dir: Path) -> int:
     """Measure regular private files without following symlinks."""
@@ -204,6 +206,13 @@ def _execute_soak_suite(
     trace_required = (
         parameters["duration_seconds"] // parameters["trace_interval_seconds"]
     )
+    runtime_deadline = (
+        run_started
+        + parameters["duration_seconds"]
+        + SHORT_STABILITY_RUNTIME_MARGIN_SECONDS
+        if is_short
+        else None
+    )
 
     def begin_segment(now: float, utc_now: datetime) -> None:
         nonlocal segment_started, sample_count, trace_count, maximum_gap
@@ -222,7 +231,7 @@ def _execute_soak_suite(
             "measured_seconds": 0.0,
             "sample_count": 0,
             "trace_count": 0,
-            "fresh_sample_count": 0,
+            "fresh_status_sample_count": 0,
             "route_verified": False,
             "trace_complete": False,
             "route": "unverified",
@@ -306,6 +315,41 @@ def _execute_soak_suite(
     trace_index = sum(step.get("trace_count", 0) for step in steps)
     while True:
         now = services.monotonic()
+        if is_short and runtime_deadline is not None and now >= runtime_deadline:
+            if active_segment is not None:
+                active_segment["measured_seconds"] = round(
+                    now - (segment_started if segment_started is not None else now), 3
+                )
+                active_segment["outcome"] = "inconclusive"
+                active_segment["reason"] = "short observation time budget exhausted"
+                active_segment["ended_utc"] = services.datetime.now(UTC).isoformat()
+            else:
+                steps.append(
+                    {
+                        "step_id": "soak_segment",
+                        "segment": segment_number,
+                        "outcome": "inconclusive",
+                        "reason": "short observation time budget exhausted",
+                        "measured_seconds": round(now - run_started, 3),
+                        "sample_count": sample_count,
+                        "fresh_status_sample_count": sample_count,
+                        "trace_count": trace_count,
+                        "route_verified": False,
+                        "trace_complete": False,
+                        "route": "unverified",
+                        "station_model": baseline.get("model"),
+                        "station_hardware_revision": device.hardware,
+                        "station_firmware_revision": device.firmware,
+                        "operator_mode": (
+                            "non_interactive"
+                            if getattr(args, "non_interactive", False)
+                            else "interactive"
+                        ),
+                    }
+                )
+            checkpoint()
+            print("Short stability stopped inconclusive: time budget exhausted")
+            return 2
         utc_now = services.datetime.now(UTC)
         if now >= next_sample:
             gap = (
@@ -323,6 +367,11 @@ def _execute_soak_suite(
             except HAAPIError:
                 capabilities = None
                 snapshot = {}
+            cutoff_observed = bool(
+                capabilities is not None
+                and capabilities.get("verified") is True
+                and capabilities.get("connected") is False
+            )
             healthy = bool(
                 capabilities is not None
                 and capabilities["verified"] is True
@@ -364,7 +413,11 @@ def _execute_soak_suite(
                         "event": "sample_gap",
                         "utc": utc_now.isoformat(),
                         "gap_seconds": round(gap, 3) if gap is not None else None,
-                        "reason": "runtime disconnected, unverified or stale",
+                        "reason": (
+                            "station cutoff observed; cause unverified"
+                            if cutoff_observed
+                            else "runtime disconnected, unverified or stale"
+                        ),
                         "session_generation": (
                             capabilities.get("session_generation")
                             if capabilities is not None
@@ -372,19 +425,13 @@ def _execute_soak_suite(
                         ),
                     }
                 )
-                disconnected = bool(
-                    capabilities is not None
-                    and capabilities.get("verified") is True
-                    and capabilities.get("connected") is False
-                )
+                if cutoff_observed and active_segment is not None:
+                    active_segment["station_cutoff_observed"] = True
                 end_segment(
-                    "verified station disconnect observed"
-                    if disconnected
-                    else "fresh connected status or verified telemetry unavailable",
-                    "fail" if is_short and disconnected else "inconclusive",
+                    "station cutoff observed; cause unverified"
+                    if cutoff_observed
+                    else "fresh connected status or verified telemetry unavailable"
                 )
-                if is_short and disconnected:
-                    return 2
             else:
                 if segment_started is None:
                     begin_segment(now, utc_now)
@@ -427,7 +474,7 @@ def _execute_soak_suite(
                 if not append_record(row):
                     break
                 active_segment["sample_count"] = sample_count
-                active_segment["fresh_sample_count"] = sample_count
+                active_segment["fresh_status_sample_count"] = sample_count
                 active_segment["measured_seconds"] = round(now - segment_started, 3)
                 active_segment["maximum_gap_seconds"] = round(maximum_gap, 3)
                 active_segment["last_sample_utc"] = utc_now.isoformat()
@@ -620,6 +667,11 @@ def _execute_soak_suite(
                     "trace_count": trace_count,
                     "minimum_traces": trace_required,
                     "dropped_traces": dropped_traces,
+                    **(
+                        {"route_consistent": active_segment["route"] != "mixed"}
+                        if is_short
+                        else {}
+                    ),
                 },
             )
             active_segment["measured_seconds"] = round(
@@ -637,6 +689,8 @@ def _execute_soak_suite(
             next_event = min(
                 next_event, next_trace, segment_started + parameters["duration_seconds"]
             )
+        if is_short and runtime_deadline is not None:
+            next_event = min(next_event, runtime_deadline)
         delay = max(0.1, next_event - services.monotonic())
         try:
             services.sleep(delay)

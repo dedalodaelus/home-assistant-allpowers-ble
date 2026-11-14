@@ -238,10 +238,9 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
+        "station_cutoff_observed",
         "restart_discontinuity",
         "data_limit_hit",
-        "route_verified",
-        "trace_complete",
     ):
         if type(step.get(name)) is bool:
             observation[name] = step[name]
@@ -254,7 +253,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "trace_count",
         "dropped_traces",
         "clock_discontinuities",
-        "fresh_sample_count",
+        "fresh_status_sample_count",
     ):
         value = step.get(name)
         if type(value) is int and 0 <= value <= 1_000_000:
@@ -330,10 +329,13 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
             actual = "observation_incomplete"
     if actual is None and step.get("step_id") == "soak_segment":
         outcome = step.get("outcome")
-        actual = outcome if outcome in {"pass", "fail"} else "inconclusive"
+        if scenario_id == "soak_24h_observation":
+            actual = "completed" if outcome == "pass" else "inconclusive"
+        else:
+            actual = outcome if outcome in {"pass", "fail"} else "inconclusive"
     reason = step.get("reason")
     limitation = None
-    if isinstance(reason, str):
+    if isinstance(reason, str) and step.get("outcome") not in {"pass", "fail"}:
         lowered = reason.lower()
         if "restart" in lowered or "unobserved interval" in lowered:
             limitation = "restart_discontinuity"
@@ -370,6 +372,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
+        "station_cutoff_observed",
         "restart_discontinuity",
         "data_limit_hit",
         "session_generation",
@@ -380,7 +383,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "trace_count",
         "dropped_traces",
         "clock_discontinuities",
-        "fresh_sample_count",
+        "fresh_status_sample_count",
         "measured_seconds",
         "maximum_gap_seconds",
         "route",
@@ -3350,6 +3353,8 @@ def verify_public_archive(
                             "ha_recovered",
                             "observation_incomplete",
                             "completed",
+                            "pass",
+                            "fail",
                             "inconclusive",
                         }
                         or not _valid_public_observation(row.get("observation"))

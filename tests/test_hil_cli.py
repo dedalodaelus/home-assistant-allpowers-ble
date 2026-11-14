@@ -6208,8 +6208,21 @@ def test_soak_keepalive_override_still_requires_verified_supported_option(
     assert api_fake.websocket_calls == []
 
 
-@pytest.mark.parametrize("suite", ["soak-24h", "stability-short"])
-def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, suite):
+@pytest.mark.parametrize(
+    ("suite", "mode", "expected_outcome"),
+    [
+        ("soak-24h", "steady", "pass"),
+        ("stability-short", "steady", "pass"),
+        ("stability-short", "mixed_routes", "inconclusive"),
+        ("stability-short", "trace_incomplete", "inconclusive"),
+        ("stability-short", "missing_telemetry", "inconclusive"),
+        ("stability-short", "cutoff", "inconclusive"),
+        ("stability-short", "interrupted", "inconclusive"),
+    ],
+)
+def test_soak_fake_clock_preserves_scope_and_fails_closed(
+    monkeypatch, tmp_path, suite, mode, expected_outcome
+):
     from datetime import UTC, datetime, timedelta
     import os
     from types import SimpleNamespace
@@ -6224,12 +6237,16 @@ def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, 
 
         def sleep(self, seconds):
             self.value += seconds
+            if mode == "interrupted" and self.value - 10_000 >= 600:
+                raise KeyboardInterrupt
 
     class FakeDateTime:
         @staticmethod
         def now(tz=UTC):
             base = datetime(2026, 1, 1, tzinfo=tz)
             return base + timedelta(seconds=clock.value - 10_000.0)
+
+    clock = FakeClock()
 
     class SoakHA:
         origin = "https://ha.example.test"
@@ -6239,11 +6256,12 @@ def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, 
             self.commands = []
 
         def hil_capabilities(self, entry_id):
+            connected = not (mode == "cutoff" and clock.value - 10_000 >= 600)
             return {
                 "verified": True,
                 "identity_conflicted": False,
-                "connected": True,
-                "status_fresh": True,
+                "connected": connected,
+                "status_fresh": connected,
                 "settings_fresh": True,
                 "session_generation": 1,
                 "model": "R600",
@@ -6268,16 +6286,93 @@ def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, 
                         "ttl_seconds": 30,
                     }
                 ]
+            if mode == "trace_incomplete":
+                route = "unverified"
+                events = []
+                route_observations = []
+                dropped_events = 1
+                complete = False
+            else:
+                route = (
+                    "active_proxy"
+                    if mode == "mixed_routes" and self.capture % 2 == 0
+                    else "local_adapter"
+                )
+                utc = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+                proof = (
+                    {
+                        "backend_kind": "bluez",
+                        "evidence": "bluez_device_path",
+                        "adapter_id": "hci0",
+                    }
+                    if route == "local_adapter"
+                    else {
+                        "backend_kind": "esphome",
+                        "evidence": "esphome_scanner_binding",
+                        "proxy_id": "proxy-test",
+                    }
+                )
+                observation = {
+                    "session_generation": 1,
+                    "seq": 1,
+                    "utc": utc,
+                    "elapsed_ms": 1,
+                    "observed_route": route,
+                    **proof,
+                }
+                events = [
+                    {
+                        "schema_version": 2,
+                        "seq": 1,
+                        "utc": utc,
+                        "elapsed_ms": 1,
+                        "run_id": "0123456789abcdef",
+                        "scenario_id": (
+                            "short_stability_observation"
+                            if suite == "stability-short"
+                            else "soak_24h_observation"
+                        ),
+                        "event": "route_observed",
+                        "session_generation": 1,
+                        "layer": "gatt_api",
+                        "observed_route": route,
+                        **proof,
+                    }
+                ]
+                route_observations = [observation]
+                dropped_events = 0
+                complete = True
             return [
                 {
                     "schema_version": 2,
+                    "capture_scope": "runtime_entry",
                     "capture_id": command["capture_id"],
-                    "observed_route": "local_adapter",
-                    "complete": True,
+                    "run_id": "0123456789abcdef",
+                    "scenario_id": (
+                        "short_stability_observation"
+                        if suite == "stability-short"
+                        else "soak_24h_observation"
+                    ),
+                    "requested_route": "auto",
+                    "qualification_allowed": False,
+                    "observed_route": route,
+                    "capture_layer": "gatt_api_not_rf",
+                    "private_raw_bytes": True,
+                    "closed": True,
+                    "expired": False,
+                    "complete": complete,
+                    "termination_reason": "requested_stop",
+                    "event_count": len(events),
+                    "frame_count": 0,
+                    "dropped_events": dropped_events,
+                    "dropped_frames": 0,
+                    "has_gatt_frames": False,
+                    "events": events,
+                    "frames": [],
+                    "route_observations": route_observations,
                 }
             ]
 
-    clock = FakeClock()
     duration = 1800 if suite == "stability-short" else 86400
     minimum_samples = 31 if suite == "stability-short" else 289
     minimum_traces = 6 if suite == "stability-short" else 24
@@ -6299,11 +6394,18 @@ def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, 
     monkeypatch.setattr(
         cli,
         "read_only_sample",
-        lambda *_: {
-            "battery": {"value": 89, "source": "ha_rest_entity_state", "verified": True}
-        },
+        lambda *_: (
+            {}
+            if mode == "missing_telemetry"
+            else {
+                "battery": {
+                    "value": 89,
+                    "source": "ha_rest_entity_state",
+                    "verified": True,
+                }
+            }
+        ),
     )
-    monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
 
     def save_trace(trace_dir, trace):
         fd = os.open(
@@ -6322,20 +6424,33 @@ def test_soak_fake_clock_preserves_its_declared_duration(monkeypatch, tmp_path, 
         "0123456789abcdef",
     )
 
-    assert result == 0
+    assert result == (0 if expected_outcome == "pass" else 2)
     checkpoint = json.loads((output_dir / "checkpoint.json").read_text())
-    segment = checkpoint["steps"][-1]
-    assert segment["outcome"] == "pass"
-    assert segment["measured_seconds"] >= duration
-    assert segment["sample_count"] == minimum_samples
-    assert segment["trace_count"] >= minimum_traces
-    assert len(api_fake.commands) == minimum_traces * 2
+    if suite == "stability-short":
+        assert checkpoint["scenario_id"] == "short_stability_observation"
+    else:
+        assert checkpoint["scenario_id"] == "soak_24h_observation"
+    assert checkpoint["steps"][-1]["outcome"] == expected_outcome
+    if mode in {"steady", "mixed_routes"}:
+        segment = checkpoint["steps"][-1]
+        assert segment["measured_seconds"] >= duration
+        assert segment["sample_count"] >= minimum_samples
+        assert segment["trace_count"] >= minimum_traces
+    if mode == "mixed_routes":
+        assert checkpoint["steps"][-1]["route"] == "mixed"
+    if mode == "cutoff":
+        assert all(step["outcome"] != "fail" for step in checkpoint["steps"])
+        assert any(
+            step.get("station_cutoff_observed") is True for step in checkpoint["steps"]
+        )
+    assert len(api_fake.commands) % 2 == 0
     assert all(
         command in {"allpowers_ble/hil/start", "allpowers_ble/hil/stop"}
         for command in api_fake.commands
     )
-    sample_prefix = "stability" if suite == "stability-short" else "soak"
-    assert (output_dir / f"{sample_prefix}_samples_001.jsonl").exists()
+    if mode in {"steady", "mixed_routes", "cutoff"}:
+        sample_prefix = "stability" if suite == "stability-short" else "soak"
+        assert (output_dir / f"{sample_prefix}_samples_001.jsonl").exists()
 
 
 def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities():

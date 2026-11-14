@@ -222,13 +222,18 @@ def short_stability_verdict(
     trace_count: int,
     minimum_traces: int,
     dropped_traces: int,
+    route_consistent: bool = True,
     data_limit_hit: bool = False,
     interrupted: bool = False,
 ) -> str:
     """Evaluate only the separately scoped short stability observation."""
     if data_limit_hit or interrupted:
         return "inconclusive"
-    if maximum_gap_seconds > allowed_gap_seconds or dropped_traces:
+    if (
+        maximum_gap_seconds > allowed_gap_seconds
+        or dropped_traces
+        or not route_consistent
+    ):
         return "inconclusive"
     if (
         measured_seconds < required_seconds

@@ -377,9 +377,12 @@ For a lower-commitment, read-only observation, run
 30 uninterrupted minutes, samples every minute, captures a 15-second verified
 route trace every five minutes, and records its own `short_stability` result.
 It does not count as `soak_24h`, cannot qualify Platinum, and never changes
-keepalive or station outputs. A verified station disconnect is reported as
-`fail`; missing freshness, route proof, trace completeness, or an interrupted
-run is `inconclusive`. Interrupted short runs can be resumed only as a new
+keepalive or station outputs. A station cutoff without an independently
+verified failure is `inconclusive`; missing freshness, route proof, trace
+completeness, or an interrupted run is also `inconclusive`. Samples are
+read-only polls of fresh Home Assistant telemetry; their count does not claim
+new device notifications. A global 40-minute monotonic budget bounds retries
+and unavailable telemetry. Interrupted short runs can be resumed only as a new
 segment; the missing interval never counts toward a pass.
 
 ### Qualify station stability before a 24-hour soak

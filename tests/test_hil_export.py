@@ -1410,6 +1410,10 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert soak["observation"]["sample_count"] == 14
     assert soak["observation"]["maximum_gap_seconds"] == 300.0
     assert soak["limitation_reason"] == "restart_discontinuity"
+    completed_soak = _public_observation(
+        "soak_24h_observation", {"step_id": "soak_segment", "outcome": "pass"}
+    )
+    assert completed_soak["actual"] == "completed"
 
     short_stability = _public_observation(
         "short_stability_observation",
@@ -1423,9 +1427,10 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
             "trace_count": 1,
             "dropped_traces": 0,
             "clock_discontinuities": 0,
-            "fresh_sample_count": 8,
+            "fresh_status_sample_count": 8,
             "route_verified": True,
             "trace_complete": False,
+            "station_cutoff_observed": True,
             "route": "local_adapter",
             "station_model": "R600",
             "station_hardware_revision": "0.3",
@@ -1440,9 +1445,10 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     )
     assert short_stability["actual"] == "fail"
     assert short_stability["observation"]["measured_seconds"] == 420.0
-    assert short_stability["observation"]["fresh_sample_count"] == 8
+    assert short_stability["observation"]["fresh_status_sample_count"] == 8
     assert short_stability["observation"]["route_verified"] is True
     assert short_stability["observation"]["trace_complete"] is False
+    assert short_stability["observation"]["station_cutoff_observed"] is True
     assert short_stability["observation"]["station_model"] == "R600"
     assert short_stability["observation"]["operator_mode"] == "interactive"
 
@@ -1651,6 +1657,54 @@ def test_soak_summary_exports_metrics_without_private_samples(tmp_path: Path) ->
             exported.read(name) for name in exported.namelist()
         )
         assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
+
+
+def test_short_stability_export_keeps_its_own_scenario_identity(tmp_path: Path) -> None:
+    run_id = "0123456789abcdef"
+    private = write_run(
+        tmp_path,
+        "short-stability",
+        {"schema_version": 1},
+        {"schema_version": 1, "run_id": run_id},
+    )
+    write_scenario_progress(
+        private,
+        run_id,
+        "short_stability_observation",
+        "e" * 64,
+        [
+            {
+                "step_id": "soak_segment",
+                "segment": 1,
+                "outcome": "pass",
+                "measured_seconds": 1800.0,
+                "sample_count": 31,
+                "fresh_status_sample_count": 31,
+                "trace_count": 6,
+                "maximum_gap_seconds": 60.0,
+                "dropped_traces": 0,
+                "clock_discontinuities": 0,
+                "route_verified": True,
+                "trace_complete": True,
+                "route": "local_adapter",
+                "reason": "completed uninterrupted short observation",
+            }
+        ],
+    )
+    (private / "stability_samples_001.jsonl").write_text(
+        '{"event":"sample","private_state":"192.168.1.25"}\n',
+        encoding="utf-8",
+    )
+    archive = export_archive(tmp_path / "short-stability", confirmed=True)
+    with zipfile.ZipFile(archive) as exported:
+        scenarios = json.loads(exported.read("public/scenarios.json"))
+        assert scenarios["scenario_id"] == "short_stability_observation"
+        assert scenarios["scenario_id"] != "soak_24h_observation"
+        assert scenarios["steps"][0]["actual"] == "pass"
+        assert "stability_samples_001.jsonl" not in exported.namelist()
+        assert b"192.168.1.25" not in b"".join(
+            exported.read(name) for name in exported.namelist()
+        )
 
 
 def test_real_environment_checkout_and_mismatch_facts_verify(
