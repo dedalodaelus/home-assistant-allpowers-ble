@@ -1668,6 +1668,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 if evidence_path.name == "trace.json":
                     trace_meta = _read_json(evidence_path)
                     expected_scenario_id = step.get("scenario_id")
+                    if child_run_id is None and expected_scenario_id is None:
+                        expected_scenario_id = trace_meta.get("scenario_id")
                     expected_requested_route = (
                         child_session.get("requested_route")
                         if child_run_id is not None
