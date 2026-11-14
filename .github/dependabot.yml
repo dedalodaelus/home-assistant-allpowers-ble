@@ -5,10 +5,21 @@ updates:
     target-branch: devel
     versioning-strategy: increase-if-necessary
     ignore:
-      # Review the HA runtime, pytest fixture, and BLE backend as one stack.
+      # Keep every generated HA test-stack pin aligned with its selected release.
+      - dependency-name: "aioesphomeapi"
+      - dependency-name: "aiousbwatcher"
+      - dependency-name: "bleak"
+      - dependency-name: "bleak-esphome"
+      - dependency-name: "bleak-retry-connector"
+      - dependency-name: "bluetooth-adapters"
+      - dependency-name: "bluetooth-auto-recovery"
+      - dependency-name: "bluetooth-data-tools"
+      - dependency-name: "dbus-fast"
+      - dependency-name: "esphome-dashboard-api"
+      - dependency-name: "habluetooth"
       - dependency-name: "homeassistant"
       - dependency-name: "pytest-homeassistant-custom-component"
-      - dependency-name: "bleak-esphome"
+      - dependency-name: "serialx"
     schedule:
       interval: weekly
       day: monday
