@@ -1026,6 +1026,8 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
     if (
         value.get("schema_version") != 1
         or value.get("requested_tier") not in {"bronze", "silver", "gold"}
+        or value.get("execution_tier", value.get("requested_tier"))
+        not in {"bronze", "silver", "gold"}
         or value.get("attained_tier") is not None
         or value.get("review_state") != "pending"
         or not isinstance(value.get("steps"), list)
@@ -1048,7 +1050,8 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         if (
             not isinstance(step.get("id"), str)
             or step["id"] not in safe_step_ids
-            or step.get("eligibility") not in {"eligible", "blocked", "not_applicable"}
+            or step.get("eligibility")
+            not in {"eligible", "blocked", "not_applicable", "pending_authorization"}
             or step.get("outcome") != "pending"
             or step.get("human_review") != "pending"
             or not isinstance(step.get("reasons"), list)
@@ -1081,7 +1084,7 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
                 "human_review": step["human_review"],
             }
         )
-    return {
+    projected = {
         "schema_version": 1,
         "requested_tier": value["requested_tier"],
         "attained_tier": None,
@@ -1095,6 +1098,10 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "operator_actions_estimate": value["operator_actions_estimate"],
         "steps": steps,
     }
+    execution_tier = value.get("execution_tier", value["requested_tier"])
+    if execution_tier != value["requested_tier"]:
+        projected["execution_tier"] = execution_tier
+    return projected
 
 
 def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
@@ -1663,6 +1670,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             or tier_execution.get("review_state") != "pending"
             or tier_execution.get("attained_tier") is not None
             or tier_execution.get("requested_tier") not in {"bronze", "silver", "gold"}
+            or tier_execution.get(
+                "execution_tier", tier_execution.get("requested_tier")
+            )
+            not in {"bronze", "silver", "gold"}
             or not isinstance(tier_execution.get("steps"), list)
             or len(tier_execution["steps"]) > 32
         ):
@@ -1894,16 +1905,22 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             )
             + "\n"
         ).encode()
+        public_execution = {
+            "schema_version": PUBLIC_SCHEMA,
+            "requested_tier": tier_execution["requested_tier"],
+            "attained_tier": None,
+            "review_state": "pending",
+            "qualification_status": "inconclusive",
+            "steps": public_steps,
+        }
+        execution_tier = tier_execution.get(
+            "execution_tier", tier_execution["requested_tier"]
+        )
+        if execution_tier != tier_execution["requested_tier"]:
+            public_execution["execution_tier"] = execution_tier
         files["tier-execution.json"] = (
             json.dumps(
-                {
-                    "schema_version": PUBLIC_SCHEMA,
-                    "requested_tier": tier_execution["requested_tier"],
-                    "attained_tier": None,
-                    "review_state": "pending",
-                    "qualification_status": "inconclusive",
-                    "steps": public_steps,
-                },
+                public_execution,
                 sort_keys=True,
                 indent=2,
             )
@@ -3438,17 +3455,21 @@ def verify_public_archive(
                     ):
                         raise HAAPIError("Invalid public scenario row")
             elif name == "tier-execution.json":
+                expected_tier_keys = {
+                    "schema_version",
+                    "requested_tier",
+                    "attained_tier",
+                    "review_state",
+                    "qualification_status",
+                    "steps",
+                }
+                if "execution_tier" in value:
+                    expected_tier_keys.add("execution_tier")
                 if (
-                    set(value)
-                    != {
-                        "schema_version",
-                        "requested_tier",
-                        "attained_tier",
-                        "review_state",
-                        "qualification_status",
-                        "steps",
-                    }
+                    set(value) != expected_tier_keys
                     or value.get("requested_tier") not in {"bronze", "silver", "gold"}
+                    or value.get("execution_tier", value.get("requested_tier"))
+                    not in {"bronze", "silver", "gold"}
                     or value.get("attained_tier") is not None
                     or value.get("review_state") != "pending"
                     or value.get("qualification_status") != "inconclusive"

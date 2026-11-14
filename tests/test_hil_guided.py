@@ -143,6 +143,34 @@ def test_candidate_eligibility_does_not_replace_backend_grant() -> None:
     )
 
 
+def test_candidate_fresh_preflight_is_separate_from_production_authorization() -> None:
+    capabilities = _capabilities("r600-hw-0.3")
+    capabilities.update(
+        schema_version=2,
+        session_generation=12,
+    )
+    capabilities["features"]["ac_output"].update(
+        physical_presence="present",
+        production_authorized=False,
+        candidate_hil_eligible=True,
+    )
+    controls = _controls("r600-hw-0.3")
+    controls["ac_output"].update(
+        available=True,
+        state="off",
+        eligible=False,
+        candidate_eligible=True,
+    )
+
+    plan = build_tier_plan(
+        "silver", capabilities, controls, observed_route="local_adapter"
+    )
+
+    step = _steps(plan)["ac_output_cycle"]
+    assert step["eligibility"] == "blocked"
+    assert step["reasons"] == ["candidate needs a fresh, single-use backend HIL grant"]
+
+
 def test_route_is_required_for_writes_but_not_bronze_read_only_probe() -> None:
     profile_id = "ap-r1500-lite-hw-0.1-evidence"
     capabilities = _capabilities(profile_id)

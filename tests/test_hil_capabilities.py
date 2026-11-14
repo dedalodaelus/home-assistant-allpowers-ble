@@ -88,6 +88,9 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
             session_hardware_version=None,
             session_raw_hardware_version=None,
             settings=settings,
+            status=SimpleNamespace(
+                ac_enabled=True, dc_enabled=False, light_enabled=True
+            ),
         ),
         settings_are_fresh=True,
         status_is_fresh=True,
@@ -124,6 +127,11 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert result["firmware_revision"] == "2.1"
     assert result["raw_firmware_revision"] == 21
     assert result["session_generation"] == 7
+    assert result["output_states"] == {
+        "ac_output": True,
+        "dc_output": False,
+        "light_output": True,
+    }
     assert result["settings_options"] == {
         "keepalive_enabled": False,
         "keepalive_interval_seconds": 540,
@@ -177,3 +185,8 @@ async def test_capability_endpoint_filters_invalid_or_stale_revisions() -> None:
     assert result["raw_firmware_revision"] is None
     assert result["session_generation"] is None
     assert result["settings_fresh"] is False
+    assert result["output_states"] == {
+        "ac_output": None,
+        "dc_output": None,
+        "light_output": None,
+    }

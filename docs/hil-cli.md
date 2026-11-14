@@ -31,6 +31,32 @@ Set `HA_HIL_TOKEN` in the process environment first, or omit `--non-interactive`
 
 `HA_HIL_URL` may be used instead of `--ha-url`. Only the HA origin is valid, without `/api`, user info, query strings or embedded tokens. HTTPS uses normal certificate verification; there is **no** option to disable it. Plain HTTP to a non-loopback address requires `--allow-insecure-http` and exposes the token on the network; only use it on an explicitly trusted, isolated test network. **The CLI deliberately ignores environment proxy variables** (`http_proxy`, `https_proxy`, `ALL_PROXY`, etc.) for both REST and WebSocket transport: this prevents a token intended for a loopback HA server from leaking to an ambient proxy. A reverse proxy at the explicitly selected HA URL still works; upstream HTTP CONNECT proxies are not supported. Do not expose the token in shell history or screenshots.
 
+### Contributor quickstart
+
+From the prepared checkout and activated `.venv-hil`, the wizard asks for a Home Assistant origin and securely prompts for a missing token:
+
+Linux/macOS:
+
+```bash
+source .venv-hil/bin/activate
+python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv-hil\Scripts\Activate.ps1
+python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
+```
+
+If a Platinum soak is interrupted, the wizard prints a resume command. It uses the existing private checkpoint, for example:
+
+```bash
+python -m scripts.hil run --suite soak-24h --resume 'hil-results/<run>/private' --ha-url https://home-assistant.example:8123
+```
+
+The resume command prompts for the token again when `HA_HIL_TOKEN` is unset; the token is never written into the checkpoint.
+
 For a local HA Container installation:
 
 ```bash
@@ -45,6 +71,7 @@ A remote host and HA OS are also supported using the REST/WebSocket APIs. `netwo
 
 ## Commands
 
+- `onboard`: from this prepared checkout, start an interactive contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and asks for the desired Bronze/Silver/Gold tier or the existing 24-hour Platinum soak. It displays known identity/build/route facts and the applicable plan before asking you to type `RUN`. Each state change and restoration still needs its own explicit consent and the existing server-side HIL grant. At the end, you can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.
 - `--device 1`: select an indexed device (or a model name if unambiguous). If there is one device, selection is automatic. In non-interactive mode, multiple devices require an explicit selection.

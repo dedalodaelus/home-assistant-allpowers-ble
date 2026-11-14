@@ -344,6 +344,21 @@ class HAClient:
         if generation is not None and (type(generation) is not int or generation < 1):
             raise HAAPIError("Malformed HIL session generation")
         normalized["session_generation"] = generation
+        output_states = result.get("output_states")
+        if output_states is not None:
+            output_state_keys = {"ac_output", "dc_output", "light_output"}
+            if (
+                not isinstance(output_states, dict)
+                or set(output_states) != output_state_keys
+                or any(
+                    value is not None and type(value) is not bool
+                    for value in output_states.values()
+                )
+            ):
+                raise HAAPIError("Malformed HIL output state snapshot")
+            normalized["output_states"] = dict(output_states)
+        else:
+            normalized["output_states"] = None
         settings_options = result.get("settings_options")
         if settings_options is not None:
             if (
