@@ -62,7 +62,9 @@ means reviewed identity, active protocol probe, and plausible fresh telemetry
 on/off confirmation for every claimed, physically present basic output (AC/DC/
 light), a basic reconnect, and at least one real output PASS. Gold adds reviewed
 checks for all declared supported functions/settings and relevant recovery and
-transaction-safety evidence. Platinum adds Gold plus a reviewed, uninterrupted
+reconnect evidence. Gold's transaction-safety regression checks run separately
+in repository CI (`run --suite transaction-safety --simulate`); simulated
+results are not physical Gold evidence. Platinum adds Gold plus a reviewed, uninterrupted
 86,400-second read-only soak. Durations in guided contributor plans are
 estimates; one observed route is sufficient for a scoped result. A confirmed
 absent feature is not applicable; unknown or untested claimed features remain

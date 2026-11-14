@@ -38,6 +38,15 @@ repository's safety and validation checklist.
 ## Before opening a change
 
 - Search existing issues and pull requests.
+- For an initial, read-only compatibility observation, use the
+  [compatibility report form](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new?template=compatibility_report.yml)
+  and report model, hardware revision, firmware, observed route (or `unknown`),
+  and per-feature presence/coverage. The guided HIL entry point is
+  `python -m scripts.hil onboard`; see the [hardware support tier guidance](docs/compatibility.md#write-authorization-and-hardware-support-tiers)
+  and [HIL CLI guide](docs/hil-cli.md). Preliminary read-only reports do not
+  require packet captures. Proposing a protocol/profile change or requesting
+  qualification still requires the relevant sanitized GATT/protocol evidence
+  and review described below and in [Adding models](docs/adding-models.md).
 - For another hardware model, provide the exact model/revision, advertised name,
   GATT service and characteristics, and sanitized packet evidence.
 - Do not infer compatibility from product appearance or marketing name.
