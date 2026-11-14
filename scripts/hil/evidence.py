@@ -17,6 +17,7 @@ from typing import Any
 
 from .api import HAAPIError
 from .scenarios import load_scenarios
+from .storage import load_scenario_checkpoint
 from .discovery import BINARY_KEYS, KNOWN_MODELS, SENSOR_KEYS, safe_model, safe_version
 from .trace import _validate_trace_result
 
@@ -306,7 +307,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _valid_public_observation(value: Any) -> bool:
+def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
     if not isinstance(value, dict):
         return False
     allowed = {
@@ -332,6 +333,11 @@ def _valid_public_observation(value: Any) -> bool:
         "maximum_gap_seconds",
         "route",
         "operator_action",
+        "target",
+        "expected",
+        "actual",
+        "observation",
+        "limitation_reason",
     }
     state_values = {
         "on",
@@ -348,7 +354,54 @@ def _valid_public_observation(value: Any) -> bool:
         "no",
         "unable_to_observe",
     }
-    if set(value) - allowed:
+    envelope_fields = {
+        "target",
+        "expected",
+        "actual",
+        "observation",
+        "limitation_reason",
+    }
+    if set(value) - (allowed - envelope_fields if nested else allowed):
+        return False
+    if (
+        "target" in value
+        and value["target"] is not None
+        and (
+            not isinstance(value["target"], str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", value["target"]) is None
+        )
+    ):
+        return False
+    if (
+        "expected" in value
+        and value["expected"] is not None
+        and (
+            not isinstance(value["expected"], str)
+            or re.fullmatch(r"[a-z][a-z0-9_ -]{0,127}", value["expected"]) is None
+        )
+    ):
+        return False
+    if "actual" in value and value["actual"] not in state_values | {
+        None,
+        "reconnected",
+        "observation_incomplete",
+        "completed",
+        "inconclusive",
+    }:
+        return False
+    if "limitation_reason" in value and value["limitation_reason"] not in {
+        None,
+        "restart_discontinuity",
+        "operator_interruption_or_decline",
+        "storage_limit",
+        "trace_unavailable",
+        "observation_unavailable",
+        "precondition_or_observation_incomplete",
+    }:
+        return False
+    if "observation" in value and not _valid_public_observation(
+        value["observation"], nested=True
+    ):
         return False
     for key in {"pre_state", "post_state", "cleanup_post_state"} & set(value):
         if value[key] not in state_values:
@@ -1277,37 +1330,7 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             and set(step) == {"step_id", "outcome", "observation"}
             and step.get("step_id") in STEP_IDS
             and step.get("outcome") in OUTCOMES
-            and isinstance(step.get("observation"), dict)
-            and not (
-                set(step["observation"])
-                - {
-                    "pre_state",
-                    "post_state",
-                    "cleanup_post_state",
-                    "connected",
-                    "status_fresh",
-                    "disconnect_observed",
-                    "operator_confirmed",
-                    "route_verified",
-                    "restart_discontinuity",
-                    "data_limit_hit",
-                    "session_generation",
-                    "session_generation_before",
-                    "session_generation_after",
-                    "segment",
-                    "sample_count",
-                    "trace_count",
-                    "dropped_traces",
-                    "clock_discontinuities",
-                    "measured_seconds",
-                    "maximum_gap_seconds",
-                    "route",
-                    "operator_action",
-                    "target",
-                    "expected",
-                    "actual",
-                }
-            )
+            and _valid_public_observation(step.get("observation"))
             for step in steps
         )
     if kind == "guided_step_evidence":
@@ -1562,6 +1585,51 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             evidence_hashes = []
             evidence_refs = []
             seen_sources: set[Path] = set()
+            child_run_id: str | None = None
+            child_private: Path | None = None
+            evidence_run = step.get("evidence_run")
+            if evidence_run is not None:
+                if not isinstance(evidence_run, str):
+                    raise HAAPIError("Invalid guided child run reference")
+                try:
+                    child_private = (private / evidence_run).resolve(strict=True)
+                    child_private.relative_to(run_dir.parent.resolve())
+                    child_session = _read_json(child_private / "session.json")
+                    _, child_checkpoint = load_scenario_checkpoint(child_private)
+                except (OSError, ValueError, HAAPIError) as exc:
+                    raise HAAPIError(
+                        "Guided child run identity is unavailable"
+                    ) from exc
+                directory_run_id = child_private.parent.name.removeprefix("tier_")
+                expected_child_step_id = step["step_id"]
+                if (
+                    step["outcome"] == "shared_evidence"
+                    and step["step_id"] == "guarded_recovery"
+                    and step_index > 0
+                    and tier_execution["steps"][step_index - 1].get("step_id")
+                    == "basic_reconnect"
+                    and tier_execution["steps"][step_index - 1].get("evidence_run")
+                    == evidence_run
+                ):
+                    expected_child_step_id = "basic_reconnect"
+                if (
+                    child_private.name != "private"
+                    or re.fullmatch(r"[a-f0-9]{16}", directory_run_id) is None
+                    or child_session.get("run_id") != directory_run_id
+                    or child_session.get("parent_tier_run_id") != raw_run_id
+                    or child_session.get("tier_step_id") != expected_child_step_id
+                    or child_session.get("requested_route")
+                    != tier_execution.get("requested_route")
+                    or child_session.get("device") != tier_execution.get("device")
+                    or child_checkpoint.get("schema_version") != 2
+                    or child_checkpoint.get("run_id") != directory_run_id
+                    or child_checkpoint.get("scenario_id") != step.get("scenario_id")
+                    or child_checkpoint.get("qualification_status") != "inconclusive"
+                    or not isinstance(child_checkpoint.get("steps"), list)
+                    or not child_checkpoint["steps"]
+                ):
+                    raise HAAPIError("Guided child run identity failed validation")
+                child_run_id = directory_run_id
             machine_evidence = step.get("machine_evidence", [])
             if not isinstance(machine_evidence, list) or len(machine_evidence) > 32:
                 raise HAAPIError("Invalid guided tier evidence list")
@@ -1599,6 +1667,17 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 evidence_hashes.append(digest)
                 if evidence_path.name == "trace.json":
                     trace_meta = _read_json(evidence_path)
+                    expected_scenario_id = step.get("scenario_id")
+                    expected_requested_route = (
+                        child_session.get("requested_route")
+                        if child_run_id is not None
+                        else trace_meta.get("requested_route")
+                    )
+                    if (
+                        trace_meta.get("scenario_id") != expected_scenario_id
+                        or trace_meta.get("requested_route") != expected_requested_route
+                    ):
+                        raise HAAPIError("Guided child trace scope failed validation")
                     events_path = evidence_path.with_name("events.jsonl")
                     frames_path = evidence_path.with_name("frames.jsonl")
                     try:
@@ -1619,10 +1698,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         }
                         _validate_trace_result(
                             trace,
-                            run_id=raw_run_id,
-                            scenario_id=trace_meta.get("scenario_id"),
+                            run_id=child_run_id or raw_run_id,
+                            scenario_id=expected_scenario_id,
                             capture_id=trace_meta.get("capture_id"),
-                            requested_route=trace_meta.get("requested_route"),
+                            requested_route=expected_requested_route,
                             expected_version=trace_meta.get("schema_version"),
                             expected_scope=trace_meta.get(
                                 "capture_scope", "runtime_entry"

@@ -12,7 +12,11 @@ import zipfile
 import pytest
 
 from scripts.hil.api import HAAPIError
-from scripts.hil.evidence import export_archive
+from scripts.hil.evidence import (
+    build_public,
+    export_archive,
+    verify_public_archive,
+)
 from scripts.hil.importer import import_archive
 from scripts.hil.qualification import migrate_v1_to_v3, migrate_v2_to_v3
 from scripts.hil.storage import write_run, write_scenario_progress
@@ -721,6 +725,175 @@ def test_conflicting_run_identity_fails_before_writing_fixtures(
     assert not (tmp_path / "tests" / "hil" / "fixtures").exists()
 
 
+def test_guided_child_capture_exports_with_child_identity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parent_run_id = "0123456789abcdef"
+    child_run_id = "fedcba9876543210"
+    parent_device = {
+        "model": "R600",
+        "hardware_version": "0.3",
+        "firmware_version": "1.1",
+    }
+    parent_root = tmp_path / "guided-parent"
+    parent_private = write_run(
+        tmp_path,
+        parent_root.name,
+        {"schema_version": 1, "integration": {}},
+        {
+            "schema_version": 1,
+            "run_id": parent_run_id,
+            "qualification_status": "inconclusive",
+            "mode": "read_only_preflight",
+            "scenario_id": "read_only_snapshot",
+            "started_at": "2026-11-09T12:00:00+00:00",
+            "device": {
+                key: _fact(value, "ha_device_registry")
+                for key, value in parent_device.items()
+            },
+        },
+    )
+    child_private = write_run(
+        tmp_path,
+        f"tier_{child_run_id}",
+        {"schema_version": 1, "integration": {}},
+        {
+            "run_id": child_run_id,
+            "parent_tier_run_id": parent_run_id,
+            "tier_step_id": "dc_output_cycle",
+            "requested_route": "local_adapter",
+            "device": parent_device,
+        },
+    )
+    write_scenario_progress(
+        child_private,
+        child_run_id,
+        "output_dc_cycle",
+        "a" * 64,
+        [{"step_id": "dc_on", "outcome": "pass"}],
+    )
+
+    stamp = "2026-11-09T12:00:01+00:00"
+    common = {
+        "schema_version": 2,
+        "run_id": child_run_id,
+        "scenario_id": "output_dc_cycle",
+        "layer": "gatt_api",
+        "session_generation": 1,
+        "observed_route": "local_adapter",
+    }
+    route_proof = {
+        "backend_kind": "bluez",
+        "evidence": "bluez_device_path",
+        "adapter_id": "hci0",
+    }
+    events = [
+        {
+            **common,
+            "seq": 1,
+            "utc": stamp,
+            "elapsed_ms": 0.0,
+            "event": "route_observed",
+            **route_proof,
+        },
+        {
+            **common,
+            "seq": 2,
+            "utc": stamp,
+            "elapsed_ms": 1.0,
+            "event": "notification_received",
+        },
+    ]
+    trace = {
+        "schema_version": 2,
+        "capture_scope": "runtime_entry",
+        "capture_id": f"capture-{child_run_id}",
+        "run_id": child_run_id,
+        "scenario_id": "output_dc_cycle",
+        "requested_route": "local_adapter",
+        "capture_layer": "gatt_api_not_rf",
+        "private_raw_bytes": True,
+        "has_gatt_frames": True,
+        "closed": True,
+        "expired": False,
+        "termination_reason": "requested_stop",
+        "qualification_allowed": False,
+        "observed_route": "local_adapter",
+        "complete": True,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "event_count": len(events),
+        "frame_count": 1,
+        "events": events,
+        "frames": [
+            {
+                **events[1],
+                "direction": "rx",
+                "command_type": "unknown",
+                "frame_validation": "unvalidated_chunk",
+                "hex": "aa55",
+            }
+        ],
+        "route_observations": [
+            {
+                "session_generation": 1,
+                "seq": 1,
+                "utc": stamp,
+                "elapsed_ms": 0.0,
+                "observed_route": "local_adapter",
+                **route_proof,
+            }
+        ],
+    }
+    trace_dir = child_private / "traces" / "output_dc_cycle_1"
+    trace_dir.mkdir(parents=True)
+    _save_private_trace(trace_dir, trace)
+    checkpoint = child_private / "checkpoint.json"
+    evidence_paths = [
+        checkpoint,
+        trace_dir / "trace.json",
+    ]
+    execution = {
+        "schema_version": 1,
+        "run_id": parent_run_id,
+        "requested_tier": "silver",
+        "requested_route": "local_adapter",
+        "device": parent_device,
+        "review_state": "pending",
+        "steps": [
+            {
+                "step_id": "dc_output_cycle",
+                "scenario_id": "output_dc_cycle",
+                "outcome": "pass",
+                "human_review": "pending",
+                "evidence_run": f"../../tier_{child_run_id}/private",
+                "machine_evidence": [
+                    {
+                        "path": f"../../tier_{child_run_id}/private/{path.relative_to(child_private).as_posix()}",
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for path in evidence_paths
+                ],
+            }
+        ],
+    }
+    (parent_private / "tier-execution.json").write_text(json.dumps(execution))
+
+    archive = export_archive(parent_root, confirmed=True)
+    capsys.readouterr()
+    verified, public, _digest = verify_public_archive(archive, include_contents=True)
+    assert verified["qualification_status"] == "inconclusive"
+    tier = json.loads(public["tier-execution.json"])
+    assert tier["steps"][0]["outcome"] == "pass"
+    assert len(tier["steps"][0]["machine_evidence"]) == 4
+    child_session_path = child_private / "session.json"
+    child_session = json.loads(child_session_path.read_text())
+    child_session["parent_tier_run_id"] = "1111111111111111"
+    child_session_path.write_text(json.dumps(child_session))
+    with pytest.raises(HAAPIError, match="child run identity"):
+        build_public(parent_root)
+
+
 def test_modified_contents_for_same_source_run_fail_without_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1019,6 +1192,18 @@ def test_export_import_and_independent_bronze_review_is_digest_bound(
         max_age_days=None,
     )
     assert errors == []
+    reviewed_matrix = matrix_path.read_bytes()
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    assert matrix_path.read_bytes() == reviewed_matrix
+    assert (
+        json.loads(matrix_path.read_text())["revisions"][0]["runs"][0][
+            "bronze_evidence"
+        ]
+        == reviewed["bronze_evidence"]
+    )
 
 
 def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
