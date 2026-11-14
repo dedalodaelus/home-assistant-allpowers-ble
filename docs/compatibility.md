@@ -54,6 +54,33 @@ document equivalence and the focused checks that support it.
 
 ## Write authorization and hardware support tiers
 
+The project also publishes **project-specific hardware support tiers**. These
+are evidence summaries, separate from Home Assistant's Integration Quality
+Scale, code-profile recognition, and production write authorization. Bronze
+means reviewed identity, active protocol probe, and plausible fresh telemetry
+(read-only). Silver adds a reviewed feature inventory, supervised physical
+on/off confirmation for every claimed, physically present basic output (AC/DC/
+light), a basic reconnect, and at least one real output PASS. Gold adds reviewed
+checks for all declared supported functions/settings and relevant recovery and
+reconnect evidence. Gold's transaction-safety regression checks run separately
+in repository CI (`run --suite transaction-safety --simulate`); simulated
+results are not physical Gold evidence. Platinum adds Gold plus a reviewed, uninterrupted
+86,400-second read-only soak. Durations in guided contributor plans are
+estimates; one observed route is sufficient for a scoped result. A confirmed
+absent feature is not applicable; unknown or untested claimed features remain
+unqualified. Optional features outside the supported contract must be declared
+as excluded and safely disabled.
+
+The `python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json`
+command computes the highest evidence-backed tier independently for exact
+model, hardware revision, firmware, and observed route. Output reports the
+scope, qualified features, exclusions, and unmet requirements; without
+qualifying reviewed evidence it reports `unqualified`. A requested tier,
+operator consent, CI simulation, imported archive, or code-profile label cannot
+create a physical PASS. See the [HIL CLI guide](hil-cli.md) for Bronze, Silver,
+and Gold guided plans and the [qualification runbook](hil-qualification.md) for
+evidence review.
+
 Production write authorization is reviewed per model/revision and individual
 control. Before adding or newly enabling a control, require an understood command
 frame and masks, representative read/write vectors and negative regression tests,
@@ -65,15 +92,10 @@ other firmware or routes; maintainers must review an equivalence rationale.
 Full matrix completion, both routes, vendor-app contention, and a 24-hour soak
 are not prerequisites for each individual control.
 
-Bronze (evidence-backed read-only), Silver (physically verified applicable basic
-output controls), and Gold (verified declared settings/functions and recovery).
-Platinum is an optional tier; earning it requires Gold plus a verified,
-uninterrupted 86,400-second soak. The soak is not required for Bronze or Gold, or
-for authorizing an individual control. These are the accepted support tiers;
-tier calculation is not implemented yet (#269). The validator supports the
-per-feature, per-route evidence scope in #268. The per-feature production
-authorization guards (#266/#267) and experimental HIL grant infrastructure
-(#275) are implemented. Legacy grouped R600/VOLIX flags remain in the code for
+The per-feature qualification validator and evidence-backed tier evaluator
+(#268/#269) are implemented. The per-feature production authorization guards
+(#266/#267) and experimental HIL grant infrastructure (#275) are also
+implemented. Legacy grouped R600/VOLIX flags remain in the code for
 compatibility; their presence does not mean individual authorization checks are
 missing. Experimental grants use a separate attended, temporary path and do not
 expose normal Home Assistant write entities or authorize production writes.

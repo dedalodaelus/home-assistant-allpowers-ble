@@ -8,11 +8,17 @@ body:
     attributes:
       value: >-
         A matching name or UUID is not enough to establish safe compatibility.
-        Test without critical loads and sanitize every capture.
+        This project uses internal Bronze/Silver/Gold/Platinum hardware support
+        tiers, separate from Home Assistant's Integration Quality Scale and from
+        production write authorization. Report only what you observed. Test
+        without critical loads; optional HIL CLI ZIPs may be attached after
+        reviewing the public export for privacy. See docs/hil-cli.md for the
+        guided workflow.
   - type: input
     id: model
     attributes:
-      label: Exact product model and label revision
+      label: Exact product model and hardware revision (or unknown)
+      description: Enter "unknown" if the hardware revision cannot be determined.
     validations:
       required: true
   - type: input
@@ -22,11 +28,23 @@ body:
     validations:
       required: true
   - type: input
-    id: versions
+    id: firmware
     attributes:
-      label: Reported hardware and firmware versions
+      label: Firmware version or explicitly unknown
+      description: State the observed firmware version, or enter "unknown".
     validations:
-      required: false
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Observed BLE route
+      description: If you tested both routes, submit a separate report for each. Do not select mixed.
+      options:
+        - Unknown
+        - Local adapter
+        - Active proxy
+    validations:
+      required: true
   - type: input
     id: environment
     attributes:
@@ -36,27 +54,46 @@ body:
   - type: checkboxes
     id: results
     attributes:
-      label: Results
+      label: Observed feature coverage (select only verified observations)
       options:
         - label: Device was discovered.
         - label: Active config-flow probe succeeded.
-        - label: Battery, power, and remaining time were plausible.
-        - label: AC control was tested and preserved DC/light state.
-        - label: DC control was tested and preserved AC/light state.
-        - label: Light control was tested and preserved AC/DC state.
-        - label: ECO and work mode were tested and preserved unknown settings bits.
-        - label: Reconnect and Home Assistant restart were tested.
-        - label: At least one hour of stable operation was observed.
+        - label: Fresh telemetry was plausible.
+        - label: AC output is physically present.
+        - label: AC output is confirmed physically absent.
+        - label: AC on/off was safely tested and physically confirmed.
+        - label: DC output is physically present.
+        - label: DC output is confirmed physically absent.
+        - label: DC on/off was safely tested and physically confirmed.
+        - label: Light is physically present.
+        - label: Light is confirmed physically absent.
+        - label: Light on/off was safely tested and physically confirmed.
+        - label: Declared settings/functions were safely tested and restored.
+        - label: Basic reconnect/recovery was observed.
+        - label: A continuous 24-hour read-only soak was completed.
+  - type: dropdown
+    id: support_tier
+    attributes:
+      label: Evidence status (do not infer a tier from selections)
+      options:
+        - Unknown / not evaluated
+        - Unqualified
+        - Bronze candidate
+        - Silver candidate
+        - Gold candidate
+        - Platinum candidate
+    validations:
+      required: true
   - type: textarea
     id: details
     attributes:
-      label: Detailed observations
+      label: Per-feature status (present / absent / unknown / untested) and evidence limits
     validations:
       required: true
   - type: textarea
     id: diagnostics
     attributes:
-      label: Sanitized diagnostics or protocol evidence
+      label: Optional sanitized evidence summary or reviewed HIL CLI ZIP link
       render: text
     validations:
       required: false
@@ -70,4 +107,8 @@ body:
             occupancy, and personal data.
           required: true
         - label: I did not test experimental writes with a critical load attached.
+          required: true
+        - label: >-
+            If I performed candidate/experimental writes, I stayed present and was prepared
+            to restore the device manually.
           required: true

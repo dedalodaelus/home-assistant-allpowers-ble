@@ -35,6 +35,12 @@ No vendor cloud or device-side ESPHome component is required.
 Code-profile recognition does not mean hardware qualification. Unknown candidates
 stay read-only; rejected models remain rejected. See the [full compatibility matrix](docs/compatibility.md).
 
+
+Project-specific hardware support tiers summarize reviewed physical evidence per
+model, hardware revision, firmware, and observed BLE route. They are not Home
+Assistant Integration Quality Scale ratings and do not authorize writes. See
+[compatibility and support tiers](docs/compatibility.md#write-authorization-and-hardware-support-tiers).
+
 ## Requirements & installation
 
 - Project support minimum: Home Assistant **2026.10.4**. This matches the

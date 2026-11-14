@@ -37,6 +37,12 @@ El reconocimiento del perfil de código no equivale a cualificación física. Lo
 candidatos desconocidos siguen en solo lectura y los modelos rechazados continúan
 rechazados. Consulta la [matriz completa](docs/compatibility.md).
 
+
+Los niveles internos de soporte de hardware resumen evidencia física revisada
+por modelo, revisión de hardware, firmware y ruta BLE observada. No son
+calificaciones de Home Assistant Integration Quality Scale ni autorizan
+escrituras. Consulta [compatibilidad y niveles de soporte](docs/compatibility.md#write-authorization-and-hardware-support-tiers).
+
 ## Requisitos e instalación
 
 - Mínimo de soporte del proyecto: Home Assistant **2026.10.4**. Coincide con

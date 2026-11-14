@@ -40,7 +40,10 @@
 - Release tags use plain `X.Y.Z` (no `v` prefix).
 - Minimum Home Assistant version is still justified.
 - English and Spanish translation trees match `strings.json`.
-- Compatibility documentation distinguishes verified and experimental hardware.
+- Compatibility documentation distinguishes code-profile recognition, feature
+  inventory, per-feature evidence, and project hardware support tiers. Tier
+  claims are scoped to model, hardware revision, firmware, and observed route;
+  they are not Home Assistant IQS ratings or write permissions.
 - Changelog describes user-visible and protocol-safety changes.
 
 ## Validation

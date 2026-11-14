@@ -124,7 +124,21 @@ For verified write-capable profiles, also:
   requesting stable promotion. Add `--max-age-days N` only for a requested
   freshness audit.
 
-## 9. Validate on failure paths
+## 9. Classify hardware evidence
+
+Report support evidence separately from code-profile recognition and write
+authorization. Record exact model, hardware revision, firmware, and actually
+observed route; mark each physical feature present, absent, or unknown and each
+claimed control with its scoped outcome. A confirmed absent feature is not
+applicable, while unknown or untested claims stay unqualified. One observed route
+is sufficient for a scoped tier result. Use
+`python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json` after
+independent evidence review; software simulations, operator consent, and imported
+archives alone do not qualify a tier. See the
+[compatibility guide](compatibility.md#write-authorization-and-hardware-support-tiers)
+and [HIL qualification runbook](hil-qualification.md#calculated-hardware-support-tiers).
+
+## 10. Validate on failure paths
 
 Test unplugged proxies, route changes, Bluetooth restarts, stale telemetry, partial
 notifications, rapid consecutive commands, Home Assistant shutdown, and integration
