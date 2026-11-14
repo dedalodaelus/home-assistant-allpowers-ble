@@ -227,6 +227,37 @@ def _discovery(
     return config, manifest, find_devices(entities, devices, entries)
 
 
+def _candidate_output_state(
+    capabilities: dict[str, Any] | None, feature: str
+) -> dict[str, Any]:
+    """Read one output state from the fresh, entry-scoped HIL snapshot."""
+    snapshot = capabilities if isinstance(capabilities, dict) else {}
+    output_states = snapshot.get("output_states")
+    features = snapshot.get("features", {})
+    facts = features.get(feature, {}) if isinstance(features, dict) else {}
+    state = output_states.get(feature) if isinstance(output_states, dict) else None
+    ready = bool(
+        snapshot.get("schema_version") == 2
+        and snapshot.get("verified") is True
+        and snapshot.get("identity_conflicted") is False
+        and snapshot.get("connected") is True
+        and snapshot.get("status_fresh") is True
+        and snapshot.get("pending_transaction") is False
+        and type(snapshot.get("session_generation")) is int
+        and snapshot["session_generation"] >= 1
+        and isinstance(facts, dict)
+        and facts.get("runtime_ready") is True
+        and type(state) is bool
+    )
+    if not ready:
+        return {"available": False, "state": None, "options": []}
+    return {
+        "available": True,
+        "state": "on" if state else "off",
+        "options": ["off", "on"],
+    }
+
+
 def _scenario_controls(
     api: HAClient,
     device: Device,
@@ -258,6 +289,14 @@ def _scenario_controls(
         settings_key = key in settings_controls
         feature_key = "light_output" if key == "light" else key
         feature = feature_facts.get(feature_key)
+        candidate_observed = (
+            _candidate_output_state(facts, feature_key)
+            if not settings_key
+            else {"available": False, "state": None, "options": []}
+        )
+        plan_observed = (
+            candidate_observed if candidate_observed["available"] else observed
+        )
         control_capable = feature_write_authorized(
             facts,
             key,
@@ -272,7 +311,7 @@ def _scenario_controls(
                 "car_charger_enabled", False
             )
         result[key] = {
-            **observed,
+            **plan_observed,
             "eligible": bool(
                 facts.get("connected") is True
                 and facts.get("pending_transaction") is False
@@ -296,8 +335,8 @@ def _scenario_controls(
                 and feature.get("candidate_hil_eligible") is True
                 and feature.get("production_authorized") is False
                 and feature.get("runtime_ready") is True
-                and observed["available"] is True
-                and observed.get("state") in {"on", "off"}
+                and candidate_observed["available"] is True
+                and candidate_observed.get("state") in {"on", "off"}
             ),
         }
     return result
@@ -1402,7 +1441,6 @@ def _execute_experimental_output_step(
     """Execute one candidate output and its separately authorized restoration."""
     import json
 
-    entity_key = {"light_output": "light"}.get(feature, feature)
     entry_id = device.config_entry_id
     if entry_id is None or args.non_interactive or device.entry_state != "loaded":
         return {
@@ -1412,15 +1450,13 @@ def _execute_experimental_output_step(
         }
     try:
         before_caps = api.hil_capabilities(entry_id)
-        before_state = api.control_state(
-            entity_key, device.control_entities.get(entity_key)
-        )
     except HAAPIError:
         return {
             "step_id": step_id,
             "outcome": "inconclusive",
             "reason": "fresh candidate preflight unavailable",
         }
+    before_state = _candidate_output_state(before_caps, feature)
     facts = before_caps.get("features", {}).get(feature, {})
     generation = before_caps.get("session_generation")
     initial = before_state.get("state")
@@ -1480,15 +1516,13 @@ def _execute_experimental_output_step(
         }
     try:
         current_caps = api.hil_capabilities(entry_id)
-        current_state = api.control_state(
-            entity_key, device.control_entities.get(entity_key)
-        )
     except HAAPIError:
         return {
             "step_id": step_id,
             "outcome": "inconclusive",
             "reason": "pre-write state unavailable; no BLE action sent",
         }
+    current_state = _candidate_output_state(current_caps, feature)
     current_facts = current_caps.get("features", {}).get(feature, {})
     if (
         current_caps.get("verified") is not True
@@ -1677,11 +1711,10 @@ def _execute_experimental_output_step(
     else:
         try:
             after_caps = api.hil_capabilities(entry_id)
-            after_state = api.control_state(
-                entity_key, device.control_entities.get(entity_key)
-            )
         except HAAPIError:
             after_caps, after_state = {}, {"available": False}
+        else:
+            after_state = _candidate_output_state(after_caps, feature)
         change_readback_confirmed = (
             changed.get("outcome") == "confirmed"
             and changed.get("confirmed") is True
@@ -1764,9 +1797,7 @@ def _execute_experimental_output_step(
             else:
                 try:
                     restore_caps = api.hil_capabilities(entry_id)
-                    restore_state = api.control_state(
-                        entity_key, device.control_entities.get(entity_key)
-                    )
+                    restore_state = _candidate_output_state(restore_caps, feature)
                     if (
                         restore_caps.get("verified") is not True
                         or restore_caps.get("identity_conflicted") is not False
@@ -1784,9 +1815,7 @@ def _execute_experimental_output_step(
                         raise HAAPIError("Restoration preflight changed")
                     restored = execute(initial == "on")
                     final_caps = api.hil_capabilities(entry_id)
-                    final_state = api.control_state(
-                        entity_key, device.control_entities.get(entity_key)
-                    )
+                    final_state = _candidate_output_state(final_caps, feature)
                     restoration_readback_confirmed = (
                         restored.get("outcome") == "confirmed"
                         and restored.get("confirmed") is True

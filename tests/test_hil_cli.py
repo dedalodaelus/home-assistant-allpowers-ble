@@ -210,7 +210,7 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
 def test_candidate_control_preflight_does_not_require_production_permission():
     class CandidateHA:
         def control_state(self, _key, _entity):
-            return {"available": True, "state": "off", "options": ["off", "on"]}
+            raise AssertionError("HIL candidate state must come from the HIL snapshot")
 
     capabilities = {
         "schema_version": 2,
@@ -220,6 +220,11 @@ def test_candidate_control_preflight_does_not_require_production_permission():
         "status_fresh": True,
         "pending_transaction": False,
         "session_generation": 12,
+        "output_states": {
+            "ac_output": False,
+            "dc_output": None,
+            "light_output": None,
+        },
         "capabilities": {"write_output_controls": False},
         "features": {
             "ac_output": {
@@ -236,7 +241,7 @@ def test_candidate_control_preflight_does_not_require_production_permission():
         hardware="0.3",
         firmware="0.2",
         state_entities={},
-        control_entities={"ac_output": "switch.private_ac"},
+        control_entities={},
     )
 
     controls = cli._scenario_controls(CandidateHA(), device, capabilities)
@@ -246,6 +251,7 @@ def test_candidate_control_preflight_does_not_require_production_permission():
     }
     assert controls["ac_output"]["eligible"] is False
     assert controls["ac_output"]["candidate_eligible"] is True
+    assert controls["ac_output"]["state"] == "off"
     assert (
         cli._candidate_step_needs_authorization(
             step, capabilities, controls, "active_proxy"
@@ -261,6 +267,10 @@ def test_candidate_control_preflight_does_not_require_production_permission():
         )
         is False
     )
+
+    stale_caps = {**capabilities, "status_fresh": False}
+    stale_controls = cli._scenario_controls(CandidateHA(), device, stale_caps)
+    assert stale_controls["ac_output"]["candidate_eligible"] is False
 
 
 def test_onboard_never_dispatches_a_blocked_reconnect_step(tmp_path):
@@ -1534,7 +1544,7 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
         firmware="1",
         state_entities={},
         entry_state="loaded",
-        control_entities={"dc_output": "switch.dc"},
+        control_entities={},
         config_entry_id="synthetic-entry",
     )
 
@@ -1552,17 +1562,21 @@ def test_candidate_tier_step_uses_two_grants_and_separate_restore_consent(
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 9,
+                "schema_version": 2,
+                "output_states": {
+                    "ac_output": None,
+                    "dc_output": self.state == "on",
+                    "light_output": None,
+                },
                 "features": {
                     "dc_output": {
                         "physical_presence": "present",
                         "candidate_hil_eligible": True,
                         "production_authorized": False,
+                        "runtime_ready": True,
                     }
                 },
             }
-
-        def control_state(self, _feature, _entity):
-            return {"available": True, "state": self.state}
 
         def websocket(self, commands):
             command = commands[0]
@@ -1675,7 +1689,7 @@ def test_onboard_dispatches_candidate_through_separate_grant_consents(
         firmware="1",
         state_entities={},
         entry_state="loaded",
-        control_entities={"dc_output": "switch.dc"},
+        control_entities={},
         config_entry_id="synthetic-entry",
     )
 
@@ -1716,11 +1730,13 @@ def test_onboard_dispatches_candidate_through_separate_grant_consents(
                 "status_fresh": True,
                 "pending_transaction": False,
                 "session_generation": 9,
+                "output_states": {
+                    "ac_output": None,
+                    "dc_output": self.state == "on",
+                    "light_output": None,
+                },
                 "features": features,
             }
-
-        def control_state(self, _feature, _entity):
-            return {"available": True, "state": self.state}
 
         def websocket(self, commands):
             command = commands[0]
@@ -6869,6 +6885,11 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
         "settings_fresh": True,
         "session_generation": 1,
         "pending_transaction": False,
+        "output_states": {
+            "ac_output": False,
+            "dc_output": None,
+            "light_output": True,
+        },
         "features": {
             name: {
                 "physical_presence": "unknown",
@@ -6891,6 +6912,11 @@ def test_capability_snapshot_accepts_strict_v2_feature_facts(monkeypatch):
     monkeypatch.setattr(client, "websocket", lambda _commands: [response])
     normalized = client.hil_capabilities("entry-123")
     assert normalized["features"]["ac_output"]["runtime_ready"] is True
+    assert normalized["output_states"] == {
+        "ac_output": False,
+        "dc_output": None,
+        "light_output": True,
+    }
 
 
 @pytest.mark.parametrize(
