@@ -73,14 +73,12 @@ A remote host and HA OS are also supported using the REST/WebSocket APIs. `netwo
 
 ### Contributor paths and evidence tiers
 
-Use `onboard` for an interactive, capability-aware Bronze, Silver, or Gold plan;
-Platinum uses the existing 24-hour read-only soak. Bronze is read-only and short.
-Silver adds supervised basic output checks only for physically present,
-explicitly eligible controls, followed by physical confirmation and reconnect.
-Gold adds declared supported settings/functions and applicable recovery checks.
-Durations shown by plans are guidance, and a single observed BLE route can
-support a scoped qualification. A feature confirmed absent is skipped as not
-applicable; unknown or untested claimed features remain blocked or inconclusive.
+Use `onboard` only for the Bronze read-only qualification flow. It requires a
+clean feature branch before prompting you to start HIL. Silver, Gold, and
+Platinum are not supported by the independent-review handoff and are rejected
+before a HIL run starts. For a separate read-only diagnostic run with no
+qualification or PR handoff, use
+`python -m scripts.hil run --suite read-only --route auto`.
 
 Before a guided plan, the CLI prints a general reminder to disconnect critical
 loads, remain present, and authorize each state change and restoration
@@ -95,8 +93,8 @@ physically absent features cannot be tested by accepting the prompt. Normal Home
 Assistant entities remain unchanged. See
 [hardware support tiers](compatibility.md#write-authorization-and-hardware-support-tiers).
 
-- `onboard`: from this prepared checkout, start an interactive contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and asks for the desired Bronze/Silver/Gold tier or the existing 24-hour Platinum soak. It displays known identity/build/route facts and the applicable plan before asking you to type `RUN`. Each state change and restoration still needs its own explicit consent and the existing server-side HIL grant. At the end, you can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
-- `onboard` validates the completed run before any export prompt. A failed runner, blocked required step, missing or corrupt artifact, unverified route/build, or executed-tier downgrade stops with the failed step and safe diagnostic commands. A passing Bronze run displays the generated public report, requires explicit export and import confirmations, and uses the offline importer and independent Bronze reviewer. The HIL operator's own observation is not an independent review. After import, hand the terminal to a different reviewer and have them type `REVIEWER READY` before the review wizard starts. Declining, lacking another reviewer, or failing strict schema-v3 validation leaves evidence inconclusive and produces no PR guidance. Silver/Gold/Platinum handoff remains unavailable until the corresponding independent reviewer exists; a soak alone cannot attain Platinum.
+- `onboard`: from this prepared checkout, start the interactive Bronze contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and checks that the checkout is a clean feature branch before it offers the `RUN` prompt. It displays known identity/build/route facts and the applicable plan. The operator must explicitly consent to each state change and restoration and use the existing server-side HIL grant. At the end, the operator can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
+- `onboard` validates the completed run before any export prompt. A failed runner, blocked required step, missing or corrupt artifact, unverified route/build, or executed-tier downgrade stops with the failed step and safe diagnostic commands. A passing Bronze run displays the generated public report, requires explicit export and import confirmations, and uses the offline importer and independent Bronze reviewer. The HIL operator's own observation is not an independent review. After import, hand the terminal to a different reviewer and have them type `REVIEWER READY` before the review wizard starts. Declining, lacking another reviewer, or failing strict schema-v3 validation leaves evidence inconclusive and produces no PR guidance. Silver/Gold/Platinum choices are rejected before running HIL; use the standalone read-only diagnostic command when you want diagnostics without qualification or PR handoff.
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.
 - `--device 1`: select an indexed device (or a model name if unambiguous). If there is one device, selection is automatic. In non-interactive mode, multiple devices require an explicit selection.

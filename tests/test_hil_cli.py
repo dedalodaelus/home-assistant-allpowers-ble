@@ -152,6 +152,7 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
     monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_onboard_import_review", lambda *_args: True)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _onboard_tty(monkeypatch, ["1", "RUN", "yes", "EXPORT"])
     output_root = tmp_path / "onboard-bronze"
 
@@ -185,34 +186,20 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
 
 
 @pytest.mark.parametrize(
-    ("bronze_choice", "export_choice"), [("BRONZE", "no"), ("", "yes")]
+    ("tier_choice", "tier_name"), [("2", "Silver"), ("3", "Gold"), ("4", "Platinum")]
 )
-def test_onboard_silver_unknown_route_offers_bronze_without_write(
-    monkeypatch,
-    tmp_path,
-    allpowers_registry,
-    capsys,
-    bronze_choice,
-    export_choice,
+def test_onboard_rejects_unsupported_tiers_before_starting_hil(
+    monkeypatch, tmp_path, allpowers_registry, capsys, tier_choice, tier_name
 ):
     fake = FakeHA(allpowers_registry)
-    fake.scanners = {"bluetooth": 1}
-    trace_calls = []
-
-    def unavailable_trace(commands):
-        trace_calls.extend(commands)
-        raise api.HAAPIError("trace API unavailable")
-
-    fake.websocket = unavailable_trace
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
-    monkeypatch.setattr(cli, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(cli, "read_only_sample", lambda *_args: {"sample": "fresh"})
-    monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
-    answers = ["2", "RUN", "1", bronze_choice, export_choice]
-    if export_choice == "yes":
-        answers.append("EXPORT")
-    _onboard_tty(monkeypatch, answers)
-    output_root = tmp_path / "onboard-silver"
+    monkeypatch.setattr(
+        cli,
+        "_execute_tier_suite",
+        lambda *_args: pytest.fail("unsupported tier must not start the HIL runner"),
+    )
+    _onboard_tty(monkeypatch, [tier_choice])
+    output_root = tmp_path / "onboard-unsupported-tier"
 
     result = cli.main(
         [
@@ -224,32 +211,52 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
         ]
     )
     assert result == 2
-    (run_root,) = tuple(output_root.iterdir())
-    private = run_root / "private"
-    execution = json.loads((private / "tier-execution.json").read_text())
-    saved_session = json.loads((private / "session.json").read_text())
-    assert execution["requested_tier"] == "silver"
-    assert execution["execution_tier"] == "bronze"
-    assert execution["verified_routes"] == []
-    assert saved_session["test_plan"]["device"]["verified_route"] is None
-    assert saved_session["test_plan"]["requested_tier"] == "silver"
-    assert saved_session["test_plan"]["execution_tier"] == "bronze"
-    assert [step["step_id"] for step in execution["steps"]] == [
-        "read_only_probe",
-        "physical_plausibility_observation",
-    ]
+    assert not output_root.exists()
     output = capsys.readouterr().out
-    assert "No Silver/Gold output step is currently achievable" in output
-    assert (
-        "Continuing as Bronze diagnostics" in output
-        if bronze_choice == "BRONZE"
-        else "Stopping after the Bronze diagnostics already collected" in output
-    )
+    assert f"Requested tier: {tier_name}" in output
+    assert f"The {tier_name} onboarding handoff is not supported" in output
+    assert "no HIL run was started" in output
+    assert "python -m scripts.hil run --suite read-only --route auto" in output
     assert not any(call[0] == "service" for call in fake.calls)
-    assert all(command["type"].endswith("/start") for command in trace_calls)
-    archive = run_root / "hil-evidence.zip"
-    assert not archive.exists()
-    assert "No ZIP export prompt" in output
+
+
+def test_onboard_requires_clean_topic_branch_before_run(
+    monkeypatch, tmp_path, allpowers_registry, capsys
+):
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: None)
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        if prompt == "Desired tier: ":
+            return "1"
+        pytest.fail(f"onboarding prompted beyond branch preflight: {prompt}")
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", answer)
+    monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
+    output_root = tmp_path / "onboard-wrong-branch"
+
+    result = cli.main(
+        [
+            "onboard",
+            "--ha-url",
+            "https://example.test",
+            "--output-root",
+            str(output_root),
+        ]
+    )
+
+    assert result == 2
+    assert prompts == ["Desired tier: "]
+    assert not output_root.exists()
+    output = capsys.readouterr().out
+    assert "clean feature branch" in output
+    assert "No tests were started" in output
+    assert "git switch -c feat/hil-qualification origin/devel" in output
+    assert not any(call[0] == "service" for call in fake.calls)
 
 
 def test_candidate_control_preflight_does_not_require_production_permission():
@@ -395,6 +402,7 @@ def test_onboard_multiple_device_cancel_stops_before_run(
     )
     fake = FakeHA((entities, devices, entries))
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _onboard_tty(monkeypatch, ["2", "1", "CANCEL"])
     monkeypatch.setattr(
         cli,

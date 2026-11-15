@@ -2340,25 +2340,37 @@ def execute(args: argparse.Namespace) -> int:
             print("HA scanner candidate inventory: unknown or unavailable")
         print("Runner-host Bluetooth hardware does not identify the remote HA adapter.")
         print(
-            "Choose desired tier: 1=Bronze (read-only), 2=Silver, 3=Gold, 4=Platinum (24-hour soak)"
+            "onboard currently supports only the Bronze qualification and review handoff."
         )
+        print("Choose desired tier: 1=Bronze (read-only).")
         tier_choice = input("Desired tier: ").strip()
         tiers = {"1": "bronze", "2": "silver", "3": "gold", "4": "platinum"}
         if tier_choice not in tiers:
             raise HAAPIError("Invalid tier selection")
         requested_tier = tiers[tier_choice]
         print(f"Requested tier: {requested_tier.title()}")
-        if requested_tier == "platinum":
-            args.suite = "soak-24h"
-            print("Applicable plan: the existing Platinum 24-hour soak suite.")
+        if requested_tier != "bronze":
             print(
-                "Expected elapsed time: up to 24 hours; stay present for setup and checks."
+                f"The {requested_tier.title()} onboarding handoff is not supported; "
+                "no HIL run was started."
             )
-            if input("Type RUN to start this plan: ").strip() != "RUN":
-                print("Onboarding cancelled before tests started.")
-                return 2
-        else:
-            args.tier = requested_tier
+            print(
+                "For a separate, read-only diagnostic run without a qualification "
+                "or PR handoff, use:"
+            )
+            print("  python -m scripts.hil run --suite read-only --route auto")
+            return 2
+        repo_root = Path(__file__).resolve().parents[2]
+        if _current_feature_branch(repo_root) is None:
+            print(
+                "Cannot start the Bronze qualification workflow: select a clean "
+                "feature branch before running HIL. No tests were started."
+            )
+            print("  git fetch origin")
+            print("  git switch -c feat/hil-qualification origin/devel")
+            print("  git status --short")
+            return 2
+        args.tier = requested_tier
     if resume_state is not None:
         fingerprint = _device_fingerprint(
             resume_state["run_id"], selected, api.origin, args.route
