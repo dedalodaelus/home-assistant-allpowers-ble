@@ -219,8 +219,14 @@ async def test_runtime_rejects_misplaced_characteristics_before_io(
 
     monkeypatch.setattr(client_module, "establish_connection", establish)
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
-    with pytest.raises(UnsupportedDeviceError, match="characteristics"):
-        await client._connect_once()
+    try:
+        with pytest.raises(UnsupportedDeviceError, match="characteristics"):
+            await client._connect_once()
+    finally:
+        assert fake.notify_target is None, (
+            "misplaced characteristic reached notification setup"
+        )
+        assert fake.writes == [], "misplaced characteristic reached GATT write"
     assert fake.notify_target is None
     assert fake.write_target is None
     assert fake.notification_callback is None

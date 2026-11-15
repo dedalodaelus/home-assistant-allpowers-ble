@@ -773,16 +773,23 @@ async def test_transaction_rejects_unconfirmed_dependent_write(group: str) -> No
     client._status_monotonic = now
     client._settings_monotonic = now
 
-    if group == "output":
-        await client.async_set_ac(True)
-        with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
-            await client.async_set_dc(True)
-        assert client._status.ac_enabled is False
-    else:
-        await client.async_set_eco(True)
-        with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
-            await client.async_set_work_mode(WorkMode.FAST)
-        assert client._settings.eco_enabled is False
+    try:
+        if group == "output":
+            await client.async_set_ac(True)
+            with pytest.raises(
+                client_module.StateUnavailableError, match="confirmation"
+            ):
+                await client.async_set_dc(True)
+            assert client._status.ac_enabled is False
+        else:
+            await client.async_set_eco(True)
+            with pytest.raises(
+                client_module.StateUnavailableError, match="confirmation"
+            ):
+                await client.async_set_work_mode(WorkMode.FAST)
+            assert client._settings.eco_enabled is False
+    finally:
+        assert len(fake.writes) == 1, "pending transaction caused an extra GATT write"
     assert len(fake.writes) == 1
 
 
@@ -792,8 +799,13 @@ async def test_transaction_keepalive_rejects_pending_settings() -> None:
     client._settings_monotonic = asyncio.get_running_loop().time()
     await client.async_set_eco(True)
 
-    with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
-        await client.async_send_settings_keepalive()
+    try:
+        with pytest.raises(client_module.StateUnavailableError, match="confirmation"):
+            await client.async_send_settings_keepalive()
+    finally:
+        assert len(fake.writes) == 1, (
+            "keepalive replayed an unconfirmed settings target"
+        )
 
     assert len(fake.writes) == 1
     assert client._settings.eco_enabled is False
@@ -1385,21 +1397,24 @@ async def test_write_commands_are_rejected_for_read_only_profiles() -> None:
     client._settings = _settings(hardware_version="1.0", raw_hardware_version=0x10)
     client._settings_monotonic = now
 
-    with pytest.raises(
-        client_module.StateUnavailableError,
-        match="Unsupported output command for active model profile",
-    ):
-        await client.async_set_ac(True)
-    with pytest.raises(
-        client_module.StateUnavailableError,
-        match="Unsupported settings command for active model profile",
-    ):
-        await client.async_set_eco(True)
-    with pytest.raises(
-        client_module.StateUnavailableError,
-        match="Unsupported settings keepalive command for active model profile",
-    ):
-        await client.async_send_settings_keepalive()
+    try:
+        with pytest.raises(
+            client_module.StateUnavailableError,
+            match="Unsupported output command for active model profile",
+        ):
+            await client.async_set_ac(True)
+        with pytest.raises(
+            client_module.StateUnavailableError,
+            match="Unsupported settings command for active model profile",
+        ):
+            await client.async_set_eco(True)
+        with pytest.raises(
+            client_module.StateUnavailableError,
+            match="Unsupported settings keepalive command for active model profile",
+        ):
+            await client.async_send_settings_keepalive()
+    finally:
+        assert fake.writes == [], "read-only profile attempted a GATT write"
 
     assert fake.writes == []
 
