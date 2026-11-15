@@ -1419,6 +1419,7 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         == 0
     )
     review_output = capsys.readouterr().out
+    assert review_output.count('"offline_regression_gate"') == 1
     reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
         "runs"
     ][0]
@@ -1518,3 +1519,464 @@ def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
         item["status"] == "inconclusive"
         for item in reviewed["bronze_evidence"].values()
     )
+
+
+def test_interactive_review_imports_reviews_and_qualifies_bronze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(
+        [
+            "public reviewer",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ]
+    )
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    from scripts.hil.review import review_imported_run as strict_review
+
+    backend_output: list[str] = []
+
+    def capture_backend(*args: Any, **kwargs: Any) -> int:
+        result = strict_review(*args, **kwargs)
+        backend_output.append(capsys.readouterr().out)
+        return result
+
+    monkeypatch.setattr(
+        "scripts.hil.review_wizard.review_imported_run", capture_backend
+    )
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    reviewed = json.loads(matrix_path.read_text())
+    run = reviewed["revisions"][0]["runs"][0]
+    assert {claim["status"] for claim in run["bronze_evidence"].values()} == {"pass"}
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "bronze"
+    audit_files = list((tmp_path / "hil-results" / "bronze-reviews").glob("*.json"))
+    assert len(audit_files) == 1
+    audit = json.loads(audit_files[0].read_text())
+    assert set(audit) == {
+        "schema_version",
+        "archive_sha256",
+        "run_id",
+        "reviewed_by",
+        "reviewed_at",
+        "claims",
+    }
+    assert len(backend_output) == 2
+    assert '"current_attained_tier": "unqualified"' in backend_output[0]
+    assert '"attained_tier"' not in backend_output[0]
+    assert '"attained_tier": "bronze"' in backend_output[1]
+
+
+def test_interactive_review_cancel_keeps_matrix_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    before = matrix_path.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(["reviewer", "no", "cancel"])
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    assert matrix_path.read_bytes() == before
+
+
+def test_interactive_review_requires_a_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.hil.api import HAAPIError
+    from scripts.hil.review_wizard import interactive_review
+
+    class Pipe:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", Pipe())
+    with pytest.raises(HAAPIError, match="requires a TTY"):
+        interactive_review(
+            tmp_path / "missing.json", run_id="archive-test", repo_root=tmp_path
+        )
+
+
+def test_interactive_review_rejects_invalid_reviewer_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.api import HAAPIError
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source", "local_adapter", "1.1", "0123456789abcdef"
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    before = matrix_path.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "   ")
+    with pytest.raises(HAAPIError, match="public identifier"):
+        interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
+    assert matrix_path.read_bytes() == before
+    assert not (tmp_path / "hil-results" / "bronze-reviews").exists()
+
+
+@pytest.mark.parametrize("mode", ["--dry-run", "--apply"])
+def test_interactive_cli_rejects_legacy_mode_flags_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from scripts.hil.cli import main
+
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text('{"unchanged": true}\n', encoding="utf-8")
+    before = matrix_path.read_bytes()
+    monkeypatch.setattr(
+        "scripts.hil.review_wizard.interactive_review",
+        lambda *_args, **_kwargs: pytest.fail("interactive wizard must not start"),
+    )
+    assert (
+        main(
+            [
+                "review",
+                "--matrix",
+                str(matrix_path),
+                "--run-id",
+                "archive-test",
+                "--interactive",
+                mode,
+            ]
+        )
+        == 2
+    )
+    assert matrix_path.read_bytes() == before
+
+
+def test_nonreviewable_interactive_archive_stays_inconclusive_after_yes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source", "local_adapter", "1.1", "0123456789abcdef"
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(["reviewer", "yes", "APPLY REVIEW"])
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    run = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    assert {item["status"] for item in run["bronze_evidence"].values()} == {
+        "inconclusive"
+    }
+    output = capsys.readouterr().out
+    assert "Preflight blockers:" in output
+    assert "installed build is not verified" in output
+    assert "tests/hil/fixtures/r600-hw03/runs/" in output
+
+
+def test_interactive_review_conflicting_generated_artifact_is_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.api import HAAPIError
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    revision = json.loads(matrix_path.read_text())["revisions"][0]
+    run = revision["runs"][0]
+    run_id = run["run_id"]
+    conflict = (
+        tmp_path
+        / "tests/hil/fixtures"
+        / revision["id"]
+        / "runs"
+        / run_id
+        / "bronze-fresh_telemetry-claim.json"
+    )
+    conflict.parent.mkdir(parents=True, exist_ok=True)
+    conflict.write_text("conflicting local evidence\n", encoding="utf-8")
+    matrix_before = matrix_path.read_bytes()
+    conflict_before = conflict.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(
+        ["reviewer", "yes", "pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"]
+    )
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    with pytest.raises(HAAPIError, match="Review evidence path conflicts"):
+        interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
+    assert matrix_path.read_bytes() == matrix_before
+    assert conflict.read_bytes() == conflict_before
+    assert not (conflict.parent / "bronze-identity-claim.json").exists()
+    assert not (conflict.parent / "bronze-protocol-capture.jsonl").exists()
+    assert not (conflict.parent / "bronze-protocol_probe-claim.json").exists()
+
+
+def test_interactive_review_does_not_report_apply_before_matrix_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.api import HAAPIError
+    from scripts.hil import review as review_module
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    matrix_before = matrix_path.read_bytes()
+    atomic_write = review_module._atomic_write
+
+    def fail_matrix_write(path: Path, content: bytes) -> None:
+        if path == matrix_path:
+            raise HAAPIError("simulated matrix persistence failure")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(review_module, "_atomic_write", fail_matrix_write)
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(
+        ["reviewer", "yes", "pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"]
+    )
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    with pytest.raises(HAAPIError, match="simulated matrix persistence failure"):
+        interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
+    output = capsys.readouterr().out
+    assert '"applied": true' not in output
+    assert matrix_path.read_bytes() == matrix_before
+    run_dir = tmp_path / "tests/hil/fixtures/r600-hw03/runs" / run_id
+    assert not list(run_dir.glob("bronze-*-claim.json"))
+    assert not (run_dir / "bronze-protocol-capture.jsonl").exists()
+
+
+def test_interactive_review_repeat_apply_keeps_evidence_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    def run_wizard() -> None:
+        answers = iter(
+            [
+                "reviewer",
+                "yes",
+                "pass",
+                "yes",
+                "pass",
+                "yes",
+                "pass",
+                "yes",
+                "APPLY REVIEW",
+            ]
+        )
+        monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+        assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+
+    run_wizard()
+    first = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    evidence_after_first = list(first["evidence"])
+    run_wizard()
+    second = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    assert len(second["evidence"]) == len(set(second["evidence"]))
+    assert set(evidence_after_first) == set(second["evidence"])
+    assert {item["status"] for item in second["bronze_evidence"].values()} == {"pass"}
+    errors, _ = validate_hil_qualification.validate_matrix(
+        json.loads(matrix_path.read_text()),
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+
+
+@pytest.mark.parametrize("interruption", [EOFError, KeyboardInterrupt])
+def test_interactive_review_interruption_never_applies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: type[BaseException],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.cli import main
+    from scripts.hil.review_wizard import interactive_review as run_interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    before = matrix_path.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(["reviewer", "yes", "inconclusive", "inconclusive", "inconclusive"])
+    interruption_reached: list[bool] = []
+
+    def interrupted_input(_prompt: str = "") -> str:
+        try:
+            return next(answers)
+        except StopIteration as exc:
+            interruption_reached.append(True)
+            raise interruption from exc
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", interrupted_input)
+
+    def use_test_repository(matrix: Path, *, run_id: str) -> int:
+        return run_interactive_review(matrix, run_id=run_id, repo_root=tmp_path)
+
+    monkeypatch.setattr(
+        "scripts.hil.review_wizard.interactive_review", use_test_repository
+    )
+    assert (
+        main(
+            [
+                "review",
+                "--matrix",
+                str(matrix_path),
+                "--run-id",
+                run_id,
+                "--interactive",
+            ]
+        )
+        == 2
+    )
+    assert interruption_reached == [True]
+    assert matrix_path.read_bytes() == before
+    run_dir = tmp_path / "tests/hil/fixtures/r600-hw03/runs" / run_id
+    assert not list(run_dir.glob("bronze-*-claim.json"))

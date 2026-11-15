@@ -161,23 +161,28 @@ def _claim_support(
     runtime = session.get("runtime_capabilities", {})
     manifest = json.loads(members["manifest.json"])
     build = manifest.get("build_provenance", {})
-    supported_scope = bool(
-        run.get("route") in validation.VERIFIED_ROUTES
-        and run.get("capture_completeness") == "complete"
-        and run.get("build_verification") == "verified"
-        and run.get("installed_fingerprint") == run.get("checkout_fingerprint")
-        and isinstance(run.get("build_fingerprint"), str)
-        and re.fullmatch(r"[a-f0-9]{64}", run["build_fingerprint"])
-        and run.get("captured_at") == session.get("started_at")
-        and run.get("session_id") not in {None, "", "unknown"}
-        and session.get("mode") == "read_only_preflight"
-        and isinstance(runtime, dict)
-        and runtime.get("available") is True
-        and runtime.get("connected") is True
-        and runtime.get("status_fresh") is True
-        and runtime.get("pending_transaction") is False
-        and build.get("verification") == "verified"
-    )
+    scope_checks = {
+        "verified_observed_route": run.get("route") in validation.VERIFIED_ROUTES,
+        "complete_capture": run.get("capture_completeness") == "complete",
+        "verified_build": run.get("build_verification") == "verified",
+        "installed_checkout_match": run.get("installed_fingerprint")
+        == run.get("checkout_fingerprint"),
+        "valid_build_fingerprint": isinstance(run.get("build_fingerprint"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", run["build_fingerprint"]) is not None,
+        "session_matches_capture": run.get("captured_at") == session.get("started_at"),
+        "session_id_present": run.get("session_id") not in {None, "", "unknown"},
+        "read_only_session": session.get("mode") == "read_only_preflight",
+        "runtime_available": isinstance(runtime, dict)
+        and runtime.get("available") is True,
+        "runtime_connected": isinstance(runtime, dict)
+        and runtime.get("connected") is True,
+        "status_fresh": isinstance(runtime, dict)
+        and runtime.get("status_fresh") is True,
+        "no_pending_transaction": isinstance(runtime, dict)
+        and runtime.get("pending_transaction") is False,
+        "manifest_build_verified": build.get("verification") == "verified",
+    }
+    supported_scope = all(scope_checks.values())
     identity = bool(
         isinstance(device, dict)
         and device.get("model", {}).get("verified") is True
@@ -307,6 +312,7 @@ def _claim_support(
             "identity": identity,
             "protocol_probe": protocol,
             "fresh_telemetry": telemetry,
+            "scope": scope_checks,
         },
     )
 
@@ -512,17 +518,21 @@ def review_imported_run(
     statuses = {
         claim: item["status"] for claim, item in updated["bronze_evidence"].items()
     }
+    from .tiers import evaluate_tiers
+
     summary = {
         "run_id": run_id,
         "reviewed_by": reviewer,
         "bronze_claims": statuses,
         "applied": apply,
     }
-    print(json.dumps(summary, sort_keys=True, indent=2))
     if not apply:
+        current_tier_result = evaluate_tiers(matrix)
+        summary["current_attained_tier"] = _attained_tier(
+            current_tier_result, revision, run
+        )
+        print(json.dumps(summary, sort_keys=True, indent=2))
         return 0
-    from .tiers import evaluate_tiers
-
     created: list[Path] = []
     try:
         for path, content in files.items():
@@ -540,15 +550,32 @@ def review_imported_run(
         if errors:
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))
         tier_result = evaluate_tiers(proposed)
+        summary["attained_tier"] = _attained_tier(tier_result, revision, run)
         if matrix_path.is_symlink() or matrix_path.read_bytes() != before:
             raise HAAPIError("Qualification matrix changed during review")
         _atomic_write(
             matrix_path,
             (json.dumps(proposed, indent=2, ensure_ascii=False) + "\n").encode(),
         )
-        print(json.dumps(tier_result, sort_keys=True, indent=2))
     except BaseException:
         for path in reversed(created):
             path.unlink(missing_ok=True)
         raise
+    print(json.dumps(summary, sort_keys=True, indent=2))
+    print(json.dumps(tier_result, sort_keys=True, indent=2))
     return 0
+
+
+def _attained_tier(
+    tier_result: dict[str, Any], revision: dict[str, Any], run: dict[str, Any]
+) -> str:
+    return next(
+        (
+            item["tier"]
+            for item in tier_result.get("tiers", [])
+            if item.get("scope", {}).get("revision_id") == revision.get("id")
+            and item.get("scope", {}).get("firmware") == run.get("firmware_version")
+            and item.get("scope", {}).get("observed_route") == run.get("route")
+        ),
+        "unqualified",
+    )

@@ -131,6 +131,19 @@ record until separately reviewed physical evidence supports each result. A
 software step marked `pass`, a complete GATT API capture, or a verified route
 must not be used to mark a physical qualification result `pass`.
 
+Use `python -m scripts.hil review --run-id archive-... --interactive` for the
+offline Bronze review wizard. The reviewer must independently inspect real
+device evidence; wizard answers are not cryptographic attestation. It displays
+the verified imported scope and available public evidence, defaults claims to
+inconclusive, and permits PASS only when the strict evidence contract supports
+the claim. The schema-v1 audit copy is saved under the git-ignored
+`hil-results/bronze-reviews/` directory. The wizard runs the existing reviewer
+in dry-run mode first and requires the exact `APPLY REVIEW` confirmation before
+updating the matrix. Its tier report is computed by the existing tier
+evaluator. The legacy `--review-file PATH` command remains available for
+noninteractive workflows. Both review modes operate offline and do not upload
+evidence.
+
 ## Prerequisites
 
 - One physical ALLPOWERS device for the target revision.
