@@ -516,11 +516,18 @@ def assess_run_gate(
         row = rows[0]
         outcome = row.get("outcome")
         if outcome not in PASS_OUTCOMES:
+            refresh_failed = row.get("failure_category") == "refresh_failed"
             blockers.append(
                 _finding(
                     step_id,
-                    str(outcome or "missing"),
-                    "required applicable step did not pass",
+                    "refresh_failed" if refresh_failed else str(outcome or "missing"),
+                    (
+                        "the read-only refresh could not be invoked; check that one "
+                        "enabled ALLPOWERS Refresh status button is linked to the "
+                        "selected device and loaded entry"
+                        if refresh_failed
+                        else "required applicable step did not pass"
+                    ),
                     execution_path,
                 )
             )

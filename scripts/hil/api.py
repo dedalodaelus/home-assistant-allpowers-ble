@@ -10,6 +10,7 @@ import json
 import math
 import re
 import socket
+from dataclasses import dataclass
 from typing import Any
 from urllib import error, parse, request
 
@@ -38,6 +39,17 @@ _CONTROL_OPTIONS = {
 
 class HAAPIError(Exception):
     """Safe message about a Home Assistant API operation."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadOnlyRefreshButton:
+    """Refresh target carrying the registry facts established by discovery."""
+
+    entity_id: str
+    unique_id: str
+    platform: str
+    device_id: str
+    config_entry_id: str
 
 
 def normalize_url(url: str, *, allow_insecure_http: bool = False) -> str:
@@ -231,11 +243,19 @@ class HAClient:
         if not isinstance(result, dict) or not isinstance(result.get("context"), dict):
             raise HAAPIError("Home Assistant did not acknowledge the service call")
 
-    def request_read_only_refresh(self, entity_id: str) -> None:
-        """Use the discovered integration refresh button for a status-only poll."""
+    def request_read_only_refresh(self, button: ReadOnlyRefreshButton) -> None:
+        """Press only a registry-verified ALLPOWERS read-only refresh button."""
         if (
-            not isinstance(entity_id, str)
-            or re.fullmatch(r"button\.[a-z0-9_]*_refresh", entity_id) is None
+            not isinstance(button, ReadOnlyRefreshButton)
+            or not isinstance(button.entity_id, str)
+            or re.fullmatch(r"button\.[a-z0-9_]+", button.entity_id) is None
+            or button.platform != "allpowers_ble"
+            or not isinstance(button.unique_id, str)
+            or not button.unique_id.endswith("_refresh")
+            or not isinstance(button.device_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", button.device_id) is None
+            or not isinstance(button.config_entry_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", button.config_entry_id) is None
         ):
             raise HAAPIError("Invalid discovered refresh button")
         result = self.websocket(
@@ -244,7 +264,7 @@ class HAClient:
                     "type": "call_service",
                     "domain": "button",
                     "service": "press",
-                    "target": {"entity_id": entity_id},
+                    "target": {"entity_id": button.entity_id},
                 }
             ]
         )[0]
