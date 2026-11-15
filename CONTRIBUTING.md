@@ -47,6 +47,16 @@ repository's safety and validation checklist.
   require packet captures. Proposing a protocol/profile change or requesting
   qualification still requires the relevant sanitized GATT/protocol evidence
   and review described below and in [Adding models](docs/adding-models.md).
+- `onboard` stops before export when its requested tier, required evidence,
+  connected route, installed build, or state restoration cannot be verified.
+  A passing Bronze run is only eligible for independent review; it does not
+  certify hardware. The HIL operator's observation is not an independent review.
+- For deterministic PR descriptions, render structured facts through
+  `.github/PULL_REQUEST_TEMPLATE.md` with
+  `python -m scripts.generate_pr_body --data pr-facts.json --output pr.md`.
+  The renderer preserves every heading and checklist item, checks only labels
+  explicitly marked true, and leaves all other items unchecked. Review the
+  generated body against the actual change and validation results.
 - For another hardware model, provide the exact model/revision, advertised name,
   GATT service and characteristics, and sanitized packet evidence.
 - Do not infer compatibility from product appearance or marketing name.

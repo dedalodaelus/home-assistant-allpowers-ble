@@ -11,10 +11,11 @@ import json  # noqa: F401 - shared module object used by trace.py and CLI tests
 import math
 import os
 import re
-from time import monotonic, sleep
 from pathlib import Path
-import shlex
+import shutil
+import subprocess
 import sys
+from time import monotonic, sleep
 from typing import Any, Callable
 
 from .api import HAAPIError, HAClient
@@ -31,6 +32,7 @@ from .environment import (
     read_only_sample,
     unknown,
 )
+from .onboard import assess_run_gate
 from .storage import (
     load_scenario_checkpoint,
     run_root,
@@ -55,6 +57,21 @@ from .trace import (
 )
 
 _SWITCH_CONTROLS = {"ac_output", "dc_output", "light", "eco_mode", "car_charger"}
+
+
+def _shell_quote(value: str | Path, *, powershell: bool | None = None) -> str:
+    """Quote one argument for the current shell without expanding its contents."""
+    use_powershell = os.name == "nt" if powershell is None else powershell
+    rendered = str(value)
+    if use_powershell:
+        return "'" + rendered.replace("'", "''") + "'"
+    import shlex
+
+    return shlex.quote(rendered)
+
+
+def _shell_join(values: list[str | Path], *, powershell: bool | None = None) -> str:
+    return " ".join(_shell_quote(value, powershell=powershell) for value in values)
 
 
 def _control_value_available(key: str, state: dict[str, Any], expected: str) -> bool:
@@ -2478,7 +2495,15 @@ def execute(args: argparse.Namespace) -> int:
             tier_capabilities,
         )
         if getattr(args, "onboarding", False):
-            return _onboard_export(output_dir, result)
+            return _onboard_export(
+                output_dir,
+                result,
+                requested_tier=tier_plan["requested_tier"],
+                device=selected.model,
+                route=args.route,
+                ha_url=getattr(api, "origin", args.ha_url or ""),
+                output_root=args.output_root,
+            )
         return result
     if args.command == "run" and args.suite == "outputs":
         return _execute_output_suite(
@@ -2497,9 +2522,18 @@ def execute(args: argparse.Namespace) -> int:
         if getattr(args, "onboarding", False):
             resume_command = (
                 "python -m scripts.hil run --suite soak-24h --resume "
-                f"{shlex.quote(str(output_dir))} --ha-url {shlex.quote(api.origin)}"
+                f"{_shell_quote(output_dir)} --ha-url {_shell_quote(api.origin)}"
             )
-            return _onboard_export(output_dir, result, resume_command=resume_command)
+            return _onboard_export(
+                output_dir,
+                result,
+                requested_tier="platinum",
+                device=selected.model,
+                route=args.route,
+                ha_url=getattr(api, "origin", args.ha_url or ""),
+                output_root=args.output_root,
+                resume_command=resume_command,
+            )
         return result
     if args.command == "run" and args.suite == "stability-short":
         return _execute_soak_suite(
@@ -2583,10 +2617,24 @@ def execute(args: argparse.Namespace) -> int:
 
 
 def _onboard_export(
-    output_dir: Path, run_result: int, *, resume_command: str | None = None
+    output_dir: Path,
+    run_result: int,
+    *,
+    requested_tier: str = "bronze",
+    device: str | None = None,
+    route: str = "auto",
+    ha_url: str = "",
+    output_root: Path | None = None,
+    resume_command: str | None = None,
 ) -> int:
-    """Offer a local privacy-reviewed export after the existing HIL run ends."""
+    """Gate the run before offering a local privacy-reviewed export."""
     execution_path = output_dir / "tier-execution.json"
+    blockers = assess_run_gate(
+        output_dir,
+        run_result=run_result,
+        requested_tier=requested_tier,
+        status_exchange=_bronze_status_exchange,
+    )
     if execution_path.is_file():
         try:
             execution = json.loads(execution_path.read_text(encoding="utf-8"))
@@ -2603,36 +2651,77 @@ def _onboard_export(
                 "Observed connected BLE route:",
                 ", ".join(observed) if observed else "unknown / not proven",
             )
-    print("Attained evidence-backed tier: unqualified until independent review.")
-    if run_result != 0:
+    if blockers:
+        print("\nTEST GATE: FAILED — onboarding stopped before export.")
+        for blocker in blockers:
+            print(
+                f"  {blocker['step_id']}: {blocker['outcome']} — "
+                f"{blocker['reason']}\n    Evidence: {blocker['evidence']}"
+            )
         print(
-            "Run did not complete successfully; private checkpoint remains available."
+            "No ZIP export prompt, import, review, or PR guidance was started. "
+            "Private evidence remains local."
         )
-        if resume_command is not None and (output_dir / "checkpoint.json").is_file():
-            print("To resume the existing Platinum soak, run:")
-            print(resume_command)
-        if execution_path.is_file():
+        if resume_command is not None and requested_tier == "platinum":
             try:
-                execution = json.loads(execution_path.read_text(encoding="utf-8"))
-            except OSError, json.JSONDecodeError:
-                execution = {}
-            execution_steps = (
-                execution.get("steps", []) if isinstance(execution, dict) else []
-            )
-            unsafe = isinstance(execution_steps, list) and any(
-                step.get("state_safe_to_continue") is False
-                for step in execution_steps
-                if isinstance(step, dict)
-            )
-            if unsafe:
-                print(
-                    "SAFETY WARNING: a control may not have been restored. "
-                    "Inspect the station physically before any further action; "
-                    "the wizard will not retry or restore it automatically."
+                _, checkpoint = load_scenario_checkpoint(output_dir)
+            except HAAPIError:
+                checkpoint = None
+            resumable = bool(
+                isinstance(checkpoint, dict)
+                and checkpoint.get("scenario_id") == "soak_24h_observation"
+                and isinstance(checkpoint.get("steps"), list)
+                and checkpoint["steps"]
+                and not any(
+                    isinstance(step, dict) and step.get("outcome") == "pass"
+                    for step in checkpoint["steps"]
                 )
+            )
+            if resumable:
+                print("To resume the existing Platinum soak, run:")
+                print(resume_command)
+        rerun = ["python", "-m", "scripts.hil", "onboard"]
+        if device:
+            rerun.extend(("--device", device))
+        rerun.extend(("--route", route))
+        if ha_url:
+            rerun.extend(("--ha-url", ha_url))
+        if output_root is not None:
+            rerun.extend(("--output-root", str(output_root.resolve())))
+        doctor = ["python", "-m", "scripts.hil", "doctor"]
+        if device:
+            doctor.extend(("--device", device))
+        doctor.extend(("--route", route))
+        if ha_url:
+            doctor.extend(("--ha-url", ha_url))
+        print("\nTo diagnose and rerun after addressing the reported requirement:")
+        print("  " + _shell_join(doctor))
+        print("  " + _shell_join(rerun))
+        print("  python -m scripts.hil report " + _shell_quote(output_dir.resolve()))
+        print("  python -m scripts.hil export " + _shell_quote(output_dir.resolve()))
+        return 2
+
+    print(
+        "TEST GATE: PASS (eligible for independent evidence review; "
+        "not a hardware qualification)."
+    )
+    report_path = write_report(output_dir)
+    report_path = report_path.resolve()
+    print("Report:", report_path)
+    try:
+        report_text = report_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as ex:
+        print("Unable to display the generated public report:", ex)
+        return 2
+    print("Report excerpt (generated from public/report.md):")
+    excerpt = report_text[:12000]
+    print(excerpt)
+    if len(report_text) > len(excerpt):
+        print("[report excerpt truncated]")
+    print("Attained evidence-backed tier: unqualified until independent review.")
     if not (output_dir / "session.json").is_file():
         print("No valid private run is available for export.")
-        return run_result or 2
+        return 2
     try:
         export_choice = (
             input("Review and create a privacy-safe evidence ZIP now? [y/N]: ")
@@ -2643,7 +2732,7 @@ def _onboard_export(
         return run_result or 2
     if export_choice not in {"y", "yes"}:
         print("No archive created. The private run remains on this machine.")
-        return run_result
+        return 2
     try:
         export_archive(output_dir, confirmed=False)
     except HAAPIError as ex:
@@ -2661,14 +2750,322 @@ def _onboard_export(
         return run_result or 2
     if not confirmed:
         print("Export cancelled; no archive created.")
-        return run_result or 2
+        return 2
     try:
-        export_archive(output_dir, confirmed=True)
+        archive_path = export_archive(output_dir, confirmed=True)
+        from .evidence import verify_public_archive
+
+        verify_public_archive(archive_path)
     except HAAPIError as ex:
-        print("The reviewed archive could not be created:", ex)
-        return run_result or 2
-    print("Privacy-safe HIL evidence archive written locally; nothing was uploaded.")
-    return run_result
+        print("The reviewed archive could not be created or verified:", ex)
+        return 2
+    print("Privacy-safe HIL evidence archive written:", archive_path.resolve())
+    if _onboard_import_review(archive_path, output_dir, requested_tier):
+        return 0
+    return 2
+
+
+def _current_feature_branch(repo_root: Path) -> str | None:
+    """Return a current safe branch name from a clean checkout, if available."""
+    try:
+        branch = subprocess.run(
+            ["git", "-C", str(repo_root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        ).stdout
+    except OSError, subprocess.SubprocessError:
+        return None
+    if branch in {"", "devel", "main"} or status.strip():
+        return None
+    return branch
+
+
+def _review_resume_command(matrix_path: Path, run_id: str) -> str:
+    return (
+        "python -m scripts.hil review --matrix "
+        f"{_shell_quote(matrix_path)} --run-id {_shell_quote(run_id)} --interactive"
+    )
+
+
+def _onboard_import_review(
+    archive_path: Path, output_dir: Path, requested_tier: str
+) -> bool:
+    """Import reviewed public evidence, invoke independent Bronze review, and hand off."""
+    if requested_tier != "bronze":
+        print("Independent interactive review is unavailable for this tier.")
+        return False
+    from . import importer
+
+    repo_root = Path(__file__).resolve().parents[2]
+    matrix_path = importer.DEFAULT_MATRIX
+    try:
+        proposal = importer._build_proposal(
+            archive_path, matrix_path, repo_root=repo_root
+        )
+    except HAAPIError as ex:
+        print("Import preview failed; no repository files were changed:", ex)
+        return False
+    importer._print_preview(proposal)
+    try:
+        accepted = input(
+            "Import this reviewed evidence? [y/N]: "
+        ).strip().casefold() in {"y", "yes"}
+        if not accepted:
+            print("Import declined; no repository files were changed.")
+            return False
+        branch = _current_feature_branch(repo_root)
+        if branch is None:
+            print("Cannot import safely: select a clean feature branch based on devel.")
+            print("  git status --short")
+            print("  git switch -c feat/hil-evidence origin/devel")
+            return False
+        if (
+            input("Type APPLY IMPORT to write these exact files: ").strip()
+            != "APPLY IMPORT"
+        ):
+            print("Import cancelled; no repository files were changed.")
+            return False
+    except EOFError, KeyboardInterrupt:
+        print("Import cancelled; no repository files were changed.")
+        return False
+    try:
+        importer._apply_proposal(proposal)
+    except HAAPIError as ex:
+        print("Import failed safely:", ex)
+        return False
+
+    run_id = proposal["run_id"]
+    print(
+        "An independent reviewer must be available. The HIL operator's own run "
+        "does not count as an independent review."
+    )
+    try:
+        reviewer_available = (
+            input(
+                "Hand the terminal to a different reviewer, then type REVIEWER READY: "
+            ).strip()
+            == "REVIEWER READY"
+        )
+    except EOFError, KeyboardInterrupt:
+        reviewer_available = False
+    if not reviewer_available:
+        print(
+            "Evidence remains imported as inconclusive; no PR commands were generated."
+        )
+        print("Later, run: " + _review_resume_command(matrix_path, run_id))
+        return False
+    try:
+        from .review_wizard import interactive_review
+
+        if interactive_review(matrix_path, run_id=run_id, repo_root=repo_root) != 0:
+            print("To continue the offline review later, run:")
+            print("  " + _review_resume_command(matrix_path, run_id))
+            return False
+    except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
+        print("Independent review did not complete:", ex)
+        print("To continue the offline review later, run:")
+        print("  " + _review_resume_command(matrix_path, run_id))
+        return False
+
+    try:
+        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, json.JSONDecodeError:
+        print("Qualification matrix could not be reloaded; no PR commands generated.")
+        return False
+    if not isinstance(matrix, dict):
+        print("Qualification matrix is malformed; no PR commands generated.")
+        return False
+    from scripts import validate_hil_qualification as validation
+
+    errors, _ = validation.validate_matrix(
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    if errors:
+        print("Schema-v3 validation failed:", "; ".join(errors))
+        return False
+    from .tiers import evaluate_tiers
+
+    tier_result = evaluate_tiers(matrix)
+    selected = next(
+        (
+            item
+            for item in tier_result["tiers"]
+            if item.get("scope", {}).get("revision_id") == proposal["revision_id"]
+            and item.get("scope", {}).get("firmware") == proposal["firmware_version"]
+            and item.get("scope", {}).get("observed_route") == proposal["route"]
+        ),
+        None,
+    )
+    if selected is None or selected.get("tier") not in {
+        "bronze",
+        "silver",
+        "gold",
+        "platinum",
+    }:
+        print("Requested Bronze tier was not attained; no PR commands generated.")
+        if selected is not None:
+            for reason in selected.get("unmet_requirements", []):
+                print("  -", reason)
+        print("After addressing the missing evidence, review this imported run with:")
+        print("  " + _review_resume_command(matrix_path, run_id))
+        return False
+    from scripts.pr_body import render_pr_body
+
+    model = proposal["model"]
+    hardware = proposal["hardware_version"]
+    firmware = proposal["firmware_version"]
+    route = proposal["route"]
+    try:
+        _, public_members, _ = importer._load_archive(archive_path)
+        bronze_evidence = json.loads(public_members["tier-bronze-read-only.json"])
+        sampled = [
+            datetime.fromisoformat(item["sampled_at_utc"].replace("Z", "+00:00"))
+            for item in bronze_evidence["samples"]
+            if isinstance(item, dict) and isinstance(item.get("sampled_at_utc"), str)
+        ]
+        duration = (
+            f"{(max(sampled) - min(sampled)).total_seconds():g} seconds"
+            if len(sampled) >= 2
+            else "not explicitly recorded"
+        )
+        physical_observation = bronze_evidence.get("physical_observation", "unknown")
+    except HAAPIError, KeyError, TypeError, ValueError, UnicodeError:
+        duration = "not available in the verified public archive"
+        physical_observation = "unknown"
+    operations = ", ".join(proposal["reported_step_ids"]) or "not recorded"
+    title = f"test(hil): add reviewed {model} Bronze evidence"
+    evidence_paths = sorted(
+        str(path.relative_to(repo_root)) for path in proposal["destination_files"]
+    )
+    stage_paths = [str(matrix_path.relative_to(repo_root)), *evidence_paths]
+    validation_text = (
+        "Executed by this onboard session: verified public archive export and "
+        "integrity check; real importer proposal and apply; interactive independent "
+        "review dry-run/apply; schema-v3 matrix validation; exact-scope tier evaluation. "
+        "Local CI, pre-commit, and remote CI have not been run by this session."
+    )
+    safety_text = (
+        "This PR adds privacy-filtered qualification evidence only. It changes no "
+        "protocol implementation, writable flags, BLE timing, or connection behavior. "
+        "The evidence contains a read-only status request; no output controls were "
+        "changed. Unknown protocol bits and current-session freshness safeguards in "
+        "the integration are unaffected."
+    )
+    hardware_text = (
+        f"Observed device: {model}, hardware {hardware}, firmware {firmware}; "
+        f"connected BLE route: {route}. Independently reviewed Bronze evidence is "
+        f"stored at: {', '.join(evidence_paths)}. This is scoped physical evidence "
+        f"from archive run {proposal['run_id']}. Operations: {operations}. "
+        f"Observation duration: {duration}. Physical observation: "
+        f"{physical_observation}. This is not a claim about other revisions, "
+        "firmware, routes, or write capabilities."
+    )
+    checked = {
+        "For normal changes, the base branch is `devel` (`main` is release-only). If this PR comes from a fork, confirm the base repository and branch before submitting; GitHub may default to `main`.": True,
+        "The PR title uses Conventional Commits syntax, for example `docs: clarify contributor workflow` or `test: cover status freshness timeout boundary`.": True,
+        "The related issue is linked, and existing issues and PRs were checked before starting duplicate work.": True,
+        "No protocol write behavior changes.": True,
+        "Unknown bits remain preserved.": True,
+        "Writes still require fresh state from the current GATT session.": True,
+        "Hardware model/revision evidence is attached or linked when required.": True,
+        "Documentation and changelog impact addressed.": True,
+        "Logs, diagnostics, addresses, serial numbers, and packet captures are sanitized.": True,
+        "For non-hotfix work, base branch is `devel`.": True,
+        "This change does not require bypassing branch protections on `devel` or `main`.": True,
+    }
+    body_data = {
+        "title": title,
+        "issue": "#227 (qualification plan); #328 (independent Bronze reviewer)",
+        "summary": (
+            f"Add independently reviewed Bronze qualification evidence for {model} "
+            f"hardware {hardware}, firmware {firmware}, on the observed {route} route. "
+            "The imported guided run remains evidence scoped to this exact device and "
+            "firmware. No write capability is claimed. The base branch is devel. "
+            "Release tooling owns "
+            "CHANGELOG.md; no changelog entry is included. No user-facing strings "
+            "changed, so translations are not applicable. The hardware-evidence "
+            "checklist item is not applicable to this evidence-only software change; "
+            "the main-source-branch checklist item applies only to main-target PRs."
+        ),
+        "safety_impact": safety_text,
+        "validation": validation_text,
+        "hardware_results": hardware_text,
+        "checked": checked,
+    }
+    body_path = output_dir / "pr.md"
+    try:
+        body_path.write_text(
+            render_pr_body(
+                (repo_root / ".github/PULL_REQUEST_TEMPLATE.md").read_text(
+                    encoding="utf-8"
+                ),
+                body_data,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, UnicodeError, ValueError) as ex:
+        print("Unable to generate the complete PR body:", ex)
+        return False
+    print(
+        f"REVIEWED TIER: {selected['tier'].title()} ({model} / {hardware} / {firmware} / {route})"
+    )
+    print("READY FOR QUALIFICATION PR. Inspect the staged diff and body first.")
+    print("Local PR body:", body_path)
+    gh_executable = shutil.which("gh")
+    if gh_executable is None:
+        print("GitHub CLI is not installed; install gh before opening the PR.")
+    else:
+        try:
+            auth_status = subprocess.run(
+                [gh_executable, "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except OSError, subprocess.SubprocessError:
+            auth_status = None
+        if auth_status is None or auth_status.returncode != 0:
+            print(
+                "GitHub CLI authentication is unavailable; run `gh auth login` "
+                "before opening the PR."
+            )
+    print("Exact allowlisted Git/gh commands:")
+    print("  git status --short")
+    print("  python scripts/validate_hil_qualification.py")
+    print("  python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json")
+    print("  pre-commit run --all-files")
+    print("  git add " + _shell_join(stage_paths))
+    print("  git diff --cached --check")
+    print("  git diff --cached")
+    print("  git diff --cached --stat")
+    print("  git commit -S -m " + _shell_quote(title))
+    print("  git verify-commit HEAD")
+    print("  git push -u origin " + _shell_quote(branch))
+    print(
+        "  gh pr create --repo dedalodaelus/home-assistant-allpowers-ble "
+        "--base devel --head "
+        + _shell_quote(branch)
+        + " --title "
+        + _shell_quote(title)
+        + " --body-file "
+        + _shell_quote(body_path)
+    )
+    print("Do not stage private HIL results, ZIP archives, tokens, or raw traces.")
+    print("After pushing, confirm GitHub shows the commit signature as Verified.")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:

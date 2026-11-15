@@ -96,6 +96,7 @@ Assistant entities remain unchanged. See
 [hardware support tiers](compatibility.md#write-authorization-and-hardware-support-tiers).
 
 - `onboard`: from this prepared checkout, start an interactive contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and asks for the desired Bronze/Silver/Gold tier or the existing 24-hour Platinum soak. It displays known identity/build/route facts and the applicable plan before asking you to type `RUN`. Each state change and restoration still needs its own explicit consent and the existing server-side HIL grant. At the end, you can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
+- `onboard` validates the completed run before any export prompt. A failed runner, blocked required step, missing or corrupt artifact, unverified route/build, or executed-tier downgrade stops with the failed step and safe diagnostic commands. A passing Bronze run displays the generated public report, requires explicit export and import confirmations, and uses the offline importer and independent Bronze reviewer. The HIL operator's own observation is not an independent review. After import, hand the terminal to a different reviewer and have them type `REVIEWER READY` before the review wizard starts. Declining, lacking another reviewer, or failing strict schema-v3 validation leaves evidence inconclusive and produces no PR guidance. Silver/Gold/Platinum handoff remains unavailable until the corresponding independent reviewer exists; a soak alone cannot attain Platinum.
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `run`: do the same and read existing battery, power, remaining time, hardware/firmware and connectivity entities where available. No service calls, commands, BLE writes, host reconfiguration or HA reloads.
 - `--device 1`: select an indexed device (or a model name if unambiguous). If there is one device, selection is automatic. In non-interactive mode, multiple devices require an explicit selection.
@@ -221,6 +222,26 @@ reviewer in dry-run mode first; type `APPLY REVIEW` to apply its verified
 results. Any other response leaves the matrix unchanged. It reports the tier
 computed by the existing evaluator. No Home Assistant or BLE connection is
 used, and no artifact is uploaded.
+
+After a fully reviewed and validated Bronze import, `onboard` writes a concrete
+`pr.md` beside the private run record and prints shell-quoted commands that stage
+only the allowlisted matrix and public evidence files. Inspect that body and the
+staged diff before committing or opening a PR. The handoff never commits, pushes,
+opens, or merges anything.
+
+For other PRs, structured facts can be rendered from the complete repository
+template without losing headings or checklist items:
+
+```bash
+python -m scripts.generate_pr_body --data pr-facts.json --output pr.md
+```
+
+The JSON input requires `title`, `issue`, `summary`, `safety_impact`,
+`validation`, and `hardware_results`. Its optional `checked` object maps exact
+checkbox labels from `.github/PULL_REQUEST_TEMPLATE.md` to booleans. Only an
+explicit `true` marks an item checked; every other item stays unchecked. Review
+the generated body against the actual change and local/remote validation before
+using it.
 
 The legacy noninteractive workflow remains available for scripted reviews.
 Create a schema-v1 JSON file bound to the archive digest and imported run ID;

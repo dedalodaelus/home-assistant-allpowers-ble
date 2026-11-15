@@ -52,6 +52,9 @@ def test_onboard_prompts_for_origin_and_hides_missing_token(monkeypatch):
 
 def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_path):
     output_dir = storage.write_run(tmp_path, "export-run", {}, {})
+    monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "write_report", lambda _path: tmp_path / "report.md")
+    (tmp_path / "report.md").write_text("# Public report\n", encoding="utf-8")
     prompts = iter(["yes", "EXPORT"])
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(prompts))
     calls = []
@@ -63,19 +66,75 @@ def test_onboard_export_requires_two_explicit_confirmations(monkeypatch, tmp_pat
         return tmp_path / "hil-evidence.zip"
 
     monkeypatch.setattr(cli, "export_archive", export_archive)
+    monkeypatch.setattr("scripts.hil.evidence.verify_public_archive", lambda _path: {})
+    monkeypatch.setattr(cli, "_onboard_import_review", lambda *_args: True)
     assert cli._onboard_export(output_dir, 0) == 0
     assert calls == [False, True]
 
 
 def test_onboard_export_decline_never_creates_archive(monkeypatch, tmp_path):
     output_dir = storage.write_run(tmp_path, "declined-run", {}, {})
+    monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "write_report", lambda _path: tmp_path / "report.md")
+    (tmp_path / "report.md").write_text("# Public report\n", encoding="utf-8")
     monkeypatch.setattr(builtins, "input", lambda _prompt: "no")
     monkeypatch.setattr(
         cli,
         "export_archive",
         lambda *_args, **_kwargs: pytest.fail("declined export must not be built"),
     )
-    assert cli._onboard_export(output_dir, 0) == 0
+    assert cli._onboard_export(output_dir, 0) == 2
+
+
+def test_failed_onboard_gate_never_prompts_or_exports(monkeypatch, tmp_path, capsys):
+    output_dir = storage.write_run(
+        tmp_path, "failed-run", {"schema_version": 1}, {"schema_version": 1}
+    )
+    monkeypatch.setattr(
+        cli,
+        "assess_run_gate",
+        lambda *_args, **_kwargs: [
+            {
+                "step_id": "read_only_probe",
+                "outcome": "inconclusive",
+                "reason": "fresh status proof is missing",
+                "evidence": str(output_dir / "tier-execution.json"),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_report",
+        lambda _path: pytest.fail("failed gate must not build a report"),
+    )
+    monkeypatch.setattr(
+        builtins,
+        "input",
+        lambda _prompt: pytest.fail("failed gate must not prompt for export"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "export_archive",
+        lambda *_args, **_kwargs: pytest.fail("failed gate must not export"),
+    )
+
+    assert (
+        cli._onboard_export(
+            output_dir,
+            0,
+            requested_tier="bronze",
+            device="R600",
+            route="active_proxy",
+            ha_url="https://ha.example:8123",
+            output_root=tmp_path,
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "read_only_probe: inconclusive" in output
+    assert "No ZIP export prompt" in output
+    assert "--device R600" in output
+    assert "HA_HIL_TOKEN" not in output
 
 
 def _onboard_tty(monkeypatch, responses):
@@ -91,6 +150,8 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
     fake = FakeHA(allpowers_registry)
     fake.scanners = {"bluetooth": 2, "esphome": 1}
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_onboard_import_review", lambda *_args: True)
     _onboard_tty(monkeypatch, ["1", "RUN", "yes", "EXPORT"])
     output_root = tmp_path / "onboard-bronze"
 
@@ -124,8 +185,7 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
 
 
 @pytest.mark.parametrize(
-    ("bronze_choice", "export_choice", "create_archive"),
-    [("BRONZE", "no", False), ("", "yes", True)],
+    ("bronze_choice", "export_choice"), [("BRONZE", "no"), ("", "yes")]
 )
 def test_onboard_silver_unknown_route_offers_bronze_without_write(
     monkeypatch,
@@ -134,7 +194,6 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
     capsys,
     bronze_choice,
     export_choice,
-    create_archive,
 ):
     fake = FakeHA(allpowers_registry)
     fake.scanners = {"bluetooth": 1}
@@ -189,22 +248,8 @@ def test_onboard_silver_unknown_route_offers_bronze_without_write(
     assert not any(call[0] == "service" for call in fake.calls)
     assert all(command["type"].endswith("/start") for command in trace_calls)
     archive = run_root / "hil-evidence.zip"
-    assert archive.is_file() is create_archive
-    if create_archive:
-        from scripts.hil.evidence import verify_public_archive
-
-        _, public, _ = verify_public_archive(archive, include_contents=True)
-        public_tier = json.loads(public["tier-execution.json"])
-        public_session = json.loads(public["session.json"])
-        assert public_tier["requested_tier"] == "silver"
-        assert public_tier["execution_tier"] == "bronze"
-        assert [step["step_id"] for step in public_tier["steps"]] == [
-            "read_only_probe",
-            "physical_plausibility_observation",
-        ]
-        public_plan = public_session["data"]["test_plan"]
-        assert public_plan["requested_tier"] == "silver"
-        assert public_plan["execution_tier"] == "bronze"
+    assert not archive.exists()
+    assert "No ZIP export prompt" in output
 
 
 def test_candidate_control_preflight_does_not_require_production_permission():
@@ -369,26 +414,53 @@ def test_onboard_multiple_device_cancel_stops_before_run(
     assert not (tmp_path / "cancelled").exists()
 
 
-def test_nonzero_platinum_run_offers_export_and_resume_command(
+def test_nonzero_platinum_run_stops_before_export_and_shows_resume_command(
     monkeypatch, tmp_path, capsys
 ):
     run_dir = storage.write_run(
         tmp_path / "runs",
         "platinum-run",
         {"schema_version": 1},
-        {"schema_version": 1, "qualification_status": "inconclusive"},
+        {
+            "schema_version": 1,
+            "qualification_status": "inconclusive",
+            "run_id": "0123456789abcdef",
+        },
     )
-    (run_dir / "checkpoint.json").write_text("{}", encoding="utf-8")
-    (run_dir / "checkpoint.json").chmod(0o600)
+    storage.write_scenario_progress(
+        run_dir,
+        "0123456789abcdef",
+        "soak_24h_observation",
+        "a" * 64,
+        [
+            {
+                "step_id": "soak_segment",
+                "segment": 1,
+                "outcome": "inconclusive",
+                "trace_count": 0,
+                "sample_file_index": 1,
+            }
+        ],
+    )
     _onboard_tty(monkeypatch, ["yes", "EXPORT"])
     command = (
         "python -m scripts.hil run --suite soak-24h --resume "
         f"{run_dir} --ha-url https://example.test"
     )
 
-    assert cli._onboard_export(run_dir, 7, resume_command=command) == 7
-    assert (run_dir.parent / "hil-evidence.zip").is_file()
-    assert command in capsys.readouterr().out
+    assert (
+        cli._onboard_export(
+            run_dir,
+            7,
+            requested_tier="platinum",
+            resume_command=command,
+        )
+        == 2
+    )
+    assert not (run_dir.parent / "hil-evidence.zip").exists()
+    output = capsys.readouterr().out
+    assert command in output
+    assert "No ZIP export prompt" in output
 
 
 @pytest.fixture
