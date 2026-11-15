@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 import hashlib
 import json
 from pathlib import Path
+import shlex
+import shutil
+import subprocess
 from typing import Any
 import zipfile
 
@@ -209,6 +212,24 @@ def _matrix(path: Path) -> Path:
     result = path / "qualification_matrix.json"
     result.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
     return result
+
+
+def _tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+
+
+def _review_answers(*, reviewer: str, inspected: bool, apply: bool) -> list[str]:
+    answers = [reviewer, "yes" if inspected else "no"]
+    if inspected:
+        for _ in range(3):
+            answers.extend(("pass", "yes"))
+    answers.append("APPLY REVIEW" if apply else "cancel")
+    return answers
 
 
 def test_v2_migration_preserves_runs_as_unqualified_history() -> None:
@@ -1603,6 +1624,237 @@ def test_interactive_review_imports_reviews_and_qualifies_bronze(
     assert '"attained_tier": "bronze"' in backend_output[1]
 
 
+def test_onboard_import_review_stages_the_complete_reviewed_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    template_target = repo_root / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    template_target.parent.mkdir(parents=True)
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github" / "PULL_REQUEST_TEMPLATE.md",
+        template_target,
+    )
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    answers = iter(
+        [
+            "yes",
+            "APPLY IMPORT",
+            "REVIEWER READY",
+            *_review_answers(
+                reviewer="independent reviewer", inspected=True, apply=True
+            ),
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert (
+        cli._onboard_import_review(
+            archive,
+            output_dir,
+            "bronze",
+            repo_root=repo_root,
+            matrix_path=matrix_path,
+        )
+        is True
+    )
+    output = capsys.readouterr().out
+    generated_body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "hardware-evidence checklist item is not applicable" not in generated_body
+    assert (
+        "- [x] Hardware model/revision evidence is attached or linked when required."
+        in generated_body
+    )
+    assert (
+        "- [ ] The related issue, if applicable, is linked, and existing issues and PRs were checked to avoid duplicate work."
+        in generated_body
+    )
+    assert "R600, hardware 0.3, firmware 1.1" in generated_body
+    assert "observed local_adapter route" in generated_body
+    assert "validated status-request TX, a write acknowledgement" in generated_body
+    assert (
+        "decoded StatusData in the same complete capture and session generation"
+        in generated_body
+    )
+    assert (
+        "Two fresh telemetry samples and a plausible operator observation"
+        in generated_body
+    )
+    assert (
+        "identity, protocol, and freshness claims were independently reviewed and applied"
+        in generated_body
+    )
+    assert "Telemetry sample interval:" in generated_body
+    assert "Observation duration:" not in generated_body
+    assert (
+        "does not establish that the decoded notification was causally caused by that request"
+        in generated_body
+    )
+    assert (
+        "does not qualify output writes or other routes, firmware, or hardware revisions"
+        in generated_body
+    )
+    add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
+    stage_paths = shlex.split(add_line)[2:]
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    expected = {
+        matrix_path.relative_to(repo_root).as_posix(),
+        *run["evidence"],
+    }
+    assert set(stage_paths) == expected
+
+    subprocess.run(["git", "-C", str(repo_root), "add", *stage_paths], check=True)
+    staged = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--cached", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert set(staged) == expected
+
+    clean_checkout = tmp_path / "clean-checkout"
+    clean_checkout.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout-index",
+            "--prefix",
+            str(clean_checkout) + "/",
+            "-a",
+        ],
+        check=True,
+    )
+    clean_matrix = clean_checkout / matrix_path.relative_to(repo_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", clean_checkout)
+    errors, _ = validate_hil_qualification.validate_matrix(
+        json.loads(clean_matrix.read_text(encoding="utf-8")),
+        matrix_path=clean_matrix,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+    assert all((clean_checkout / reference).is_file() for reference in run["evidence"])
+
+
+@pytest.mark.parametrize("review_end", ["cancel", "inconclusive"])
+def test_prior_scope_bronze_does_not_unlock_unreviewed_imported_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    review_end: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import importer
+    from scripts.hil import cli
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    first_archive = _captured_archive(
+        tmp_path / "first-source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    import_archive(
+        first_archive, matrix_path=matrix_path, apply=True, repo_root=repo_root
+    )
+    first_run_id = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]["run_id"]
+    first_answers = iter(
+        _review_answers(reviewer="first reviewer", inspected=True, apply=True)
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(first_answers))
+    assert (
+        interactive_review(matrix_path, run_id=first_run_id, repo_root=repo_root) == 0
+    )
+
+    second_archive = _captured_archive(
+        tmp_path / "second-source",
+        "local_adapter",
+        "1.1",
+        "fedcba9876543210",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    second_proposal = importer._build_proposal(
+        second_archive, matrix_path, repo_root=repo_root
+    )
+    second_answers = iter(
+        [
+            "yes",
+            "APPLY IMPORT",
+            "REVIEWER READY",
+            *_review_answers(
+                reviewer="second reviewer",
+                inspected=False,
+                apply=review_end == "inconclusive",
+            ),
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(second_answers))
+
+    assert (
+        cli._onboard_import_review(
+            second_archive,
+            tmp_path / "operator-run",
+            "bronze",
+            repo_root=repo_root,
+            matrix_path=matrix_path,
+        )
+        is False
+    )
+    output = capsys.readouterr().out
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "gh pr create" not in output
+    assert "git add " not in output
+
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    second_run = next(
+        run
+        for revision in matrix["revisions"]
+        for run in revision["runs"]
+        if run["run_id"] == second_proposal["run_id"]
+    )
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+    assert second_run.get("qualification_status") != "pass"
+    if review_end == "inconclusive":
+        assert {
+            claim["status"] for claim in second_run["bronze_evidence"].values()
+        } == {"inconclusive"}
+
+
 def test_interactive_review_cancel_keeps_matrix_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1630,7 +1882,7 @@ def test_interactive_review_cancel_keeps_matrix_unchanged(
     answers = iter(["reviewer", "no", "cancel"])
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
-    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 2
     assert matrix_path.read_bytes() == before
 
 

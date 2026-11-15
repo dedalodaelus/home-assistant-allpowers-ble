@@ -183,7 +183,7 @@ def interactive_review(
         != "APPLY REVIEW"
     ):
         print("Review cancelled; qualification matrix unchanged.")
-        return 0
+        return 2
     return review_imported_run(
         matrix_path, run_id=run_id, review_file=audit_path, apply=True, repo_root=root
     )

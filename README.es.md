@@ -43,6 +43,12 @@ por modelo, revisión de hardware, firmware y ruta BLE observada. No son
 calificaciones de Home Assistant Integration Quality Scale ni autorizan
 escrituras. Consulta [compatibilidad y niveles de soporte](docs/compatibility.md#write-authorization-and-hardware-support-tiers).
 
+Los colaboradores pueden iniciar una sesión HIL guiada con
+`python -m scripts.hil onboard`. El asistente se detiene antes de exportar si
+faltan resultados, ruta, build o evidencias requeridas. Una ejecución correcta
+sigue sin cualificar hasta que la revise una persona independiente; consulta la
+[guía de la CLI HIL](docs/hil-cli.md#contributor-quickstart).
+
 ## Requisitos e instalación
 
 - Mínimo de soporte del proyecto: Home Assistant **2026.10.4**. Coincide con

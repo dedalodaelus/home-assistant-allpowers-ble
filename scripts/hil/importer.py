@@ -427,6 +427,7 @@ def _build_proposal(
         "matrix_bytes": matrix_bytes,
         "matrix": proposal,
         "revision_id": revision_id,
+        "revision_created": existing is None,
         "model": model or "unknown",
         "hardware_version": hardware or "unknown",
         "firmware_version": firmware or "unknown",
@@ -465,10 +466,25 @@ def _reject_symlink_components(path: Path, root: Path) -> None:
 
 def _print_preview(proposal: dict[str, Any]) -> None:
     print("HIL evidence import preview")
+    print("Archive SHA-256:", proposal["archive_digest"])
     print(f"Profile: {proposal['model']} hardware {proposal['hardware_version']}")
     print(f"Firmware: {proposal['firmware_version']}")
     print(f"Observed route: {proposal['route']}")
     print(f"Capture completeness: {proposal['completeness']}")
+    run = proposal["run"]
+    print(
+        "Build verification / fingerprint: "
+        f"{run['build_verification']} / {run['build_fingerprint']}"
+    )
+    capture_summary = run.get("capture_summary", {})
+    if isinstance(capture_summary, dict):
+        print(
+            "Capture counts: "
+            f"{capture_summary.get('count', 'unknown')} captures, "
+            f"{capture_summary.get('events', 'unknown')} events, "
+            f"{capture_summary.get('frames', 'unknown')} frames; "
+            f"complete={capture_summary.get('complete', 'unknown')}"
+        )
     print(f"Reported guided scenario: {proposal['reported_scenario_id'] or 'none'}")
     print(
         "Reported step records: " + (", ".join(proposal["reported_step_ids"]) or "none")
@@ -476,6 +492,18 @@ def _print_preview(proposal: dict[str, Any]) -> None:
     print("Qualification: inconclusive; no PASS results will be created")
     print(f"Revision record: {proposal['revision_id']}")
     print(f"Run record: {proposal['run_id']}")
+    print(
+        "Matrix action: "
+        + (
+            "archive is already imported; verify idempotent evidence"
+            if proposal["existing_run"]
+            else (
+                "add a new revision and inconclusive run"
+                if proposal["revision_created"]
+                else "append a run to the existing revision"
+            )
+        )
+    )
     print("Matrix scenario verdicts: all inconclusive; no physical result is inferred")
     print("Write-capability verdicts: all inconclusive")
     print(

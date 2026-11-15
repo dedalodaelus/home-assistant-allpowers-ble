@@ -111,6 +111,16 @@ stable support qualification.
 
 ## Scope
 
+The `onboard` orchestration gates the actual guided result, route, build, fresh
+telemetry, physical observation, and correlated status trace before it offers
+the privacy-safe report/export flow. The imported ZIP remains inconclusive
+until the separate Bronze reviewer applies supported claims. Only after
+schema-v3 validation and the existing tier evaluator report the requested exact
+scope does `onboard` generate `pr.md` and print allowlisted Git/`gh` commands.
+It never commits, pushes, opens, or merges a PR. Higher tiers require their
+corresponding independent review implementation; a Platinum soak alone does not
+meet the pre-existing Gold requirement.
+
 Use this process when you need to:
 
 - promote or keep a profile in the verified lane;
