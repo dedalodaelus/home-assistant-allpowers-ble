@@ -551,7 +551,6 @@ def review_imported_run(
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))
         tier_result = evaluate_tiers(proposed)
         summary["attained_tier"] = _attained_tier(tier_result, revision, run)
-        print(json.dumps(summary, sort_keys=True, indent=2))
         if matrix_path.is_symlink() or matrix_path.read_bytes() != before:
             raise HAAPIError("Qualification matrix changed during review")
         _atomic_write(
@@ -563,6 +562,8 @@ def review_imported_run(
         for path in reversed(created):
             path.unlink(missing_ok=True)
         raise
+    print(json.dumps(summary, sort_keys=True, indent=2))
+    print(json.dumps(tier_result, sort_keys=True, indent=2))
     return 0
 
 

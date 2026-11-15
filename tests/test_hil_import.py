@@ -1776,7 +1776,7 @@ def test_interactive_review_conflicting_generated_artifact_is_atomic(
         / revision["id"]
         / "runs"
         / run_id
-        / "bronze-identity-claim.json"
+        / "bronze-fresh_telemetry-claim.json"
     )
     conflict.parent.mkdir(parents=True, exist_ok=True)
     conflict.write_text("conflicting local evidence\n", encoding="utf-8")
@@ -1797,6 +1797,62 @@ def test_interactive_review_conflicting_generated_artifact_is_atomic(
         interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
     assert matrix_path.read_bytes() == matrix_before
     assert conflict.read_bytes() == conflict_before
+    assert not (conflict.parent / "bronze-identity-claim.json").exists()
+    assert not (conflict.parent / "bronze-protocol-capture.jsonl").exists()
+    assert not (conflict.parent / "bronze-protocol_probe-claim.json").exists()
+
+
+def test_interactive_review_does_not_report_apply_before_matrix_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.api import HAAPIError
+    from scripts.hil import review as review_module
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    matrix_before = matrix_path.read_bytes()
+    atomic_write = review_module._atomic_write
+
+    def fail_matrix_write(path: Path, content: bytes) -> None:
+        if path == matrix_path:
+            raise HAAPIError("simulated matrix persistence failure")
+        atomic_write(path, content)
+
+    monkeypatch.setattr(review_module, "_atomic_write", fail_matrix_write)
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(
+        ["reviewer", "yes", "pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"]
+    )
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    with pytest.raises(HAAPIError, match="simulated matrix persistence failure"):
+        interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
+    output = capsys.readouterr().out
+    assert '"applied": true' not in output
+    assert matrix_path.read_bytes() == matrix_before
+    run_dir = tmp_path / "tests/hil/fixtures/r600-hw03/runs" / run_id
+    assert not list(run_dir.glob("bronze-*-claim.json"))
+    assert not (run_dir / "bronze-protocol-capture.jsonl").exists()
 
 
 def test_interactive_review_repeat_apply_keeps_evidence_idempotent(
@@ -1867,6 +1923,7 @@ def test_interactive_review_interruption_never_applies(
 ) -> None:
     from scripts import validate_hil_qualification
     from scripts.hil.cli import main
+    from scripts.hil.review_wizard import interactive_review as run_interactive_review
 
     archive = _captured_archive(
         tmp_path / "source",
@@ -1887,15 +1944,24 @@ def test_interactive_review_interruption_never_applies(
             return True
 
     answers = iter(["reviewer", "yes", "inconclusive", "inconclusive", "inconclusive"])
+    interruption_reached: list[bool] = []
 
     def interrupted_input(_prompt: str = "") -> str:
         try:
             return next(answers)
         except StopIteration as exc:
+            interruption_reached.append(True)
             raise interruption from exc
 
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", interrupted_input)
+
+    def use_test_repository(matrix: Path, *, run_id: str) -> int:
+        return run_interactive_review(matrix, run_id=run_id, repo_root=tmp_path)
+
+    monkeypatch.setattr(
+        "scripts.hil.review_wizard.interactive_review", use_test_repository
+    )
     assert (
         main(
             [
@@ -1909,4 +1975,7 @@ def test_interactive_review_interruption_never_applies(
         )
         == 2
     )
+    assert interruption_reached == [True]
     assert matrix_path.read_bytes() == before
+    run_dir = tmp_path / "tests/hil/fixtures/r600-hw03/runs" / run_id
+    assert not list(run_dir.glob("bronze-*-claim.json"))
