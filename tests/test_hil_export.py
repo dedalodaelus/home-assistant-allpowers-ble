@@ -1458,6 +1458,17 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert short_stability["observation"]["station_model"] == "R600"
     assert short_stability["observation"]["operator_mode"] == "interactive"
 
+    valid_observation = short_stability["observation"]
+    invalid_observations = (
+        {**valid_observation, "status_notification_marker_available": "yes"},
+        {**valid_observation, "status_notification_marker_available": 1},
+        {**valid_observation, "status_notifications_observed": "arbitrary text"},
+        {**valid_observation, "status_notifications_observed": True},
+        {**valid_observation, "status_notifications_observed": -1},
+        {**valid_observation, "status_notifications_observed": 1_000_001},
+    )
+    assert all(not _valid_public_observation(item) for item in invalid_observations)
+
 
 def test_recovery_route_observation_exports_with_controlled_scenario_summary(
     tmp_path: Path,

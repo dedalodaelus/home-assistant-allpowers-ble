@@ -485,6 +485,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "route_verified",
         "trace_complete",
         "fresh_status_telemetry",
+        "status_notification_marker_available",
         "restart_discontinuity",
         "data_limit_hit",
     } & set(value):
@@ -499,6 +500,8 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "trace_count",
         "dropped_traces",
         "clock_discontinuities",
+        "fresh_status_sample_count",
+        "status_notifications_observed",
     } & set(value):
         if type(value[key]) is not int or not 0 <= value[key] <= 1_000_000:
             return False
