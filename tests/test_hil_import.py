@@ -1419,6 +1419,7 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         == 0
     )
     review_output = capsys.readouterr().out
+    assert review_output.count('"offline_regression_gate"') == 1
     reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
         "runs"
     ][0]

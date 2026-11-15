@@ -557,7 +557,6 @@ def review_imported_run(
             matrix_path,
             (json.dumps(proposed, indent=2, ensure_ascii=False) + "\n").encode(),
         )
-        print(json.dumps(tier_result, sort_keys=True, indent=2))
     except BaseException:
         for path in reversed(created):
             path.unlink(missing_ok=True)
