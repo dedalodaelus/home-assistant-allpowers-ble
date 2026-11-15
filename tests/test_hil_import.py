@@ -1634,3 +1634,32 @@ def test_interactive_review_requires_a_tty(
         interactive_review(
             tmp_path / "missing.json", run_id="archive-test", repo_root=tmp_path
         )
+
+
+def test_interactive_review_rejects_invalid_reviewer_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.api import HAAPIError
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source", "local_adapter", "1.1", "0123456789abcdef"
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    before = matrix_path.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "   ")
+    with pytest.raises(HAAPIError, match="public identifier"):
+        interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path)
+    assert matrix_path.read_bytes() == before
+    assert not (tmp_path / "hil-results" / "bronze-reviews").exists()
