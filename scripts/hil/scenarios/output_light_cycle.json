@@ -2,7 +2,7 @@
   "id": "output_light_cycle",
   "schema_version": 1,
   "suite": "outputs",
-  "title": "Turn the station light on and return it to the initial off state",
+  "title": "Verify station light on and off cycles and restore the initial off state",
   "mode": "interactive_write",
   "steps": [
     {
@@ -15,6 +15,22 @@
     },
     {
       "id": "light_off",
+      "instruction": "Turn the station light off to restore the first cycle and verify the off transition.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "light",
+      "expected": "off"
+    },
+    {
+      "id": "light_on_second_cycle",
+      "instruction": "Turn the station light on to restore the off cycle.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "light",
+      "expected": "on"
+    },
+    {
+      "id": "light_final_restore",
       "instruction": "Turn the station light off and confirm the initial state is restored.",
       "timeout_seconds": 30,
       "action": "switch",

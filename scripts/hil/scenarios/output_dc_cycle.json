@@ -2,7 +2,7 @@
   "id": "output_dc_cycle",
   "schema_version": 1,
   "suite": "outputs",
-  "title": "Turn DC output on and return it to the initial off state",
+  "title": "Verify DC output on and off cycles and restore the initial off state",
   "mode": "interactive_write",
   "steps": [
     {
@@ -15,6 +15,22 @@
     },
     {
       "id": "dc_off",
+      "instruction": "Turn DC output off to restore the first cycle and verify the off transition.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "dc_output",
+      "expected": "off"
+    },
+    {
+      "id": "dc_on_second_cycle",
+      "instruction": "Turn DC output on to restore the off cycle.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "dc_output",
+      "expected": "on"
+    },
+    {
+      "id": "dc_final_restore",
       "instruction": "Turn DC output off and confirm the initial safe state is restored.",
       "timeout_seconds": 30,
       "action": "switch",

@@ -337,9 +337,15 @@ def _execute_output_suite(
         restore_step_id = cleanup.get("step_id")
         restore_expected = steps[0].get("pre_state")
         restore_entity = device.control_entities.get(restore_key)
-        restore_pre_state = cleanup.get("post_state") or (
-            "off" if restore_expected == "on" else "on"
-        )
+        restore_pre_state = cleanup.get("post_state")
+        if restore_pre_state not in {"on", "off"}:
+            restore_pre_state = (
+                ("off" if restore_expected == "on" else "on")
+                if cleanup.get("service_attempted") is True
+                else cleanup.get("pre_state")
+            )
+        if restore_pre_state not in {"on", "off"}:
+            restore_pre_state = "off" if restore_expected == "on" else "on"
         restore_is_settings = restore_key in {"eco_mode", "car_charger"}
         restore_freshness_key = (
             "settings_fresh" if restore_is_settings else "status_fresh"
@@ -350,12 +356,13 @@ def _execute_output_suite(
             else "write_output_controls"
         )
         prewrite_cleanup = (
-            len(steps) == 2
-            and steps[0].get("outcome") == "pass"
+            len(steps) > 1
+            and any(step.get("outcome") == "pass" for step in steps[:-1])
             and cleanup.get("step_id") == restore_step_id
             and cleanup.get("authorized") is True
             and cleanup.get("prewrite_trace_failed") is True
             and cleanup.get("service_attempted") is not True
+            and restore_pre_state != restore_expected
         )
         ambiguous_cleanup = (
             cleanup.get("step_id") == restore_step_id

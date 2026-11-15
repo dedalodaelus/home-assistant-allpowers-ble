@@ -435,6 +435,7 @@ def _bound_capture(
     state: Any,
     *,
     action_stage: str = "transition",
+    evidence: Any = None,
 ) -> bool:
     if not isinstance(path, str) or path not in run.get("evidence", []):
         return False
@@ -457,6 +458,7 @@ def _bound_capture(
                 feature,
                 requested_state,
                 action_stage,
+                evidence,
             )
             for row in rows
         )
@@ -495,7 +497,12 @@ def _output_pass(
             or artifact.get("initial_state") not in {"on", "off"}
             or artifact.get("restored_state") != artifact.get("initial_state")
             or not _bound_capture(
-                entry.get("capture_evidence"), run, revision, feature, state
+                entry.get("capture_evidence"),
+                run,
+                revision,
+                feature,
+                state,
+                evidence=item.get("evidence"),
             )
             or not _bound_restoration(
                 entry.get("restoration_capture"),
@@ -576,6 +583,7 @@ def _bound_restoration(
             feature,
             restored_state,
             action_stage="restoration",
+            evidence=item.get("evidence"),
         )
     )
 

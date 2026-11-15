@@ -102,6 +102,9 @@ def build_tier_plan(
             {
                 "id": step_id,
                 "feature": feature,
+                "physical_presence": presence
+                if presence in {"present", "absent", "unknown"}
+                else "unknown",
                 "action": action,
                 "original_state": None if absent else original,
                 "target_state": (

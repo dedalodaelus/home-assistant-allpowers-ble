@@ -1089,6 +1089,9 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
                 }
                 else "unknown",
                 "eligibility": step["eligibility"],
+                "physical_presence": step.get("physical_presence")
+                if step.get("physical_presence") in {"present", "absent", "unknown"}
+                else "unknown",
                 "outcome": step["outcome"],
                 "reasons": step["reasons"],
                 "human_review": step["human_review"],
@@ -1333,6 +1336,44 @@ def _public_tier_artifact(
     for key in ("physical_change_outcome", "physical_restore_outcome"):
         if value.get(key) in {"correct", "incorrect", "unable_to_observe"}:
             safe[key] = value[key]
+    output_cycles = value.get("output_cycles")
+    if step_id in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}:
+        if isinstance(output_cycles, list) and len(output_cycles) == 2:
+            safe_cycles = []
+            for cycle in output_cycles:
+                if not isinstance(cycle, dict) or set(cycle) != {
+                    "initial_state",
+                    "target_state",
+                    "change_action_index",
+                    "restore_action_index",
+                    "physical_change_outcome",
+                    "physical_restore_outcome",
+                }:
+                    raise HAAPIError("Invalid guided output cycle evidence")
+                if (
+                    cycle.get("initial_state") not in {"on", "off"}
+                    or cycle.get("target_state") not in {"on", "off"}
+                    or cycle["initial_state"] == cycle["target_state"]
+                    or type(cycle.get("change_action_index")) is not int
+                    or type(cycle.get("restore_action_index")) is not int
+                    or cycle.get("restore_action_index")
+                    != cycle.get("change_action_index") + 1
+                    or cycle.get("physical_change_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    or cycle.get("physical_restore_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                ):
+                    raise HAAPIError("Invalid guided output cycle evidence")
+                safe_cycles.append(dict(cycle))
+            safe["output_cycles"] = safe_cycles
+        if type(value.get("final_restore_action_index")) is int:
+            safe["final_restore_action_index"] = value["final_restore_action_index"]
+        if value.get("final_restore_outcome") in {
+            "correct",
+            "incorrect",
+            "unable_to_observe",
+        }:
+            safe["final_restore_outcome"] = value["final_restore_outcome"]
     actions = value.get("actions", [])
     if not isinstance(actions, list) or len(actions) > 4:
         raise HAAPIError("Invalid guided step action evidence")
@@ -1719,6 +1760,9 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             "readback_state",
             "physical_change_outcome",
             "physical_restore_outcome",
+            "output_cycles",
+            "final_restore_action_index",
+            "final_restore_outcome",
             "actions",
         }
         actions = value.get("actions")
@@ -1744,6 +1788,46 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             )
             or not isinstance(actions, list)
             or len(actions) > 4
+            or "output_cycles" in value
+            and (
+                value.get("step_id")
+                not in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}
+                or not isinstance(value.get("output_cycles"), list)
+                or len(value["output_cycles"]) != 2
+                or any(
+                    not isinstance(cycle, dict)
+                    or set(cycle)
+                    != {
+                        "initial_state",
+                        "target_state",
+                        "change_action_index",
+                        "restore_action_index",
+                        "physical_change_outcome",
+                        "physical_restore_outcome",
+                    }
+                    or cycle.get("initial_state") not in {"on", "off"}
+                    or cycle.get("target_state") not in {"on", "off"}
+                    or cycle.get("initial_state") == cycle.get("target_state")
+                    or type(cycle.get("change_action_index")) is not int
+                    or type(cycle.get("restore_action_index")) is not int
+                    or cycle.get("restore_action_index")
+                    != cycle.get("change_action_index") + 1
+                    or cycle.get("physical_change_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    or cycle.get("physical_restore_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    for cycle in value["output_cycles"]
+                )
+            )
+            or "final_restore_action_index" in value
+            and (
+                value.get("step_id")
+                not in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}
+                or type(value.get("final_restore_action_index")) is not int
+                or value.get("final_restore_action_index") != 3
+                or value.get("final_restore_outcome")
+                not in {"correct", "incorrect", "unable_to_observe"}
+            )
         ):
             return False
         action_fields = {

@@ -135,7 +135,9 @@ def _review_file(path: Path, run: dict[str, Any]) -> tuple[str, str, dict[str, s
 
 def _tier_review_file(
     path: Path, run: dict[str, Any], tier: str
-) -> tuple[str, str, bool, list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    str, str, bool, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+]:
     """Validate the exact run-bound local audit created by the tier wizard."""
     value = _json(path)
     expected = {
@@ -150,7 +152,8 @@ def _tier_review_file(
         "scenarios",
     }
     if (
-        set(value) != expected
+        frozenset(value)
+        not in {frozenset(expected), frozenset(expected | {"absences"})}
         or type(value.get("schema_version")) is not int
         or value.get("schema_version") != 1
         or value.get("tier") != tier
@@ -164,6 +167,8 @@ def _tier_review_file(
         or len(value["transitions"]) > 32
         or not isinstance(value.get("scenarios"), list)
         or len(value["scenarios"]) > 8
+        or not isinstance(value.get("absences", []), list)
+        or len(value.get("absences", [])) > 7
     ):
         raise HAAPIError("Tier review file does not match this imported run")
     try:
@@ -285,7 +290,9 @@ def _tier_review_file(
                 or reference["frame_seq"] < 1
                 or type(reference.get("session_generation")) is not int
                 or reference["session_generation"] < 1
-                or reference.get("source_action_index") != index
+                or type(reference.get("source_action_index")) is not int
+                or reference.get("source_action_index")
+                not in ({0, 1, 2, 3} if output_feature else {index})
                 or reference.get("action_stage")
                 != ("transition" if index == 0 else "restoration")
                 or reference.get("source_step_id") != item["step_id"]
@@ -308,6 +315,7 @@ def _tier_review_file(
         "source_step_id",
         "trace_sha256",
         "frame_sha256",
+        "transaction_sha256",
         "frame_seq",
         "session_generation",
         "physical_action_confirmed",
@@ -336,6 +344,23 @@ def _tier_review_file(
             or type(item.get("physical_recovery_confirmed")) is not bool
         ):
             raise HAAPIError("Tier review scenario is malformed")
+    absence_keys = {
+        "feature",
+        "source_step_id",
+        "physical_absence_confirmed",
+        "safe_disable_confirmed",
+    }
+    for item in value.get("absences", []):
+        if (
+            not isinstance(item, dict)
+            or set(item) != absence_keys
+            or item.get("feature") not in {"ac_output", "dc_output", "light_output"}
+            or item.get("source_step_id")
+            not in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}
+            or type(item.get("physical_absence_confirmed")) is not bool
+            or type(item.get("safe_disable_confirmed")) is not bool
+        ):
+            raise HAAPIError("Tier review absence decision is malformed")
     if len({item["scenario"] for item in value["scenarios"]}) != len(
         value["scenarios"]
     ):
@@ -346,6 +371,7 @@ def _tier_review_file(
         value["reviewer_independent_from_operator"],
         value["transitions"],
         value["scenarios"],
+        value.get("absences", []),
     )
 
 
@@ -460,6 +486,8 @@ def _reconnect_review_candidate(
                 and frame.get("session_generation") == generation
                 and frame.get("frame_sha256")
                 == hashlib.sha256(bytes.fromhex(STATUS_REQUEST_HEX)).hexdigest()
+                and isinstance(frame.get("transaction_sha256"), str)
+                and re.fullmatch(r"[a-f0-9]{64}", frame["transaction_sha256"])
             ):
                 continue
             write_ok = any(
@@ -468,6 +496,7 @@ def _reconnect_review_candidate(
                 and event.get("seq", 0) > frame.get("seq", 0)
                 and event.get("session_generation") == generation
                 and event.get("observed_route") == run.get("route")
+                and event.get("transaction_sha256") == frame.get("transaction_sha256")
                 for event in trace["events"]
             )
             if write_ok:
@@ -476,6 +505,7 @@ def _reconnect_review_candidate(
                     "source_step_id": "basic_reconnect",
                     "trace_sha256": digest,
                     "frame_sha256": frame["frame_sha256"],
+                    "transaction_sha256": frame["transaction_sha256"],
                     "frame_seq": frame["seq"],
                     "session_generation": generation,
                 }
@@ -1040,6 +1070,7 @@ def review_imported_tier_run(
         reviewer_independent_from_operator,
         decisions,
         scenario_decisions,
+        absence_decisions,
     ) = _tier_review_file(review_file, run, tier)
     if not reviewer_independent_from_operator:
         print(
@@ -1078,6 +1109,7 @@ def review_imported_tier_run(
                     "source_step_id",
                     "trace_sha256",
                     "frame_sha256",
+                    "transaction_sha256",
                     "frame_seq",
                     "session_generation",
                 )
@@ -1086,6 +1118,39 @@ def review_imported_tier_run(
             and decision.get("physical_recovery_confirmed") is True
         ):
             reviewed_scenarios.append(reconnect_candidate)
+    absence_plan: dict[str, str] = {}
+    try:
+        session = json.loads(members["session.json"])
+        session_data = session.get("data", {})
+        test_plan = session_data.get("test_plan", {})
+        session_device = session_data.get("device", {})
+        if (
+            session_device.get("model", {}).get("value") == revision.get("model")
+            and session_device.get("hardware_version", {}).get("value")
+            == revision.get("hardware_version")
+            and session_device.get("firmware_version", {}).get("value")
+            == run.get("firmware_version")
+            and test_plan.get("device", {}).get("model") == revision.get("model")
+        ):
+            absence_plan = {
+                step.get("feature"): step.get("id")
+                for step in test_plan.get("steps", [])
+                if isinstance(step, dict)
+                and step.get("feature") in {"ac_output", "dc_output", "light_output"}
+                and step.get("physical_presence") == "absent"
+                and step.get("eligibility") == "not_applicable"
+                and "runtime profile substantiates physical absence"
+                in step.get("reasons", [])
+            }
+    except KeyError, TypeError, ValueError, UnicodeError:
+        absence_plan = {}
+    reviewed_absences = [
+        decision
+        for decision in absence_decisions
+        if absence_plan.get(decision.get("feature")) == decision.get("source_step_id")
+        and decision.get("physical_absence_confirmed") is True
+        and decision.get("safe_disable_confirmed") is True
+    ]
     updated = json.loads(json.dumps(run))
     files: dict[Path, bytes] = {}
     run_rel = Path("tests/hil/fixtures") / revision["id"] / "runs" / run_id
@@ -1100,6 +1165,10 @@ def review_imported_tier_run(
     if source_bundle is None or source_execution is None:
         raise HAAPIError("Imported guided tier artifact graph is incomplete")
     common_evidence = [source_bundle, source_execution]
+    session_evidence = next(
+        (item for item in run.get("evidence", []) if Path(item).name == "session.json"),
+        None,
+    )
     accepted_cycles: dict[str, list[dict[str, Any]]] = {}
     presence_evidence: dict[str, list[str]] = {}
     scope = {
@@ -1167,7 +1236,7 @@ def review_imported_tier_run(
             if reference not in presence_evidence.get(feature, [])
         )
 
-    if not accepted_cycles and not reviewed_scenarios:
+    if not accepted_cycles and not reviewed_scenarios and not reviewed_absences:
         print(
             "No supported production-authorized physical result was independently "
             "confirmed; the qualification matrix remains unchanged."
@@ -1337,6 +1406,7 @@ def review_imported_tier_run(
             "physical_outcome": "pass",
             "source_trace_sha256": decision["trace_sha256"],
             "source_frame_sha256": decision["frame_sha256"],
+            "source_transaction_sha256": decision["transaction_sha256"],
             "source_frame_seq": decision["frame_seq"],
             "source_step_id": decision["source_step_id"],
             "session_generation": decision["session_generation"],
@@ -1357,6 +1427,41 @@ def review_imported_tier_run(
         )
         updated["scenarios"]["reconnect_failover"] = result
         applied_scenarios.append("reconnect_failover")
+
+    for decision in reviewed_absences:
+        feature = decision["feature"]
+        path = (run_rel / f"{review_tag}-{feature}-physical-absence.json").as_posix()
+        artifact = {
+            "artifact_type": "physical_absence",
+            **scope,
+            "feature": feature,
+            "source_step_id": decision["source_step_id"],
+            "physical_absence_confirmed": True,
+            "safe_disable_confirmed": True,
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+        }
+        files[root / path] = (
+            json.dumps(artifact, sort_keys=True, indent=2) + "\n"
+        ).encode()
+        evidence = [
+            *common_evidence,
+            *([session_evidence] if session_evidence else []),
+            path,
+        ]
+        updated["feature_presence"][feature] = {
+            "status": "absent",
+            "evidence": evidence,
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+            "evidence_sha256": _evidence_digests(evidence, files, root),
+        }
+        updated["write_capabilities"][feature] = {
+            "status": "not_applicable",
+            "evidence": evidence,
+            "rationale": "independently reviewed physical absence and safe disable",
+        }
+        applied_capabilities.append(f"{feature}: absent")
 
     if applied_capabilities:
         updated["authorization_context"] = "production"

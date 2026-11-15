@@ -33,6 +33,8 @@ def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
     for step_id, target, pre, post in (
         ("ac_on", "on", "off", "on"),
         ("ac_off", "off", "on", "off"),
+        ("ac_on_second", "on", "off", "on"),
+        ("ac_final_off", "off", "on", "off"),
     ):
         trace_name = f"traces/{step_id}"
         trace_dir = child / trace_name
@@ -120,10 +122,12 @@ def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
     assert result["initial_state"] == "off"
     assert result["target_state"] == "on"
     assert result["restored_state"] == "off"
-    assert [action["outcome"] for action in result["actions"]] == [
-        "confirmed",
-        "confirmed",
-    ]
+    assert [action["outcome"] for action in result["actions"]] == ["confirmed"] * 4
+    assert [
+        (cycle["initial_state"], cycle["target_state"])
+        for cycle in result["output_cycles"]
+    ] == [("off", "on"), ("on", "off")]
+    assert result["final_restore_action_index"] == 3
     assert all(
         action["trace_evidence"][0]["path"].startswith("../../tier_")
         for action in result["actions"]

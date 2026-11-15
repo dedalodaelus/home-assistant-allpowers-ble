@@ -1135,6 +1135,54 @@ def test_public_guided_frame_projection_keeps_semantics_and_omits_payload() -> N
     assert "hex" not in settings["rows"][0]
 
 
+def test_public_guided_output_evidence_requires_two_restored_cycles() -> None:
+    from scripts.hil.evidence import _public_tier_artifact, _valid_public_tier_artifact
+
+    cycles = [
+        {
+            "initial_state": "off",
+            "target_state": "on",
+            "change_action_index": 0,
+            "restore_action_index": 1,
+            "physical_change_outcome": "correct",
+            "physical_restore_outcome": "correct",
+        },
+        {
+            "initial_state": "on",
+            "target_state": "off",
+            "change_action_index": 1,
+            "restore_action_index": 2,
+            "physical_change_outcome": "correct",
+            "physical_restore_outcome": "correct",
+        },
+    ]
+    private = {
+        "step_id": "light_output_cycle",
+        "outcome": "pass",
+        "initial_state": "off",
+        "target_state": "on",
+        "restored_state": "off",
+        "physical_change_outcome": "correct",
+        "physical_restore_outcome": "correct",
+        "output_cycles": cycles,
+        "final_restore_action_index": 3,
+        "final_restore_outcome": "correct",
+        "actions": [{"outcome": "confirmed", "confirmed": True}] * 4,
+    }
+    projected = _public_tier_artifact(
+        "tier-light_output_cycle.json", json.dumps(private).encode()
+    )
+    assert projected["output_cycles"] == cycles
+    assert _valid_public_tier_artifact(projected)
+
+    malformed = json.loads(json.dumps(private))
+    malformed["output_cycles"][1]["restore_action_index"] = 1
+    with pytest.raises(HAAPIError, match="output cycle"):
+        _public_tier_artifact(
+            "tier-light_output_cycle.json", json.dumps(malformed).encode()
+        )
+
+
 def test_reconnect_capture_is_bound_to_source_status_frame(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1151,6 +1199,7 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
         "session_generation": 2,
         "payload_omitted": True,
         "frame_sha256": hashlib.sha256(validation.STATUS_REQUEST).hexdigest(),
+        "transaction_sha256": "e" * 64,
     }
     trace = {
         "kind": "gatt_trace_metadata",
@@ -1173,6 +1222,7 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
                 "elapsed_ms": 10.0,
                 "session_generation": 2,
                 "observed_route": "local_adapter",
+                "transaction_sha256": "e" * 64,
             }
         ],
         "frames": [frame],
@@ -1190,8 +1240,6 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
         "steps": [
             {
                 "step_id": "basic_reconnect",
-                "authorization_context": "production",
-                "authorization_context_source": "runtime_production_authorized",
                 "machine_evidence_sha256": [trace_sha],
                 "machine_evidence": [
                     {
@@ -1223,6 +1271,7 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
         "physical_outcome": "pass",
         "source_trace_sha256": trace_sha,
         "source_frame_sha256": frame["frame_sha256"],
+        "source_transaction_sha256": frame["transaction_sha256"],
         "source_frame_seq": 5,
         "source_step_id": "basic_reconnect",
         "session_generation": 2,
@@ -1552,6 +1601,26 @@ def test_schema_v3_validates_normalized_frame_against_imported_artifact_graph(
                     "initial_state": "off",
                     "physical_change_outcome": "correct",
                     "physical_restore_outcome": "correct",
+                    "output_cycles": [
+                        {
+                            "initial_state": "off",
+                            "target_state": "on",
+                            "change_action_index": 0,
+                            "restore_action_index": 1,
+                            "physical_change_outcome": "correct",
+                            "physical_restore_outcome": "correct",
+                        },
+                        {
+                            "initial_state": "on",
+                            "target_state": "off",
+                            "change_action_index": 1,
+                            "restore_action_index": 2,
+                            "physical_change_outcome": "correct",
+                            "physical_restore_outcome": "correct",
+                        },
+                    ],
+                    "final_restore_action_index": 3,
+                    "final_restore_outcome": "correct",
                     "actions": [
                         {
                             "outcome": "confirmed",
@@ -1726,7 +1795,7 @@ def test_higher_tier_review_fails_closed_when_public_proof_is_unavailable(
     assert matrix_path.read_bytes() == before
 
 
-def test_interactive_higher_tier_review_confirms_each_transition_separately(
+def test_interactive_higher_tier_review_does_not_infer_off_from_on_restoration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1898,20 +1967,12 @@ def test_interactive_higher_tier_review_confirms_each_transition_separately(
     )
 
     assert result == 2
-    assert len(prompts) == 5
-    assert "not the HIL operator/contributor" in " ".join(prompts)
+    assert len(prompts) == 0
     output = capsys.readouterr().out
-    assert "Inconclusive review audit" in output
-    assert "Did you independently observe ac_output change to on?" in " ".join(prompts)
-    assert "Did you independently observe ac_output restore to off?" in " ".join(
-        prompts
-    )
+    assert "both on and off transitions" in output
+    assert "No PASS can be recorded" in output
     audit_files = list((tmp_path / "hil-results" / "tier-reviews").glob("*.json"))
-    assert len(audit_files) == 1
-    audit = json.loads(audit_files[0].read_text(encoding="utf-8"))
-    assert audit["transitions"][0]["physical_change_confirmed"] is True
-    assert audit["transitions"][0]["physical_restoration_confirmed"] is False
-    assert audit["transitions"][0]["production_authorization_confirmed"] is True
+    assert audit_files == []
 
 
 def test_import_review_and_apply_generates_scoped_gold_setting_evidence(

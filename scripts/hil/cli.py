@@ -2131,36 +2131,67 @@ def _reviewable_tier_step_artifact(
                 "trace_evidence": evidence,
             }
         )
-    if len(actions) != 2:
+    if len(actions) != 4 or len(checkpoint_rows) < 4:
         return None
-    first = next(
+    rows = [
         row
         for row in checkpoint_rows
         if row.get("target") == feature and row.get("trace")
-    )
-    last = next(
-        row
-        for row in reversed(checkpoint_rows)
-        if row.get("target") == feature and row.get("trace")
-    )
+    ]
+    if len(rows) != 4:
+        return None
     physical = {"yes": "correct", "no": "incorrect"}
+    output_cycles = [
+        {
+            "initial_state": protocol_state(rows[0].get("pre_state")),
+            "target_state": protocol_state(rows[0].get("expected")),
+            "change_action_index": 0,
+            "restore_action_index": 1,
+            "physical_change_outcome": physical.get(
+                rows[0].get("physical_outcome"), "unable_to_observe"
+            ),
+            "physical_restore_outcome": physical.get(
+                rows[1].get("physical_outcome"), "unable_to_observe"
+            ),
+        },
+        {
+            "initial_state": protocol_state(rows[1].get("pre_state")),
+            "target_state": protocol_state(rows[1].get("expected")),
+            "change_action_index": 1,
+            "restore_action_index": 2,
+            "physical_change_outcome": physical.get(
+                rows[1].get("physical_outcome"), "unable_to_observe"
+            ),
+            "physical_restore_outcome": physical.get(
+                rows[2].get("physical_outcome"), "unable_to_observe"
+            ),
+        },
+    ]
+    complete = (
+        all(item.get("confirmed") is True for item in actions)
+        and [row.get("expected") for row in rows] == ["on", "off", "on", "off"]
+        and rows[0].get("pre_state") == "off"
+        and rows[-1].get("post_state") == "off"
+        and all(row.get("physical_outcome") == "yes" for row in rows)
+    )
     return {
         "schema_version": 1,
         "step_id": step_id,
-        "initial_state": protocol_state(first.get("pre_state")),
-        "target_state": protocol_state(first.get("expected")),
-        "restored_state": protocol_state(last.get("post_state")),
+        "initial_state": protocol_state(rows[0].get("pre_state")),
+        "target_state": protocol_state(rows[0].get("expected")),
+        "restored_state": protocol_state(rows[-1].get("post_state")),
         "physical_change_outcome": physical.get(
-            first.get("physical_outcome"), "unable_to_observe"
+            rows[0].get("physical_outcome"), "unable_to_observe"
         ),
         "physical_restore_outcome": physical.get(
-            last.get("physical_outcome"), "unable_to_observe"
+            rows[-1].get("physical_outcome"), "unable_to_observe"
         ),
-        "outcome": "pass"
-        if all(item.get("confirmed") is True for item in actions)
-        and first.get("physical_outcome") == "yes"
-        and last.get("physical_outcome") == "yes"
-        else "inconclusive",
+        "output_cycles": output_cycles,
+        "final_restore_action_index": 3,
+        "final_restore_outcome": physical.get(
+            rows[-1].get("physical_outcome"), "unable_to_observe"
+        ),
+        "outcome": "pass" if complete else "inconclusive",
         "actions": actions,
     }
 

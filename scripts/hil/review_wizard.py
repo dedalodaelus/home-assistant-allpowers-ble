@@ -58,6 +58,7 @@ def _trace_operation_reference(
     state: Any,
     route: str,
     action_index: int | None = None,
+    action_stage: str | None = None,
     step_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Find a validated TX and matching transaction events in the action's trace."""
@@ -170,7 +171,7 @@ def _trace_operation_reference(
                 }
                 if action_index is not None:
                     reference["source_action_index"] = action_index
-                    reference["action_stage"] = (
+                    reference["action_stage"] = action_stage or (
                         "transition" if action_index == 0 else "restoration"
                     )
                 if step_id is not None:
@@ -414,6 +415,34 @@ def _interactive_higher_tier_review(
         if isinstance(item, dict) and isinstance(item.get("source_sha256"), str)
     }
     steps = execution.get("steps", []) if isinstance(execution, dict) else []
+    absence_candidates = []
+    try:
+        session = json.loads(members["session.json"])
+        session_data = session.get("data", {})
+        test_plan = session_data.get("test_plan", {})
+        plan_device = test_plan.get("device", {})
+        session_device = session_data.get("device", {})
+        model = session_device.get("model", {}).get("value")
+        hardware = session_device.get("hardware_version", {}).get("value")
+        firmware = session_device.get("firmware_version", {}).get("value")
+        if (
+            model == revision.get("model")
+            and hardware == revision.get("hardware_version")
+            and firmware == run.get("firmware_version")
+            and plan_device.get("model") == model
+        ):
+            absence_candidates = [
+                step
+                for step in test_plan.get("steps", [])
+                if isinstance(step, dict)
+                and step.get("feature") in {"ac_output", "dc_output", "light_output"}
+                and step.get("physical_presence") == "absent"
+                and step.get("eligibility") == "not_applicable"
+                and "runtime profile substantiates physical absence"
+                in step.get("reasons", [])
+            ]
+    except KeyError, TypeError, ValueError, UnicodeError:
+        absence_candidates = []
     execution_by_step = {
         item.get("step_id"): item
         for item in steps
@@ -506,9 +535,95 @@ def _interactive_higher_tier_review(
                     "eco_timeout",
                     "car_charger",
                 }
+                output_cycles = content.get("output_cycles")
                 if (
                     production_authorized
-                    and (is_output or (tier == "gold" and is_setting))
+                    and is_output
+                    and content.get("outcome") == "pass"
+                    and len(actions) == 4
+                    and isinstance(output_cycles, list)
+                    and len(output_cycles) == 2
+                    and content.get("final_restore_action_index") == 3
+                    and content.get("final_restore_outcome") == "correct"
+                ):
+                    final_state = content.get("initial_state")
+                    final_restore = (
+                        _trace_operation_reference(
+                            actions[3],
+                            by_source_digest,
+                            feature=feature,
+                            state=final_state,
+                            route=run.get("route"),
+                            action_index=3,
+                            action_stage="restoration",
+                            step_id=content.get("step_id"),
+                        )
+                        if final_state in {"on", "off"}
+                        else None
+                    )
+                    if final_restore is None:
+                        output_cycles = []
+                    for cycle in output_cycles:
+                        if not isinstance(cycle, dict):
+                            continue
+                        change_index = cycle.get("change_action_index")
+                        restore_index = cycle.get("restore_action_index")
+                        initial = cycle.get("initial_state")
+                        target = cycle.get("target_state")
+                        if (
+                            type(change_index) is not int
+                            or type(restore_index) is not int
+                            or change_index not in range(4)
+                            or restore_index not in range(4)
+                            or initial not in {"on", "off"}
+                            or target not in {"on", "off"}
+                            or initial == target
+                            or cycle.get("physical_change_outcome") != "correct"
+                            or cycle.get("physical_restore_outcome") != "correct"
+                        ):
+                            continue
+                        change = actions[change_index]
+                        restore = actions[restore_index]
+                        change_reference = _trace_operation_reference(
+                            change,
+                            by_source_digest,
+                            feature=feature,
+                            state=target,
+                            route=run.get("route"),
+                            action_index=change_index,
+                            action_stage="transition",
+                            step_id=content.get("step_id"),
+                        )
+                        restore_reference = _trace_operation_reference(
+                            restore,
+                            by_source_digest,
+                            feature=feature,
+                            state=initial,
+                            route=run.get("route"),
+                            action_index=restore_index,
+                            action_stage="restoration",
+                            step_id=content.get("step_id"),
+                        )
+                        if change_reference and restore_reference:
+                            recorded_targets.setdefault(feature, set()).add(target)
+                            record = {
+                                "step_id": content.get("step_id"),
+                                "initial_state": initial,
+                                "target_state": target,
+                                "change_frame_evidence": change_reference,
+                                "restore_frame_evidence": restore_reference,
+                                "change_trace_sha256": sorted(
+                                    change.get("trace_evidence_sha256", [])
+                                ),
+                                "restore_trace_sha256": sorted(
+                                    restore.get("trace_evidence_sha256", [])
+                                ),
+                            }
+                            if record not in recorded_cycles.setdefault(feature, []):
+                                recorded_cycles[feature].append(record)
+                if (
+                    production_authorized
+                    and (tier == "gold" and is_setting)
                     and content.get("outcome") == "pass"
                     and content.get("physical_change_outcome") == "correct"
                     and content.get("physical_restore_outcome") == "correct"
@@ -663,8 +778,9 @@ def _interactive_higher_tier_review(
     reviewed_at = datetime.now(UTC).isoformat()
     decisions = []
     scenario_decisions = []
+    absence_decisions = []
     reviewer_independent_from_operator = False
-    if reviewable or reconnect_candidate is not None:
+    if reviewable or reconnect_candidate is not None or absence_candidates:
         print(
             "The public archive does not identify the HIL operator. Do not review "
             "your own run."
@@ -771,6 +887,36 @@ def _interactive_higher_tier_review(
                     "physical_recovery_confirmed": physical_recovery_confirmed,
                 }
             )
+        for candidate in absence_candidates:
+            feature = candidate["feature"]
+            print(
+                f"Profile-declared physical absence for {feature}; source plan step "
+                f"{candidate['id']}. Unknown or unsupported assertions cannot exclude it."
+            )
+            physically_absent = (
+                input(
+                    "  Did independent physical inspection confirm this control is absent? [no/yes] (default no): "
+                )
+                .strip()
+                .lower()
+                == "yes"
+            )
+            safe_disable_confirmed = (
+                input(
+                    "  Did you confirm the feature is safely unavailable/disabled? [no/yes] (default no): "
+                )
+                .strip()
+                .lower()
+                == "yes"
+            )
+            absence_decisions.append(
+                {
+                    "feature": feature,
+                    "source_step_id": candidate["id"],
+                    "physical_absence_confirmed": physically_absent,
+                    "safe_disable_confirmed": safe_disable_confirmed,
+                }
+            )
         audit_dir = repo_root / "hil-results" / "tier-reviews"
         _reject_symlink_components(audit_dir, repo_root)
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -787,6 +933,7 @@ def _interactive_higher_tier_review(
             "reviewer_independent_from_operator": reviewer_independent_from_operator,
             "transitions": decisions,
             "scenarios": scenario_decisions,
+            "absences": absence_decisions,
         }
         try:
             with audit_path.open("x", encoding="utf-8") as stream:
