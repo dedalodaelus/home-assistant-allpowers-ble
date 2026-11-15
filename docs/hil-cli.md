@@ -49,7 +49,9 @@ Windows PowerShell:
 python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
 ```
 
-If a Platinum soak is interrupted, the wizard prints a resume command. It uses the existing private checkpoint, for example:
+`onboard` does not start or resume a Platinum soak. To run a standalone
+read-only 24-hour soak, use `run --suite soak-24h`; if it is interrupted, resume
+it from its existing private checkpoint, for example:
 
 ```bash
 python -m scripts.hil run --suite soak-24h --resume 'hil-results/<run>/private' --ha-url https://home-assistant.example:8123
