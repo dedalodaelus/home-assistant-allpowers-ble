@@ -3048,23 +3048,116 @@ def _onboard_import_review(
             for item in bronze_evidence["samples"]
             if isinstance(item, dict) and isinstance(item.get("sampled_at_utc"), str)
         ]
-        duration = (
+        sample_interval = (
             f"{(max(sampled) - min(sampled)).total_seconds():g} seconds"
             if len(sampled) >= 2
             else "not explicitly recorded"
         )
         physical_observation = bronze_evidence.get("physical_observation", "unknown")
-    except HAAPIError, KeyError, TypeError, ValueError, UnicodeError:
-        duration = "not available in the verified public archive"
+        capture_id = bronze_evidence.get("protocol_capture_id")
+        request_seq = bronze_evidence.get("protocol_status_request_seq")
+        write_ok_seq = bronze_evidence.get("protocol_status_write_ok_seq")
+        decoded_seq = bronze_evidence.get("protocol_decoded_response_seq")
+        session_generation = bronze_evidence.get("protocol_session_generation")
+        public_events = [
+            json.loads(line)
+            for line in public_members["events.jsonl"].decode("utf-8").splitlines()
+            if line
+        ]
+        public_frames = [
+            json.loads(line)
+            for line in public_members["frames.jsonl"].decode("utf-8").splitlines()
+            if line
+        ]
+        status_request = any(
+            frame.get("capture_id") == capture_id
+            and frame.get("direction") == "tx"
+            and frame.get("command_type") == "status_request"
+            and frame.get("frame_validation") == "validated_tx"
+            and frame.get("seq") == request_seq
+            and frame.get("session_generation") == session_generation
+            for frame in public_frames
+        )
+        write_ack = any(
+            event.get("capture_id") == capture_id
+            and event.get("event") == "write_ok"
+            and event.get("seq") == write_ok_seq
+            and event.get("session_generation") == session_generation
+            for event in public_events
+        )
+        decoded_status = any(
+            event.get("capture_id") == capture_id
+            and event.get("event") == "status_data_decoded"
+            and event.get("seq") == decoded_seq
+            and event.get("session_generation") == session_generation
+            for event in public_events
+        )
+        protocol_behavior_verified = (
+            bronze_evidence.get("protocol_probe") == "verified"
+            and isinstance(capture_id, str)
+            and bool(capture_id)
+            and type(session_generation) is int
+            and status_request
+            and write_ack
+            and decoded_status
+        )
+        from .evidence import _bronze_samples_fresh
+
+        fresh_samples_verified = _bronze_samples_fresh(bronze_evidence["samples"])
+    except (
+        HAAPIError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ):
+        sample_interval = "not available in the verified public archive"
         physical_observation = "unknown"
-    operations = ", ".join(proposal["reported_step_ids"]) or "not recorded"
+        protocol_behavior_verified = False
+        fresh_samples_verified = False
+    selected_run = next(
+        (
+            run
+            for revision in matrix.get("revisions", [])
+            if isinstance(revision, dict)
+            for run in revision.get("runs", [])
+            if isinstance(run, dict) and run.get("run_id") == run_id
+        ),
+        None,
+    )
+    reviewed_claims = (
+        selected_run.get("bronze_evidence", {})
+        if isinstance(selected_run, dict)
+        else {}
+    )
+    independently_reviewed_claims = all(
+        isinstance(reviewed_claims.get(claim), dict)
+        and reviewed_claims[claim].get("status") == "pass"
+        and reviewed_claims[claim].get("physical_review", {}).get("outcome")
+        == "confirmed_pass"
+        for claim in ("identity", "protocol_probe", "fresh_telemetry")
+    )
+    if not (
+        protocol_behavior_verified
+        and fresh_samples_verified
+        and physical_observation == "plausible"
+        and independently_reviewed_claims
+    ):
+        print(
+            "Verified public Bronze behavior or applied review claims are incomplete; "
+            "no PR body was generated."
+        )
+        return False
+
     title = f"test(hil): add reviewed {model} Bronze evidence"
     evidence_paths = stage_paths[1:]
     validation_text = (
-        "Executed by this onboard session: verified public archive export and "
-        "integrity check; real importer proposal and apply; interactive independent "
-        "review dry-run/apply; schema-v3 matrix validation; exact-scope tier evaluation. "
-        "Local CI, pre-commit, and remote CI have not been run by this session."
+        "The imported public archive passed integrity and schema checks. The exact "
+        "run's Bronze identity, protocol, and freshness claims were independently "
+        "reviewed and applied; the resulting matrix passed schema-v3 validation and "
+        "the scoped tier evaluator. This generated body describes the verified "
+        "archive behavior below; it does not claim physical output-write qualification."
     )
     safety_text = (
         "This PR adds privacy-filtered qualification evidence only. It changes no "
@@ -3074,18 +3167,22 @@ def _onboard_import_review(
         "the integration are unaffected."
     )
     hardware_text = (
-        f"Observed device: {model}, hardware {hardware}, firmware {firmware}; "
-        f"connected BLE route: {route}. Independently reviewed Bronze evidence is "
-        f"stored at: {', '.join(evidence_paths)}. This is scoped physical evidence "
-        f"from archive run {proposal['run_id']}. Operations: {operations}. "
-        f"Observation duration: {duration}. Physical observation: "
-        f"{physical_observation}. This is not a claim about other revisions, "
-        "firmware, routes, or write capabilities."
+        f"For the exact {model}, hardware {hardware}, firmware {firmware}, and "
+        f"observed {route} route, the reviewed public artifacts at "
+        f"{', '.join(evidence_paths)} record a validated status-request TX, a write "
+        "acknowledgement, and decoded StatusData in the same complete capture and "
+        "session generation. The trace validates capture/session identity and the "
+        "recorded event sequence; it does not establish that the decoded notification "
+        "was causally caused by that request. Two fresh telemetry samples and a "
+        "plausible operator observation are present, and the identity, protocol, and "
+        "freshness claims were independently reviewed and applied. Telemetry sample "
+        f"interval: {sample_interval}. This evidence does not qualify output writes "
+        "or other routes, firmware, or hardware revisions."
     )
     checked = {
         "For normal changes, the base branch is `devel` (`main` is release-only). If this PR comes from a fork, confirm the base repository and branch before submitting; GitHub may default to `main`.": True,
         "The PR title uses Conventional Commits syntax, for example `docs: clarify contributor workflow` or `test: cover status freshness timeout boundary`.": True,
-        "The related issue, if applicable, is linked, and existing issues and PRs were checked to avoid duplicate work.": True,
+        "The related issue, if applicable, is linked, and existing issues and PRs were checked to avoid duplicate work.": False,
         "No protocol write behavior changes.": True,
         "Unknown bits remain preserved.": True,
         "Writes still require fresh state from the current GATT session.": True,
@@ -3099,15 +3196,16 @@ def _onboard_import_review(
         "title": title,
         "issue": "#227 (qualification plan); #328 (independent Bronze reviewer)",
         "summary": (
-            f"Add independently reviewed Bronze qualification evidence for {model} "
-            f"hardware {hardware}, firmware {firmware}, on the observed {route} route. "
-            "The imported guided run remains evidence scoped to this exact device and "
-            "firmware. No write capability is claimed. The base branch is devel. "
-            "Release tooling owns "
+            f"Add independently reviewed Bronze qualification evidence for {model}, "
+            f"hardware {hardware}, firmware {firmware}, on the observed {route} "
+            "route. The linked public evidence paths substantiate the hardware and "
+            "revision checklist item for this exact scope. The related qualification "
+            "and reviewer issues are linked; a duplicate issue/PR search has not been "
+            "automatically performed, so that checklist item remains unchecked. "
+            "No output-write capability is claimed. Release tooling owns "
             "CHANGELOG.md; no changelog entry is included. No user-facing strings "
-            "changed, so translations are not applicable. The hardware-evidence "
-            "checklist item is not applicable to this evidence-only software change; "
-            "the main-source-branch checklist item applies only to main-target PRs."
+            "changed, so translations are not applicable. The main-source-branch "
+            "checklist item applies only to main-target PRs."
         ),
         "safety_impact": safety_text,
         "validation": validation_text,

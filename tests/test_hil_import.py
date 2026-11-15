@@ -1677,6 +1677,41 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         is True
     )
     output = capsys.readouterr().out
+    generated_body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "hardware-evidence checklist item is not applicable" not in generated_body
+    assert (
+        "- [x] Hardware model/revision evidence is attached or linked when required."
+        in generated_body
+    )
+    assert (
+        "- [ ] The related issue, if applicable, is linked, and existing issues and PRs were checked to avoid duplicate work."
+        in generated_body
+    )
+    assert "R600, hardware 0.3, firmware 1.1" in generated_body
+    assert "observed local_adapter route" in generated_body
+    assert "validated status-request TX, a write acknowledgement" in generated_body
+    assert (
+        "decoded StatusData in the same complete capture and session generation"
+        in generated_body
+    )
+    assert (
+        "Two fresh telemetry samples and a plausible operator observation"
+        in generated_body
+    )
+    assert (
+        "identity, protocol, and freshness claims were independently reviewed and applied"
+        in generated_body
+    )
+    assert "Telemetry sample interval:" in generated_body
+    assert "Observation duration:" not in generated_body
+    assert (
+        "does not establish that the decoded notification was causally caused by that request"
+        in generated_body
+    )
+    assert (
+        "does not qualify output writes or other routes, firmware, or hardware revisions"
+        in generated_body
+    )
     add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
     stage_paths = shlex.split(add_line)[2:]
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
