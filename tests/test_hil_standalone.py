@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
 
 from custom_components.allpowers_ble.const import MAX_STALE_TIMEOUT, WRITE_TIMEOUT
 from scripts.hil.api import (
@@ -32,8 +35,16 @@ def test_cli_help_starts_without_site_packages() -> None:
         assert "usage:" in result.stdout.lower()
 
 
-def test_doctor_reaches_preflight_without_site_packages() -> None:
+def test_doctor_reaches_preflight_without_site_packages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Doctor handles missing connection settings after isolated startup."""
+    monkeypatch.setenv("HA_HIL_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("HA_HIL_TOKEN", "dummy-test-token")
+    env = os.environ.copy()
+    env.pop("HA_HIL_URL", None)
+    env.pop("HA_HIL_TOKEN", None)
+
     result = subprocess.run(
         [
             sys.executable,
@@ -48,6 +59,7 @@ def test_doctor_reaches_preflight_without_site_packages() -> None:
             "--non-interactive",
         ],
         cwd=REPOSITORY_ROOT,
+        env=env,
         capture_output=True,
         check=False,
         text=True,
