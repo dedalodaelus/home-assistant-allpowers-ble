@@ -201,10 +201,31 @@ python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json
 Imported consent, software PASS labels, synthetic captures, or hashes without
 their verified child artifacts cannot create a qualification PASS.
 
-For imported Bronze archives, the reviewer CLI can apply a digest-bound
-independent review. Create a JSON file that names the archive digest and
-imported run ID, and set each claim to `pass` only after inspecting its
-supporting public artifacts; otherwise use `inconclusive`:
+For imported Bronze archives, use the offline interactive reviewer to inspect
+the verified public evidence and record an independent physical review. The
+reviewer must inspect real-device evidence; wizard answers are not
+cryptographic attestation. The command displays the observed route and archive
+binding, defaults every claim to inconclusive, and does not offer PASS when the
+objective evidence contract is incomplete:
+
+```bash
+python -m scripts.hil review \
+  --matrix tests/hil/qualification_matrix.json \
+  --run-id archive-... \
+  --interactive
+```
+
+The generated schema-v1 audit file is saved under the git-ignored
+`hil-results/bronze-reviews/` directory. The command runs the existing strict
+reviewer in dry-run mode first; type `APPLY REVIEW` to apply its verified
+results. Any other response leaves the matrix unchanged. It reports the tier
+computed by the existing evaluator. No Home Assistant or BLE connection is
+used, and no artifact is uploaded.
+
+The legacy noninteractive workflow remains available for scripted reviews.
+Create a schema-v1 JSON file bound to the archive digest and imported run ID;
+set a claim to `pass` only after inspecting supporting public artifacts, or
+otherwise use `inconclusive`:
 
 ```json
 {

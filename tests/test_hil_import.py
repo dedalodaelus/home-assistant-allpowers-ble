@@ -1518,3 +1518,119 @@ def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
         item["status"] == "inconclusive"
         for item in reviewed["bronze_evidence"].values()
     )
+
+
+def test_interactive_review_imports_reviews_and_qualifies_bronze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(
+        [
+            "public reviewer",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ]
+    )
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    reviewed = json.loads(matrix_path.read_text())
+    run = reviewed["revisions"][0]["runs"][0]
+    assert {claim["status"] for claim in run["bronze_evidence"].values()} == {"pass"}
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "bronze"
+    audit_files = list((tmp_path / "hil-results" / "bronze-reviews").glob("*.json"))
+    assert len(audit_files) == 1
+    audit = json.loads(audit_files[0].read_text())
+    assert set(audit) == {
+        "schema_version",
+        "archive_sha256",
+        "run_id",
+        "reviewed_by",
+        "reviewed_at",
+        "claims",
+    }
+    assert '"attained_tier": "bronze"' in capsys.readouterr().out
+
+
+def test_interactive_review_cancel_keeps_matrix_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+    before = matrix_path.read_bytes()
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(["reviewer", "no", "cancel"])
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    assert matrix_path.read_bytes() == before
+
+
+def test_interactive_review_requires_a_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.hil.api import HAAPIError
+    from scripts.hil.review_wizard import interactive_review
+
+    class Pipe:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", Pipe())
+    with pytest.raises(HAAPIError, match="requires a TTY"):
+        interactive_review(
+            tmp_path / "missing.json", run_id="archive-test", repo_root=tmp_path
+        )

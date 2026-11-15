@@ -137,7 +137,13 @@ def make_parser() -> argparse.ArgumentParser:
     )
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)
-    review_parser.add_argument("--review-file", type=Path, required=True)
+    review_mode_input = review_parser.add_mutually_exclusive_group(required=True)
+    review_mode_input.add_argument("--review-file", type=Path)
+    review_mode_input.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Interactively review an imported Bronze run offline",
+    )
     review_mode = review_parser.add_mutually_exclusive_group()
     review_mode.add_argument("--dry-run", action="store_true")
     review_mode.add_argument("--apply", action="store_true")
@@ -2065,6 +2071,10 @@ def execute(args: argparse.Namespace) -> int:
     if args.command == "import":
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "review":
+        if args.interactive:
+            from .review_wizard import interactive_review
+
+            return interactive_review(args.matrix, run_id=args.run_id)
         from .review import review_imported_run
 
         return review_imported_run(

@@ -512,17 +512,19 @@ def review_imported_run(
     statuses = {
         claim: item["status"] for claim, item in updated["bronze_evidence"].items()
     }
+    from .tiers import evaluate_tiers
+
     summary = {
         "run_id": run_id,
         "reviewed_by": reviewer,
         "bronze_claims": statuses,
         "applied": apply,
     }
-    print(json.dumps(summary, sort_keys=True, indent=2))
     if not apply:
+        tier_result = evaluate_tiers(proposed)
+        summary["attained_tier"] = _attained_tier(tier_result, revision, run)
+        print(json.dumps(summary, sort_keys=True, indent=2))
         return 0
-    from .tiers import evaluate_tiers
-
     created: list[Path] = []
     try:
         for path, content in files.items():
@@ -540,6 +542,8 @@ def review_imported_run(
         if errors:
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))
         tier_result = evaluate_tiers(proposed)
+        summary["attained_tier"] = _attained_tier(tier_result, revision, run)
+        print(json.dumps(summary, sort_keys=True, indent=2))
         if matrix_path.is_symlink() or matrix_path.read_bytes() != before:
             raise HAAPIError("Qualification matrix changed during review")
         _atomic_write(
@@ -552,3 +556,18 @@ def review_imported_run(
             path.unlink(missing_ok=True)
         raise
     return 0
+
+
+def _attained_tier(
+    tier_result: dict[str, Any], revision: dict[str, Any], run: dict[str, Any]
+) -> str:
+    return next(
+        (
+            item["tier"]
+            for item in tier_result.get("tiers", [])
+            if item.get("scope", {}).get("revision_id") == revision.get("id")
+            and item.get("scope", {}).get("firmware") == run.get("firmware_version")
+            and item.get("scope", {}).get("observed_route") == run.get("route")
+        ),
+        "unqualified",
+    )
