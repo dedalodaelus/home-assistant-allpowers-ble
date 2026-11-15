@@ -866,7 +866,13 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             "value": 55,
             "verified": True,
             "source": "ha_rest_entity_state",
-        }
+            "sample_age_seconds": 2,
+        },
+        "telemetry_available": {
+            "value": "on",
+            "verified": True,
+            "source": "ha_rest_entity_state",
+        },
     }
     real_status_client, fake_ble = _connected_client()
     real_status_client._active_session_generation = 3
@@ -1089,9 +1095,44 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
     assert private_bronze["protocol_probe"]["outcome"] == expected_probe
     if use_production_client and expected_probe == "pass":
+        from scripts.hil.onboard import assess_run_gate
+
         assert (
             private_bronze["protocol_probe"]["capture_id"]
             == api_fake.capture.capture_id
+        )
+        status_exchange = cli._bronze_status_exchange
+        assert (
+            assess_run_gate(
+                run_dir,
+                run_result=result,
+                requested_tier="bronze",
+                status_exchange=status_exchange,
+            )
+            == []
+        )
+
+        # Keep the bronze artifact digest valid so this isolates the capture
+        # correlation check rather than failing artifact-integrity validation.
+        private_bronze["protocol_probe"]["capture_id"] = "cross-capture-id"
+        bronze_path = run_dir / "tier-bronze-read-only.json"
+        bronze_path.write_text(json.dumps(private_bronze), encoding="utf-8")
+        execution_path = run_dir / "tier-execution.json"
+        execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        digest = hashlib.sha256(bronze_path.read_bytes()).hexdigest()
+        for row in execution["steps"]:
+            for reference in row.get("machine_evidence", []):
+                if reference.get("path") == bronze_path.name:
+                    reference["sha256"] = digest
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
+        blockers = assess_run_gate(
+            run_dir,
+            run_result=result,
+            requested_tier="bronze",
+            status_exchange=status_exchange,
+        )
+        assert any(
+            blocker["outcome"] == "incomplete_protocol_proof" for blocker in blockers
         )
     archive = export_archive(run_dir.parent, confirmed=True)
     _, public, _ = verify_public_archive(archive, include_contents=True)

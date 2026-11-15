@@ -155,13 +155,18 @@ def _valid_bronze_capture(
     ):
         return False
     status_tx, write_ok, decoded, write_failed = status_exchange(events, frames)
+    correlated_records = (status_tx, write_ok, decoded)
     return bool(
         status_tx is not None
         and write_ok is not None
         and decoded is not None
         and not write_failed
+        and all(
+            record.get("capture_id", metadata["capture_id"]) == probe.get("capture_id")
+            for record in correlated_records
+            if isinstance(record, dict)
+        )
         and status_tx.get("hex") == expected_request
-        and status_tx.get("capture_id") == probe.get("capture_id")
         and status_tx.get("session_generation") == probe.get("session_generation")
         and status_tx.get("seq") == probe.get("status_request_seq")
         and write_ok.get("seq") == probe.get("status_write_ok_seq")
