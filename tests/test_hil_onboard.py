@@ -133,15 +133,25 @@ def _run(tmp_path):
             "steps": [
                 {
                     "id": "read_only_probe",
+                    "feature": "telemetry",
                     "action": "read_only",
                     "eligibility": "eligible",
+                    "required_evidence": ["fresh telemetry", "physical plausibility"],
                 },
                 {
                     "id": "physical_plausibility_observation",
+                    "feature": "telemetry",
                     "action": "manual",
                     "eligibility": "eligible",
+                    "required_evidence": [
+                        "separate operator observation",
+                        "fresh telemetry context",
+                    ],
                 },
             ],
+        },
+        "runtime_capabilities": {
+            "features": {"ac_output": {"physical_presence": "absent"}}
         },
     }
     execution = {
@@ -276,8 +286,16 @@ def test_confirmed_not_applicable_plan_step_is_not_a_blocker(tmp_path):
     session["test_plan"]["steps"].append(
         {
             "id": "absent_control",
+            "feature": "ac_output",
             "action": "not_applicable",
             "eligibility": "not_applicable",
+            "reasons": ["runtime profile substantiates physical absence"],
+        }
+    )
+    execution["steps"].append(
+        {
+            "step_id": "absent_control",
+            "outcome": "not_applicable",
         }
     )
     _save(private, session, execution)
@@ -290,6 +308,75 @@ def test_confirmed_not_applicable_plan_step_is_not_a_blocker(tmp_path):
             status_exchange=status_exchange,
         )
         == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("plan_change", "expected_step"),
+    [
+        ("absent", "read_only_probe"),
+        ("empty", "read_only_probe"),
+        ("omit_physical", "physical_plausibility_observation"),
+        ("mandatory_exclusion", "read_only_probe"),
+    ],
+)
+def test_mandatory_bronze_steps_cannot_be_removed_or_excluded(
+    tmp_path, plan_change, expected_step
+):
+    private, session, execution, _, status_exchange = _run(tmp_path)
+    steps = session["test_plan"]["steps"]
+    if plan_change == "absent":
+        session.pop("test_plan")
+    elif plan_change == "empty":
+        session["test_plan"]["steps"] = []
+        execution["steps"] = []
+    elif plan_change == "omit_physical":
+        session["test_plan"]["steps"] = steps[:1]
+        execution["steps"] = execution["steps"][:1]
+    else:
+        steps[0]["action"] = "not_applicable"
+        steps[0]["eligibility"] = "not_applicable"
+    _save(private, session, execution)
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="bronze",
+        status_exchange=status_exchange,
+    )
+
+    assert expected_step in {item["step_id"] for item in blockers}
+
+
+def test_optional_exclusion_without_absence_evidence_fails_closed(tmp_path):
+    private, session, execution, _, status_exchange = _run(tmp_path)
+    session["test_plan"]["steps"].append(
+        {
+            "id": "ac_output_cycle",
+            "feature": "ac_output",
+            "action": "not_applicable",
+            "eligibility": "not_applicable",
+            "reasons": [],
+        }
+    )
+    execution["steps"].append(
+        {"step_id": "ac_output_cycle", "outcome": "not_applicable"}
+    )
+    session["runtime_capabilities"]["features"]["ac_output"] = {
+        "physical_presence": "unknown"
+    }
+    _save(private, session, execution)
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="bronze",
+        status_exchange=status_exchange,
+    )
+
+    assert any(
+        item["step_id"] == "ac_output_cycle" and item["outcome"] == "invalid_exclusion"
+        for item in blockers
     )
 
 

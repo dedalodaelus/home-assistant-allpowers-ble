@@ -10,6 +10,15 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+BODY_FIELDS = {
+    "title",
+    "summary",
+    "issue",
+    "safety_impact",
+    "validation",
+    "hardware_results",
+}
+BODY_MARKER = re.compile(r"\s*<!--\s*pr-body:([a-z0-9_-]+)\s*-->\s*")
 
 
 def _required_text(data: dict[str, Any], key: str) -> str:
@@ -20,7 +29,7 @@ def _required_text(data: dict[str, Any], key: str) -> str:
 
 
 def render_pr_body(template: str, data: dict[str, Any]) -> str:
-    """Render facts into template sections while preserving headings and checkboxes."""
+    """Fill explicit template markers while preserving headings and checkboxes."""
     summary = _required_text(data, "summary")
     issue = _required_text(data, "issue")
     safety = _required_text(data, "safety_impact")
@@ -34,33 +43,38 @@ def render_pr_body(template: str, data: dict[str, Any]) -> str:
     ):
         raise ValueError("checked must map checkbox labels to booleans")
 
-    sections = {
-        "## Summary": f"**Proposed title:** `{title}`\n\n{summary}\n\nRelated issue: {issue}.",
-        "## Protocol and safety impact": safety,
-        "## Validation": validation,
-        "## Hardware results": hardware,
+    fields = {
+        "title": f"**Proposed title:** `{title}`",
+        "summary": summary,
+        "issue": f"Related issue: {issue}.",
+        "safety_impact": safety,
+        "validation": validation,
+        "hardware_results": hardware,
     }
     lines: list[str] = []
     in_comment = False
-    current_section: str | None = None
     inserted: set[str] = set()
     seen_checkboxes: set[str] = set()
     for line in template.splitlines():
-        if "<!--" in line:
+        marker = None if in_comment else BODY_MARKER.fullmatch(line)
+        if marker is not None:
+            name = marker.group(1)
+            if name not in BODY_FIELDS:
+                raise ValueError(f"Unknown PR body template marker: {name}")
+            if name in inserted:
+                raise ValueError(f"Duplicate PR body template marker: {name}")
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append(fields[name])
+            inserted.add(name)
+            continue
+        if "<!--" in line and not in_comment:
             if "-->" not in line:
                 in_comment = True
             continue
         if in_comment:
             if "-->" in line:
                 in_comment = False
-            continue
-        if line.startswith("## "):
-            current_section = line
-            lines.append(line)
-            section = sections.get(line)
-            if section is not None:
-                lines.extend(("", section))
-                inserted.add(line)
             continue
         match = re.fullmatch(r"- \[([ xX])\] (.+)", line)
         if match:
@@ -69,13 +83,11 @@ def render_pr_body(template: str, data: dict[str, Any]) -> str:
             is_checked = checked.get(label, False)
             lines.append(f"- [{'x' if is_checked else ' '}] {label}")
             continue
-        if line.strip() and current_section in sections:
-            continue
         lines.append(line)
-    missing = set(sections) - inserted
+    missing = BODY_FIELDS - inserted
     if missing:
         raise ValueError(
-            "PR template is missing required sections: " + ", ".join(sorted(missing))
+            "PR template is missing body markers: " + ", ".join(sorted(missing))
         )
     unknown_labels = set(checked) - seen_checkboxes
     if unknown_labels:

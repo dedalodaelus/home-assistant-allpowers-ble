@@ -11,8 +11,9 @@ import json  # noqa: F401 - shared module object used by trace.py and CLI tests
 import math
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
+import stat
 import subprocess
 import sys
 from time import monotonic, sleep
@@ -898,6 +899,7 @@ def _execute_tier_suite(
                         services.save_private_trace(trace_dir, trace)
                         protocol_probe = {
                             "outcome": "pass" if protocol_verified else "inconclusive",
+                            "capture_id": trace.get("capture_id"),
                             "trace": str(trace_dir.relative_to(output_dir)),
                             "trace_sha256": hashlib.sha256(
                                 (trace_dir / "trace.json").read_bytes()
@@ -2796,8 +2798,104 @@ def _review_resume_command(matrix_path: Path, run_id: str) -> str:
     )
 
 
+def _verified_review_stage_paths(
+    matrix: dict[str, Any],
+    matrix_path: Path,
+    repo_root: Path,
+    *,
+    revision_id: str,
+    run_id: str,
+) -> list[str] | None:
+    """Return only existing, digest-verified public files for one reviewed run."""
+    from .importer import _reject_symlink_components
+    from .review import CLAIMS
+
+    if (
+        re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", revision_id) is None
+        or re.fullmatch(r"archive-[a-f0-9]{64}", run_id) is None
+    ):
+        return None
+    matches = [
+        run
+        for revision in matrix.get("revisions", [])
+        if isinstance(revision, dict) and revision.get("id") == revision_id
+        for run in revision.get("runs", [])
+        if isinstance(run, dict) and run.get("run_id") == run_id
+    ]
+    if len(matches) != 1:
+        return None
+    run = matches[0]
+    references = run.get("evidence")
+    if (
+        not isinstance(references, list)
+        or not references
+        or any(not isinstance(item, str) for item in references)
+        or len(set(references)) != len(references)
+    ):
+        return None
+    expected_run_dir = (
+        PurePosixPath("tests/hil/fixtures") / revision_id / "runs" / run_id
+    )
+    digests: dict[str, str] = {}
+    try:
+        for reference in references:
+            relative = PurePosixPath(reference)
+            if (
+                "\\" in reference
+                or relative.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or not relative.is_relative_to(expected_run_dir)
+            ):
+                return None
+            target = repo_root.joinpath(*relative.parts)
+            _reject_symlink_components(target, repo_root)
+            metadata = target.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                return None
+            digests[reference] = hashlib.sha256(target.read_bytes()).hexdigest()
+    except HAAPIError, OSError, ValueError:
+        return None
+
+    bronze = run.get("bronze_evidence")
+    if not isinstance(bronze, dict) or set(bronze) != set(CLAIMS):
+        return None
+    for claim in CLAIMS:
+        item = bronze.get(claim)
+        review = item.get("physical_review") if isinstance(item, dict) else None
+        claim_refs = item.get("evidence") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "pass"
+            or not isinstance(review, dict)
+            or review.get("outcome") != "confirmed_pass"
+            or not isinstance(review.get("reviewed_by"), str)
+            or not review["reviewed_by"].strip()
+            or not isinstance(claim_refs, list)
+            or not claim_refs
+            or any(
+                not isinstance(reference, str) or reference not in digests
+                for reference in claim_refs
+            )
+            or review.get("evidence_sha256")
+            != {reference: digests[reference] for reference in sorted(claim_refs)}
+            or item.get("claim_artifact") not in claim_refs
+        ):
+            return None
+    try:
+        matrix_relative = matrix_path.relative_to(repo_root).as_posix()
+        _reject_symlink_components(matrix_path, repo_root)
+    except HAAPIError, OSError, ValueError:
+        return None
+    return [matrix_relative, *sorted(references)]
+
+
 def _onboard_import_review(
-    archive_path: Path, output_dir: Path, requested_tier: str
+    archive_path: Path,
+    output_dir: Path,
+    requested_tier: str,
+    *,
+    repo_root: Path | None = None,
+    matrix_path: Path | None = None,
 ) -> bool:
     """Import reviewed public evidence, invoke independent Bronze review, and hand off."""
     if requested_tier != "bronze":
@@ -2805,8 +2903,8 @@ def _onboard_import_review(
         return False
     from . import importer
 
-    repo_root = Path(__file__).resolve().parents[2]
-    matrix_path = importer.DEFAULT_MATRIX
+    repo_root = (repo_root or Path(__file__).resolve().parents[2]).resolve()
+    matrix_path = matrix_path or (repo_root / "tests/hil/qualification_matrix.json")
     try:
         proposal = importer._build_proposal(
             archive_path, matrix_path, repo_root=repo_root
@@ -2895,6 +2993,21 @@ def _onboard_import_review(
     if errors:
         print("Schema-v3 validation failed:", "; ".join(errors))
         return False
+    stage_paths = _verified_review_stage_paths(
+        matrix,
+        matrix_path,
+        repo_root,
+        revision_id=proposal["revision_id"],
+        run_id=run_id,
+    )
+    if stage_paths is None:
+        print(
+            "This imported run lacks complete, independently applied Bronze claims "
+            "or verified public artifacts; no PR commands were generated."
+        )
+        print("After completing the independent review, run:")
+        print("  " + _review_resume_command(matrix_path, run_id))
+        return False
     from .tiers import evaluate_tiers
 
     tier_result = evaluate_tiers(matrix)
@@ -2946,10 +3059,7 @@ def _onboard_import_review(
         physical_observation = "unknown"
     operations = ", ".join(proposal["reported_step_ids"]) or "not recorded"
     title = f"test(hil): add reviewed {model} Bronze evidence"
-    evidence_paths = sorted(
-        str(path.relative_to(repo_root)) for path in proposal["destination_files"]
-    )
-    stage_paths = [str(matrix_path.relative_to(repo_root)), *evidence_paths]
+    evidence_paths = stage_paths[1:]
     validation_text = (
         "Executed by this onboard session: verified public archive export and "
         "integrity check; real importer proposal and apply; interactive independent "
@@ -2975,7 +3085,7 @@ def _onboard_import_review(
     checked = {
         "For normal changes, the base branch is `devel` (`main` is release-only). If this PR comes from a fork, confirm the base repository and branch before submitting; GitHub may default to `main`.": True,
         "The PR title uses Conventional Commits syntax, for example `docs: clarify contributor workflow` or `test: cover status freshness timeout boundary`.": True,
-        "The related issue is linked, and existing issues and PRs were checked before starting duplicate work.": True,
+        "The related issue, if applicable, is linked, and existing issues and PRs were checked to avoid duplicate work.": True,
         "No protocol write behavior changes.": True,
         "Unknown bits remain preserved.": True,
         "Writes still require fresh state from the current GATT session.": True,

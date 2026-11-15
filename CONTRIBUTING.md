@@ -54,9 +54,11 @@ repository's safety and validation checklist.
 - For deterministic PR descriptions, render structured facts through
   `.github/PULL_REQUEST_TEMPLATE.md` with
   `python -m scripts.generate_pr_body --data pr-facts.json --output pr.md`.
-  The renderer preserves every heading and checklist item, checks only labels
-  explicitly marked true, and leaves all other items unchecked. Review the
-  generated body against the actual change and validation results.
+  HTML body markers in the template define where facts go; the renderer fails
+  when a required marker is missing, repeated, or unknown. It preserves every
+  heading and checklist item, checks only labels explicitly marked true, and
+  leaves all other items unchecked. Review the generated body against the
+  actual change and validation results.
 - For another hardware model, provide the exact model/revision, advertised name,
   GATT service and characteristics, and sanitized packet evidence.
 - Do not infer compatibility from product appearance or marketing name.

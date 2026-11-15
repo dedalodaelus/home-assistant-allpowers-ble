@@ -13,6 +13,21 @@ from typing import Any
 
 VERIFIED_ROUTES = {"local_adapter", "active_proxy"}
 PASS_OUTCOMES = {"pass", "not_applicable"}
+BRONZE_REQUIRED_STEP_CONTRACTS = {
+    "read_only_probe": {
+        "feature": "telemetry",
+        "action": "read_only",
+        "required_evidence": ["fresh telemetry", "physical plausibility"],
+    },
+    "physical_plausibility_observation": {
+        "feature": "telemetry",
+        "action": "manual",
+        "required_evidence": [
+            "separate operator observation",
+            "fresh telemetry context",
+        ],
+    },
+}
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -348,16 +363,35 @@ def assess_run_gate(
 
     plan_steps = plan.get("steps") if isinstance(plan, dict) else None
     execution_steps = execution.get("steps")
-    if not isinstance(plan_steps, list) or not isinstance(execution_steps, list):
+    if not isinstance(plan_steps, list):
         blockers.append(
             _finding(
                 "required_steps",
                 "missing_or_invalid",
-                "planned or executed step list is missing",
+                "planned step list is missing",
                 execution_path,
             )
         )
+        for step_id in BRONZE_REQUIRED_STEP_CONTRACTS:
+            blockers.append(
+                _finding(
+                    step_id,
+                    "missing_plan_step",
+                    "mandatory Bronze step cannot be verified without a stored plan",
+                    session_path,
+                )
+            )
         return blockers
+    if not isinstance(execution_steps, list):
+        blockers.append(
+            _finding(
+                "required_steps",
+                "missing_or_invalid",
+                "executed step list is missing",
+                execution_path,
+            )
+        )
+        execution_steps = []
 
     by_id: dict[str, list[dict[str, Any]]] = {}
     for row in execution_steps:
@@ -372,6 +406,37 @@ def assess_run_gate(
                         execution_path,
                     )
                 )
+    planned_by_id: dict[str, list[dict[str, Any]]] = {}
+    for planned in plan_steps:
+        if isinstance(planned, dict) and isinstance(planned.get("id"), str):
+            planned_by_id.setdefault(planned["id"], []).append(planned)
+    for step_id, contract in BRONZE_REQUIRED_STEP_CONTRACTS.items():
+        matching = planned_by_id.get(step_id, [])
+        if len(matching) != 1:
+            blockers.append(
+                _finding(
+                    step_id,
+                    "missing_or_ambiguous_plan_step",
+                    "mandatory Bronze step is absent or duplicated in the stored plan",
+                    session_path,
+                )
+            )
+            continue
+        planned = matching[0]
+        if (
+            planned.get("feature") != contract["feature"]
+            or planned.get("action") != contract["action"]
+            or planned.get("required_evidence") != contract["required_evidence"]
+            or planned.get("eligibility") != "eligible"
+        ):
+            blockers.append(
+                _finding(
+                    step_id,
+                    str(planned.get("eligibility", "missing")),
+                    "mandatory Bronze step does not match its required eligible contract",
+                    session_path,
+                )
+            )
     for planned in plan_steps:
         if not isinstance(planned, dict) or not isinstance(planned.get("id"), str):
             blockers.append(
@@ -388,6 +453,39 @@ def assess_run_gate(
             planned.get("eligibility") == "not_applicable"
             or planned.get("action") == "not_applicable"
         ):
+            if step_id in BRONZE_REQUIRED_STEP_CONTRACTS:
+                continue
+            capabilities = session.get("runtime_capabilities")
+            features = (
+                capabilities.get("features") if isinstance(capabilities, dict) else None
+            )
+            feature = planned.get("feature")
+            feature_facts = (
+                features.get(feature) if isinstance(features, dict) else None
+            )
+            reasons = planned.get("reasons")
+            substantiated_absence = (
+                planned.get("action") == "not_applicable"
+                and planned.get("eligibility") == "not_applicable"
+                and isinstance(feature_facts, dict)
+                and feature_facts.get("physical_presence") == "absent"
+                and isinstance(reasons, list)
+                and "runtime profile substantiates physical absence" in reasons
+            )
+            rows = by_id.get(step_id, [])
+            if (
+                not substantiated_absence
+                or len(rows) != 1
+                or rows[0].get("outcome") != "not_applicable"
+            ):
+                blockers.append(
+                    _finding(
+                        step_id,
+                        "invalid_exclusion",
+                        "optional step exclusion is not backed by verified physical absence",
+                        execution_path,
+                    )
+                )
             continue
         if planned.get("eligibility") not in {"eligible", "pending_authorization"}:
             blockers.append(

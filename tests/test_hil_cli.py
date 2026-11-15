@@ -1013,7 +1013,35 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
         "schema_version": 1,
         "home_assistant": {},
         "runner_host": {},
-        "integration": {},
+        "integration": {"build_match": "verified"},
+    }
+    plan = {
+        "requested_tier": "bronze",
+        "steps": [
+            {
+                "id": "read_only_probe",
+                "feature": "telemetry",
+                "action": "read_only",
+                "eligibility": "eligible",
+                "required_evidence": ["fresh telemetry", "physical plausibility"],
+            },
+            {
+                "id": "physical_plausibility_observation",
+                "feature": "telemetry",
+                "action": "manual",
+                "eligibility": "eligible",
+                "required_evidence": [
+                    "separate operator observation",
+                    "fresh telemetry context",
+                ],
+            },
+        ],
+        "device": {
+            "model": "R600",
+            "hardware_revision": "0.3",
+            "firmware_revision": "0.2",
+            "build_provenance": {"build_match": "verified"},
+        },
     }
     session = {
         "schema_version": 1,
@@ -1022,6 +1050,9 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
         "mode": "read_only_preflight",
         "scenario_id": "read_only_snapshot",
         "started_at": datetime.now(UTC).isoformat(),
+        "route": {"requested": "active_proxy"},
+        "integration_build": {"build_match": "verified"},
+        "test_plan": plan,
         "device": {
             "model": {"value": "R600", "verified": True},
             "hardware_version": {"value": "0.3", "verified": True},
@@ -1042,11 +1073,6 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     monkeypatch.setattr(cli, "_has_verified_telemetry", lambda _sample: True)
     monkeypatch.setattr(cli, "sleep", advance_sleep)
     monkeypatch.setattr("builtins.input", lambda _prompt: "1")
-    plan = {
-        "requested_tier": "bronze",
-        "steps": [{"id": "read_only_probe"}],
-        "device": {"build_provenance": {}},
-    }
 
     result = cli._execute_tier_suite(
         api_fake,
@@ -1062,6 +1088,11 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     assert result == (0 if expected_probe == "pass" else 2)
     private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
     assert private_bronze["protocol_probe"]["outcome"] == expected_probe
+    if use_production_client and expected_probe == "pass":
+        assert (
+            private_bronze["protocol_probe"]["capture_id"]
+            == api_fake.capture.capture_id
+        )
     archive = export_archive(run_dir.parent, confirmed=True)
     _, public, _ = verify_public_archive(archive, include_contents=True)
     public_bronze = json.loads(public["tier-bronze-read-only.json"])

@@ -24,23 +24,25 @@ TEMPLATE = """# Before submitting
 
 ## Summary
 
-<!-- Summary placeholder -->
+<!-- pr-body:title -->
+<!-- pr-body:summary -->
+<!-- pr-body:issue -->
 
 ## Protocol and safety impact
 
-<!-- Safety placeholder -->
+<!-- pr-body:safety_impact -->
 
 - [ ] No protocol write behavior changes.
 - [ ] Unknown bits remain preserved.
 
 ## Validation
 
-<!-- Validation placeholder -->
+<!-- pr-body:validation -->
 - [ ] Unit tests added or updated.
 
 ## Hardware results
 
-<!-- Hardware placeholder -->
+<!-- pr-body:hardware_results -->
 """
 
 DATA = {
@@ -74,8 +76,11 @@ def test_render_pr_body_preserves_all_headings_and_checklists():
     assert "- [x] No protocol write behavior changes." in rendered
     assert "- [ ] Unknown bits remain preserved." in rendered
     assert "- [ ] Unit tests added or updated." in rendered
-    assert "placeholder" not in rendered
+    assert "pr-body:" not in rendered
+    assert "What changes and why?" not in rendered
+    assert "State whether protocol bytes" not in rendered
     assert "R600 HW 0.3" in rendered
+    assert "\n\n\n" not in rendered
 
 
 def test_render_pr_body_is_deterministic():
@@ -93,6 +98,10 @@ def test_repository_template_headings_and_checklist_are_complete():
     ]
     assert sum(line.startswith("- [") for line in template.splitlines()) == sum(
         line.startswith("- [") for line in rendered.splitlines()
+    )
+    assert any(
+        "related issue, if applicable" in line.casefold()
+        for line in template.splitlines()
     )
 
 
@@ -120,6 +129,29 @@ def test_render_rejects_unknown_checklist_label():
 
     with pytest.raises(ValueError, match="Unknown PR template checkbox"):
         render_pr_body(TEMPLATE, data)
+
+
+def test_render_rejects_missing_template_marker():
+    template = TEMPLATE.replace("<!-- pr-body:validation -->", "<!-- validation -->")
+
+    with pytest.raises(ValueError, match="missing body markers: validation"):
+        render_pr_body(template, DATA)
+
+
+def test_render_rejects_duplicate_template_marker():
+    template = TEMPLATE.replace(
+        "<!-- pr-body:title -->", "<!-- pr-body:title -->\n<!-- pr-body:title -->"
+    )
+
+    with pytest.raises(ValueError, match="Duplicate PR body template marker: title"):
+        render_pr_body(template, DATA)
+
+
+def test_render_rejects_unknown_template_marker():
+    template = TEMPLATE.replace("<!-- pr-body:title -->", "<!-- pr-body:heading -->")
+
+    with pytest.raises(ValueError, match="Unknown PR body template marker: heading"):
+        render_pr_body(template, DATA)
 
 
 def test_file_generator_writes_utf8_markdown(tmp_path):

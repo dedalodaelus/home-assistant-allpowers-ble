@@ -238,8 +238,10 @@ python -m scripts.generate_pr_body --data pr-facts.json --output pr.md
 
 The JSON input requires `title`, `issue`, `summary`, `safety_impact`,
 `validation`, and `hardware_results`. Its optional `checked` object maps exact
-checkbox labels from `.github/PULL_REQUEST_TEMPLATE.md` to booleans. Only an
-explicit `true` marks an item checked; every other item stays unchecked. Review
+checkbox labels from `.github/PULL_REQUEST_TEMPLATE.md` to booleans. The HTML
+`pr-body:*` markers in that template define where each fact is inserted; the
+renderer rejects missing, duplicate, or unknown markers. Only an explicit
+`true` marks a checklist item checked; every other item stays unchecked. Review
 the generated body against the actual change and local/remote validation before
 using it.
 
