@@ -2072,6 +2072,11 @@ def execute(args: argparse.Namespace) -> int:
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "review":
         if args.interactive:
+            if args.dry_run or args.apply:
+                raise HAAPIError(
+                    "--interactive cannot be combined with --dry-run or --apply; "
+                    "interactive review has its own dry-run and confirmation"
+                )
             from .review_wizard import interactive_review
 
             return interactive_review(args.matrix, run_id=args.run_id)
