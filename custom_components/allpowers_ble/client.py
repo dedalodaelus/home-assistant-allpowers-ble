@@ -211,6 +211,7 @@ class AllpowersBLEClient:
         self._status_monotonic: float | None = None
         self._settings_monotonic: float | None = None
         self._status_version = 0
+        self._session_status_notification_count = 0
         self._settings_version = 0
         self._last_packet_monotonic: float | None = None
         self._last_status_request_monotonic: float | None = None
@@ -242,6 +243,13 @@ class AllpowersBLEClient:
     def active_session_generation(self) -> int | None:
         """Return the current connection generation for scoped HIL evidence."""
         return self._active_session_generation
+
+    @property
+    def session_status_notification_count(self) -> int | None:
+        """Return accepted status notifications in the active GATT session."""
+        if self._active_session_generation is None:
+            return None
+        return self._session_status_notification_count
 
     @property
     def is_connected(self) -> bool:
@@ -1569,6 +1577,7 @@ class AllpowersBLEClient:
                 self._pending_model_identity = None
                 self._pending_model_identity_generation = None
         self._session_generation_counter += 1
+        self._session_status_notification_count = 0
         self._active_session_generation = self._session_generation_counter
         self._connected_route = None
         self._disconnect_reason_category = None
@@ -1652,6 +1661,7 @@ class AllpowersBLEClient:
                 self._status = packet
                 self._status_monotonic = now
                 self._status_version += 1
+                self._session_status_notification_count += 1
                 if (
                     self._output_blocked_until_version is not None
                     and self._status_version >= self._output_blocked_until_version

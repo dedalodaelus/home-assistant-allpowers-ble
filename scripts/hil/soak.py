@@ -203,6 +203,8 @@ def _execute_soak_suite(
     clock_discontinuities = 0
     data_limit_hit = False
     active_segment: dict[str, Any] | None = None
+    last_status_notification_count = baseline.get("status_notification_count")
+    last_status_notification_generation = baseline["session_generation"]
     trace_required = (
         parameters["duration_seconds"] // parameters["trace_interval_seconds"]
     )
@@ -288,6 +290,7 @@ def _execute_soak_suite(
 
     def end_segment(reason: str, outcome: str = "inconclusive") -> None:
         nonlocal active_segment, segment_started, segment_number
+        nonlocal last_status_notification_count, last_status_notification_generation
         if active_segment is not None:
             active_segment["outcome"] = outcome
             active_segment["reason"] = reason
@@ -295,6 +298,9 @@ def _execute_soak_suite(
         active_segment = None
         segment_started = None
         segment_number += 1
+        if is_short:
+            last_status_notification_count = None
+            last_status_notification_generation = None
 
     if resume_state is not None:
         restart_utc = services.datetime.now(UTC)
@@ -337,6 +343,8 @@ def _execute_soak_suite(
                         "maximum_gap_seconds": 0.0,
                         "dropped_traces": 0,
                         "clock_discontinuities": 0,
+                        "status_notification_marker_available": False,
+                        "status_notifications_observed": None,
                         "route_verified": False,
                         "trace_complete": False,
                         "route": "unverified",
@@ -474,6 +482,61 @@ def _execute_soak_suite(
                         previous_sample_monotonic = None
                         previous_sample_utc = None
                         next_trace = now
+                notification_count = capabilities.get("status_notification_count")
+                notification_count_valid = (
+                    type(notification_count) is int
+                    and 0 <= notification_count <= 1_000_000_000
+                )
+                if is_short:
+                    same_notification_session = (
+                        last_status_notification_generation
+                        == capabilities["session_generation"]
+                    )
+                    counter_went_backwards = bool(
+                        notification_count_valid
+                        and same_notification_session
+                        and type(last_status_notification_count) is int
+                        and notification_count < last_status_notification_count
+                    )
+                    marker_available = (
+                        notification_count_valid and not counter_went_backwards
+                    )
+                    notification_delta = None
+                    if (
+                        marker_available
+                        and same_notification_session
+                        and type(last_status_notification_count) is int
+                    ):
+                        notification_delta = (
+                            notification_count - last_status_notification_count
+                        )
+                    if "status_notification_marker_available" not in active_segment:
+                        active_segment["status_notification_marker_available"] = (
+                            marker_available
+                        )
+                        active_segment["status_notifications_observed"] = (
+                            notification_delta
+                            if marker_available and notification_delta is not None
+                            else 0
+                            if marker_available
+                            else None
+                        )
+                    elif not marker_available:
+                        active_segment["status_notification_marker_available"] = False
+                        active_segment["status_notifications_observed"] = None
+                    elif (
+                        active_segment["status_notification_marker_available"]
+                        and notification_delta is not None
+                    ):
+                        active_segment["status_notifications_observed"] += (
+                            notification_delta
+                        )
+                    last_status_notification_count = (
+                        notification_count if notification_count_valid else None
+                    )
+                    last_status_notification_generation = capabilities[
+                        "session_generation"
+                    ]
                 last_generation = capabilities["session_generation"]
                 sample_count += 1
                 if gap is not None:
@@ -489,6 +552,18 @@ def _execute_soak_suite(
                     "settings_fresh": capabilities["settings_fresh"],
                     "telemetry": snapshot,
                 }
+                if is_short:
+                    row.update(
+                        {
+                            "status_notification_marker_available": marker_available,
+                            "status_notification_count": (
+                                notification_count if notification_count_valid else None
+                            ),
+                            "status_notifications_since_previous_poll": (
+                                notification_delta
+                            ),
+                        }
+                    )
                 if not append_record(row):
                     break
                 active_segment["sample_count"] = sample_count

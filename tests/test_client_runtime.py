@@ -893,16 +893,19 @@ async def test_session_generation_rejects_stale_disconnect_and_notifications(
     client = make_client()
     loop = asyncio.get_running_loop()
     client._loop = loop
+    assert client.session_status_notification_count is None
 
     first = FakeClient()
     second = FakeClient()
 
     generation_one = client._activate_session_generation()
+    assert client.session_status_notification_count == 0
     client._client = first
     stale_disconnect = client._make_disconnected_callback(generation_one)
     stale_notify = client._make_notification_handler(generation_one, first)
 
     generation_two = client._activate_session_generation()
+    assert client.session_status_notification_count == 0
     client._client = second
     client._connected = True
     active_disconnect = client._make_disconnected_callback(generation_two)
@@ -911,10 +914,17 @@ async def test_session_generation_rejects_stale_disconnect_and_notifications(
     stale_notify(FakeCharacteristic(), bytearray(status_frame))
     assert client._status is None
     assert not client._ready_event.is_set()
+    assert client.session_status_notification_count == 0
 
     active_notify(FakeCharacteristic(), bytearray(status_frame))
     assert client._status is not None
     assert client._ready_event.is_set()
+    assert client.session_status_notification_count == 1
+    active_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client.session_status_notification_count == 2
+    assert client.session_status_notification_count == 2
+    active_notify(FakeCharacteristic(), bytearray(b"malformed"))
+    assert client.session_status_notification_count == 2
 
     client._disconnect_event.clear()
     stale_disconnect(first)
@@ -924,6 +934,12 @@ async def test_session_generation_rejects_stale_disconnect_and_notifications(
     active_disconnect(second)
     await asyncio.sleep(0)
     assert client._disconnect_event.is_set()
+
+    generation_three = client._activate_session_generation()
+    assert generation_three != generation_two
+    assert client.session_status_notification_count == 0
+    active_notify(FakeCharacteristic(), bytearray(status_frame))
+    assert client.session_status_notification_count == 0
 
 
 @pytest.mark.asyncio

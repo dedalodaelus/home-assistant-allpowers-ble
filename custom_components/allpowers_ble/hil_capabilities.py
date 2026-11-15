@@ -73,6 +73,15 @@ async def ws_capabilities(
     generation = getattr(runtime.client, "active_session_generation", None)
     if type(generation) is not int or generation < 1:
         generation = None
+    status_notification_count = getattr(
+        runtime.client, "session_status_notification_count", None
+    )
+    if (
+        generation is None
+        or type(status_notification_count) is not int
+        or not 0 <= status_notification_count <= 1_000_000_000
+    ):
+        status_notification_count = None
 
     capability_flags = support.capabilities
     status = getattr(data, "status", None)
@@ -143,6 +152,7 @@ async def ws_capabilities(
         "status_fresh": bool(coordinator.status_is_fresh),
         "settings_fresh": bool(settings_fresh),
         "session_generation": generation,
+        "status_notification_count": status_notification_count,
         "pending_transaction": bool(runtime.client.has_pending_transaction),
         # Candidate HIL controls may intentionally have no production switch
         # entity. Expose only the current, fresh protocol booleans needed for

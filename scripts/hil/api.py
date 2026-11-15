@@ -344,6 +344,14 @@ class HAClient:
         if generation is not None and (type(generation) is not int or generation < 1):
             raise HAAPIError("Malformed HIL session generation")
         normalized["session_generation"] = generation
+        status_notification_count = result.get("status_notification_count")
+        if status_notification_count is not None and (
+            type(status_notification_count) is not int
+            or not 0 <= status_notification_count <= 1_000_000_000
+            or generation is None
+        ):
+            raise HAAPIError("Malformed HIL status notification count")
+        normalized["status_notification_count"] = status_notification_count
         output_states = result.get("output_states")
         if output_states is not None:
             output_state_keys = {"ac_output", "dc_output", "light_output"}

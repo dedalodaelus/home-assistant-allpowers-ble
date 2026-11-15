@@ -1428,6 +1428,8 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
             "dropped_traces": 0,
             "clock_discontinuities": 0,
             "fresh_status_sample_count": 8,
+            "status_notification_marker_available": True,
+            "status_notifications_observed": 0,
             "route_verified": True,
             "trace_complete": False,
             "disconnect_observed": True,
@@ -1446,11 +1448,26 @@ def test_public_nonwrite_observation_summaries_are_typed_and_redacted() -> None:
     assert short_stability["actual"] == "inconclusive"
     assert short_stability["observation"]["measured_seconds"] == 420.0
     assert short_stability["observation"]["fresh_status_sample_count"] == 8
+    assert (
+        short_stability["observation"]["status_notification_marker_available"] is True
+    )
+    assert short_stability["observation"]["status_notifications_observed"] == 0
     assert short_stability["observation"]["route_verified"] is True
     assert short_stability["observation"]["trace_complete"] is False
     assert short_stability["observation"]["disconnect_observed"] is True
     assert short_stability["observation"]["station_model"] == "R600"
     assert short_stability["observation"]["operator_mode"] == "interactive"
+
+    valid_observation = short_stability["observation"]
+    invalid_observations = (
+        {**valid_observation, "status_notification_marker_available": "yes"},
+        {**valid_observation, "status_notification_marker_available": 1},
+        {**valid_observation, "status_notifications_observed": "arbitrary text"},
+        {**valid_observation, "status_notifications_observed": True},
+        {**valid_observation, "status_notifications_observed": -1},
+        {**valid_observation, "status_notifications_observed": 1_000_001},
+    )
+    assert all(not _valid_public_observation(item) for item in invalid_observations)
 
 
 def test_recovery_route_observation_exports_with_controlled_scenario_summary(
