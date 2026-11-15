@@ -52,6 +52,46 @@ in a follow-up pull request.
 - A mature pull request may be opened before remote CI finishes. Fix CI failures
   on the same pull request. Opening a pull request is not approval; passing CI
   alone does not prove correctness or authorize merging.
+- Before every normal push of an implementation or review-fix commit, inspect
+  the current [CI workflow](.github/workflows/ci.yml) and other applicable
+  [pull-request workflows](.github/workflows/). Use Python 3.14 with
+  `requirements_test.txt`, and run every locally reproducible check in the
+  current CI job on the final working tree, including for documentation-only
+  changes. `make all`, focused tests, and pre-commit alone are not equivalent
+  to CI. Follow CI's commands, environment variables, coverage options, and
+  dependency-safe ordering rather than copying a second pipeline here. This
+  includes dependency synchronization, HA candidate validation, and
+  `uv pip check`; then pre-commit and
+  repository validation before tests create caches; then all lint, type,
+  coverage, real-Home-Assistant, simulated HIL transaction-safety, and HIL
+  metadata checks; finally clean generated caches and run the repository,
+  release build, release-metadata dry-run, and archive-layout checks. In a fresh
+  isolated environment installed from `requirements_hil.txt`, run
+  `python -m scripts.hil --help`, `python -m scripts.hil doctor --help`, and
+  `python -m scripts.hil onboard --help` with that environment's Python. Do not
+  publish a release.
+- A failing check blocks a green validation claim. After any fix or autofix,
+  rerun the complete applicable local CI pipeline on the final tree. Do not
+  skip failures, suppress results, lower coverage, weaken tests, or change CI to
+  obtain a pass. If an environment limitation prevents a check, name the exact
+  command and blocker; do not present the PR as ready or locally validated.
+- After pushing, inspect remote PR check results for the exact latest head SHA.
+  Verify `Python, tests, and release validation`, `HACS validation`, `Home
+  Assistant Hassfest`, `Analyze Python`, `Review dependency changes`,
+  `Validate title`, and `Gate all required checks`, plus any other applicable
+  PR-triggered check. A missing, pending, skipped/not-applicable, or older-SHA
+  result is not a pass. Investigate failures, fix the same PR, rerun local
+  checks, and verify the new head's remote results. Hosted checks need not be
+  imitated locally. Follow additional branch-specific gates, such as opt-in HIL
+  qualification for `main` when enabled.
+- In the PR description, state the observable behavior or safety invariant the
+  change guarantees, its preconditions, the behavioral assertion or evidence
+  that supports each material claim, what regression that check would detect,
+  and the claim's limits. For documentation-only changes, describe the workflow
+  or policy behavior changed and how it was verified. Separate local results
+  from remote CI results and simulations from physical-device observations;
+  synthetic tests do not prove physical BLE or Home Assistant behavior. Report
+  omissions and environment limitations explicitly.
 
 ## 4. Code quality, BLE safety, and testing
 
