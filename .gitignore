@@ -29,3 +29,9 @@ config/
 # Local HIL captures and the optional HIL environment
 hil-results/
 .venv-hil/
+
+# Per-job pytest and coverage artifacts
+.pytest-tmp-*/
+.pytest_cache-*/
+.coverage.*
+coverage-*.xml
