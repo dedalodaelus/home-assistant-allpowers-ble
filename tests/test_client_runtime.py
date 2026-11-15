@@ -484,10 +484,16 @@ async def test_connection_rejects_invalid_gatt_properties_before_io(
     monkeypatch.setattr(client_module, "establish_connection", establish)
     monkeypatch.setattr(client, "_fresh_ble_device", lambda: FakeDevice())
 
-    with pytest.raises(
-        UnsupportedDeviceError, match=f"fff{1 if kind == 'notify' else 2}"
-    ):
-        await client._connect_once()
+    try:
+        with pytest.raises(
+            UnsupportedDeviceError, match=f"fff{1 if kind == 'notify' else 2}"
+        ):
+            await client._connect_once()
+    finally:
+        assert fake.notification_callback is None, (
+            "invalid GATT properties reached notification setup"
+        )
+        assert fake.writes == [], "invalid GATT properties reached GATT write"
 
     assert fake.notification_callback is None
     assert fake.writes == []
@@ -710,9 +716,17 @@ async def test_reconnect_requires_current_session_settings_for_write_capability(
 
     status_frame = notification_builder(0x01, bytes((0x10, 50, 0, 100, 0, 25, 0, 90)))
     fake.notification_callback(FakeCharacteristic(), bytearray(status_frame))
-    assert not client._runtime_model_support().capabilities.write_output_controls
-    with pytest.raises(StateUnavailableError):
-        await client.async_set_ac(True)
+    output_write_capability = (
+        client._runtime_model_support().capabilities.write_output_controls
+    )
+    try:
+        with pytest.raises(StateUnavailableError):
+            await client.async_set_ac(True)
+    finally:
+        assert fake.writes == [client_module.encode_status_request()], (
+            "stale prior-session settings authorized an output GATT write"
+        )
+    assert not output_write_capability
     assert fake.writes == [client_module.encode_status_request()]
 
     settings_notification = notification_builder(
