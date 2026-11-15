@@ -954,6 +954,16 @@ def _execute_tier_suite(
                             )
                         except HAAPIError:
                             pass
+            elif (
+                device.entry_state == "loaded"
+                and device.config_entry_id is not None
+                and device.refresh_button is None
+            ):
+                protocol_probe = {
+                    "outcome": "inconclusive",
+                    "stage": "refresh",
+                    "reason": "refresh_unavailable",
+                }
             else:
                 services.sleep(1)
                 try:
@@ -1016,12 +1026,14 @@ def _execute_tier_suite(
                     "outcome": "pass" if bronze_pass else "inconclusive",
                     **(
                         {
-                            "reason": "The read-only refresh could not be invoked. "
-                            "Check that one enabled ALLPOWERS Refresh status button "
-                            "is linked to the selected device and loaded entry.",
-                            "failure_category": "refresh_failed",
+                            "reason": "The read-only refresh button could not be safely "
+                            "resolved or invoked. Check that exactly one enabled "
+                            "ALLPOWERS Refresh status button is linked to the selected "
+                            "device and loaded entry.",
+                            "failure_category": protocol_probe["reason"],
                         }
-                        if protocol_probe.get("reason") == "refresh_failed"
+                        if protocol_probe.get("reason")
+                        in {"refresh_failed", "refresh_unavailable"}
                         else {}
                     ),
                     "observed_routes": [

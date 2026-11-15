@@ -818,6 +818,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
         ([], "write_ok", "synthetic", "inconclusive", "notification_decoded"),
         ([], "write_ok", "no_response", "inconclusive", None),
         ([], "write_ok", "refresh_rejected", "inconclusive", None),
+        ([], "write_ok", "refresh_unavailable", "inconclusive", None),
         (
             ["StatusData"],
             "write_ok",
@@ -1051,6 +1052,8 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             }
         ],
     )
+    if notification_mode == "refresh_unavailable":
+        device.refresh_button = None
     environment_data = {
         "schema_version": 1,
         "home_assistant": {},
@@ -1130,24 +1133,28 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     assert result == (0 if expected_probe == "pass" else 2)
     private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
     assert private_bronze["protocol_probe"]["outcome"] == expected_probe
-    assert api_fake.refresh_service_calls == [
-        {
-            "type": "call_service",
-            "domain": "button",
-            "service": "press",
-            "target": {"entity_id": "button.r600_actualizar_estado"},
-        }
-    ]
-    if notification_mode == "refresh_rejected":
+    if notification_mode == "refresh_unavailable":
+        assert api_fake.refresh_service_calls == []
+        category = "refresh_unavailable"
+    else:
+        assert api_fake.refresh_service_calls == [
+            {
+                "type": "call_service",
+                "domain": "button",
+                "service": "press",
+                "target": {"entity_id": "button.r600_actualizar_estado"},
+            }
+        ]
+        category = "refresh_failed"
+    if notification_mode in {"refresh_rejected", "refresh_unavailable"}:
         assert private_bronze["protocol_probe"] == {
             "outcome": "inconclusive",
             "stage": "refresh",
-            "reason": "refresh_failed",
+            "reason": category,
         }
         execution = json.loads((run_dir / "tier-execution.json").read_text())
-        assert (
-            "read-only refresh could not be invoked" in execution["steps"][0]["reason"]
-        )
+        assert "Refresh status button" in execution["steps"][0]["reason"]
+        assert execution["steps"][0]["failure_category"] == category
         from scripts.hil.onboard import assess_run_gate
 
         blockers = assess_run_gate(
@@ -1156,7 +1163,7 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             requested_tier="bronze",
             status_exchange=cli._bronze_status_exchange,
         )
-        assert any(blocker["outcome"] == "refresh_failed" for blocker in blockers)
+        assert any(blocker["outcome"] == category for blocker in blockers)
     if use_production_client and expected_probe == "pass":
         from scripts.hil.onboard import assess_run_gate
 
