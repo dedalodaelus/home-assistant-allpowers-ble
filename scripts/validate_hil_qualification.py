@@ -353,6 +353,42 @@ def _has_bound_capture(
             run_time = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
         except AttributeError, ValueError:
             continue
+        capture_scope = {
+            "route": route,
+            "revision_id": revision_id,
+            "firmware_version": firmware_version,
+            "run_id": run_id,
+            "captured_at": captured_at,
+            "session_id": session_id,
+            "build_fingerprint": build_fingerprint,
+        }
+        if (
+            not capability
+            and result_key == "reconnect_failover"
+            and isinstance(run_id, str)
+            and run_id.startswith("archive-")
+        ):
+            capture_valid = _valid_public_scenario_capture(
+                row, values, scope=capture_scope, scenario=result_key
+            )
+        else:
+            capture_valid = bool(
+                isinstance(frame_hex, str)
+                and re.fullmatch(r"(?:[0-9A-Fa-f]{2}){1,256}", frame_hex) is not None
+                and _valid_protocol_frame(
+                    frame_hex,
+                    row.get("direction"),
+                    row.get("capability") if capability else row.get("scenario"),
+                    row.get("requested_state") if capability else None,
+                )
+                or _valid_public_frame_capture(
+                    row,
+                    values,
+                    scope=capture_scope,
+                    feature=result_key,
+                    requested_state=row.get("requested_state") if capability else None,
+                )
+            )
         if (
             row.get("route") != route
             or row.get("revision_id") != revision_id
@@ -366,14 +402,7 @@ def _has_bound_capture(
             or row.get("verdict") != expected_verdict
             or row.get("physical_outcome")
             != ("not_applicable" if expected_verdict == "not_applicable" else "pass")
-            or not isinstance(frame_hex, str)
-            or re.fullmatch(r"(?:[0-9A-Fa-f]{2}){1,256}", frame_hex) is None
-            or not _valid_protocol_frame(
-                frame_hex,
-                row.get("direction"),
-                row.get("capability") if capability else row.get("scenario"),
-                row.get("requested_state") if capability else None,
-            )
+            or not capture_valid
         ):
             continue
         if capability:
@@ -391,6 +420,122 @@ def _has_bound_capture(
         ):
             return True
     return False
+
+
+def _valid_public_scenario_capture(
+    row: Any,
+    evidence: Any,
+    *,
+    scope: dict[str, Any],
+    scenario: str,
+) -> bool:
+    """Bind an imported scenario row to its exact production trace and frame."""
+    if scenario != "reconnect_failover" or not isinstance(row, dict):
+        return False
+    try:
+        bundle_paths = [
+            value
+            for value in evidence
+            if isinstance(value, str) and Path(value).name == "tier-artifacts.json"
+        ]
+        execution_paths = [
+            value
+            for value in evidence
+            if isinstance(value, str) and Path(value).name == "tier-execution.json"
+        ]
+        if len(bundle_paths) != 1 or len(execution_paths) != 1:
+            return False
+        bundle = json.loads((ROOT / bundle_paths[0]).read_text(encoding="utf-8"))
+        execution = json.loads((ROOT / execution_paths[0]).read_text(encoding="utf-8"))
+        trace_sha = row.get("source_trace_sha256")
+        frame_sha = row.get("source_frame_sha256")
+        frame_seq = row.get("source_frame_seq")
+        generation = row.get("session_generation")
+        if (
+            row.get("scenario") != scenario
+            or row.get("operation_id") != scenario
+            or row.get("source_step_id") != "basic_reconnect"
+            or not isinstance(trace_sha, str)
+            or re.fullmatch(r"[a-f0-9]{64}", trace_sha) is None
+            or not isinstance(frame_sha, str)
+            or re.fullmatch(r"[a-f0-9]{64}", frame_sha) is None
+            or type(frame_seq) is not int
+            or type(generation) is not int
+            or not all(row.get(key) == value for key, value in scope.items())
+        ):
+            return False
+        artifacts = bundle.get("artifacts", [])
+        trace_artifact = next(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and item.get("source_sha256") == trace_sha
+                and isinstance(item.get("content"), dict)
+                and item["content"].get("kind") == "gatt_trace_metadata"
+            ),
+            None,
+        )
+        if trace_artifact is None:
+            return False
+        trace = trace_artifact["content"]
+        if not (
+            trace.get("scenario_id") == "recovery_reconnect"
+            and trace.get("observed_route") == scope["route"]
+            and trace.get("complete") is True
+            and trace.get("dropped_events") == 0
+            and trace.get("dropped_frames") == 0
+            and type(trace.get("frame_count")) is int
+            and trace.get("frame_count") == len(trace.get("frames", []))
+            and type(trace.get("event_count")) is int
+            and trace.get("event_count") == len(trace.get("events", []))
+        ):
+            return False
+        frame = next(
+            (
+                item
+                for item in trace.get("frames", [])
+                if isinstance(item, dict)
+                and item.get("seq") == frame_seq
+                and item.get("frame_sha256") == frame_sha
+                and item.get("session_generation") == generation
+                and item.get("direction") == "tx"
+                and item.get("command_type") == "status_request"
+                and item.get("frame_validation") == "validated_tx"
+            ),
+            None,
+        )
+        if frame is None or row.get("frame_hex", "").lower() != STATUS_REQUEST.hex():
+            return False
+        completed = any(
+            isinstance(event, dict)
+            and event.get("event") == "write_ok"
+            and event.get("session_generation") == generation
+            and event.get("observed_route") == scope["route"]
+            and event.get("seq", 0) > frame_seq
+            for event in trace.get("events", [])
+        )
+        if not completed:
+            return False
+        artifact_id = trace_artifact.get("artifact_id")
+        artifact_digest = trace_artifact.get("source_sha256")
+        return any(
+            isinstance(step, dict)
+            and step.get("step_id") == "basic_reconnect"
+            and step.get("authorization_context") == "production"
+            and step.get("authorization_context_source")
+            == "runtime_production_authorized"
+            and trace_sha in step.get("machine_evidence_sha256", [])
+            and any(
+                isinstance(reference, dict)
+                and reference.get("artifact_id") == artifact_id
+                and reference.get("source_sha256") == artifact_digest
+                for reference in step.get("machine_evidence", [])
+            )
+            for step in execution.get("steps", [])
+        )
+    except OSError, UnicodeError, ValueError, TypeError, KeyError:
+        return False
 
 
 def _has_bound_bronze_probe(
@@ -1106,6 +1251,7 @@ def _valid_tier_capture_row(
     feature: str,
     requested_state: Any,
     action_stage: str,
+    evidence: Any = None,
 ) -> bool:
     """Validate one physical write row, including its encoded target state."""
     if not isinstance(row, dict):
@@ -1120,9 +1266,262 @@ def _valid_tier_capture_row(
         and row.get("direction") == "write"
         and row.get("verdict") == "ok"
         and row.get("physical_outcome") == "pass"
-        and isinstance(row.get("frame_hex"), str)
-        and _valid_protocol_frame(row["frame_hex"], "write", feature, requested_state)
+        and (
+            isinstance(row.get("frame_hex"), str)
+            and _valid_protocol_frame(
+                row["frame_hex"], "write", feature, requested_state
+            )
+            or _valid_public_frame_capture(
+                row,
+                evidence,
+                scope=scope,
+                feature=feature,
+                requested_state=requested_state,
+                action_stage=action_stage,
+            )
+        )
     )
+
+
+def _valid_public_frame_capture(
+    row: Any,
+    evidence: Any,
+    *,
+    scope: dict[str, Any],
+    feature: str,
+    requested_state: Any,
+    action_stage: str | None = None,
+) -> bool:
+    """Validate a payload-free capture against its imported source artifact graph."""
+    if not isinstance(row, dict):
+        return False
+    try:
+        bundle_paths = [
+            value
+            for value in evidence
+            if isinstance(value, str) and Path(value).name == "tier-artifacts.json"
+        ]
+        execution_paths = [
+            value
+            for value in evidence
+            if isinstance(value, str) and Path(value).name == "tier-execution.json"
+        ]
+        if len(bundle_paths) != 1 or len(execution_paths) != 1:
+            return False
+        bundle = json.loads((ROOT / bundle_paths[0]).read_text(encoding="utf-8"))
+        execution = json.loads((ROOT / execution_paths[0]).read_text(encoding="utf-8"))
+        trace_sha = row.get("source_trace_sha256")
+        frame_sha = row.get("source_frame_sha256")
+        transaction_sha = row.get("source_transaction_sha256")
+        frame_seq = row.get("source_frame_seq")
+        step_id = row.get("source_step_id")
+        action_index = row.get("source_action_index")
+        if (
+            not isinstance(trace_sha, str)
+            or re.fullmatch(r"[a-f0-9]{64}", trace_sha) is None
+            or not isinstance(frame_sha, str)
+            or re.fullmatch(r"[a-f0-9]{64}", frame_sha) is None
+            or not isinstance(transaction_sha, str)
+            or re.fullmatch(r"[a-f0-9]{64}", transaction_sha) is None
+            or type(frame_seq) is not int
+            or type(action_index) is not int
+            or action_index < 0
+            or not isinstance(step_id, str)
+        ):
+            return False
+        artifacts = bundle.get("artifacts", [])
+        trace_artifact = next(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and item.get("source_sha256") == trace_sha
+                and isinstance(item.get("content"), dict)
+                and item["content"].get("kind") == "gatt_trace_metadata"
+            ),
+            None,
+        )
+        if trace_artifact is None:
+            return False
+        trace = trace_artifact["content"]
+        if (
+            trace.get("complete") is not True
+            or trace.get("dropped_events") != 0
+            or trace.get("dropped_frames") != 0
+            or trace.get("observed_route") != scope.get("route")
+            or not isinstance(trace.get("frames"), list)
+            or not isinstance(trace.get("events"), list)
+        ):
+            return False
+        frame = next(
+            (
+                item
+                for item in trace["frames"]
+                if isinstance(item, dict)
+                and item.get("seq") == frame_seq
+                and item.get("frame_sha256") == frame_sha
+                and item.get("transaction_sha256") == transaction_sha
+            ),
+            None,
+        )
+        expected_states = (
+            frame.get(
+                "output_states"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "setting_states"
+            )
+            if frame
+            else None
+        )
+        if (
+            frame is None
+            or frame.get("event") != "write_attempt"
+            or frame.get("direction") != "tx"
+            or frame.get("frame_validation") != "validated_tx"
+            or frame.get("session_generation") != row.get("session_generation")
+            or frame.get("command_type")
+            != (
+                "output_control"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "settings_control"
+            )
+            or not isinstance(expected_states, dict)
+            or expected_states.get(feature) != requested_state
+            or row.get("direction") != "write"
+        ):
+            return False
+        events = trace["events"]
+        write_event = next(
+            (
+                item
+                for item in events
+                if isinstance(item, dict)
+                and item.get("seq") == frame_seq
+                and item.get("event") == "write_attempt"
+                and item.get("transaction_sha256") == transaction_sha
+            ),
+            None,
+        )
+        generation = row.get("session_generation")
+        kind = (
+            "output"
+            if feature in {"ac_output", "dc_output", "light_output"}
+            else "settings"
+        )
+        submitted = [
+            item
+            for item in events
+            if isinstance(item, dict)
+            and item.get("event") == "transaction_submitted"
+            and item.get("session_generation") == generation
+            and item.get("transaction_kind") == kind
+            and item.get("observed_route") == scope.get("route")
+            and item.get("transaction_sha256") == transaction_sha
+        ]
+        confirmed = [
+            item
+            for item in events
+            if isinstance(item, dict)
+            and item.get("event") == "transaction_confirmed"
+            and item.get("session_generation") == generation
+            and item.get("observed_route") == scope.get("route")
+            and item.get("transaction_sha256") == transaction_sha
+            and item.get("transaction_reason") == "matching_validated_telemetry"
+        ]
+        if not (
+            isinstance(write_event, dict)
+            and write_event.get("session_generation") == generation
+            and write_event.get("observed_route") == scope.get("route")
+            and len(submitted) == 1
+            and len(confirmed) == 1
+        ):
+            return False
+        source_step = next(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and isinstance(item.get("content"), dict)
+                and item["content"].get("kind") == "guided_step_evidence"
+                and item["content"].get("step_id") == step_id
+            ),
+            None,
+        )
+        if source_step is None:
+            return False
+        guided = source_step["content"]
+        if not (
+            guided.get("outcome") == "pass"
+            and guided.get("physical_change_outcome") == "correct"
+            and guided.get("physical_restore_outcome") == "correct"
+        ):
+            return False
+        reference_exists = any(
+            isinstance(step, dict)
+            and step.get("step_id") == step_id
+            and step.get("authorization_context") == "production"
+            and step.get("authorization_context_source")
+            == "runtime_production_authorized"
+            and any(
+                isinstance(reference, dict)
+                and reference.get("artifact_id") == source_step.get("artifact_id")
+                and reference.get("source_sha256") == source_step.get("source_sha256")
+                for reference in step.get("machine_evidence", [])
+            )
+            and trace_sha in step.get("machine_evidence_sha256", [])
+            for step in execution.get("steps", [])
+        )
+        actions = source_step["content"].get("actions", [])
+        if not reference_exists or action_index >= len(actions):
+            return False
+        action = actions[action_index]
+        transaction = action.get("transaction") if isinstance(action, dict) else None
+        expected_step = {
+            "ac_output": "ac_output_cycle",
+            "dc_output": "dc_output_cycle",
+            "light_output": "light_output_cycle",
+            "eco_mode": "eco_mode_reversal",
+            "work_mode": "work_mode_reversal",
+            "eco_timeout": "eco_timeout_reversal",
+            "car_charger": "car_charger_reversal",
+        }.get(feature)
+        stage_index = {"transition": 0, "restoration": 1}.get(action_stage)
+        expected_guided_state = (
+            ("on" if requested_state else "off")
+            if type(requested_state) is bool
+            else requested_state
+        )
+        state_key = "target_state" if action_stage == "transition" else "initial_state"
+        if not (
+            expected_step == step_id
+            and (stage_index is None or stage_index == action_index)
+            and (
+                feature not in {"ac_output", "dc_output", "light_output"}
+                or guided.get(state_key) == expected_guided_state
+            )
+            and isinstance(action, dict)
+            and trace_sha in action.get("trace_evidence_sha256", [])
+            and action.get("outcome") == "confirmed"
+            and action.get("confirmed") is True
+            and action.get("trace_valid") is True
+            and action.get("trace_complete") is True
+            and action.get("route") == scope.get("route")
+            and action.get("session_generation") == generation
+            and isinstance(transaction, dict)
+            and transaction.get("kind") == kind
+            and transaction.get("session_generation") == generation
+            and transaction.get("transaction_sha256") == transaction_sha
+            and transaction.get("write_seq") == frame_seq
+            and transaction.get("submitted_seq") == submitted[0].get("seq")
+            and transaction.get("confirmed_seq") == confirmed[0].get("seq")
+            and frame_seq
+            < transaction.get("submitted_seq", 0)
+            < transaction.get("confirmed_seq", 0)
+        ):
+            return False
+        return action_stage is None or row.get("action_stage") == action_stage
+    except OSError, UnicodeError, ValueError, TypeError, KeyError:
+        return False
 
 
 def _check_output_transitions(
@@ -1158,7 +1557,7 @@ def _check_output_transitions(
             and capture in item.get("evidence", [])
             and rows
             and _has_bound_capture(
-                [capture],
+                [capture, *item.get("evidence", [])],
                 route=scope["route"],
                 revision_id=scope["revision_id"],
                 firmware_version=scope["firmware_version"],
@@ -1172,7 +1571,12 @@ def _check_output_transitions(
             )
             and any(
                 _valid_tier_capture_row(
-                    row, scope, feature, expected_request, "transition"
+                    row,
+                    scope,
+                    feature,
+                    expected_request,
+                    "transition",
+                    item.get("evidence"),
                 )
                 for row in rows
             )
@@ -1245,7 +1649,7 @@ def _valid_restoration_capture(
     return bool(
         rows
         and _has_bound_capture(
-            [capture],
+            [capture, *item.get("evidence", [])],
             route=scope["route"],
             revision_id=scope["revision_id"],
             firmware_version=scope["firmware_version"],
@@ -1258,7 +1662,14 @@ def _valid_restoration_capture(
             expected_verdict="ok",
         )
         and any(
-            _valid_tier_capture_row(row, scope, feature, restored_state, "restoration")
+            _valid_tier_capture_row(
+                row,
+                scope,
+                feature,
+                restored_state,
+                "restoration",
+                item.get("evidence"),
+            )
             for row in rows
         )
     )

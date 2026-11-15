@@ -1003,7 +1003,7 @@ def test_later_reviewed_failure_supersedes_prior_feature_pass(
     assert "eco_mode" not in result["qualified_features"]
 
 
-def test_reviewed_experimental_hil_result_can_contribute_after_review(
+def test_experimental_hil_result_cannot_qualify_production_feature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     matrix = _matrix_fixture(tmp_path, "bronze")
@@ -1021,4 +1021,4 @@ def test_reviewed_experimental_hil_result_can_contribute_after_review(
     errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
     assert errors == []
     assert result["tiers"][0]["tier"] == "bronze"
-    assert "ac_output" in result["tiers"][0]["qualified_features"]
+    assert "ac_output" not in result["tiers"][0]["qualified_features"]

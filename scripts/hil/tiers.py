@@ -583,6 +583,12 @@ def _bound_restoration(
 def _feature_pass(
     item: dict[str, Any], run: dict[str, Any], revision: dict[str, Any], feature: str
 ) -> bool:
+    # Experimental HIL grants authorize one guarded operator action; they do
+    # not authorize production qualification. Keep this check at the evaluator
+    # boundary so imported or hand-edited feature records cannot promote an
+    # experimental run into Silver or Gold.
+    if run.get("authorization_context") != "production":
+        return False
     if feature in BASIC_OUTPUTS:
         return _output_pass(item, run, revision, feature)
     return _restoration_pass(item, run, revision, feature)

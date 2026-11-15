@@ -155,12 +155,18 @@ def make_parser() -> argparse.ArgumentParser:
     )
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)
+    review_parser.add_argument(
+        "--tier",
+        choices=("bronze", "silver", "gold", "platinum"),
+        default="bronze",
+        help="Support tier to review (Bronze remains the default)",
+    )
     review_mode_input = review_parser.add_mutually_exclusive_group(required=True)
     review_mode_input.add_argument("--review-file", type=Path)
     review_mode_input.add_argument(
         "--interactive",
         action="store_true",
-        help="Interactively review an imported Bronze run offline",
+        help="Interactively review an imported run offline",
     )
     review_mode = review_parser.add_mutually_exclusive_group()
     review_mode.add_argument("--dry-run", action="store_true")
@@ -718,6 +724,7 @@ def _execute_tier_suite(
     plan_steps = plan["steps"]
     for planned in plan_steps:
         step_id = planned["id"]
+        facts: dict[str, Any] = {}
         if stop_reason is not None:
             execution["steps"].append(
                 {
@@ -1259,6 +1266,10 @@ def _execute_tier_suite(
                         feature,
                         services,
                     )
+                    candidate_result["authorization_context"] = "experimental_hil"
+                    candidate_result["authorization_context_source"] = (
+                        "experimental_hil_grant"
+                    )
                     execution["steps"].append(candidate_result)
                     if candidate_result.get("outcome") != "pass":
                         overall = 2
@@ -1369,6 +1380,26 @@ def _execute_tier_suite(
             and any(Path(item).name == "trace.json" for item in evidence_paths)
             and all(row.get("outcome") == "pass" for row in rows)
         )
+        review_evidence_path: Path | None = None
+        if (
+            passed
+            and isinstance(facts, dict)
+            and facts.get("production_authorized") is True
+        ):
+            review_artifact = _reviewable_tier_step_artifact(
+                parent_private=output_dir,
+                child_private=child_root,
+                step_id=step_id,
+                feature=feature,
+                checkpoint_rows=rows,
+            )
+            if review_artifact is not None:
+                review_evidence_path = output_dir / f"tier-{step_id}.json"
+                review_evidence_path.write_text(
+                    json.dumps(review_artifact, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                review_evidence_path.chmod(0o600)
         reconnect_reason = None
         if passed and step_id == "basic_reconnect":
             action_row = next(
@@ -1409,6 +1440,22 @@ def _execute_tier_suite(
             if isinstance(failed_reason, str) and failed_reason.strip()
             else "guided scenario did not complete with confirmed evidence"
         )
+        machine_evidence = [
+            {
+                "path": f"../../tier_{child_run_id}/private/{item}",
+                "sha256": hashlib.sha256((child_root / item).read_bytes()).hexdigest(),
+            }
+            for item in evidence_paths
+        ]
+        if review_evidence_path is not None:
+            machine_evidence.append(
+                {
+                    "path": review_evidence_path.name,
+                    "sha256": hashlib.sha256(
+                        review_evidence_path.read_bytes()
+                    ).hexdigest(),
+                }
+            )
         execution["steps"].append(
             {
                 "step_id": step_id,
@@ -1417,15 +1464,16 @@ def _execute_tier_suite(
                 **({} if passed else {"reason": step_reason}),
                 "observed_routes": sorted(verified_routes),
                 "human_review": "pending",
-                "machine_evidence": [
+                **(
                     {
-                        "path": f"../../tier_{child_run_id}/private/{item}",
-                        "sha256": hashlib.sha256(
-                            (child_root / item).read_bytes()
-                        ).hexdigest(),
+                        "authorization_context": "production",
+                        "authorization_context_source": "runtime_production_authorized",
                     }
-                    for item in evidence_paths
-                ],
+                    if isinstance(facts, dict)
+                    and facts.get("production_authorized") is True
+                    else {}
+                ),
+                "machine_evidence": machine_evidence,
                 "evidence_run": f"../../tier_{child_run_id}/private",
             }
         )
@@ -1980,6 +2028,143 @@ def _suite_services() -> SuiteServices:
     )
 
 
+def _reviewable_tier_step_artifact(
+    *,
+    parent_private: Path,
+    child_private: Path,
+    step_id: str,
+    feature: str,
+    checkpoint_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Bind standard production-suite actions for offline physical review."""
+    actions = []
+    setting_states = {
+        "eco_mode": {"on": True, "off": False},
+        "car_charger": {"on": True, "off": False},
+        "work_mode": {"mute": 0, "standard": 1, "fast": 2},
+        "eco_timeout": {
+            "one_hour": 1,
+            "two_hours": 2,
+            "four_hours": 4,
+            "six_hours": 6,
+        },
+    }
+
+    def protocol_state(value: Any) -> Any:
+        if feature in setting_states and isinstance(value, str):
+            return setting_states[feature].get(value)
+        return value
+
+    for row in checkpoint_rows:
+        if row.get("target") != feature or row.get("outcome") != "pass":
+            continue
+        trace_name = row.get("trace")
+        if not isinstance(trace_name, str):
+            continue
+        trace_dir = (child_private / trace_name).resolve()
+        try:
+            trace_dir.relative_to(child_private.resolve())
+            trace = json.loads((trace_dir / "trace.json").read_text(encoding="utf-8"))
+            trace["events"] = [
+                json.loads(line)
+                for line in (trace_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+            trace["frames"] = [
+                json.loads(line)
+                for line in (trace_dir / "frames.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+        except OSError, ValueError, UnicodeError:
+            continue
+        evidence = []
+        for filename in ("trace.json", "events.jsonl", "frames.jsonl"):
+            source = trace_dir / filename
+            if not source.is_file():
+                continue
+            relative = Path(os.path.relpath(source, parent_private)).as_posix()
+            evidence.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
+        transaction = row.get("transaction")
+        generation = row.get("session_generation")
+        route = row.get("route")
+        kind = (
+            "output"
+            if feature in {"ac_output", "dc_output", "light_output"}
+            else "settings"
+        )
+        correlated = (
+            correlate_transaction(trace, expected_generation=generation, kind=kind)
+            if type(generation) is int
+            else None
+        )
+        trace_valid = bool(
+            evidence
+            and trace.get("complete") is True
+            and trace.get("dropped_events") == 0
+            and trace.get("dropped_frames") == 0
+            and route in {"local_adapter", "active_proxy"}
+            and trace.get("observed_route") == route
+            and type(generation) is int
+            and isinstance(transaction, dict)
+            and transaction.get("session_generation") == generation
+            and correlated == transaction
+        )
+        actions.append(
+            {
+                "outcome": "confirmed" if trace_valid else "inconclusive",
+                "confirmed": trace_valid,
+                "trace_valid": trace_valid,
+                "trace_complete": trace_valid,
+                "route": route,
+                "trace_route": trace.get("observed_route"),
+                "session_generation": generation,
+                "transaction": transaction,
+                "trace_evidence": evidence,
+            }
+        )
+    if len(actions) != 2:
+        return None
+    first = next(
+        row
+        for row in checkpoint_rows
+        if row.get("target") == feature and row.get("trace")
+    )
+    last = next(
+        row
+        for row in reversed(checkpoint_rows)
+        if row.get("target") == feature and row.get("trace")
+    )
+    physical = {"yes": "correct", "no": "incorrect"}
+    return {
+        "schema_version": 1,
+        "step_id": step_id,
+        "initial_state": protocol_state(first.get("pre_state")),
+        "target_state": protocol_state(first.get("expected")),
+        "restored_state": protocol_state(last.get("post_state")),
+        "physical_change_outcome": physical.get(
+            first.get("physical_outcome"), "unable_to_observe"
+        ),
+        "physical_restore_outcome": physical.get(
+            last.get("physical_outcome"), "unable_to_observe"
+        ),
+        "outcome": "pass"
+        if all(item.get("confirmed") is True for item in actions)
+        and first.get("physical_outcome") == "yes"
+        and last.get("physical_outcome") == "yes"
+        else "inconclusive",
+        "actions": actions,
+    }
+
+
 def _execute_output_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -2098,7 +2283,11 @@ def execute(args: argparse.Namespace) -> int:
                 )
             from .review_wizard import interactive_review
 
-            return interactive_review(args.matrix, run_id=args.run_id)
+            if args.tier == "bronze":
+                return interactive_review(args.matrix, run_id=args.run_id)
+            return interactive_review(args.matrix, run_id=args.run_id, tier=args.tier)
+        if args.tier != "bronze":
+            raise HAAPIError("--tier applies only to --interactive review")
         from .review import review_imported_run
 
         return review_imported_run(

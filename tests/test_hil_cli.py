@@ -25,6 +25,150 @@ def test_onboard_parser_declares_interactive_command():
     assert not hasattr(args, "token")
 
 
+def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
+    parent = tmp_path / "parent" / "private"
+    child = tmp_path / "tier_0123456789abcdef" / "private"
+    parent.mkdir(parents=True)
+    rows = []
+    for step_id, target, pre, post in (
+        ("ac_on", "on", "off", "on"),
+        ("ac_off", "off", "on", "off"),
+    ):
+        trace_name = f"traces/{step_id}"
+        trace_dir = child / trace_name
+        trace_dir.mkdir(parents=True)
+        transaction_id = f"{step_id}-transaction"
+        (trace_dir / "trace.json").write_text(
+            json.dumps(
+                {
+                    "complete": True,
+                    "dropped_events": 0,
+                    "dropped_frames": 0,
+                    "observed_route": "local_adapter",
+                }
+            )
+        )
+        events = [
+            {
+                "seq": seq,
+                "event": event,
+                "transaction_id": transaction_id,
+                "transaction_kind": "output",
+                "session_generation": 7,
+                "observed_route": "local_adapter",
+                **(
+                    {"reason": "matching_validated_telemetry"}
+                    if event == "transaction_confirmed"
+                    else {}
+                ),
+            }
+            for seq, event in (
+                (1, "write_attempt"),
+                (2, "transaction_submitted"),
+                (3, "transaction_confirmed"),
+            )
+        ]
+        frames = [
+            {
+                "seq": 1,
+                "event": "write_attempt",
+                "direction": "tx",
+                "command_type": "output_control",
+                "frame_validation": "validated_tx",
+                "session_generation": 7,
+                "transaction_id": transaction_id,
+            }
+        ]
+        for filename, trace_rows in (
+            ("events.jsonl", events),
+            ("frames.jsonl", frames),
+        ):
+            (trace_dir / filename).write_text(
+                "".join(json.dumps(item) + "\n" for item in trace_rows)
+            )
+        rows.append(
+            {
+                "target": "ac_output",
+                "outcome": "pass",
+                "trace": trace_name,
+                "session_generation": 7,
+                "route": "local_adapter",
+                "transaction": {
+                    "transaction_id": transaction_id,
+                    "write_seq": 1,
+                    "submitted_seq": 2,
+                    "confirmed_seq": 3,
+                    "session_generation": 7,
+                    "kind": "output",
+                    "command_type": "output_control",
+                },
+                "pre_state": pre,
+                "expected": target,
+                "post_state": post,
+                "physical_outcome": "yes",
+            }
+        )
+    result = cli._reviewable_tier_step_artifact(
+        parent_private=parent,
+        child_private=child,
+        step_id="ac_output_cycle",
+        feature="ac_output",
+        checkpoint_rows=rows,
+    )
+    assert result is not None
+    assert result["outcome"] == "pass"
+    assert result["initial_state"] == "off"
+    assert result["target_state"] == "on"
+    assert result["restored_state"] == "off"
+    assert [action["outcome"] for action in result["actions"]] == [
+        "confirmed",
+        "confirmed",
+    ]
+    assert all(
+        action["trace_evidence"][0]["path"].startswith("../../tier_")
+        for action in result["actions"]
+    )
+
+
+def test_standard_tier_step_artifact_rejects_missing_restoration_trace(tmp_path):
+    parent = tmp_path / "parent" / "private"
+    child = tmp_path / "tier_0123456789abcdef" / "private"
+    parent.mkdir(parents=True)
+    trace_dir = child / "traces/ac_on"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.json").write_text(
+        json.dumps(
+            {
+                "complete": True,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "observed_route": "local_adapter",
+            }
+        )
+    )
+    result = cli._reviewable_tier_step_artifact(
+        parent_private=parent,
+        child_private=child,
+        step_id="ac_output_cycle",
+        feature="ac_output",
+        checkpoint_rows=[
+            {
+                "target": "ac_output",
+                "outcome": "pass",
+                "trace": "traces/ac_on",
+                "session_generation": 7,
+                "route": "local_adapter",
+                "transaction": {"kind": "output", "session_generation": 7},
+                "pre_state": "off",
+                "expected": "on",
+                "post_state": "on",
+                "physical_outcome": "yes",
+            }
+        ],
+    )
+    assert result is None
+
+
 def test_onboard_rejects_non_interactive_invocation(monkeypatch):
     args = cli.make_parser().parse_args(["onboard"])
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)

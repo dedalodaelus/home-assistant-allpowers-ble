@@ -223,6 +223,32 @@ results. Any other response leaves the matrix unchanged. It reports the tier
 computed by the existing evaluator. No Home Assistant or BLE connection is
 used, and no artifact is uploaded.
 
+For Silver and Gold, select the requested tier explicitly:
+
+```bash
+python -m scripts.hil review \
+  --matrix tests/hil/qualification_matrix.json \
+  --run-id archive-... \
+  --tier gold \
+  --interactive
+```
+
+The reviewer shows the imported trace, decoded target state, route, session
+generation, exact frame digest, and hashed transaction reference with its write,
+submission, and confirmation sequence numbers. It asks separately whether the
+change, restoration, and production authorization were independently verified.
+The public archive does not identify its HIL operator; the reviewer must
+explicitly confirm they did not collect the run.
+Answers default to no. The dry run constructs schema-v3 records and validates them
+against the imported evidence graph and the existing tier evaluator. Type
+`APPLY REVIEW` only after inspecting the proposed result. Missing, cross-scope,
+incomplete, or experimental-write evidence stays inconclusive; an experimental
+HIL grant cannot qualify a production write capability. Silver requires both
+on and off transitions with their separate safe restorations. Gold also reviews
+declared setting changes and restorations. Platinum is blocked in offline
+review because the public archive does not preserve the required scope-bound,
+continuous 24-hour soak evidence.
+
 After a fully reviewed and validated Bronze import, `onboard` writes a concrete
 `pr.md` beside the private run record and prints shell-quoted commands that stage
 only the allowlisted matrix and public evidence files. Inspect that body and the
