@@ -13,11 +13,14 @@ import socket
 from typing import Any
 from urllib import error, parse, request
 
-from custom_components.allpowers_ble.const import MAX_STALE_TIMEOUT, WRITE_TIMEOUT
-
 MAX_JSON_BYTES = 16 * 1024 * 1024
 API_TIMEOUT = 12.0
-HIL_EXECUTE_TIMEOUT = API_TIMEOUT + MAX_STALE_TIMEOUT + WRITE_TIMEOUT + 5.0
+# Keep this standalone CLI budget aligned with the integration's bounded HIL
+# operation: API_TIMEOUT + MAX_STALE_TIMEOUT + WRITE_TIMEOUT + 5s margin.
+# Duplicating these numeric limits avoids importing Home Assistant at startup.
+HIL_MAX_STALE_TIMEOUT = 300.0
+HIL_WRITE_TIMEOUT = 10.0
+HIL_EXECUTE_TIMEOUT = API_TIMEOUT + HIL_MAX_STALE_TIMEOUT + HIL_WRITE_TIMEOUT + 5.0
 _CONTROL_DOMAINS = {
     "ac_output": "switch",
     "dc_output": "switch",

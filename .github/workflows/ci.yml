@@ -36,6 +36,15 @@ jobs:
           cache-dependency-glob: requirements_test.txt
           cache-suffix: py314
 
+      - name: Smoke test standalone HIL installation
+        run: |
+          hil_venv="$RUNNER_TEMP/hil-cli-smoke"
+          uv venv --python "$(command -v python)" "$hil_venv"
+          uv pip install --python "$hil_venv/bin/python" -r requirements_hil.txt
+          "$hil_venv/bin/python" -m scripts.hil --help
+          "$hil_venv/bin/python" -m scripts.hil doctor --help
+          "$hil_venv/bin/python" -m scripts.hil onboard --help
+
       - name: Install test dependencies
         run: uv pip install --python "$(command -v python)" -r requirements_test.txt
 
