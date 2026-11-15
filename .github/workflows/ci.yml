@@ -37,6 +37,8 @@ jobs:
           cache-suffix: py314
 
       - name: Smoke test standalone HIL installation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           hil_venv="$RUNNER_TEMP/hil-cli-smoke"
           uv venv --python "$(command -v python)" "$hil_venv"
