@@ -2131,16 +2131,45 @@ def _reviewable_tier_step_artifact(
                 "trace_evidence": evidence,
             }
         )
-    if len(actions) != 4 or len(checkpoint_rows) < 4:
-        return None
     rows = [
         row
         for row in checkpoint_rows
         if row.get("target") == feature and row.get("trace")
     ]
-    if len(rows) != 4:
-        return None
     physical = {"yes": "correct", "no": "incorrect"}
+    output_feature = feature in {"ac_output", "dc_output", "light_output"}
+    if not output_feature:
+        if len(actions) != 2 or len(rows) != 2:
+            return None
+        initial = protocol_state(rows[0].get("pre_state"))
+        target = protocol_state(rows[0].get("expected"))
+        restored = protocol_state(rows[-1].get("post_state"))
+        physical_change = physical.get(
+            rows[0].get("physical_outcome"), "unable_to_observe"
+        )
+        physical_restore = physical.get(
+            rows[-1].get("physical_outcome"), "unable_to_observe"
+        )
+        complete = (
+            all(action.get("confirmed") is True for action in actions)
+            and initial != target
+            and restored == initial
+            and physical_change == "correct"
+            and physical_restore == "correct"
+        )
+        return {
+            "schema_version": 1,
+            "step_id": step_id,
+            "initial_state": initial,
+            "target_state": target,
+            "restored_state": restored,
+            "physical_change_outcome": physical_change,
+            "physical_restore_outcome": physical_restore,
+            "outcome": "pass" if complete else "inconclusive",
+            "actions": actions,
+        }
+    if len(actions) != 4 or len(rows) != 4:
+        return None
     output_cycles = [
         {
             "initial_state": protocol_state(rows[0].get("pre_state")),

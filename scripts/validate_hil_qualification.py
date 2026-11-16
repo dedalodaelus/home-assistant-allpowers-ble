@@ -1570,7 +1570,8 @@ def _valid_public_frame_capture(
         stage_index = {"transition": 0, "restoration": 1}.get(action_stage)
         expected_guided_state = (
             ("on" if requested_state else "off")
-            if type(requested_state) is bool
+            if feature in {"ac_output", "dc_output", "light_output"}
+            and type(requested_state) is bool
             else requested_state
         )
         state_key = "target_state" if action_stage == "transition" else "initial_state"
@@ -1601,7 +1602,7 @@ def _valid_public_frame_capture(
                 else stage_index is None or stage_index == action_index
             )
             and (
-                feature not in {"ac_output", "dc_output", "light_output"}
+                feature in {"ac_output", "dc_output", "light_output"}
                 or guided.get(state_key) == expected_guided_state
             )
             and isinstance(action, dict)

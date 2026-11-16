@@ -436,6 +436,14 @@ def _reconnect_review_candidate(
     recovery = recoveries[-1]
     action_observation = action.get("observation", {})
     observation = recovery.get("observation", {})
+    if isinstance(action_observation, dict) and isinstance(
+        action_observation.get("observation"), dict
+    ):
+        action_observation = action_observation["observation"]
+    if isinstance(observation, dict) and isinstance(
+        observation.get("observation"), dict
+    ):
+        observation = observation["observation"]
     generation = observation.get("session_generation_after")
     if not (
         action.get("outcome") == "pass"

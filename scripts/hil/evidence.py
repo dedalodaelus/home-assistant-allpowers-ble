@@ -208,6 +208,8 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "unavailable",
         "could_not_connect",
         "unable_or_unwilling",
+        "yes",
+        "route interruption and restoration",
         "connected",
         "ha_stable",
         "ha_recovered",
@@ -228,6 +230,7 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "post_state",
         "cleanup_post_state",
         "physical_outcome",
+        "operator_action",
     ):
         value = state_value(name)
         if value is not None:
@@ -1329,7 +1332,8 @@ def _public_tier_artifact(
             valid = (
                 state in {True, False}
                 if setting_types[step_id] is bool
-                else state in ({0, 1, 2} if step_id == "work_mode" else {1, 2, 4, 6})
+                else state
+                in ({0, 1, 2} if step_id == "work_mode_reversal" else {1, 2, 4, 6})
             )
             if valid:
                 safe[key] = state

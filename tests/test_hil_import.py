@@ -720,6 +720,503 @@ def _captured_archive(
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
+def _standard_tier_suite_archive(path: Path) -> Path:
+    """Export schema-realistic Bronze, Silver, Gold, and reconnect fixtures."""
+    from scripts.hil.cli import _reviewable_tier_step_artifact
+    from scripts.hil.evidence import export_archive
+    from scripts.hil.runner import correlate_transaction
+
+    route = "local_adapter"
+    run_id = "abcdef0123456789"
+    source_root = path / "source"
+    archive = _captured_archive(
+        source_root,
+        route,
+        "1.1",
+        run_id,
+        bronze_reviewable=True,
+    )
+    del archive
+    parent_root = source_root / f"run-{run_id}"
+    parent_private = parent_root / "private"
+    environment = json.loads((parent_private / "environment.json").read_text())
+    device = {
+        "model": "ALLPOWERS R600",
+        "hardware_version": "0.3",
+        "firmware_version": "1.1",
+    }
+    execution: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "requested_tier": "gold",
+        "execution_tier": "gold",
+        "requested_route": route,
+        "device": device,
+        "build_provenance": {},
+        "review_state": "pending",
+        "steps": [],
+    }
+    generation = 7
+    action_counter = 0
+
+    def feature_frame(feature: str, state: Any) -> bytes:
+        if feature in {"ac_output", "dc_output", "light_output"}:
+            mask = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[feature]
+            frame = bytearray.fromhex("a56500b10101000000")
+            frame[7] = mask if state == "on" else 0
+        else:
+            frame = bytearray.fromhex("a56500b1010202000100")
+            if feature == "eco_mode":
+                frame[7] = 1 if state is True or state == "on" else 0
+            elif feature == "work_mode":
+                frame[7] = {"mute": 0, "standard": 1, "fast": 2}.get(state, state) << 1
+            elif feature == "car_charger":
+                frame[7] = 0x10 if state is True or state == "on" else 0
+            elif feature == "eco_timeout":
+                frame[8] = {
+                    "one_hour": 1,
+                    "two_hours": 2,
+                    "four_hours": 4,
+                    "six_hours": 6,
+                }.get(state, state)
+        checksum = 0
+        for byte in frame[:-1]:
+            checksum ^= byte
+        frame[-1] = checksum
+        return bytes(frame)
+
+    def add_action(
+        child_private: Path,
+        child_id: str,
+        scenario_id: str,
+        feature: str,
+        target: Any,
+    ) -> dict[str, Any]:
+        nonlocal action_counter
+        action_counter += 1
+        transaction_id = f"synthetic-tier-action-{action_counter}"
+        stamp = f"2026-11-09T12:00:{action_counter:02d}+00:00"
+        common = {
+            "schema_version": 2,
+            "run_id": child_id,
+            "scenario_id": scenario_id,
+            "layer": "gatt_api",
+            "session_generation": generation,
+            "observed_route": route,
+        }
+        route_event = {
+            **common,
+            "seq": 1,
+            "utc": stamp,
+            "elapsed_ms": 0.0,
+            "event": "route_observed",
+            "backend_kind": "bluez",
+            "evidence": "bluez_device_path",
+            "adapter_id": "hci0",
+        }
+        write_event = {
+            **common,
+            "seq": 2,
+            "utc": stamp,
+            "elapsed_ms": 100.0,
+            "event": "write_attempt",
+            "transaction_kind": (
+                "output"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "settings"
+            ),
+            "transaction_id": transaction_id,
+        }
+        submitted_event = {
+            **common,
+            "seq": 3,
+            "utc": stamp,
+            "elapsed_ms": 200.0,
+            "event": "transaction_submitted",
+            "transaction_kind": write_event["transaction_kind"],
+            "transaction_id": transaction_id,
+        }
+        confirmed_event = {
+            **common,
+            "seq": 4,
+            "utc": stamp,
+            "elapsed_ms": 300.0,
+            "event": "transaction_confirmed",
+            "transaction_kind": write_event["transaction_kind"],
+            "transaction_id": transaction_id,
+            "reason": "matching_validated_telemetry",
+        }
+        frame = {
+            **write_event,
+            "direction": "tx",
+            "command_type": (
+                "output_control"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "settings_control"
+            ),
+            "frame_validation": "validated_tx",
+            "hex": feature_frame(feature, target).hex(),
+        }
+        events = [route_event, write_event, submitted_event, confirmed_event]
+        trace = {
+            "schema_version": 2,
+            "capture_scope": "runtime_entry",
+            "capture_id": f"synthetic-{child_id}-{action_counter}",
+            "run_id": child_id,
+            "scenario_id": scenario_id,
+            "requested_route": route,
+            "capture_layer": "gatt_api_not_rf",
+            "private_raw_bytes": True,
+            "has_gatt_frames": True,
+            "closed": True,
+            "expired": False,
+            "termination_reason": "requested_stop",
+            "qualification_allowed": False,
+            "observed_route": route,
+            "complete": True,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "event_count": len(events),
+            "frame_count": 1,
+            "events": events,
+            "frames": [frame],
+            "route_observations": [
+                {
+                    "session_generation": generation,
+                    "seq": 1,
+                    "utc": stamp,
+                    "elapsed_ms": 0.0,
+                    "observed_route": route,
+                    "backend_kind": "bluez",
+                    "evidence": "bluez_device_path",
+                    "adapter_id": "hci0",
+                }
+            ],
+        }
+        trace_name = f"traces/action_{action_counter}"
+        trace_dir = child_private / trace_name
+        trace_dir.mkdir(parents=True)
+        _save_private_trace(trace_dir, trace)
+        transaction = correlate_transaction(
+            trace,
+            expected_generation=generation,
+            kind=write_event["transaction_kind"],
+        )
+        assert transaction is not None
+        return {
+            "target": feature,
+            "outcome": "pass",
+            "trace": trace_name,
+            "session_generation": generation,
+            "route": route,
+            "transaction": transaction,
+            "physical_outcome": "yes",
+            "step_id": f"action_{action_counter}",
+        }
+
+    def add_feature_step(
+        step_id: str,
+        scenario_id: str,
+        feature: str,
+        actions: list[tuple[Any, Any, Any]],
+    ) -> None:
+        child_id = f"{len(execution['steps']) + 1:016x}"
+        child_private = write_run(
+            source_root,
+            f"tier_{child_id}",
+            environment,
+            {
+                "run_id": child_id,
+                "parent_tier_run_id": run_id,
+                "tier_step_id": step_id,
+                "requested_route": route,
+                "device": device,
+            },
+        )
+        checkpoint_rows = []
+        scenario_step_ids = {
+            "output_ac_cycle": [
+                "ac_on",
+                "ac_off",
+                "ac_on_second_cycle",
+                "ac_final_restore",
+            ],
+            "output_dc_cycle": [
+                "dc_on",
+                "dc_off",
+                "dc_on_second_cycle",
+                "dc_final_restore",
+            ],
+            "output_light_cycle": [
+                "light_on",
+                "light_off",
+                "light_on_second_cycle",
+                "light_final_restore",
+            ],
+            "settings_eco_mode": ["eco_mode_on"],
+            "settings_work_mode": ["work_mode_standard"],
+            "settings_eco_timeout": ["eco_timeout_two_hours"],
+            "output_car_charger_cycle": ["car_charger_on", "car_charger_off"],
+        }
+        for action_index, (before, target, after) in enumerate(actions):
+            row = add_action(child_private, child_id, scenario_id, feature, target)
+            row.update(pre_state=before, expected=target, post_state=after)
+            row["step_id"] = scenario_step_ids[scenario_id][
+                min(action_index, len(scenario_step_ids[scenario_id]) - 1)
+            ]
+            checkpoint_rows.append(row)
+        write_scenario_progress(
+            child_private,
+            child_id,
+            scenario_id,
+            "a" * 64,
+            checkpoint_rows,
+        )
+        review_artifact = _reviewable_tier_step_artifact(
+            parent_private=parent_private,
+            child_private=child_private,
+            step_id=step_id,
+            feature=feature,
+            checkpoint_rows=checkpoint_rows,
+        )
+        assert review_artifact is not None
+        review_name = f"tier-{step_id}.json"
+        (parent_private / review_name).write_text(
+            json.dumps(review_artifact, sort_keys=True), encoding="utf-8"
+        )
+        machine_evidence = []
+        for relative in [
+            "checkpoint.json",
+            *(f"{row['trace']}/trace.json" for row in checkpoint_rows),
+        ]:
+            source = child_private / relative
+            machine_evidence.append(
+                {
+                    "path": f"../../tier_{child_id}/private/{relative}",
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
+        review_path = parent_private / review_name
+        machine_evidence.append(
+            {
+                "path": review_name,
+                "sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
+            }
+        )
+        execution["steps"].append(
+            {
+                "step_id": step_id,
+                "scenario_id": scenario_id,
+                "outcome": "pass",
+                "observed_routes": [route],
+                "human_review": "pending",
+                "authorization_context": "production",
+                "authorization_context_source": "runtime_production_authorized",
+                "machine_evidence": machine_evidence,
+                "evidence_run": f"../../tier_{child_id}/private",
+            }
+        )
+
+    for feature, step_id, scenario_id in (
+        ("ac_output", "ac_output_cycle", "output_ac_cycle"),
+        ("dc_output", "dc_output_cycle", "output_dc_cycle"),
+        ("light_output", "light_output_cycle", "output_light_cycle"),
+    ):
+        add_feature_step(
+            step_id,
+            scenario_id,
+            feature,
+            [
+                ("off", "on", "on"),
+                ("on", "off", "off"),
+                ("off", "on", "on"),
+                ("on", "off", "off"),
+            ],
+        )
+    for feature, step_id, scenario_id, initial, target in (
+        ("eco_mode", "eco_mode_reversal", "settings_eco_mode", "off", "on"),
+        ("work_mode", "work_mode_reversal", "settings_work_mode", "mute", "fast"),
+        (
+            "eco_timeout",
+            "eco_timeout_reversal",
+            "settings_eco_timeout",
+            "one_hour",
+            "four_hours",
+        ),
+        (
+            "car_charger",
+            "car_charger_reversal",
+            "output_car_charger_cycle",
+            "off",
+            "on",
+        ),
+    ):
+        add_feature_step(
+            step_id,
+            scenario_id,
+            feature,
+            [(initial, target, target), (target, initial, initial)],
+        )
+
+    reconnect_id = "0000000000000008"
+    reconnect_private = write_run(
+        source_root,
+        f"tier_{reconnect_id}",
+        environment,
+        {
+            "run_id": reconnect_id,
+            "parent_tier_run_id": run_id,
+            "tier_step_id": "basic_reconnect",
+            "requested_route": route,
+            "device": device,
+        },
+    )
+    reconnect_stamp = "2026-11-09T12:01:00+00:00"
+    transaction_id = "synthetic-reconnect-status"
+    reconnect_common = {
+        "schema_version": 2,
+        "run_id": reconnect_id,
+        "scenario_id": "recovery_reconnect",
+        "layer": "gatt_api",
+        "session_generation": generation + 1,
+        "observed_route": route,
+    }
+    reconnect_events = [
+        {
+            **reconnect_common,
+            "seq": 1,
+            "utc": reconnect_stamp,
+            "elapsed_ms": 0.0,
+            "event": "route_observed",
+            "backend_kind": "bluez",
+            "evidence": "bluez_device_path",
+            "adapter_id": "hci0",
+        },
+        {
+            **reconnect_common,
+            "seq": 2,
+            "utc": reconnect_stamp,
+            "elapsed_ms": 100.0,
+            "event": "write_attempt",
+            "transaction_id": transaction_id,
+        },
+        {
+            **reconnect_common,
+            "seq": 3,
+            "utc": reconnect_stamp,
+            "elapsed_ms": 200.0,
+            "event": "write_ok",
+            "transaction_id": transaction_id,
+        },
+        {
+            **reconnect_common,
+            "seq": 4,
+            "utc": reconnect_stamp,
+            "elapsed_ms": 300.0,
+            "event": "notification_decoded",
+            "decoded_packet_types": ["StatusData"],
+        },
+    ]
+    status_frame = {
+        **reconnect_events[1],
+        "direction": "tx",
+        "command_type": "status_request",
+        "frame_validation": "validated_tx",
+        "hex": "a565b1000106010000000000",
+    }
+    reconnect_trace = {
+        "schema_version": 2,
+        "capture_scope": "runtime_entry",
+        "capture_id": f"synthetic-reconnect-{reconnect_id}",
+        "run_id": reconnect_id,
+        "scenario_id": "recovery_reconnect",
+        "requested_route": route,
+        "capture_layer": "gatt_api_not_rf",
+        "private_raw_bytes": True,
+        "has_gatt_frames": True,
+        "closed": True,
+        "expired": False,
+        "termination_reason": "requested_stop",
+        "qualification_allowed": False,
+        "observed_route": route,
+        "complete": True,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "event_count": len(reconnect_events),
+        "frame_count": 1,
+        "events": reconnect_events,
+        "frames": [status_frame],
+        "route_observations": [
+            {
+                "session_generation": generation + 1,
+                "seq": 1,
+                "utc": reconnect_stamp,
+                "elapsed_ms": 0.0,
+                "observed_route": route,
+                "backend_kind": "bluez",
+                "evidence": "bluez_device_path",
+                "adapter_id": "hci0",
+            }
+        ],
+    }
+    reconnect_trace_dir = reconnect_private / "traces/reconnect"
+    reconnect_trace_dir.mkdir(parents=True)
+    _save_private_trace(reconnect_trace_dir, reconnect_trace)
+    write_scenario_progress(
+        reconnect_private,
+        reconnect_id,
+        "recovery_reconnect",
+        "a" * 64,
+        [
+            {"step_id": "baseline", "outcome": "pass"},
+            {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": "route interruption and restoration",
+                "operator_confirmed": True,
+            },
+            {
+                "step_id": "recovered_session",
+                "outcome": "pass",
+                "session_generation_before": generation,
+                "session_generation_after": generation + 1,
+                "disconnect_observed": True,
+                "connected": True,
+                "status_fresh": True,
+                "route_verified": True,
+                "trace_complete": True,
+                "fresh_status_telemetry": True,
+                "physical_outcome": "yes",
+                "route": route,
+            },
+        ],
+    )
+    reconnect_evidence = []
+    for relative in ("checkpoint.json", "traces/reconnect/trace.json"):
+        source = reconnect_private / relative
+        reconnect_evidence.append(
+            {
+                "path": f"../../tier_{reconnect_id}/private/{relative}",
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        )
+    execution["steps"].append(
+        {
+            "step_id": "basic_reconnect",
+            "scenario_id": "recovery_reconnect",
+            "outcome": "pass",
+            "observed_routes": [route],
+            "human_review": "pending",
+            "machine_evidence": reconnect_evidence,
+            "evidence_run": f"../../tier_{reconnect_id}/private",
+        }
+    )
+    (parent_private / "tier-execution.json").write_text(
+        json.dumps(execution, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return export_archive(parent_root, confirmed=True)
+
+
 @pytest.mark.parametrize("packet_types", [("SettingsData",), ()])
 def test_private_export_rejects_bronze_pass_without_decoded_status(
     tmp_path: Path, packet_types: tuple[str, ...]
@@ -2026,6 +2523,89 @@ def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
     )
     assert errors == []
     assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "unqualified"
+
+
+def test_standard_tier_export_review_apply_reaches_silver_and_gold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _standard_tier_suite_archive(tmp_path / "standard")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = imported["revisions"][0]["runs"][0]["run_id"]
+
+    _tty(monkeypatch)
+
+    def answer_review(responses: list[str]) -> None:
+        iterator = iter(responses)
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(iterator))
+
+    answer_review(
+        _review_answers(reviewer="Bronze reviewer", inspected=True, apply=True)
+    )
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+
+    # Six output cycles each require authorization, change, and restore
+    # confirmations, followed by reconnect review and explicit apply.
+    answer_review(["Silver reviewer", *(["yes"] * 21), "APPLY REVIEW"])
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    silver = evaluate_tiers(matrix)["tiers"][0]
+    assert silver["tier"] == "silver"
+    assert set(silver["qualified_features"]) >= {
+        "ac_output",
+        "dc_output",
+        "light_output",
+    }
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+    # Gold repeats the independent output review and additionally reviews all
+    # four settings cycles before dry-run and apply.
+    answer_review(["Gold reviewer", *(["yes"] * 33), "APPLY REVIEW"])
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    errors, _ = validate_hil_qualification.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    gold = evaluate_tiers(matrix)["tiers"][0]
+    assert gold["tier"] == "gold"
+    assert set(gold["qualified_features"]) == {
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+        "car_charger",
+    }
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
 
 
 def test_higher_tier_review_requires_reviewer_independence_confirmation(
