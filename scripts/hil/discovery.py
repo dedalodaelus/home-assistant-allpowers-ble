@@ -7,7 +7,7 @@ import ipaddress
 import re
 from typing import Any
 
-from .api import HAAPIError
+from .api import HAAPIError, ReadOnlyRefreshButton
 
 DOMAIN = "allpowers_ble"
 KNOWN_MODELS = {"R600", "VOLIX P1800", "BLE power station", "S500", "S700"}
@@ -55,7 +55,7 @@ class Device:
     entry_state: str | None = None
     control_entities: dict[str, str] = field(default_factory=dict)
     config_entry_id: str | None = None
-    refresh_entity: str | None = None
+    refresh_button: ReadOnlyRefreshButton | None = None
 
 
 def safe_model(value: Any) -> str:
@@ -185,17 +185,30 @@ def _control_key(entry: dict[str, Any]) -> str | None:
     return None
 
 
-def _refresh_entity(entry: dict[str, Any]) -> str | None:
+def _refresh_button(
+    entry: dict[str, Any], *, device_id: str, loaded_entry_id: str | None
+) -> ReadOnlyRefreshButton | None:
     """Resolve only the integration-owned read-only refresh button."""
     unique_id = entry.get("unique_id")
     entity_id = entry.get("entity_id")
+    config_entry_id = entry.get("config_entry_id")
     if (
-        isinstance(unique_id, str)
+        entry.get("platform") == DOMAIN
+        and entry.get("device_id") == device_id
+        and isinstance(unique_id, str)
         and unique_id.endswith("_refresh")
         and isinstance(entity_id, str)
-        and entity_id.startswith("button.")
+        and re.fullmatch(r"button\.[a-z0-9_]+", entity_id) is not None
+        and isinstance(config_entry_id, str)
+        and config_entry_id == loaded_entry_id
     ):
-        return entity_id
+        return ReadOnlyRefreshButton(
+            entity_id=entity_id,
+            unique_id=unique_id,
+            platform=DOMAIN,
+            device_id=device_id,
+            config_entry_id=config_entry_id,
+        )
     return None
 
 
@@ -238,12 +251,21 @@ def find_devices(
             continue
         mapping: dict[str, str] = {}
         control_mapping: dict[str, str] = {}
-        refresh_entity: str | None = None
-        ambiguous_refresh = False
+        loaded_entry_id = _loaded_entry_id(raw_device, entries)
+        refresh_button: ReadOnlyRefreshButton | None = None
+        refresh_candidate_count = 0
+        invalid_refresh_candidate = False
         ambiguous: set[str] = set()
         ambiguous_controls: set[str] = set()
         for entity in platforms.get(device_id, []):
+            unique_id = entity.get("unique_id")
+            is_refresh_candidate = isinstance(unique_id, str) and unique_id.endswith(
+                "_refresh"
+            )
+            if is_refresh_candidate:
+                refresh_candidate_count += 1
             if entity.get("disabled_by") is not None:
+                invalid_refresh_candidate |= is_refresh_candidate
                 continue
             key = _entity_key(entity)
             entity_id = entity.get("entity_id")
@@ -252,17 +274,13 @@ def find_devices(
                     ambiguous.add(key)
                 mapping[key] = entity_id
             control_key = _control_key(entity)
-            refresh = _refresh_entity(entity)
+            refresh = _refresh_button(
+                entity, device_id=device_id, loaded_entry_id=loaded_entry_id
+            )
             if refresh is not None:
-                config_entry_id = entity.get("config_entry_id")
-                linked_entries = _linked_entry_ids(raw_device)
-                if config_entry_id is None or (
-                    linked_entries and config_entry_id not in linked_entries
-                ):
-                    continue
-                if refresh_entity is not None:
-                    ambiguous_refresh = True
-                refresh_entity = refresh
+                refresh_button = refresh
+            elif is_refresh_candidate:
+                invalid_refresh_candidate = True
             expected_domain = CONTROL_DOMAINS.get(control_key or "")
             if (
                 control_key is not None
@@ -285,8 +303,8 @@ def find_devices(
             mapping.pop(key, None)
         for key in ambiguous_controls:
             control_mapping.pop(key, None)
-        if ambiguous_refresh:
-            refresh_entity = None
+        if refresh_candidate_count != 1 or invalid_refresh_candidate:
+            refresh_button = None
         results.append(
             Device(
                 device_id=device_id,
@@ -297,7 +315,7 @@ def find_devices(
                 entry_state=_entry_state(raw_device, entries),
                 control_entities=control_mapping,
                 config_entry_id=_loaded_entry_id(raw_device, entries),
-                refresh_entity=refresh_entity,
+                refresh_button=refresh_button,
             )
         )
     return sorted(

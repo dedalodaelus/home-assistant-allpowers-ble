@@ -776,9 +776,10 @@ def _execute_tier_suite(
             if (
                 device.entry_state == "loaded"
                 and device.config_entry_id is not None
-                and device.refresh_entity is not None
+                and device.refresh_button is not None
             ):
                 capture_id = None
+                failure_stage = "capture_start"
                 try:
                     started = api.websocket(
                         [
@@ -799,7 +800,9 @@ def _execute_tier_suite(
                         and started["ttl_seconds"] >= 2
                     ):
                         capture_id = started["capture_id"]
-                        api.request_read_only_refresh(device.refresh_entity)
+                        failure_stage = "refresh"
+                        api.request_read_only_refresh(device.refresh_button)
+                        failure_stage = "capture"
                         wait_budget = min(12.0, started["ttl_seconds"] - 1.0)
                         deadline = services.monotonic() + wait_budget
                         maximum_polls = min(25, math.ceil(wait_budget / 0.5) + 1)
@@ -930,12 +933,21 @@ def _execute_tier_suite(
                             if status_tx
                             else None,
                         }
+                        failure_stage = "complete"
                     else:
                         second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
                 except HAAPIError, OSError, TypeError, ValueError, KeyError:
                     second_sample = {}
-                    protocol_probe = {"outcome": "inconclusive"}
+                    protocol_probe = {
+                        "outcome": "inconclusive",
+                        "stage": failure_stage,
+                        "reason": (
+                            "refresh_failed"
+                            if failure_stage == "refresh"
+                            else "capture_incomplete"
+                        ),
+                    }
                     if capture_id is not None:
                         try:
                             api.websocket(
@@ -949,6 +961,16 @@ def _execute_tier_suite(
                             )
                         except HAAPIError:
                             pass
+            elif (
+                device.entry_state == "loaded"
+                and device.config_entry_id is not None
+                and device.refresh_button is None
+            ):
+                protocol_probe = {
+                    "outcome": "inconclusive",
+                    "stage": "refresh",
+                    "reason": "refresh_unavailable",
+                }
             else:
                 services.sleep(1)
                 try:
@@ -1009,6 +1031,18 @@ def _execute_tier_suite(
                 {
                     "step_id": step_id,
                     "outcome": "pass" if bronze_pass else "inconclusive",
+                    **(
+                        {
+                            "reason": "The read-only refresh button could not be safely "
+                            "resolved or invoked. Check that exactly one enabled "
+                            "ALLPOWERS Refresh status button is linked to the selected "
+                            "device and loaded entry.",
+                            "failure_category": protocol_probe["reason"],
+                        }
+                        if protocol_probe.get("reason")
+                        in {"refresh_failed", "refresh_unavailable"}
+                        else {}
+                    ),
                     "observed_routes": [
                         protocol_probe["route"]
                         if protocol_probe.get("outcome") == "pass"

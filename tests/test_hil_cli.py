@@ -965,6 +965,8 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
         ),
         ([], "write_ok", "synthetic", "inconclusive", "notification_decoded"),
         ([], "write_ok", "no_response", "inconclusive", None),
+        ([], "write_ok", "refresh_rejected", "inconclusive", None),
+        ([], "write_ok", "refresh_unavailable", "inconclusive", None),
         (
             ["StatusData"],
             "write_ok",
@@ -1056,6 +1058,7 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             self.observer = None
             self.notification_delivered = False
             self.fetch_count = 0
+            self.refresh_service_calls = []
 
         def websocket(self, commands):
             command = commands[0]
@@ -1105,8 +1108,15 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             self.capture.stop()
             return [self.capture.snapshot()]
 
-        def request_read_only_refresh(self, entity_id):
-            assert entity_id == "button.station_refresh"
+        def request_read_only_refresh(self, button):
+            assert button.entity_id == "button.r600_actualizar_estado"
+            refresh_client = api.HAClient("http://127.0.0.1:8123", "token")
+            refresh_client.websocket = lambda commands: (
+                self.refresh_service_calls.extend(commands) or [{"context": {}}]
+            )
+            refresh_client.request_read_only_refresh(button)
+            if notification_mode == "refresh_rejected":
+                raise api.HAAPIError("safe internal failure")
             if use_production_client:
 
                 async def write_and_notify(characteristic, frame, *, response):
@@ -1161,16 +1171,37 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             )
 
     api_fake = BronzeProbeHA()
-    device = discovery.Device(
-        device_id="private-device-id",
-        model="R600",
-        hardware="0.3",
-        firmware="0.2",
-        state_entities={},
-        entry_state="loaded",
-        config_entry_id="private-entry",
-        refresh_entity="button.station_refresh",
+    (device,) = discovery.find_devices(
+        [
+            {
+                "device_id": "private-device-id",
+                "platform": "allpowers_ble",
+                "entity_id": "button.r600_actualizar_estado",
+                "unique_id": "registry_refresh",
+                "config_entry_id": "private-entry",
+                "disabled_by": None,
+            }
+        ],
+        [
+            {
+                "id": "private-device-id",
+                "config_entry_id": "private-entry",
+                "identifiers": [["allpowers_ble", "private-registry-id"]],
+                "model": "R600",
+                "hw_version": "0.3",
+                "sw_version": "0.2",
+            }
+        ],
+        [
+            {
+                "entry_id": "private-entry",
+                "domain": "allpowers_ble",
+                "state": "loaded",
+            }
+        ],
     )
+    if notification_mode == "refresh_unavailable":
+        device.refresh_button = None
     environment_data = {
         "schema_version": 1,
         "home_assistant": {},
@@ -1250,6 +1281,37 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     assert result == (0 if expected_probe == "pass" else 2)
     private_bronze = json.loads((run_dir / "tier-bronze-read-only.json").read_text())
     assert private_bronze["protocol_probe"]["outcome"] == expected_probe
+    if notification_mode == "refresh_unavailable":
+        assert api_fake.refresh_service_calls == []
+        category = "refresh_unavailable"
+    else:
+        assert api_fake.refresh_service_calls == [
+            {
+                "type": "call_service",
+                "domain": "button",
+                "service": "press",
+                "target": {"entity_id": "button.r600_actualizar_estado"},
+            }
+        ]
+        category = "refresh_failed"
+    if notification_mode in {"refresh_rejected", "refresh_unavailable"}:
+        assert private_bronze["protocol_probe"] == {
+            "outcome": "inconclusive",
+            "stage": "refresh",
+            "reason": category,
+        }
+        execution = json.loads((run_dir / "tier-execution.json").read_text())
+        assert "Refresh status button" in execution["steps"][0]["reason"]
+        assert execution["steps"][0]["failure_category"] == category
+        from scripts.hil.onboard import assess_run_gate
+
+        blockers = assess_run_gate(
+            run_dir,
+            run_result=result,
+            requested_tier="bronze",
+            status_exchange=cli._bronze_status_exchange,
+        )
+        assert any(blocker["outcome"] == category for blocker in blockers)
     if use_production_client and expected_probe == "pass":
         from scripts.hil.onboard import assess_run_gate
 
@@ -1293,7 +1355,9 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     archive = export_archive(run_dir.parent, confirmed=True)
     _, public, _ = verify_public_archive(archive, include_contents=True)
     public_bronze = json.loads(public["tier-bronze-read-only.json"])
-    public_events = [json.loads(line) for line in public["events.jsonl"].splitlines()]
+    public_events = [
+        json.loads(line) for line in public.get("events.jsonl", "").splitlines()
+    ]
     decoded = next(
         (
             row
@@ -5455,7 +5519,7 @@ def test_discovery_maps_only_linked_integration_read_only_refresh_button():
         {
             "device_id": "device-1",
             "platform": "allpowers_ble",
-            "entity_id": "button.device_refresh",
+            "entity_id": "button.r600_actualizar_estado",
             "unique_id": "registry_refresh",
             "config_entry_id": "entry-1",
             "disabled_by": None,
@@ -5481,7 +5545,67 @@ def test_discovery_maps_only_linked_integration_read_only_refresh_button():
 
     (device,) = discovery.find_devices(entities, devices, entries)
 
-    assert device.refresh_entity == "button.device_refresh"
+    assert device.refresh_button is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"platform": "foreign_integration"},
+        {"device_id": "other-device"},
+        {"disabled_by": "user"},
+        {"entity_id": "button.invalid.name"},
+        {"config_entry_id": "other-entry"},
+    ],
+)
+def test_refresh_discovery_rejects_untrusted_or_invalid_registry_rows(changes):
+    entity = {
+        "device_id": "device-1",
+        "platform": "allpowers_ble",
+        "entity_id": "button.r600_actualizar_estado",
+        "unique_id": "registry_refresh",
+        "config_entry_id": "entry-1",
+        "disabled_by": None,
+    }
+    entity.update(changes)
+    (device,) = discovery.find_devices(
+        [entity],
+        [
+            {
+                "id": "device-1",
+                "config_entry_id": "entry-1",
+                "identifiers": [["allpowers_ble", "private-registry-id"]],
+                "model": "R600",
+            }
+        ],
+        [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}],
+    )
+    assert device.refresh_button is None
+
+
+def test_refresh_discovery_rejects_ambiguous_owned_buttons():
+    first = {
+        "device_id": "device-1",
+        "platform": "allpowers_ble",
+        "entity_id": "button.r600_refresh",
+        "unique_id": "registry_refresh",
+        "config_entry_id": "entry-1",
+        "disabled_by": None,
+    }
+    second = {**first, "entity_id": "button.r600_actualizar_estado"}
+    (device,) = discovery.find_devices(
+        [first, second],
+        [
+            {
+                "id": "device-1",
+                "config_entry_id": "entry-1",
+                "identifiers": [["allpowers_ble", "private-registry-id"]],
+                "model": "R600",
+            }
+        ],
+        [{"entry_id": "entry-1", "domain": "allpowers_ble", "state": "loaded"}],
+    )
+    assert device.refresh_button is None
 
 
 def test_control_state_filters_unavailable_states_and_unknown_options(monkeypatch):
@@ -5541,7 +5665,18 @@ def test_call_control_only_sends_allowlisted_service_targets(monkeypatch):
     ]
 
 
-def test_request_read_only_refresh_uses_only_the_integration_button(monkeypatch):
+@pytest.mark.parametrize(
+    "entity_id",
+    [
+        "button.r600_actualizar_estado",
+        "button.r600_refresh",
+        "button.r600_refresh_status",
+        "button.my_custom_refresh_name",
+    ],
+)
+def test_request_read_only_refresh_uses_only_the_discovered_button(
+    monkeypatch, entity_id
+):
     client = api.HAClient("http://127.0.0.1:8123", "token")
     commands = []
     monkeypatch.setattr(
@@ -5550,18 +5685,43 @@ def test_request_read_only_refresh_uses_only_the_integration_button(monkeypatch)
         lambda rows: commands.extend(rows) or [{"context": {}}],
     )
 
-    client.request_read_only_refresh("button.station_refresh")
+    button = api.ReadOnlyRefreshButton(
+        entity_id=entity_id,
+        unique_id="registry_refresh",
+        platform="allpowers_ble",
+        device_id="device-1",
+        config_entry_id="entry-1",
+    )
+    client.request_read_only_refresh(button)
 
     assert commands == [
         {
             "type": "call_service",
             "domain": "button",
             "service": "press",
-            "target": {"entity_id": "button.station_refresh"},
+            "target": {"entity_id": entity_id},
         }
     ]
-    with pytest.raises(api.HAAPIError):
-        client.request_read_only_refresh("button.other_domain_press")
+    for untrusted in (
+        "button.other_domain_press",
+        api.ReadOnlyRefreshButton(
+            entity_id="button.foreign_refresh",
+            unique_id="registry_refresh",
+            platform="foreign_integration",
+            device_id="device-1",
+            config_entry_id="entry-1",
+        ),
+        api.ReadOnlyRefreshButton(
+            entity_id="button.malformed.id",
+            unique_id="registry_refresh",
+            platform="allpowers_ble",
+            device_id="device-1",
+            config_entry_id="entry-1",
+        ),
+    ):
+        with pytest.raises(api.HAAPIError):
+            client.request_read_only_refresh(untrusted)
+    assert len(commands) == 1
 
 
 @pytest.mark.parametrize(
