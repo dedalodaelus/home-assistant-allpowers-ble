@@ -1079,10 +1079,7 @@ def _execute_tier_suite(
                     "human_review": "pending",
                 }
             )
-            if getattr(args, "onboarding", False) and plan.get("requested_tier") in {
-                "silver",
-                "gold",
-            }:
+            if plan.get("requested_tier") in {"silver", "gold"}:
                 from .guided import build_tier_plan
 
                 observed_route = (
@@ -1103,12 +1100,22 @@ def _execute_tier_suite(
                 )
                 requested_tier = plan["requested_tier"]
                 build_provenance = plan.get("device", {}).get("build_provenance", {})
+                inventory_preflight = (
+                    {}
+                    if args.non_interactive
+                    else _collect_physical_inventory_preflight(
+                        refreshed_capabilities,
+                        refreshed_controls,
+                        prompt=services.prompt,
+                    )
+                )
                 refreshed_plan = build_tier_plan(
                     requested_tier,
                     refreshed_capabilities,
                     refreshed_controls,
                     observed_route=observed_route,
                     build_provenance=build_provenance,
+                    inventory_preflight=inventory_preflight,
                 )
                 for refreshed_step in refreshed_plan["steps"]:
                     if _candidate_step_needs_authorization(
@@ -1148,7 +1155,8 @@ def _execute_tier_suite(
                     )
                     try:
                         continue_bronze = (
-                            services.prompt(
+                            not args.non_interactive
+                            and services.prompt(
                                 "Type BRONZE to keep only the read-only diagnostics, or press Enter to stop: "
                             ).strip()
                             == "BRONZE"
@@ -1162,6 +1170,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         print(
@@ -1175,6 +1184,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         overall = 2
@@ -1185,7 +1195,8 @@ def _execute_tier_suite(
                 else:
                     try:
                         proceed = (
-                            services.prompt(
+                            not args.non_interactive
+                            and services.prompt(
                                 "Type RUN after reviewing the refreshed plan to authorize proceeding to individually consented steps: "
                             ).strip()
                             == "RUN"
@@ -1199,6 +1210,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         overall = 2
@@ -1272,15 +1284,23 @@ def _execute_tier_suite(
                     }
                 )
                 continue
-            if (
-                not isinstance(facts, dict)
-                or facts.get("physical_presence") != "present"
+            if not isinstance(facts, dict) or not (
+                facts.get("physical_presence") == "present"
+                or (
+                    facts.get("physical_presence") == "unknown"
+                    and facts.get("production_authorized") is True
+                    and planned.get("inventory_preflight")
+                    == "operator_inspected_present"
+                    and isinstance(plan.get("physical_inventory_preflight"), dict)
+                    and plan["physical_inventory_preflight"].get("source")
+                    == "operator_physical_inspection"
+                )
             ):
                 execution["steps"].append(
                     {
                         "step_id": step_id,
                         "outcome": "blocked",
-                        "reason": "physical presence is unknown or unreviewed",
+                        "reason": "physical presence is unknown and no valid production-authorized inventory preflight is recorded",
                     }
                 )
                 overall = 2
@@ -1534,6 +1554,62 @@ def _execute_tier_suite(
         "Requested tier is not an attained qualification; independent review remains pending."
     )
     return overall
+
+
+def _collect_physical_inventory_preflight(
+    capabilities: dict[str, Any] | None,
+    controls: dict[str, Any],
+    *,
+    prompt: Callable[[str], str],
+) -> dict[str, dict[str, str]]:
+    """Collect an operator inspection gate, separate from independent review."""
+    features = (
+        capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    )
+    if not isinstance(features, dict):
+        return {}
+    control_keys = {
+        "ac_output": "ac_output",
+        "dc_output": "dc_output",
+        "light_output": "light",
+        "eco_mode": "eco_mode",
+        "work_mode": "work_mode",
+        "eco_timeout": "eco_timeout",
+        "car_charger": "car_charger",
+    }
+    result: dict[str, dict[str, str]] = {}
+    identity = " ".join(
+        str(value)
+        for value in (
+            capabilities.get("model"),
+            capabilities.get("hardware_revision"),
+            capabilities.get("firmware_revision"),
+        )
+        if isinstance(value, str) and value
+    )
+    for feature, control_key in control_keys.items():
+        facts = features.get(feature)
+        control = controls.get(control_key)
+        if (
+            not isinstance(facts, dict)
+            or facts.get("physical_presence") != "unknown"
+            or facts.get("production_authorized") is not True
+            or not isinstance(control, dict)
+            or control.get("available") is not True
+        ):
+            continue
+        try:
+            answer = prompt(
+                f"Physically inspect {identity}: confirm {feature} is present and belongs to this exact unit. Type PRESENT only after inspection (anything else leaves it blocked): "
+            ).strip()
+        except EOFError, KeyboardInterrupt:
+            answer = ""
+        if answer == "PRESENT":
+            result[feature] = {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
+    return result
 
 
 def _execute_experimental_output_step(

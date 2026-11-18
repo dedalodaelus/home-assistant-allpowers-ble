@@ -416,6 +416,7 @@ def _interactive_higher_tier_review(
     }
     steps = execution.get("steps", []) if isinstance(execution, dict) else []
     absence_candidates = []
+    inventory_preflight: dict[str, Any] = {}
     try:
         session = json.loads(members["session.json"])
         session_data = session.get("data", {})
@@ -431,6 +432,32 @@ def _interactive_higher_tier_review(
             and firmware == run.get("firmware_version")
             and plan_device.get("model") == model
         ):
+            inventory = test_plan.get("physical_inventory_preflight", {})
+            declared_inventory = (
+                inventory.get("features") if isinstance(inventory, dict) else None
+            )
+            if (
+                isinstance(inventory, dict)
+                and inventory.get("source") == "operator_physical_inspection"
+                and isinstance(declared_inventory, dict)
+            ):
+                inventory_preflight = {
+                    feature: item
+                    for feature, item in declared_inventory.items()
+                    if feature
+                    in {
+                        "ac_output",
+                        "dc_output",
+                        "light_output",
+                        "eco_mode",
+                        "work_mode",
+                        "eco_timeout",
+                        "car_charger",
+                    }
+                    and isinstance(item, dict)
+                    and item.get("outcome") == "present"
+                    and item.get("basis") == "operator_physical_inspection"
+                }
             absence_candidates = [
                 step
                 for step in test_plan.get("steps", [])
@@ -460,7 +487,18 @@ def _interactive_higher_tier_review(
     )
     recorded_targets: dict[str, set[str]] = {}
     recorded_cycles: dict[str, list[dict[str, Any]]] = {}
+    final_restorations: dict[str, dict[str, Any]] = {}
     print("Imported guided evidence:")
+    if inventory_preflight:
+        print(
+            "Operator physical-inventory preflight (acquisition eligibility only; "
+            "not independent qualification):"
+        )
+        for feature in sorted(inventory_preflight):
+            print(
+                f"  {feature}: operator reported physically present; independently "
+                "inspect the actual transitions and restorations below."
+            )
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -563,6 +601,14 @@ def _interactive_higher_tier_review(
                     )
                     if final_restore is None:
                         output_cycles = []
+                    else:
+                        final_restorations[feature] = {
+                            "step_id": content.get("step_id"),
+                            "frame_evidence": final_restore,
+                            "trace_sha256": sorted(
+                                actions[3].get("trace_evidence_sha256", [])
+                            ),
+                        }
                     for cycle in output_cycles:
                         if not isinstance(cycle, dict):
                             continue
@@ -618,6 +664,11 @@ def _interactive_higher_tier_review(
                                 "restore_trace_sha256": sorted(
                                     restore.get("trace_evidence_sha256", [])
                                 ),
+                                "final_restore_frame_evidence": final_restore,
+                                "final_restore_trace_sha256": sorted(
+                                    actions[3].get("trace_evidence_sha256", [])
+                                ),
+                                "final_restore_state": content.get("initial_state"),
                             }
                             if record not in recorded_cycles.setdefault(feature, []):
                                 recorded_cycles[feature].append(record)
@@ -681,6 +732,11 @@ def _interactive_higher_tier_review(
                                 "restore_trace_sha256": sorted(
                                     restore.get("trace_evidence_sha256", [])
                                 ),
+                                "final_restore_frame_evidence": restore_reference,
+                                "final_restore_trace_sha256": sorted(
+                                    restore.get("trace_evidence_sha256", [])
+                                ),
+                                "final_restore_state": initial,
                             }
                             if cycle not in recorded_cycles.setdefault(feature, []):
                                 recorded_cycles[feature].append(cycle)
@@ -753,6 +809,11 @@ def _interactive_higher_tier_review(
                             "restore_trace_sha256": sorted(
                                 restore.get("trace_evidence_sha256", [])
                             ),
+                            "final_restore_frame_evidence": restore_reference,
+                            "final_restore_trace_sha256": sorted(
+                                restore.get("trace_evidence_sha256", [])
+                            ),
+                            "final_restore_state": initial,
                         }
                         if cycle not in recorded_cycles.setdefault(feature, []):
                             recorded_cycles[feature].append(cycle)
@@ -852,8 +913,50 @@ def _interactive_higher_tier_review(
                     "production_authorization_confirmed": production_authorization_confirmed,
                     "physical_change_confirmed": change_confirmed,
                     "physical_restoration_confirmed": restore_confirmed,
+                    "final_restoration_confirmed": (
+                        restore_confirmed
+                        if feature not in {"ac_output", "dc_output", "light_output"}
+                        else False
+                    ),
                 }
             )
+        reviewed_output_steps = sorted(
+            {
+                decision["step_id"]
+                for decision in decisions
+                if _FEATURE_STEPS.get(decision["step_id"])
+                in {"ac_output", "dc_output", "light_output"}
+                and _FEATURE_STEPS[decision["step_id"]] in final_restorations
+            }
+        )
+        for step_id in reviewed_output_steps:
+            feature = _FEATURE_STEPS[step_id]
+            final = final_restorations[feature]
+            reference = final["frame_evidence"]
+            final_state = "on" if reference["requested_state"] else "off"
+            print(
+                f"Final physical restoration for {feature}: action 4 returns to "
+                f"the original {final_state} state."
+            )
+            print(
+                f"  Final frame: trace {reference['trace_sha256']}, seq "
+                f"{reference['frame_seq']}, frame SHA-256 "
+                f"{reference['frame_sha256']}, session generation "
+                f"{reference['session_generation']}"
+            )
+            final_confirmed = (
+                input(
+                    "  Did you independently confirm the unit physically returned "
+                    "to its original safe state after this final action? "
+                    "[no/yes] (default no): "
+                )
+                .strip()
+                .lower()
+                == "yes"
+            )
+            for decision in decisions:
+                if decision["step_id"] == step_id:
+                    decision["final_restoration_confirmed"] = final_confirmed
         if reconnect_candidate is not None:
             print(
                 "Physical reconnect evidence: source step basic_reconnect, "

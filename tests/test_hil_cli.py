@@ -1429,9 +1429,68 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
     from argparse import Namespace
 
     from scripts.hil import outputs, recovery, settings
+    from scripts.hil.api import ReadOnlyRefreshButton
     from scripts.hil.guided import build_tier_plan
 
-    api = type("FakeHA", (), {"origin": "https://example.test"})()
+    class FakeHA:
+        origin = "https://example.test"
+
+        def hil_capabilities(self, _entry_id):
+            return capabilities
+
+        def request_read_only_refresh(self, _button):
+            return None
+
+        def websocket(self, commands):
+            command = commands[0]
+            kind = command["type"]
+            if kind.endswith("/start"):
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": "bronze-capture",
+                        "ttl_seconds": 5,
+                    }
+                ]
+            if kind == "call_service":
+                return [{"context": {"id": "safe-context"}}]
+            trace = {
+                "capture_id": "bronze-capture",
+                "events": [
+                    {
+                        "seq": 2,
+                        "event": "write_ok",
+                        "transaction_id": "status-tx",
+                        "session_generation": 7,
+                    },
+                    {
+                        "seq": 3,
+                        "event": "notification_decoded",
+                        "decoded_packet_types": ["StatusData"],
+                        "session_generation": 7,
+                    },
+                ],
+                "frames": [
+                    {
+                        "seq": 1,
+                        "direction": "tx",
+                        "command_type": "status_request",
+                        "frame_validation": "validated_tx",
+                        "transaction_id": "status-tx",
+                        "session_generation": 7,
+                        "hex": "a56500b10101000000",
+                    }
+                ],
+                "complete": True,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "observed_route": "local_adapter",
+            }
+            if kind.endswith("/fetch"):
+                return [trace]
+            return [trace]
+
+    api = FakeHA()
     device = discovery.Device(
         device_id="fake-device",
         model="R600",
@@ -1449,6 +1508,13 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
             "car_charger": "switch.car",
         },
         config_entry_id="fake-entry",
+        refresh_button=ReadOnlyRefreshButton(
+            entity_id="button.private_refresh",
+            unique_id="private_refresh",
+            platform="allpowers_ble",
+            device_id="fake-device",
+            config_entry_id="fake-entry",
+        ),
     )
     capabilities = {
         "model": "R600",
@@ -1479,6 +1545,7 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
             "car_charger",
         )
     }
+    monkeypatch.setattr(cli, "_scenario_controls", lambda *_args: controls)
     plan = build_tier_plan(
         "gold", capabilities, controls, observed_route="local_adapter"
     )
@@ -1560,18 +1627,26 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
             base_services,
             read_only_sample=lambda *_args: {"sample": "fresh"},
             has_verified_telemetry=lambda sample: sample == {"sample": "fresh"},
-            prompt=lambda _question: "1",
+            validate_trace_result=lambda *_args, **_kwargs: None,
+            save_private_trace=lambda path, trace: (
+                path.mkdir(parents=True, exist_ok=True),
+                (path / "trace.json").write_text(json.dumps(trace)),
+                (path / "events.jsonl").write_text(
+                    "".join(json.dumps(row) + "\n" for row in trace["events"])
+                ),
+                (path / "frames.jsonl").write_text(
+                    "".join(json.dumps(row) + "\n" for row in trace["frames"])
+                ),
+            ),
+            prompt=lambda question: "RUN" if "Type RUN" in question else "1",
         ),
     )
     args = Namespace(route="local_adapter", output_root=tmp_path, non_interactive=False)
     root = storage.write_run(tmp_path, "tier-parent", {}, {})
 
-    assert (
-        cli._execute_tier_suite(
-            api, args, device, {}, root, "parent-run", plan, capabilities
-        )
-        == 2
-    )
+    assert cli._execute_tier_suite(
+        api, args, device, {}, root, "parent-run", plan, capabilities
+    ) == (0 if include_trace else 2)
     assert calls.count(("recovery", None)) == (1 if include_trace else 0)
     assert ("outputs", "output_ac_cycle") in calls
     assert (("settings", "settings_eco_mode") in calls) is include_trace
@@ -1724,8 +1799,123 @@ def test_tier_executor_skips_absent_and_blocks_unknown_without_ble_write(
         "blocked",
     ]
     assert "substantiates physical absence" in execution["steps"][0]["reason"]
-    assert "unknown or unreviewed" in execution["steps"][1]["reason"]
+    assert (
+        "no valid production-authorized inventory preflight"
+        in execution["steps"][1]["reason"]
+    )
     assert api.commands == []
+
+
+def test_tier_executor_reaches_production_runner_from_r600_inventory_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from argparse import Namespace
+
+    from custom_components.allpowers_ble.model_support import (
+        ModelFeature,
+        identify_model,
+        model_feature_capability,
+    )
+    from scripts.hil.discovery import Device
+    from scripts.hil.guided import build_tier_plan
+    from scripts.hil.storage import write_run
+
+    support = identify_model("R600", hardware_version="0.3", raw_hardware_version=0x03)
+    capabilities = {
+        "model": support.model,
+        "profile": support.profile,
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.0",
+        "verified": support.verified,
+        "identity_conflicted": False,
+        "features": {
+            feature.value: {
+                "physical_presence": model_feature_capability(
+                    support, feature
+                ).physical_presence.value,
+                "production_authorized": model_feature_capability(
+                    support, feature
+                ).production_authorized,
+                "candidate_hil_eligible": model_feature_capability(
+                    support, feature
+                ).hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature in ModelFeature
+        },
+    }
+    controls = {"ac_output": {"available": True, "eligible": True, "state": "off"}}
+    inventory = cli._collect_physical_inventory_preflight(
+        capabilities, controls, prompt=lambda _message: "PRESENT"
+    )
+    plan = build_tier_plan(
+        "silver",
+        capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    plan["steps"] = [step for step in plan["steps"] if step["id"] == "ac_output_cycle"]
+    root = write_run(tmp_path, "inventory-preflight", {}, {})
+    device = Device(
+        device_id="fake-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.0",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="fake-entry",
+        control_entities={"ac_output": "switch.ac_output"},
+    )
+    runner_calls: list[str] = []
+
+    def production_runner(
+        _api, _args, _device, _environment, output_dir, run_id, _services
+    ):
+        runner_calls.append(run_id)
+        trace = output_dir / "action" / "trace.json"
+        trace.parent.mkdir(parents=True)
+        trace.write_text(
+            json.dumps(
+                {
+                    "complete": True,
+                    "dropped_events": 0,
+                    "dropped_frames": 0,
+                    "observed_route": "local_adapter",
+                }
+            )
+        )
+        (output_dir / "checkpoint.json").write_text(
+            json.dumps(
+                {
+                    "steps": [
+                        {
+                            "step_id": "ac_output_cycle",
+                            "outcome": "pass",
+                            "trace": "action",
+                            "physical_outcome": "yes",
+                        }
+                    ]
+                }
+            )
+        )
+        return 0
+
+    monkeypatch.setattr("scripts.hil.outputs._execute_output_suite", production_runner)
+    result = cli._execute_tier_suite(
+        object(),
+        Namespace(route="auto", output_root=tmp_path, non_interactive=False),
+        device,
+        {},
+        root,
+        "parent-run",
+        plan,
+        capabilities,
+    )
+    execution = json.loads((root / "tier-execution.json").read_text())
+    assert result == 0
+    assert len(runner_calls) == 1
+    assert execution["steps"][0]["outcome"] == "pass"
 
 
 def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_path):

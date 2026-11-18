@@ -1561,10 +1561,14 @@ def test_tier_review_audit_is_bound_to_feature_phase_and_archive(
                 "target_state": True,
                 "change_frame_evidence": reference(0, True),
                 "restore_frame_evidence": reference(1, False),
+                "final_restore_frame_evidence": reference(1, False),
                 "change_trace_sha256": ["b" * 64],
                 "restore_trace_sha256": ["c" * 64],
+                "final_restore_trace_sha256": ["c" * 64],
+                "final_restore_state": False,
                 "physical_change_confirmed": True,
                 "physical_restoration_confirmed": True,
+                "final_restoration_confirmed": True,
                 "production_authorization_confirmed": True,
             }
         ],
@@ -2648,8 +2652,8 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
 
     # Six output cycles each require authorization, change, and restore
-    # confirmations, followed by reconnect review and explicit apply.
-    answer_review(["Silver reviewer", *(["yes"] * 21), "APPLY REVIEW"])
+    # confirmations; each output's final restoration is also confirmed.
+    answer_review(["Silver reviewer", *(["yes"] * 24), "APPLY REVIEW"])
     assert (
         interactive_review(
             matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
@@ -2666,10 +2670,18 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     }
     run = matrix["revisions"][0]["runs"][0]
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+    for feature in ("ac_output", "dc_output", "light_output"):
+        transitions = run["write_capabilities"][feature]["physical_review"][
+            "output_transitions"
+        ]
+        for transition in transitions:
+            capture = tmp_path / transition["restoration_capture"]
+            rows = [json.loads(line) for line in capture.read_text().splitlines()]
+            assert any(row["source_action_index"] == 3 for row in rows)
 
     # Gold repeats the independent output review and additionally reviews all
     # four settings cycles before dry-run and apply.
-    answer_review(["Gold reviewer", *(["yes"] * 33), "APPLY REVIEW"])
+    answer_review(["Gold reviewer", *(["yes"] * 36), "APPLY REVIEW"])
     assert (
         interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
         == 0
@@ -2692,6 +2704,68 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     }
     run = matrix["revisions"][0]["runs"][0]
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+
+def test_output_review_without_final_restoration_confirmation_stays_unqualified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _standard_tier_suite_archive(tmp_path / "standard")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+
+    _tty(monkeypatch)
+    answers = iter(
+        _review_answers(reviewer="Bronze reviewer", inspected=True, apply=True)
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+
+    # Confirm both cycles for all outputs, then decline the separately prompted
+    # final action 4 restoration for every feature. Reconnect can still pass, but
+    # no output may receive a Silver PASS without that independent observation.
+    answers = iter(
+        [
+            "Silver reviewer",
+            "yes",
+            *("yes" for _ in range(18)),
+            "no",
+            "no",
+            "no",
+            "yes",
+            "yes",
+            "APPLY REVIEW",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+    assert all(
+        run["write_capabilities"][feature]["status"] != "pass"
+        for feature in ("ac_output", "dc_output", "light_output")
+    )
 
 
 def test_higher_tier_review_requires_reviewer_independence_confirmation(

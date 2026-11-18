@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from custom_components.allpowers_ble.model_support import MODEL_FEATURE_PROFILES
+from custom_components.allpowers_ble.model_support import (
+    ModelFeature,
+    identify_model,
+    model_feature_capability,
+)
 from scripts.hil.guided import build_tier_plan
 
 
@@ -121,6 +126,94 @@ def test_r600_unknown_outputs_and_settings_remain_blocked() -> None:
     )
     assert steps["guarded_recovery"]["eligibility"] == "eligible"
     assert "soak_24h" not in steps
+
+
+def test_verified_r600_inventory_preflight_unlocks_acquisition_without_qualification() -> (
+    None
+):
+    support = identify_model("R600", hardware_version="0.3", raw_hardware_version=0x03)
+    features = {
+        feature.value: {
+            "physical_presence": model_feature_capability(
+                support, feature
+            ).physical_presence.value,
+            "production_authorized": model_feature_capability(
+                support, feature
+            ).production_authorized,
+            "candidate_hil_eligible": model_feature_capability(
+                support, feature
+            ).hil_candidate_eligible,
+            "runtime_ready": True,
+        }
+        for feature in ModelFeature
+    }
+    capabilities = _capabilities("r600-hw-0.3")
+    capabilities["features"] = features
+    controls = _controls("r600-hw-0.3")
+    from scripts.hil.cli import _collect_physical_inventory_preflight
+
+    prompts: list[str] = []
+    inventory = _collect_physical_inventory_preflight(
+        capabilities,
+        controls,
+        prompt=lambda message: prompts.append(message) or "PRESENT",
+    )
+    assert len(prompts) == 7
+    assert all("R600 0.3" in prompt for prompt in prompts)
+
+    blocked = build_tier_plan(
+        "gold", capabilities, controls, observed_route="local_adapter"
+    )
+    assert _steps(blocked)["ac_output_cycle"]["eligibility"] == "blocked"
+
+    plan = build_tier_plan(
+        "gold",
+        capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    steps = _steps(plan)
+    for step_id in (
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+        "eco_mode_reversal",
+        "work_mode_reversal",
+        "eco_timeout_reversal",
+        "car_charger_reversal",
+    ):
+        assert steps[step_id]["eligibility"] == "eligible"
+        assert steps[step_id]["inventory_preflight"] == "operator_inspected_present"
+        assert steps[step_id]["physical_presence"] == "unknown"
+        assert steps[step_id]["outcome"] == "pending"
+    assert plan["physical_inventory_preflight"]["source"] == (
+        "operator_physical_inspection"
+    )
+
+
+def test_inventory_preflight_cannot_override_absent_or_unauthorized_feature() -> None:
+    profile_id = "ap-r1500-lite-hw-0.1-evidence"
+    capabilities = _capabilities(profile_id)
+    plan = build_tier_plan(
+        "silver",
+        capabilities,
+        _controls(profile_id),
+        observed_route="local_adapter",
+        inventory_preflight={
+            "light_output": {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            },
+            "ac_output": {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            },
+        },
+    )
+    steps = _steps(plan)
+    assert steps["light_output_cycle"]["eligibility"] == "not_applicable"
+    assert steps["ac_output_cycle"]["eligibility"] == "blocked"
 
 
 def test_candidate_eligibility_does_not_replace_backend_grant() -> None:

@@ -193,6 +193,10 @@ def _tier_review_file(
         "restore_frame_evidence",
         "change_trace_sha256",
         "restore_trace_sha256",
+        "final_restore_frame_evidence",
+        "final_restore_trace_sha256",
+        "final_restore_state",
+        "final_restoration_confirmed",
         "physical_change_confirmed",
         "physical_restoration_confirmed",
         "production_authorization_confirmed",
@@ -217,6 +221,29 @@ def _tier_review_file(
         output_feature = feature in {"ac_output", "dc_output", "light_output"}
         initial_state = item.get("initial_state") if isinstance(item, dict) else None
         target_state = item.get("target_state") if isinstance(item, dict) else None
+        final_restore_state = (
+            item.get("final_restore_state") if isinstance(item, dict) else None
+        )
+        valid_final_state = (
+            isinstance(final_restore_state, str)
+            and final_restore_state in {"on", "off"}
+            if output_feature
+            else (
+                type(final_restore_state) is bool
+                if feature in {"eco_mode", "car_charger"}
+                else (
+                    type(final_restore_state) is int
+                    and final_restore_state in {0, 1, 2}
+                    if feature == "work_mode"
+                    else (
+                        type(final_restore_state) is int
+                        and final_restore_state in {1, 2, 4, 6}
+                        if feature == "eco_timeout"
+                        else False
+                    )
+                )
+            )
+        )
         allowed_states = (
             isinstance(initial_state, str)
             and initial_state in {"on", "off"}
@@ -249,34 +276,56 @@ def _tier_review_file(
             or item.get("step_id") not in _TIER_STEP_FEATURES
             or not isinstance(item.get("change_frame_evidence"), dict)
             or not isinstance(item.get("restore_frame_evidence"), dict)
+            or not isinstance(item.get("final_restore_frame_evidence"), dict)
             or not allowed_states
+            or not valid_final_state
             or initial_state == target_state
             or any(
                 set(item[key]) != reference_keys
-                for key in ("change_frame_evidence", "restore_frame_evidence")
+                for key in (
+                    "change_frame_evidence",
+                    "restore_frame_evidence",
+                    "final_restore_frame_evidence",
+                )
             )
             or not isinstance(item.get("change_trace_sha256"), list)
             or not isinstance(item.get("restore_trace_sha256"), list)
+            or not isinstance(item.get("final_restore_trace_sha256"), list)
             or any(
                 not isinstance(digest, str)
                 or re.fullmatch(r"[a-f0-9]{64}", digest) is None
-                for digest in item["change_trace_sha256"] + item["restore_trace_sha256"]
+                for digest in (
+                    item["change_trace_sha256"]
+                    + item["restore_trace_sha256"]
+                    + item["final_restore_trace_sha256"]
+                )
             )
             or any(
                 type(item.get(key)) is not bool
                 for key in (
                     "physical_change_confirmed",
                     "physical_restoration_confirmed",
+                    "final_restoration_confirmed",
                     "production_authorization_confirmed",
                 )
             )
         ):
             raise HAAPIError("Tier review transition is malformed")
         for index, name in enumerate(
-            ("change_frame_evidence", "restore_frame_evidence")
+            (
+                "change_frame_evidence",
+                "restore_frame_evidence",
+                "final_restore_frame_evidence",
+            )
         ):
             reference = item[name]
-            expected_state = target_state if index == 0 else initial_state
+            expected_state = (
+                target_state
+                if index == 0
+                else initial_state
+                if index == 1
+                else final_restore_state
+            )
             expected_machine_state = (
                 expected_state == "on" if output_feature else expected_state
             )
@@ -292,7 +341,11 @@ def _tier_review_file(
                 or reference["session_generation"] < 1
                 or type(reference.get("source_action_index")) is not int
                 or reference.get("source_action_index")
-                not in ({0, 1, 2, 3} if output_feature else {index})
+                not in (
+                    ({0, 1, 2, 3} if index < 2 else {3})
+                    if output_feature
+                    else {index if index < 2 else 1}
+                )
                 or reference.get("action_stage")
                 != ("transition" if index == 0 else "restoration")
                 or reference.get("source_step_id") != item["step_id"]
@@ -301,7 +354,11 @@ def _tier_review_file(
                 or reference.get("requested_state") != expected_machine_state
                 or reference["trace_sha256"]
                 not in item[
-                    "change_trace_sha256" if index == 0 else "restore_trace_sha256"
+                    "change_trace_sha256"
+                    if index == 0
+                    else "final_restore_trace_sha256"
+                    if index == 2
+                    else "restore_trace_sha256"
                 ]
             ):
                 raise HAAPIError("Tier review frame reference is invalid")
@@ -310,6 +367,11 @@ def _tier_review_file(
             != item["restore_frame_evidence"]["session_generation"]
         ):
             raise HAAPIError("Tier review actions cross a GATT session generation")
+        final_reference = item["final_restore_frame_evidence"]
+        if final_reference["session_generation"] != item["change_frame_evidence"][
+            "session_generation"
+        ] or (not output_feature and final_reference != item["restore_frame_evidence"]):
+            raise HAAPIError("Tier review final restoration reference is invalid")
     scenario_keys = {
         "scenario",
         "source_step_id",
@@ -1221,9 +1283,42 @@ def review_imported_tier_run(
         )
         if not isinstance(feature_artifact, dict):
             continue
+        if feature in {"ac_output", "dc_output", "light_output"}:
+            actions = feature_artifact.get("actions")
+            final_state = feature_artifact.get("initial_state")
+            if (
+                not isinstance(actions, list)
+                or len(actions) != 4
+                or feature_artifact.get("final_restore_action_index") != 3
+                or decision.get("final_restore_state") != final_state
+                or final_state not in {"on", "off"}
+            ):
+                continue
+            from .review_wizard import _trace_operation_reference
+
+            expected_final_reference = _trace_operation_reference(
+                actions[3],
+                trace_artifacts,
+                feature=feature,
+                state=final_state,
+                route=run.get("route"),
+                action_index=3,
+                action_stage="restoration",
+                step_id=decision["step_id"],
+            )
+            if expected_final_reference != decision.get("final_restore_frame_evidence"):
+                continue
         physical_pass = (
             decision["physical_change_confirmed"] is True
             and decision["physical_restoration_confirmed"] is True
+            and (
+                feature not in {"ac_output", "dc_output", "light_output"}
+                or (
+                    decision["final_restoration_confirmed"] is True
+                    and decision["final_restore_frame_evidence"]["trace_sha256"]
+                    in trace_artifacts
+                )
+            )
             and feature_artifact.get("outcome") == "pass"
             and feature_artifact.get("physical_change_outcome") == "correct"
             and feature_artifact.get("physical_restore_outcome") == "correct"
@@ -1357,7 +1452,11 @@ def review_imported_tier_run(
             capture = capture_path(feature, state_index)
             add_capture(
                 capture,
-                [cycle["change_frame_evidence"], cycle["restore_frame_evidence"]],
+                [
+                    cycle["change_frame_evidence"],
+                    cycle["restore_frame_evidence"],
+                    cycle["final_restore_frame_evidence"],
+                ],
                 feature,
             )
             artifact_path = (
