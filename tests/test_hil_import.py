@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -766,12 +767,15 @@ def _standard_tier_suite_archive(path: Path) -> Path:
             frame[7] = mask if state == "on" else 0
         else:
             frame = bytearray.fromhex("a56500b1010202000100")
+            # Match the production encoder: unrelated reserved flags survive
+            # every settings update and remain part of the checksummed frame.
+            frame[7] = 0xA0
             if feature == "eco_mode":
-                frame[7] = 1 if state is True or state == "on" else 0
+                frame[7] |= 1 if state is True or state == "on" else 0
             elif feature == "work_mode":
-                frame[7] = {"mute": 0, "standard": 1, "fast": 2}.get(state, state) << 1
+                frame[7] |= {"mute": 0, "standard": 1, "fast": 2}.get(state, state) << 1
             elif feature == "car_charger":
-                frame[7] = 0x10 if state is True or state == "on" else 0
+                frame[7] |= 0x10 if state is True or state == "on" else 0
             elif feature == "eco_timeout":
                 frame[8] = {
                     "one_hour": 1,
@@ -1071,128 +1075,124 @@ def _standard_tier_suite_archive(path: Path) -> Path:
             "device": device,
         },
     )
-    reconnect_stamp = "2026-11-09T12:01:00+00:00"
-    transaction_id = "synthetic-reconnect-status"
-    reconnect_common = {
-        "schema_version": 2,
-        "run_id": reconnect_id,
-        "scenario_id": "recovery_reconnect",
-        "layer": "gatt_api",
-        "session_generation": generation + 1,
-        "observed_route": route,
-    }
-    reconnect_events = [
-        {
-            **reconnect_common,
-            "seq": 1,
-            "utc": reconnect_stamp,
-            "elapsed_ms": 0.0,
-            "event": "route_observed",
-            "backend_kind": "bluez",
-            "evidence": "bluez_device_path",
-            "adapter_id": "hci0",
-        },
-        {
-            **reconnect_common,
-            "seq": 2,
-            "utc": reconnect_stamp,
-            "elapsed_ms": 100.0,
-            "event": "write_attempt",
-            "transaction_id": transaction_id,
-        },
-        {
-            **reconnect_common,
-            "seq": 3,
-            "utc": reconnect_stamp,
-            "elapsed_ms": 200.0,
-            "event": "write_ok",
-            "transaction_id": transaction_id,
-        },
-        {
-            **reconnect_common,
-            "seq": 4,
-            "utc": reconnect_stamp,
-            "elapsed_ms": 300.0,
-            "event": "notification_decoded",
-            "decoded_packet_types": ["StatusData"],
-        },
-    ]
-    status_frame = {
-        **reconnect_events[1],
-        "direction": "tx",
-        "command_type": "status_request",
-        "frame_validation": "validated_tx",
-        "hex": "a565b1000106010000000000",
-    }
-    reconnect_trace = {
-        "schema_version": 2,
-        "capture_scope": "runtime_entry",
-        "capture_id": f"synthetic-reconnect-{reconnect_id}",
-        "run_id": reconnect_id,
-        "scenario_id": "recovery_reconnect",
-        "requested_route": route,
-        "capture_layer": "gatt_api_not_rf",
-        "private_raw_bytes": True,
-        "has_gatt_frames": True,
-        "closed": True,
-        "expired": False,
-        "termination_reason": "requested_stop",
-        "qualification_allowed": False,
-        "observed_route": route,
-        "complete": True,
-        "dropped_events": 0,
-        "dropped_frames": 0,
-        "event_count": len(reconnect_events),
-        "frame_count": 1,
-        "events": reconnect_events,
-        "frames": [status_frame],
-        "route_observations": [
-            {
-                "session_generation": generation + 1,
-                "seq": 1,
-                "utc": reconnect_stamp,
-                "elapsed_ms": 0.0,
-                "observed_route": route,
-                "backend_kind": "bluez",
-                "evidence": "bluez_device_path",
-                "adapter_id": "hci0",
+    from unittest.mock import patch
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.protocol.codec import encode_status_request
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from scripts.hil import cli as hil_cli
+    from scripts.hil.discovery import Device
+
+    class RunnerGeneratedReconnectHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self) -> None:
+            self.capture: Capture | None = None
+            self.capability_calls = 0
+
+        def hil_capabilities(self, entry_id: str) -> dict[str, Any]:
+            self.capability_calls += 1
+            disconnected = self.capability_calls == 2
+            current_generation = (
+                generation + 1 if self.capability_calls >= 3 else generation
+            )
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": not disconnected,
+                "status_fresh": not disconnected,
+                "session_generation": current_generation,
             }
-        ],
-    }
-    reconnect_trace_dir = reconnect_private / "traces/reconnect"
-    reconnect_trace_dir.mkdir(parents=True)
-    _save_private_trace(reconnect_trace_dir, reconnect_trace)
-    write_scenario_progress(
-        reconnect_private,
-        reconnect_id,
-        "recovery_reconnect",
-        "a" * 64,
-        [
-            {"step_id": "baseline", "outcome": "pass"},
-            {
-                "step_id": "operator_action",
-                "outcome": "pass",
-                "action": "route interruption and restoration",
-                "operator_confirmed": True,
-            },
-            {
-                "step_id": "recovered_session",
-                "outcome": "pass",
-                "session_generation_before": generation,
-                "session_generation_after": generation + 1,
-                "disconnect_observed": True,
-                "connected": True,
-                "status_fresh": True,
-                "route_verified": True,
-                "trace_complete": True,
-                "fresh_status_telemetry": True,
-                "physical_outcome": "yes",
-                "route": route,
-            },
-        ],
+
+        def request_read_only_refresh(self, entity_id: str) -> None:
+            assert entity_id == "button.station_refresh"
+            assert self.capture is not None
+            txid = "runner-generated-status-request"
+            self.capture.record(
+                "write_attempt",
+                frame=encode_status_request(),
+                direction="tx",
+                session_generation=generation + 1,
+                transaction_id=txid,
+            )
+            self.capture.record(
+                "write_ok", session_generation=generation + 1, transaction_id=txid
+            )
+            self.capture.record(
+                "notification_decoded",
+                session_generation=generation + 1,
+                decoded_packet_types=["StatusData"],
+            )
+
+        def websocket(self, commands: list[dict[str, Any]]) -> list[Any]:
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "entry-safe", "operator", reconnect_id, "recovery_reconnect", route
+                )
+                self.capture.record(
+                    "capture_started", session_generation=generation + 1
+                )
+                self.capture.observe_route(
+                    generation + 1,
+                    ConnectedRoute(
+                        "local_adapter", "bluez", "bluez_device_path", adapter_id="hci0"
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+            if command["type"].endswith("/fetch"):
+                assert self.capture is not None
+                return [self.capture.snapshot()]
+            assert self.capture is not None
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+    api_fake = RunnerGeneratedReconnectHA()
+    reconnect_device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.1",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+        refresh_entity="button.station_refresh",
     )
+    with (
+        patch("builtins.input", side_effect=("1", "1", "1")),
+        patch("scripts.hil.cli.sleep", return_value=None),
+    ):
+        assert (
+            hil_cli._execute_recovery_suite(
+                api_fake,
+                argparse.Namespace(
+                    non_interactive=False,
+                    route=route,
+                    guided_reconnect_required=True,
+                ),
+                reconnect_device,
+                reconnect_private,
+                reconnect_id,
+            )
+            == 0
+        )
+    reconnect_checkpoint = json.loads(
+        (reconnect_private / "checkpoint.json").read_text(encoding="utf-8")
+    )
+    recovered_step = next(
+        row
+        for row in reconnect_checkpoint["steps"]
+        if row.get("step_id") == "recovered_session"
+    )
+    reconnect_trace = recovered_step["trace"]
     reconnect_evidence = []
-    for relative in ("checkpoint.json", "traces/reconnect/trace.json"):
+    for relative in ("checkpoint.json", f"{reconnect_trace}/trace.json"):
         source = reconnect_private / relative
         reconnect_evidence.append(
             {
@@ -1705,7 +1705,7 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
         "requested_route": "local_adapter",
         "observed_route": "local_adapter",
         "complete": True,
-        "event_count": 1,
+        "event_count": 2,
         "frame_count": 1,
         "dropped_events": 0,
         "dropped_frames": 0,
@@ -1720,7 +1720,16 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
                 "session_generation": 2,
                 "observed_route": "local_adapter",
                 "transaction_sha256": "e" * 64,
-            }
+            },
+            {
+                "seq": 7,
+                "event": "notification_decoded",
+                "utc": "2026-11-09T12:00:02+00:00",
+                "elapsed_ms": 20.0,
+                "session_generation": 2,
+                "observed_route": "local_adapter",
+                "decoded_packet_types": ["StatusData"],
+            },
         ],
         "frames": [frame],
     }
@@ -1730,7 +1739,29 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
                 "artifact_id": "step-01-evidence-01",
                 "source_sha256": trace_sha,
                 "content": trace,
-            }
+            },
+            {
+                "artifact_id": "scenario-checkpoint",
+                "source_sha256": "f" * 64,
+                "content": {
+                    "kind": "scenario_checkpoint",
+                    "scenario_id": "recovery_reconnect",
+                    "steps": [
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "observation": {
+                                "session_generation_before": 1,
+                                "session_generation_after": 2,
+                                "fresh_status_telemetry": True,
+                                "trace_complete": True,
+                                "route_verified": True,
+                                "route": "local_adapter",
+                            },
+                        }
+                    ],
+                },
+            },
         ]
     }
     execution = {
@@ -1742,7 +1773,11 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
                     {
                         "artifact_id": "step-01-evidence-01",
                         "source_sha256": trace_sha,
-                    }
+                    },
+                    {
+                        "artifact_id": "scenario-checkpoint",
+                        "source_sha256": "f" * 64,
+                    },
                 ],
             }
         ]
@@ -1787,8 +1822,53 @@ def test_reconnect_capture_is_bound_to_source_status_frame(
         capability=False,
         expected_verdict="ok",
     )
-    row["source_frame_seq"] = 4
-    (tmp_path / "reconnect.jsonl").write_text(json.dumps(row) + "\n")
+    trace["events"] = trace["events"][:1]
+    trace["event_count"] = 1
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    assert not validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+    trace["events"] = [
+        {
+            **trace["events"][0],
+            "seq": 4,
+            "event": "notification_decoded",
+            "decoded_packet_types": ["StatusData"],
+        },
+        {
+            **trace["events"][0],
+            "seq": 6,
+            "event": "write_ok",
+        },
+    ]
+    trace["event_count"] = 2
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    assert not validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+    trace["events"] = [
+        {
+            **trace["events"][1],
+            "seq": 6,
+            "event": "write_ok",
+        },
+        {
+            **trace["events"][0],
+            "seq": 7,
+            "event": "notification_decoded",
+        },
+    ]
+    checkpoint = bundle["artifacts"][1]["content"]["steps"][0]["observation"]
+    checkpoint["session_generation_before"] = 2
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
     assert not validation._has_bound_capture(
         evidence,
         **scope,

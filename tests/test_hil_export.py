@@ -15,6 +15,42 @@ from scripts.hil.storage import write_run, write_scenario_progress
 from scripts.hil.trace import _save_private_trace
 
 
+def test_public_settings_projection_preserves_encoder_reserved_bits(
+    settings_frame: bytes,
+) -> None:
+    from custom_components.allpowers_ble.protocol.codec import (
+        SettingsData,
+        decode_notification,
+        encode_settings_control,
+        updated_settings,
+    )
+    from scripts.hil.evidence import _public_setting_states
+
+    current = decode_notification(settings_frame)
+    assert isinstance(current, SettingsData)
+    request = encode_settings_control(updated_settings(current, eco_timeout_hours=6))
+
+    projected = _public_setting_states(request)
+
+    assert projected == {
+        "eco_mode": current.eco_enabled,
+        "work_mode": int(current.work_mode),
+        "car_charger": current.car_charger_enabled,
+        "eco_timeout": 6,
+    }
+    assert request[7] & 0xA0 == 0xA0
+    unsupported_mode = bytearray(request)
+    unsupported_mode[7] = (unsupported_mode[7] & ~0x06) | 0x06
+    checksum = 0
+    for value in unsupported_mode[:-1]:
+        checksum ^= value
+    unsupported_mode[-1] = checksum
+    assert _public_setting_states(bytes(unsupported_mode)) is None
+    malformed = bytearray(request)
+    malformed[-1] ^= 1
+    assert _public_setting_states(bytes(malformed)) is None
+
+
 def _run(path: Path) -> None:
     path.mkdir()
     (path / "environment.json").write_text(

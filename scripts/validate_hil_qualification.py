@@ -522,8 +522,90 @@ def _valid_public_scenario_capture(
         )
         if not completed:
             return False
+        decoded_after_request = any(
+            isinstance(event, dict)
+            and event.get("event") == "notification_decoded"
+            and event.get("session_generation") == generation
+            and event.get("observed_route") == scope["route"]
+            and "StatusData" in event.get("decoded_packet_types", [])
+            and any(
+                isinstance(write, dict)
+                and write.get("event") == "write_ok"
+                and write.get("transaction_sha256") == transaction_sha
+                and write.get("session_generation") == generation
+                and write.get("observed_route") == scope["route"]
+                and write.get("seq", 0) > frame_seq
+                and event.get("seq", 0) > write.get("seq", 0)
+                for write in trace.get("events", [])
+            )
+            for event in trace.get("events", [])
+        )
+        if not decoded_after_request:
+            return False
         artifact_id = trace_artifact.get("artifact_id")
         artifact_digest = trace_artifact.get("source_sha256")
+        execution_step = next(
+            (
+                step
+                for step in execution.get("steps", [])
+                if isinstance(step, dict)
+                and step.get("step_id") == "basic_reconnect"
+                and trace_sha in step.get("machine_evidence_sha256", [])
+                and any(
+                    isinstance(reference, dict)
+                    and reference.get("artifact_id") == artifact_id
+                    and reference.get("source_sha256") == artifact_digest
+                    for reference in step.get("machine_evidence", [])
+                )
+            ),
+            None,
+        )
+        if execution_step is None:
+            return False
+        checkpoint = next(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and isinstance(item.get("content"), dict)
+                and item["content"].get("kind") == "scenario_checkpoint"
+                and item["content"].get("scenario_id") == "recovery_reconnect"
+                and any(
+                    isinstance(reference, dict)
+                    and reference.get("artifact_id") == item.get("artifact_id")
+                    and reference.get("source_sha256") == item.get("source_sha256")
+                    for reference in execution_step.get("machine_evidence", [])
+                )
+            ),
+            None,
+        )
+        if checkpoint is None:
+            return False
+        recovery_steps = [
+            step
+            for step in checkpoint["content"].get("steps", [])
+            if isinstance(step, dict) and step.get("step_id") == "recovered_session"
+        ]
+        if not recovery_steps:
+            return False
+        recovery = recovery_steps[-1]
+        observation = recovery.get("observation")
+        if isinstance(observation, dict) and isinstance(
+            observation.get("observation"), dict
+        ):
+            observation = observation["observation"]
+        if not (
+            recovery.get("outcome") == "pass"
+            and isinstance(observation, dict)
+            and observation.get("session_generation_after") == generation
+            and type(observation.get("session_generation_before")) is int
+            and observation["session_generation_before"] != generation
+            and observation.get("fresh_status_telemetry") is True
+            and observation.get("trace_complete") is True
+            and observation.get("route_verified") is True
+            and observation.get("route") == scope["route"]
+        ):
+            return False
         return any(
             isinstance(step, dict)
             and step.get("step_id") == "basic_reconnect"

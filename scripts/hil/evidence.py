@@ -1477,7 +1477,7 @@ def _public_setting_states(frame: bytes) -> dict[str, Any] | None:
         len(frame) != 10
         or frame[:6] != bytes.fromhex("a56500b10102")
         or frame[6] != 2
-        or frame[7] & ~0x17
+        or (frame[7] & 0x06) >> 1 not in {0, 1, 2}
         or frame[8] not in {1, 2, 4, 6}
         or _xor_bytes(frame) != 0
     ):

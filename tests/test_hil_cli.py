@@ -5648,6 +5648,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
             # poll may already see the new session without a transient down state.
             self.capabilities = iter(((True, 4), (True, 5)))
             self.commands = []
+            self.capture = None
 
         def hil_capabilities(self, entry_id):
             connected, generation = next(self.capabilities)
@@ -5659,9 +5660,54 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                 "session_generation": generation,
             }
 
+        def request_read_only_refresh(self, entity_id):
+            from custom_components.allpowers_ble.protocol.codec import (
+                encode_status_request,
+            )
+
+            assert entity_id == "button.station_refresh"
+            self.commands.append(
+                {
+                    "type": "call_service",
+                    "domain": "button",
+                    "service": "press",
+                    "target": {"entity_id": entity_id},
+                }
+            )
+            self.capture.record(
+                "write_attempt",
+                frame=encode_status_request(),
+                direction="tx",
+                session_generation=5,
+                transaction_id="status-refresh",
+            )
+            self.capture.record(
+                "write_ok", session_generation=5, transaction_id="status-refresh"
+            )
+            self.capture.record(
+                "notification_decoded",
+                session_generation=5,
+                decoded_packet_types=["StatusData"],
+            )
+
         def websocket(self, commands):
             self.commands.extend(commands)
             if commands[0]["type"].endswith("/start"):
+                from custom_components.allpowers_ble.hil_trace import Capture
+                from custom_components.allpowers_ble.route_attribution import (
+                    ConnectedRoute,
+                )
+
+                self.capture = Capture(
+                    "entry-safe", "operator", "run-safe", "recovery_reconnect", "auto"
+                )
+                self.capture.record("capture_started", session_generation=5)
+                self.capture.observe_route(
+                    5,
+                    ConnectedRoute(
+                        "local_adapter", "bluez", "bluez_device_path", adapter_id="hci0"
+                    ),
+                )
                 return [
                     {
                         "schema_version": 2,
@@ -5669,20 +5715,10 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                         "ttl_seconds": 120,
                     }
                 ]
-            return [
-                {
-                    "schema_version": 2,
-                    "observed_route": "local_adapter",
-                    "complete": True,
-                    "events": [
-                        {
-                            "event": "notification_decoded",
-                            "session_generation": 5,
-                            "decoded_packet_types": ["StatusData"],
-                        }
-                    ],
-                }
-            ]
+            if commands[0]["type"].endswith("/fetch"):
+                return [self.capture.snapshot()]
+            self.capture.stop()
+            return [self.capture.snapshot()]
 
     api_fake = RecoveryHA()
     device = Device(
@@ -5693,6 +5729,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         state_entities={},
         entry_state="loaded",
         config_entry_id="entry-safe",
+        refresh_entity="button.station_refresh",
     )
     output_dir = tmp_path / "run"
     output_dir.mkdir(mode=0o700)
@@ -5716,14 +5753,17 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
 
     assert result == 0
     assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
-    assert [command["type"] for command in api_fake.commands[1:]] == [
+    assert api_fake.commands[1] == {
+        "type": "call_service",
+        "domain": "button",
+        "service": "press",
+        "target": {"entity_id": "button.station_refresh"},
+    }
+    assert [command["type"] for command in api_fake.commands[2:]] == [
         "allpowers_ble/hil/fetch",
         "allpowers_ble/hil/stop",
     ]
-    assert all(
-        command["type"] not in {"call_service", "allpowers_ble/command"}
-        for command in api_fake.commands
-    )
+    assert api_fake.commands[1]["domain"] == "button"
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
     assert stored["steps"][-1]["disconnect_observed"] is False
@@ -5749,6 +5789,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
             self.capture_started_at = None
             self.status_recorded = False
             self.capability_calls = 0
+            self.refresh_requested = False
 
         def hil_capabilities(self, entry_id):
             self.capability_calls += 1
@@ -5760,6 +5801,26 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
                 "status_fresh": True,
                 "session_generation": generation,
             }
+
+        def request_read_only_refresh(self, entity_id):
+            from custom_components.allpowers_ble.protocol.codec import (
+                encode_status_request,
+            )
+
+            assert entity_id == "button.station_refresh"
+            assert self.capture is not None
+            transaction_id = "synthetic-recovery-refresh"
+            self.capture.record(
+                "write_attempt",
+                frame=encode_status_request(),
+                direction="tx",
+                session_generation=5,
+                transaction_id=transaction_id,
+            )
+            self.capture.record(
+                "write_ok", session_generation=5, transaction_id=transaction_id
+            )
+            self.refresh_requested = True
 
         def websocket(self, commands):
             command = commands[0]
@@ -5793,6 +5854,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
             if command["type"].endswith("/fetch"):
                 if (
                     not self.status_recorded
+                    and self.refresh_requested
                     and self.clock[0] - self.capture_started_at >= 8
                 ):
                     self.capture.record(
@@ -5822,6 +5884,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
         state_entities={},
         entry_state="loaded",
         config_entry_id="entry-safe",
+        refresh_entity="button.station_refresh",
     )
     output_dir = tmp_path / "guided-delayed-status"
     output_dir.mkdir(mode=0o700)
@@ -5849,6 +5912,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
     assert result == 0
     assert api_fake.capability_calls >= 2
     assert api_fake.status_recorded is True
+    assert api_fake.refresh_requested is True
     assert clock[0] - api_fake.capture_started_at >= 8
     assert observation["disconnect_observed"] is False
     assert observation["session_generation_before"] == 4
