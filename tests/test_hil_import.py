@@ -15,7 +15,7 @@ import zipfile
 
 import pytest
 
-from scripts.hil.api import HAAPIError
+from scripts.hil.api import HAAPIError, ReadOnlyRefreshButton
 from scripts.hil.evidence import (
     build_public,
     export_archive,
@@ -1104,8 +1104,8 @@ def _standard_tier_suite_archive(path: Path) -> Path:
                 "session_generation": current_generation,
             }
 
-        def request_read_only_refresh(self, entity_id: str) -> None:
-            assert entity_id == "button.station_refresh"
+        def request_read_only_refresh(self, button: ReadOnlyRefreshButton) -> None:
+            assert button.entity_id == "button.station_refresh"
             assert self.capture is not None
             txid = "runner-generated-status-request"
             self.capture.record(
@@ -1162,7 +1162,13 @@ def _standard_tier_suite_archive(path: Path) -> Path:
         state_entities={},
         entry_state="loaded",
         config_entry_id="entry-safe",
-        refresh_entity="button.station_refresh",
+        refresh_button=ReadOnlyRefreshButton(
+            entity_id="button.station_refresh",
+            unique_id="private_station_refresh",
+            platform="allpowers_ble",
+            device_id="private-device",
+            config_entry_id="entry-safe",
+        ),
     )
     with (
         patch("builtins.input", side_effect=("1", "1", "1")),

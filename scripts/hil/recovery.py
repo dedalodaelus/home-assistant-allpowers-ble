@@ -375,12 +375,12 @@ def _execute_recovery_suite(
                 capture_id = start["capture_id"]
                 try:
                     if guided_reconnect_required:
-                        refresh_entity = device.refresh_entity
-                        if refresh_entity is None:
+                        refresh_button = device.refresh_button
+                        if refresh_button is None:
                             raise HAAPIError(
                                 "A registry-resolved status refresh button is required"
                             )
-                        api.request_read_only_refresh(refresh_entity)
+                        api.request_read_only_refresh(refresh_button)
                     if vendor_action or guided_reconnect_required:
                         ttl_seconds = start.get("ttl_seconds")
                         if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 120:

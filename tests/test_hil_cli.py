@@ -5820,18 +5820,18 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                 "session_generation": generation,
             }
 
-        def request_read_only_refresh(self, entity_id):
+        def request_read_only_refresh(self, button):
             from custom_components.allpowers_ble.protocol.codec import (
                 encode_status_request,
             )
 
-            assert entity_id == "button.station_refresh"
+            assert button.entity_id == "button.station_refresh"
             self.commands.append(
                 {
                     "type": "call_service",
                     "domain": "button",
                     "service": "press",
-                    "target": {"entity_id": entity_id},
+                    "target": {"entity_id": button.entity_id},
                 }
             )
             self.capture.record(
@@ -5889,7 +5889,13 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         state_entities={},
         entry_state="loaded",
         config_entry_id="entry-safe",
-        refresh_entity="button.station_refresh",
+        refresh_button=api.ReadOnlyRefreshButton(
+            entity_id="button.station_refresh",
+            unique_id="private_station_refresh",
+            platform="allpowers_ble",
+            device_id="private-device",
+            config_entry_id="entry-safe",
+        ),
     )
     output_dir = tmp_path / "run"
     output_dir.mkdir(mode=0o700)
@@ -5962,12 +5968,12 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
                 "session_generation": generation,
             }
 
-        def request_read_only_refresh(self, entity_id):
+        def request_read_only_refresh(self, button):
             from custom_components.allpowers_ble.protocol.codec import (
                 encode_status_request,
             )
 
-            assert entity_id == "button.station_refresh"
+            assert button.entity_id == "button.station_refresh"
             assert self.capture is not None
             transaction_id = "synthetic-recovery-refresh"
             self.capture.record(
@@ -6044,7 +6050,13 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
         state_entities={},
         entry_state="loaded",
         config_entry_id="entry-safe",
-        refresh_entity="button.station_refresh",
+        refresh_button=api.ReadOnlyRefreshButton(
+            entity_id="button.station_refresh",
+            unique_id="private_station_refresh",
+            platform="allpowers_ble",
+            device_id="private-device",
+            config_entry_id="entry-safe",
+        ),
     )
     output_dir = tmp_path / "guided-delayed-status"
     output_dir.mkdir(mode=0o700)
