@@ -435,6 +435,7 @@ def _bound_capture(
     state: Any,
     *,
     action_stage: str = "transition",
+    evidence: Any = None,
 ) -> bool:
     if not isinstance(path, str) or path not in run.get("evidence", []):
         return False
@@ -457,6 +458,8 @@ def _bound_capture(
                 feature,
                 requested_state,
                 action_stage,
+                evidence,
+                require_source_graph=hil_validation._archive_backed_run(run),
             )
             for row in rows
         )
@@ -471,6 +474,22 @@ def _output_pass(
         return False
     transitions = review.get("output_transitions")
     if not isinstance(transitions, list) or len(transitions) != 2:
+        return False
+    if hil_validation._archive_backed_run(
+        run
+    ) and not hil_validation._valid_final_output_restoration(
+        item,
+        feature,
+        {
+            "route": run.get("route"),
+            "revision_id": revision.get("id"),
+            "firmware_version": run.get("firmware_version"),
+            "run_id": run.get("run_id"),
+            "captured_at": run.get("captured_at"),
+            "session_id": run.get("session_id"),
+            "build_fingerprint": run.get("build_fingerprint"),
+        },
+    ):
         return False
     states: set[str] = set()
     for entry in transitions:
@@ -495,7 +514,12 @@ def _output_pass(
             or artifact.get("initial_state") not in {"on", "off"}
             or artifact.get("restored_state") != artifact.get("initial_state")
             or not _bound_capture(
-                entry.get("capture_evidence"), run, revision, feature, state
+                entry.get("capture_evidence"),
+                run,
+                revision,
+                feature,
+                state,
+                evidence=item.get("evidence"),
             )
             or not _bound_restoration(
                 entry.get("restoration_capture"),
@@ -518,6 +542,15 @@ def _restoration_pass(
     feature: str,
 ) -> bool:
     review = item.get("physical_review")
+    scope = {
+        "route": run.get("route"),
+        "revision_id": revision.get("id"),
+        "firmware_version": run.get("firmware_version"),
+        "run_id": run.get("run_id"),
+        "captured_at": run.get("captured_at"),
+        "session_id": run.get("session_id"),
+        "build_fingerprint": run.get("build_fingerprint"),
+    }
     artifact = _scope_artifact(
         review.get("restoration_evidence") if isinstance(review, dict) else None,
         run,
@@ -553,6 +586,17 @@ def _restoration_pass(
             feature,
             artifact.get("pre_state"),
         )
+        and (
+            not hil_validation._archive_backed_run(run)
+            or hil_validation._valid_restoration_capture(
+                review.get("restoration_capture"),
+                item,
+                scope,
+                feature,
+                artifact.get("pre_state"),
+                require_change=True,
+            )
+        )
     )
 
 
@@ -576,6 +620,7 @@ def _bound_restoration(
             feature,
             restored_state,
             action_stage="restoration",
+            evidence=item.get("evidence"),
         )
     )
 
@@ -583,6 +628,12 @@ def _bound_restoration(
 def _feature_pass(
     item: dict[str, Any], run: dict[str, Any], revision: dict[str, Any], feature: str
 ) -> bool:
+    # Experimental HIL grants authorize one guarded operator action; they do
+    # not authorize production qualification. Keep this check at the evaluator
+    # boundary so imported or hand-edited feature records cannot promote an
+    # experimental run into Silver or Gold.
+    if run.get("authorization_context") != "production":
+        return False
     if feature in BASIC_OUTPUTS:
         return _output_pass(item, run, revision, feature)
     return _restoration_pass(item, run, revision, feature)

@@ -150,9 +150,22 @@ the claim. The schema-v1 audit copy is saved under the git-ignored
 `hil-results/bronze-reviews/` directory. The wizard runs the existing reviewer
 in dry-run mode first and requires the exact `APPLY REVIEW` confirmation before
 updating the matrix. Its tier report is computed by the existing tier
-evaluator. The legacy `--review-file PATH` command remains available for
-noninteractive workflows. Both review modes operate offline and do not upload
-evidence.
+evaluator. Use `--tier silver` or `--tier gold` with `--interactive` for the
+offline higher-tier review. It separately records physical change,
+restoration, production-authorization, and reviewer-independence decisions, then
+dry-runs generated schema-v3 records through the validator and evaluator before
+the exact `APPLY REVIEW` confirmation. Generated capture rows omit raw frame
+bytes and bind each decision to the imported trace digest, validated frame digest and
+sequence, hashed transaction identity and exact write/submission/confirmation
+sequence numbers, source step, action phase, route, and session generation.
+Raw transaction IDs and frame bytes are omitted. Incomplete or mismatched proof
+remains inconclusive, and experimental HIL writes cannot qualify a production
+capability. Silver requires reviewed on and off transitions with safe
+restoration; Gold adds declared setting and restoration evidence. The offline
+importer blocks Platinum because its public archive does
+not preserve the scope-bound, uninterrupted 86,400-second soak. The legacy
+`--review-file PATH` contract remains available for Bronze noninteractive
+workflows. All review modes operate offline and do not upload evidence.
 
 ## Prerequisites
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -14,7 +15,7 @@ import zipfile
 
 import pytest
 
-from scripts.hil.api import HAAPIError
+from scripts.hil.api import HAAPIError, ReadOnlyRefreshButton
 from scripts.hil.evidence import (
     build_public,
     export_archive,
@@ -38,6 +39,7 @@ def _public_archive(
     firmware_version: str = "1.1",
     verified_build: bool = False,
     guided_tier: bool = False,
+    guided_authorization_context: str | None = None,
 ) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     run = path / "run"
@@ -113,6 +115,17 @@ def _public_archive(
                             "step_id": "dc_output_cycle",
                             "outcome": "pass",
                             "human_review": "pending",
+                            **(
+                                {
+                                    "authorization_context": guided_authorization_context,
+                                    "authorization_context_source": {
+                                        "production": "runtime_production_authorized",
+                                        "experimental_hil": "experimental_hil_grant",
+                                    }.get(guided_authorization_context, "invalid"),
+                                }
+                                if guided_authorization_context is not None
+                                else {}
+                            ),
                             "machine_evidence": [
                                 {
                                     "path": artifact.name,
@@ -186,6 +199,215 @@ def _rewrite_capture_archive(
         for name, contents in members.items():
             archive.writestr(name, contents)
     return destination
+
+
+def _guided_setting_review_archive(
+    path: Path, *, observed_route: str = "local_adapter"
+) -> Path:
+    """Build a synthetic public archive with one complete settings cycle."""
+    from scripts.hil.evidence import _public_tier_artifact
+
+    source_run_id = "abcdef0123456789"
+    archive = _captured_archive(
+        path / "source",
+        "local_adapter",
+        "1.1",
+        source_run_id,
+        bronze_reviewable=True,
+    )
+    artifacts = []
+    refs = []
+    all_hashes = []
+    action_refs = []
+    for index, state in enumerate((True, False), start=1):
+        transaction_id = f"settings-transaction-{index}"
+        frame = bytearray.fromhex(
+            "a56500b1010202010100" if state else "a56500b1010202000100"
+        )
+        checksum = 0
+        for value in frame[:-1]:
+            checksum ^= value
+        frame[-1] = checksum
+        scenario_id = "settings_eco_mode"
+        stamp = f"2026-11-09T12:00:0{index}+00:00"
+        events = [
+            {
+                "schema_version": 2,
+                "seq": seq,
+                "utc": stamp,
+                "elapsed_ms": float(seq * 100),
+                "run_id": source_run_id,
+                "scenario_id": scenario_id,
+                "layer": "gatt_api",
+                "session_generation": 3,
+                "observed_route": observed_route,
+                "event": event,
+                "transaction_kind": "settings",
+                "transaction_id": transaction_id,
+                **(
+                    {"reason": "matching_validated_telemetry"}
+                    if event == "transaction_confirmed"
+                    else {}
+                ),
+            }
+            for seq, event in enumerate(
+                ("write_attempt", "transaction_submitted", "transaction_confirmed"),
+                start=1,
+            )
+        ]
+        frames = [
+            {
+                **events[0],
+                "direction": "tx",
+                "command_type": "settings_control",
+                "frame_validation": "validated_tx",
+                "hex": frame.hex(),
+            }
+        ]
+        events_bytes = b"".join(
+            (json.dumps(row, sort_keys=True) + "\n").encode() for row in events
+        )
+        frames_bytes = b"".join(
+            (json.dumps(row, sort_keys=True) + "\n").encode() for row in frames
+        )
+        trace_value = {
+            "schema_version": 2,
+            "scenario_id": scenario_id,
+            "capture_id": f"synthetic-setting-capture-{index}",
+            "requested_route": observed_route,
+            "observed_route": observed_route,
+            "complete": True,
+            "event_count": len(events),
+            "frame_count": len(frames),
+            "dropped_events": 0,
+            "dropped_frames": 0,
+        }
+        trace_bytes = (json.dumps(trace_value, sort_keys=True) + "\n").encode()
+        source_rows = [
+            (
+                "trace.json",
+                trace_bytes,
+                _public_tier_artifact(
+                    "trace.json",
+                    trace_bytes,
+                    trace_files={
+                        "events.jsonl": events_bytes,
+                        "frames.jsonl": frames_bytes,
+                    },
+                ),
+            ),
+            (
+                "events.jsonl",
+                events_bytes,
+                _public_tier_artifact("events.jsonl", events_bytes),
+            ),
+            (
+                "frames.jsonl",
+                frames_bytes,
+                _public_tier_artifact("frames.jsonl", frames_bytes),
+            ),
+        ]
+        trace_hashes = []
+        for _name, contents, projected in source_rows:
+            digest = hashlib.sha256(contents).hexdigest()
+            trace_hashes.append(digest)
+            all_hashes.append(digest)
+            artifact_id = f"step-01-evidence-{len(artifacts) + 1:02d}"
+            artifacts.append(
+                {
+                    "artifact_id": artifact_id,
+                    "source_sha256": digest,
+                    "content": projected,
+                }
+            )
+            refs.append({"artifact_id": artifact_id, "source_sha256": digest})
+        action_refs.append(
+            {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "trace_valid": True,
+                "trace_complete": True,
+                "route": observed_route,
+                "trace_route": observed_route,
+                "session_generation": 3,
+                "transaction": {
+                    "transaction_id": transaction_id,
+                    "write_seq": 1,
+                    "submitted_seq": 2,
+                    "confirmed_seq": 3,
+                    "session_generation": 3,
+                    "kind": "settings",
+                    "command_type": "settings_control",
+                },
+                "trace_evidence": [
+                    {"path": f"action-{index}/{name}", "sha256": digest}
+                    for (name, _contents, _projected), digest in zip(
+                        source_rows, trace_hashes, strict=True
+                    )
+                ],
+            }
+        )
+
+    guide = {
+        "schema_version": 1,
+        "step_id": "eco_mode_reversal",
+        "outcome": "pass",
+        "initial_state": False,
+        "target_state": True,
+        "restored_state": False,
+        "physical_change_outcome": "correct",
+        "physical_restore_outcome": "correct",
+        "actions": action_refs,
+    }
+    guide_bytes = (json.dumps(guide, sort_keys=True) + "\n").encode()
+    guide_hash = hashlib.sha256(guide_bytes).hexdigest()
+    all_hashes.append(guide_hash)
+    guide_id = f"step-01-evidence-{len(artifacts) + 1:02d}"
+    artifacts.append(
+        {
+            "artifact_id": guide_id,
+            "source_sha256": guide_hash,
+            "content": _public_tier_artifact(
+                "tier-eco_mode_reversal.json", guide_bytes
+            ),
+        }
+    )
+    refs.append({"artifact_id": guide_id, "source_sha256": guide_hash})
+    execution = {
+        "schema_version": 2,
+        "requested_tier": "gold",
+        "execution_tier": "gold",
+        "attained_tier": None,
+        "review_state": "pending",
+        "qualification_status": "inconclusive",
+        "steps": [
+            {
+                "step_id": "eco_mode_reversal",
+                "outcome": "pass",
+                "human_review": "pending",
+                "authorization_context": "production",
+                "authorization_context_source": "runtime_production_authorized",
+                "machine_evidence_sha256": sorted(set(all_hashes)),
+                "machine_evidence": refs,
+            }
+        ],
+    }
+    return _rewrite_capture_archive(
+        archive,
+        path / "guided-settings.zip",
+        capture_updates={},
+        member_updates={
+            "tier-execution.json": (
+                json.dumps(execution, sort_keys=True) + "\n"
+            ).encode(),
+            "tier-artifacts.json": (
+                json.dumps(
+                    {"schema_version": 2, "artifacts": artifacts}, sort_keys=True
+                )
+                + "\n"
+            ).encode(),
+        },
+    )
 
 
 def _matrix(path: Path) -> Path:
@@ -499,6 +721,508 @@ def _captured_archive(
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
+def _standard_tier_suite_archive(path: Path) -> Path:
+    """Export schema-realistic Bronze, Silver, Gold, and reconnect fixtures."""
+    from scripts.hil.cli import _reviewable_tier_step_artifact
+    from scripts.hil.evidence import export_archive
+    from scripts.hil.runner import correlate_transaction
+
+    route = "local_adapter"
+    run_id = "abcdef0123456789"
+    source_root = path / "source"
+    archive = _captured_archive(
+        source_root,
+        route,
+        "1.1",
+        run_id,
+        bronze_reviewable=True,
+    )
+    del archive
+    parent_root = source_root / f"run-{run_id}"
+    parent_private = parent_root / "private"
+    environment = json.loads((parent_private / "environment.json").read_text())
+    device = {
+        "model": "ALLPOWERS R600",
+        "hardware_version": "0.3",
+        "firmware_version": "1.1",
+    }
+    execution: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "requested_tier": "gold",
+        "execution_tier": "gold",
+        "requested_route": route,
+        "device": device,
+        "build_provenance": {},
+        "review_state": "pending",
+        "steps": [],
+    }
+    generation = 7
+    action_counter = 0
+
+    def feature_frame(feature: str, state: Any) -> bytes:
+        if feature in {"ac_output", "dc_output", "light_output"}:
+            mask = {"ac_output": 0x02, "dc_output": 0x01, "light_output": 0x20}[feature]
+            frame = bytearray.fromhex("a56500b10101000000")
+            frame[7] = mask if state == "on" else 0
+        else:
+            frame = bytearray.fromhex("a56500b1010202000100")
+            # Match the production encoder: unrelated reserved flags survive
+            # every settings update and remain part of the checksummed frame.
+            frame[7] = 0xA0
+            if feature == "eco_mode":
+                frame[7] |= 1 if state is True or state == "on" else 0
+            elif feature == "work_mode":
+                frame[7] |= {"mute": 0, "standard": 1, "fast": 2}.get(state, state) << 1
+            elif feature == "car_charger":
+                frame[7] |= 0x10 if state is True or state == "on" else 0
+            elif feature == "eco_timeout":
+                frame[8] = {
+                    "one_hour": 1,
+                    "two_hours": 2,
+                    "four_hours": 4,
+                    "six_hours": 6,
+                }.get(state, state)
+        checksum = 0
+        for byte in frame[:-1]:
+            checksum ^= byte
+        frame[-1] = checksum
+        return bytes(frame)
+
+    def add_action(
+        child_private: Path,
+        child_id: str,
+        scenario_id: str,
+        feature: str,
+        target: Any,
+    ) -> dict[str, Any]:
+        nonlocal action_counter
+        action_counter += 1
+        transaction_id = f"synthetic-tier-action-{action_counter}"
+        stamp = f"2026-11-09T12:00:{action_counter:02d}+00:00"
+        common = {
+            "schema_version": 2,
+            "run_id": child_id,
+            "scenario_id": scenario_id,
+            "layer": "gatt_api",
+            "session_generation": generation,
+            "observed_route": route,
+        }
+        route_event = {
+            **common,
+            "seq": 1,
+            "utc": stamp,
+            "elapsed_ms": 0.0,
+            "event": "route_observed",
+            "backend_kind": "bluez",
+            "evidence": "bluez_device_path",
+            "adapter_id": "hci0",
+        }
+        write_event = {
+            **common,
+            "seq": 2,
+            "utc": stamp,
+            "elapsed_ms": 100.0,
+            "event": "write_attempt",
+            "transaction_kind": (
+                "output"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "settings"
+            ),
+            "transaction_id": transaction_id,
+        }
+        submitted_event = {
+            **common,
+            "seq": 3,
+            "utc": stamp,
+            "elapsed_ms": 200.0,
+            "event": "transaction_submitted",
+            "transaction_kind": write_event["transaction_kind"],
+            "transaction_id": transaction_id,
+        }
+        confirmed_event = {
+            **common,
+            "seq": 4,
+            "utc": stamp,
+            "elapsed_ms": 300.0,
+            "event": "transaction_confirmed",
+            "transaction_kind": write_event["transaction_kind"],
+            "transaction_id": transaction_id,
+            "reason": "matching_validated_telemetry",
+        }
+        frame = {
+            **write_event,
+            "direction": "tx",
+            "command_type": (
+                "output_control"
+                if feature in {"ac_output", "dc_output", "light_output"}
+                else "settings_control"
+            ),
+            "frame_validation": "validated_tx",
+            "hex": feature_frame(feature, target).hex(),
+        }
+        events = [route_event, write_event, submitted_event, confirmed_event]
+        trace = {
+            "schema_version": 2,
+            "capture_scope": "runtime_entry",
+            "capture_id": f"synthetic-{child_id}-{action_counter}",
+            "run_id": child_id,
+            "scenario_id": scenario_id,
+            "requested_route": route,
+            "capture_layer": "gatt_api_not_rf",
+            "private_raw_bytes": True,
+            "has_gatt_frames": True,
+            "closed": True,
+            "expired": False,
+            "termination_reason": "requested_stop",
+            "qualification_allowed": False,
+            "observed_route": route,
+            "complete": True,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "event_count": len(events),
+            "frame_count": 1,
+            "events": events,
+            "frames": [frame],
+            "route_observations": [
+                {
+                    "session_generation": generation,
+                    "seq": 1,
+                    "utc": stamp,
+                    "elapsed_ms": 0.0,
+                    "observed_route": route,
+                    "backend_kind": "bluez",
+                    "evidence": "bluez_device_path",
+                    "adapter_id": "hci0",
+                }
+            ],
+        }
+        trace_name = f"traces/action_{action_counter}"
+        trace_dir = child_private / trace_name
+        trace_dir.mkdir(parents=True)
+        _save_private_trace(trace_dir, trace)
+        transaction = correlate_transaction(
+            trace,
+            expected_generation=generation,
+            kind=write_event["transaction_kind"],
+        )
+        assert transaction is not None
+        return {
+            "target": feature,
+            "outcome": "pass",
+            "trace": trace_name,
+            "session_generation": generation,
+            "route": route,
+            "transaction": transaction,
+            "physical_outcome": "yes",
+            "step_id": f"action_{action_counter}",
+        }
+
+    def add_feature_step(
+        step_id: str,
+        scenario_id: str,
+        feature: str,
+        actions: list[tuple[Any, Any, Any]],
+    ) -> None:
+        child_id = f"{len(execution['steps']) + 1:016x}"
+        child_private = write_run(
+            source_root,
+            f"tier_{child_id}",
+            environment,
+            {
+                "run_id": child_id,
+                "parent_tier_run_id": run_id,
+                "tier_step_id": step_id,
+                "requested_route": route,
+                "device": device,
+            },
+        )
+        checkpoint_rows = []
+        scenario_step_ids = {
+            "output_ac_cycle": [
+                "ac_on",
+                "ac_off",
+                "ac_on_second_cycle",
+                "ac_final_restore",
+            ],
+            "output_dc_cycle": [
+                "dc_on",
+                "dc_off",
+                "dc_on_second_cycle",
+                "dc_final_restore",
+            ],
+            "output_light_cycle": [
+                "light_on",
+                "light_off",
+                "light_on_second_cycle",
+                "light_final_restore",
+            ],
+            "settings_eco_mode": ["eco_mode_on"],
+            "settings_work_mode": ["work_mode_standard"],
+            "settings_eco_timeout": ["eco_timeout_two_hours"],
+            "output_car_charger_cycle": ["car_charger_on", "car_charger_off"],
+        }
+        for action_index, (before, target, after) in enumerate(actions):
+            row = add_action(child_private, child_id, scenario_id, feature, target)
+            row.update(pre_state=before, expected=target, post_state=after)
+            row["step_id"] = scenario_step_ids[scenario_id][
+                min(action_index, len(scenario_step_ids[scenario_id]) - 1)
+            ]
+            checkpoint_rows.append(row)
+        write_scenario_progress(
+            child_private,
+            child_id,
+            scenario_id,
+            "a" * 64,
+            checkpoint_rows,
+        )
+        review_artifact = _reviewable_tier_step_artifact(
+            parent_private=parent_private,
+            child_private=child_private,
+            step_id=step_id,
+            feature=feature,
+            checkpoint_rows=checkpoint_rows,
+        )
+        assert review_artifact is not None
+        review_name = f"tier-{step_id}.json"
+        (parent_private / review_name).write_text(
+            json.dumps(review_artifact, sort_keys=True), encoding="utf-8"
+        )
+        machine_evidence = []
+        for relative in [
+            "checkpoint.json",
+            *(f"{row['trace']}/trace.json" for row in checkpoint_rows),
+        ]:
+            source = child_private / relative
+            machine_evidence.append(
+                {
+                    "path": f"../../tier_{child_id}/private/{relative}",
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
+        review_path = parent_private / review_name
+        machine_evidence.append(
+            {
+                "path": review_name,
+                "sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
+            }
+        )
+        execution["steps"].append(
+            {
+                "step_id": step_id,
+                "scenario_id": scenario_id,
+                "outcome": "pass",
+                "observed_routes": [route],
+                "human_review": "pending",
+                "authorization_context": "production",
+                "authorization_context_source": "runtime_production_authorized",
+                "machine_evidence": machine_evidence,
+                "evidence_run": f"../../tier_{child_id}/private",
+            }
+        )
+
+    for feature, step_id, scenario_id in (
+        ("ac_output", "ac_output_cycle", "output_ac_cycle"),
+        ("dc_output", "dc_output_cycle", "output_dc_cycle"),
+        ("light_output", "light_output_cycle", "output_light_cycle"),
+    ):
+        add_feature_step(
+            step_id,
+            scenario_id,
+            feature,
+            [
+                ("off", "on", "on"),
+                ("on", "off", "off"),
+                ("off", "on", "on"),
+                ("on", "off", "off"),
+            ],
+        )
+    for feature, step_id, scenario_id, initial, target in (
+        ("eco_mode", "eco_mode_reversal", "settings_eco_mode", "off", "on"),
+        ("work_mode", "work_mode_reversal", "settings_work_mode", "mute", "fast"),
+        (
+            "eco_timeout",
+            "eco_timeout_reversal",
+            "settings_eco_timeout",
+            "one_hour",
+            "four_hours",
+        ),
+        (
+            "car_charger",
+            "car_charger_reversal",
+            "output_car_charger_cycle",
+            "off",
+            "on",
+        ),
+    ):
+        add_feature_step(
+            step_id,
+            scenario_id,
+            feature,
+            [(initial, target, target), (target, initial, initial)],
+        )
+
+    reconnect_id = "0000000000000008"
+    reconnect_private = write_run(
+        source_root,
+        f"tier_{reconnect_id}",
+        environment,
+        {
+            "run_id": reconnect_id,
+            "parent_tier_run_id": run_id,
+            "tier_step_id": "basic_reconnect",
+            "requested_route": route,
+            "device": device,
+        },
+    )
+    from unittest.mock import patch
+
+    from custom_components.allpowers_ble.hil_trace import Capture
+    from custom_components.allpowers_ble.protocol.codec import encode_status_request
+    from custom_components.allpowers_ble.route_attribution import ConnectedRoute
+    from scripts.hil import cli as hil_cli
+    from scripts.hil.discovery import Device
+
+    class RunnerGeneratedReconnectHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self) -> None:
+            self.capture: Capture | None = None
+            self.capability_calls = 0
+
+        def hil_capabilities(self, entry_id: str) -> dict[str, Any]:
+            self.capability_calls += 1
+            disconnected = self.capability_calls == 2
+            current_generation = (
+                generation + 1 if self.capability_calls >= 3 else generation
+            )
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": not disconnected,
+                "status_fresh": not disconnected,
+                "session_generation": current_generation,
+            }
+
+        def request_read_only_refresh(self, button: ReadOnlyRefreshButton) -> None:
+            assert button.entity_id == "button.station_refresh"
+            assert self.capture is not None
+            txid = "runner-generated-status-request"
+            self.capture.record(
+                "write_attempt",
+                frame=encode_status_request(),
+                direction="tx",
+                session_generation=generation + 1,
+                transaction_id=txid,
+            )
+            self.capture.record(
+                "write_ok", session_generation=generation + 1, transaction_id=txid
+            )
+            self.capture.record(
+                "notification_decoded",
+                session_generation=generation + 1,
+                decoded_packet_types=["StatusData"],
+            )
+
+        def websocket(self, commands: list[dict[str, Any]]) -> list[Any]:
+            command = commands[0]
+            if command["type"].endswith("/start"):
+                self.capture = Capture(
+                    "entry-safe", "operator", reconnect_id, "recovery_reconnect", route
+                )
+                self.capture.record(
+                    "capture_started", session_generation=generation + 1
+                )
+                self.capture.observe_route(
+                    generation + 1,
+                    ConnectedRoute(
+                        "local_adapter", "bluez", "bluez_device_path", adapter_id="hci0"
+                    ),
+                )
+                return [
+                    {
+                        "schema_version": 2,
+                        "capture_id": self.capture.capture_id,
+                        "ttl_seconds": 120,
+                    }
+                ]
+            if command["type"].endswith("/fetch"):
+                assert self.capture is not None
+                return [self.capture.snapshot()]
+            assert self.capture is not None
+            self.capture.stop()
+            return [self.capture.snapshot()]
+
+    api_fake = RunnerGeneratedReconnectHA()
+    reconnect_device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.1",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+        refresh_button=ReadOnlyRefreshButton(
+            entity_id="button.station_refresh",
+            unique_id="private_station_refresh",
+            platform="allpowers_ble",
+            device_id="private-device",
+            config_entry_id="entry-safe",
+        ),
+    )
+    with (
+        patch("builtins.input", side_effect=("1", "1", "1")),
+        patch("scripts.hil.cli.sleep", return_value=None),
+    ):
+        assert (
+            hil_cli._execute_recovery_suite(
+                api_fake,
+                argparse.Namespace(
+                    non_interactive=False,
+                    route=route,
+                    guided_reconnect_required=True,
+                ),
+                reconnect_device,
+                reconnect_private,
+                reconnect_id,
+            )
+            == 0
+        )
+    reconnect_checkpoint = json.loads(
+        (reconnect_private / "checkpoint.json").read_text(encoding="utf-8")
+    )
+    recovered_step = next(
+        row
+        for row in reconnect_checkpoint["steps"]
+        if row.get("step_id") == "recovered_session"
+    )
+    reconnect_trace = recovered_step["trace"]
+    reconnect_evidence = []
+    for relative in ("checkpoint.json", f"{reconnect_trace}/trace.json"):
+        source = reconnect_private / relative
+        reconnect_evidence.append(
+            {
+                "path": f"../../tier_{reconnect_id}/private/{relative}",
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        )
+    execution["steps"].append(
+        {
+            "step_id": "basic_reconnect",
+            "scenario_id": "recovery_reconnect",
+            "outcome": "pass",
+            "observed_routes": [route],
+            "human_review": "pending",
+            "machine_evidence": reconnect_evidence,
+            "evidence_run": f"../../tier_{reconnect_id}/private",
+        }
+    )
+    (parent_private / "tier-execution.json").write_text(
+        json.dumps(execution, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return export_archive(parent_root, confirmed=True)
+
+
 @pytest.mark.parametrize("packet_types", [("SettingsData",), ()])
 def test_private_export_rejects_bronze_pass_without_decoded_status(
     tmp_path: Path, packet_types: tuple[str, ...]
@@ -736,7 +1460,11 @@ def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
     from scripts import validate_hil_qualification
     from scripts.hil.tiers import evaluate_tiers
 
-    archive = _public_archive(tmp_path, guided_tier=True)
+    archive = _public_archive(
+        tmp_path,
+        guided_tier=True,
+        guided_authorization_context="production",
+    )
     matrix_path = _matrix(tmp_path)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
 
@@ -755,6 +1483,11 @@ def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
     assert public_execution["attained_tier"] is None
     assert public_execution["qualification_status"] == "inconclusive"
     assert public_execution["steps"][0]["machine_evidence_sha256"]
+    assert public_execution["steps"][0]["authorization_context"] == "production"
+    assert (
+        public_execution["steps"][0]["authorization_context_source"]
+        == "runtime_production_authorized"
+    )
     artifacts_file = next(
         path for path in evidence_paths if path.name == "tier-artifacts.json"
     )
@@ -774,6 +1507,1933 @@ def test_guided_tier_export_is_imported_as_unqualified_review_evidence(
     )
     assert imported["session_id"].startswith("archive-session-")
     assert "0123456789abcdef" not in imported["session_id"]
+
+
+def test_guided_export_rejects_unverified_authorization_context(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(HAAPIError, match="authorization provenance"):
+        _public_archive(
+            tmp_path,
+            guided_tier=True,
+            guided_authorization_context="unsupported",
+        )
+
+
+def test_tier_review_audit_is_bound_to_feature_phase_and_archive(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+    from scripts.hil.review import _tier_review_file
+
+    now = datetime.now(UTC)
+    run = {
+        "run_id": "archive-sample",
+        "archive_sha256": "a" * 64,
+        "captured_at": (now - timedelta(seconds=1)).isoformat(),
+    }
+
+    def reference(index: int, state: bool) -> dict[str, Any]:
+        return {
+            "trace_sha256": ("b" if index == 0 else "c") * 64,
+            "frame_sha256": ("d" if index == 0 else "e") * 64,
+            "transaction_sha256": ("f" if index == 0 else "a") * 64,
+            "frame_seq": index + 1,
+            "session_generation": 4,
+            "source_action_index": index,
+            "action_stage": "transition" if index == 0 else "restoration",
+            "source_step_id": "eco_mode_reversal",
+            "requested_state": state,
+        }
+
+    payload = {
+        "schema_version": 1,
+        "tier": "gold",
+        "archive_sha256": run["archive_sha256"],
+        "run_id": run["run_id"],
+        "reviewed_by": "reviewer one",
+        "reviewed_at": now.isoformat(),
+        "reviewer_independent_from_operator": True,
+        "transitions": [
+            {
+                "step_id": "eco_mode_reversal",
+                "initial_state": False,
+                "target_state": True,
+                "change_frame_evidence": reference(0, True),
+                "restore_frame_evidence": reference(1, False),
+                "final_restore_frame_evidence": reference(1, False),
+                "change_trace_sha256": ["b" * 64],
+                "restore_trace_sha256": ["c" * 64],
+                "final_restore_trace_sha256": ["c" * 64],
+                "final_restore_state": False,
+                "physical_change_confirmed": True,
+                "physical_restoration_confirmed": True,
+                "final_restoration_confirmed": True,
+                "production_authorization_confirmed": True,
+            }
+        ],
+        "scenarios": [],
+    }
+    path = tmp_path / "tier-review.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _tier_review_file(path, run, "gold")[0] == "reviewer one"
+    payload["transitions"][0]["restore_frame_evidence"]["source_action_index"] = 0
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(HAAPIError, match="frame reference"):
+        _tier_review_file(path, run, "gold")
+
+
+def test_public_guided_frame_projection_keeps_semantics_and_omits_payload() -> None:
+    from scripts.hil.evidence import _public_tier_artifact, _valid_public_tier_artifact
+
+    frame = bytearray.fromhex("a56500b10101000200")
+    checksum = 0
+    for value in frame[:-1]:
+        checksum ^= value
+    frame[-1] = checksum
+    private_row = {
+        "seq": 4,
+        "event": "write_attempt",
+        "direction": "tx",
+        "command_type": "output_control",
+        "frame_validation": "validated_tx",
+        "session_generation": 2,
+        "hex": frame.hex(),
+    }
+    projected = _public_tier_artifact(
+        "frames.jsonl", (json.dumps(private_row) + "\n").encode()
+    )
+
+    row = projected["rows"][0]
+    assert row["output_states"] == {
+        "ac_output": True,
+        "dc_output": False,
+        "light_output": False,
+    }
+    assert row["frame_sha256"] == hashlib.sha256(frame).hexdigest()
+    assert "hex" not in row
+    assert _valid_public_tier_artifact(projected)
+
+    frame[-1] ^= 1
+    private_row["hex"] = frame.hex()
+    invalid = _public_tier_artifact(
+        "frames.jsonl", (json.dumps(private_row) + "\n").encode()
+    )
+    assert "output_states" not in invalid["rows"][0]
+
+    settings_frame = bytearray.fromhex("a56500b1010202010400")
+    checksum = 0
+    for value in settings_frame[:-1]:
+        checksum ^= value
+    settings_frame[-1] = checksum
+    private_row.update(
+        command_type="settings_control",
+        hex=settings_frame.hex(),
+    )
+    settings = _public_tier_artifact(
+        "frames.jsonl", (json.dumps(private_row) + "\n").encode()
+    )
+    assert settings["rows"][0]["setting_states"] == {
+        "eco_mode": True,
+        "work_mode": 0,
+        "car_charger": False,
+        "eco_timeout": 4,
+    }
+    assert "hex" not in settings["rows"][0]
+
+
+def test_public_guided_output_evidence_requires_two_restored_cycles() -> None:
+    from scripts.hil.evidence import _public_tier_artifact, _valid_public_tier_artifact
+
+    cycles = [
+        {
+            "initial_state": "off",
+            "target_state": "on",
+            "change_action_index": 0,
+            "restore_action_index": 1,
+            "physical_change_outcome": "correct",
+            "physical_restore_outcome": "correct",
+        },
+        {
+            "initial_state": "on",
+            "target_state": "off",
+            "change_action_index": 1,
+            "restore_action_index": 2,
+            "physical_change_outcome": "correct",
+            "physical_restore_outcome": "correct",
+        },
+    ]
+    private = {
+        "step_id": "light_output_cycle",
+        "outcome": "pass",
+        "initial_state": "off",
+        "target_state": "on",
+        "restored_state": "off",
+        "physical_change_outcome": "correct",
+        "physical_restore_outcome": "correct",
+        "output_cycles": cycles,
+        "final_restore_action_index": 3,
+        "final_restore_outcome": "correct",
+        "actions": [{"outcome": "confirmed", "confirmed": True}] * 4,
+    }
+    projected = _public_tier_artifact(
+        "tier-light_output_cycle.json", json.dumps(private).encode()
+    )
+    assert projected["output_cycles"] == cycles
+    assert _valid_public_tier_artifact(projected)
+
+    malformed = json.loads(json.dumps(private))
+    malformed["output_cycles"][1]["restore_action_index"] = 1
+    with pytest.raises(HAAPIError, match="output cycle"):
+        _public_tier_artifact(
+            "tier-light_output_cycle.json", json.dumps(malformed).encode()
+        )
+
+
+def test_reconnect_capture_is_bound_to_source_status_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification as validation
+
+    monkeypatch.setattr(validation, "ROOT", tmp_path)
+    trace_sha = "a" * 64
+    frame = {
+        "seq": 5,
+        "event": "write_attempt",
+        "direction": "tx",
+        "command_type": "status_request",
+        "frame_validation": "validated_tx",
+        "session_generation": 2,
+        "payload_omitted": True,
+        "frame_sha256": hashlib.sha256(validation.STATUS_REQUEST).hexdigest(),
+        "transaction_sha256": "e" * 64,
+    }
+    trace = {
+        "kind": "gatt_trace_metadata",
+        "schema_version": 2,
+        "scenario_id": "recovery_reconnect",
+        "requested_route": "local_adapter",
+        "observed_route": "local_adapter",
+        "complete": True,
+        "event_count": 2,
+        "frame_count": 1,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "events_sha256": "b" * 64,
+        "frames_sha256": "c" * 64,
+        "events": [
+            {
+                "seq": 6,
+                "event": "write_ok",
+                "utc": "2026-11-09T12:00:01+00:00",
+                "elapsed_ms": 10.0,
+                "session_generation": 2,
+                "observed_route": "local_adapter",
+                "transaction_sha256": "e" * 64,
+            },
+            {
+                "seq": 7,
+                "event": "notification_decoded",
+                "utc": "2026-11-09T12:00:02+00:00",
+                "elapsed_ms": 20.0,
+                "session_generation": 2,
+                "observed_route": "local_adapter",
+                "decoded_packet_types": ["StatusData"],
+            },
+        ],
+        "frames": [frame],
+    }
+    bundle = {
+        "artifacts": [
+            {
+                "artifact_id": "step-01-evidence-01",
+                "source_sha256": trace_sha,
+                "content": trace,
+            },
+            {
+                "artifact_id": "scenario-checkpoint",
+                "source_sha256": "f" * 64,
+                "content": {
+                    "kind": "scenario_checkpoint",
+                    "scenario_id": "recovery_reconnect",
+                    "steps": [
+                        {
+                            "step_id": "recovered_session",
+                            "outcome": "pass",
+                            "observation": {
+                                "session_generation_before": 1,
+                                "session_generation_after": 2,
+                                "fresh_status_telemetry": True,
+                                "trace_complete": True,
+                                "route_verified": True,
+                                "route": "local_adapter",
+                            },
+                        }
+                    ],
+                },
+            },
+        ]
+    }
+    execution = {
+        "steps": [
+            {
+                "step_id": "basic_reconnect",
+                "machine_evidence_sha256": [trace_sha],
+                "machine_evidence": [
+                    {
+                        "artifact_id": "step-01-evidence-01",
+                        "source_sha256": trace_sha,
+                    },
+                    {
+                        "artifact_id": "scenario-checkpoint",
+                        "source_sha256": "f" * 64,
+                    },
+                ],
+            }
+        ]
+    }
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    (tmp_path / "tier-execution.json").write_text(json.dumps(execution))
+    scope = {
+        "route": "local_adapter",
+        "revision_id": "sample",
+        "firmware_version": "1.1",
+        "run_id": "archive-sample",
+        "captured_at": "2026-11-09T12:00:00+00:00",
+        "session_id": "archive-session-sample",
+        "build_fingerprint": "d" * 64,
+    }
+    row = {
+        **scope,
+        "scenario": "reconnect_failover",
+        "operation_id": "reconnect_failover",
+        "direction": "write",
+        "frame_hex": validation.STATUS_REQUEST.hex(),
+        "verdict": "ok",
+        "physical_outcome": "pass",
+        "source_trace_sha256": trace_sha,
+        "source_frame_sha256": frame["frame_sha256"],
+        "source_transaction_sha256": frame["transaction_sha256"],
+        "source_frame_seq": 5,
+        "source_step_id": "basic_reconnect",
+        "session_generation": 2,
+    }
+    (tmp_path / "reconnect.jsonl").write_text(json.dumps(row) + "\n")
+    evidence = [
+        "tier-artifacts.json",
+        "tier-execution.json",
+        "reconnect.jsonl",
+    ]
+
+    assert validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+    trace["events"] = trace["events"][:1]
+    trace["event_count"] = 1
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    assert not validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+    trace["events"] = [
+        {
+            **trace["events"][0],
+            "seq": 4,
+            "event": "notification_decoded",
+            "decoded_packet_types": ["StatusData"],
+        },
+        {
+            **trace["events"][0],
+            "seq": 6,
+            "event": "write_ok",
+        },
+    ]
+    trace["event_count"] = 2
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    assert not validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+    trace["events"] = [
+        {
+            **trace["events"][1],
+            "seq": 6,
+            "event": "write_ok",
+        },
+        {
+            **trace["events"][0],
+            "seq": 7,
+            "event": "notification_decoded",
+        },
+    ]
+    checkpoint = bundle["artifacts"][1]["content"]["steps"][0]["observation"]
+    checkpoint["session_generation_before"] = 2
+    (tmp_path / "tier-artifacts.json").write_text(json.dumps(bundle))
+    assert not validation._has_bound_capture(
+        evidence,
+        **scope,
+        result_key="reconnect_failover",
+        capability=False,
+        expected_verdict="ok",
+    )
+
+
+def test_public_guided_trace_binds_sanitized_events_and_frames() -> None:
+    from scripts.hil.evidence import _public_tier_artifact, _valid_public_tier_artifact
+
+    frame = bytearray.fromhex("a56500b10101000200")
+    checksum = 0
+    for value in frame[:-1]:
+        checksum ^= value
+    frame[-1] = checksum
+    transaction_id = "public-output-transaction"
+    transaction_sha256 = hashlib.sha256(transaction_id.encode()).hexdigest()
+    event_rows = [
+        {
+            "seq": seq,
+            "event": event,
+            "utc": f"2026-11-09T12:00:0{seq}+00:00",
+            "elapsed_ms": seq * 100,
+            "session_generation": 2,
+            "observed_route": "local_adapter",
+            "transaction_kind": "output",
+            **(
+                {
+                    "transaction_id": transaction_id,
+                    **(
+                        {"reason": "matching_validated_telemetry"}
+                        if event == "transaction_confirmed"
+                        else {}
+                    ),
+                }
+                if event != "notification_decoded"
+                else {}
+            ),
+        }
+        for seq, event in enumerate(
+            (
+                "write_attempt",
+                "transaction_submitted",
+                "transaction_confirmed",
+                "notification_decoded",
+            ),
+            1,
+        )
+    ]
+    event_rows[-1]["decoded_packet_types"] = ["StatusData"]
+    frame_rows = [
+        {
+            "seq": 1,
+            "event": "write_attempt",
+            "direction": "tx",
+            "command_type": "output_control",
+            "frame_validation": "validated_tx",
+            "session_generation": 2,
+            "transaction_id": transaction_id,
+            "hex": frame.hex(),
+        }
+    ]
+    trace = {
+        "schema_version": 2,
+        "scenario_id": "output_ac_cycle",
+        "requested_route": "local_adapter",
+        "observed_route": "local_adapter",
+        "complete": True,
+        "event_count": len(event_rows),
+        "frame_count": len(frame_rows),
+        "dropped_events": 0,
+        "dropped_frames": 0,
+    }
+    projected = _public_tier_artifact(
+        "trace.json",
+        json.dumps(trace).encode(),
+        trace_files={
+            "events.jsonl": b"".join(
+                (json.dumps(row) + "\n").encode() for row in event_rows
+            ),
+            "frames.jsonl": b"".join(
+                (json.dumps(row) + "\n").encode() for row in frame_rows
+            ),
+        },
+    )
+
+    assert _valid_public_tier_artifact(projected)
+    assert projected["events_sha256"]
+    assert projected["frames_sha256"]
+    assert projected["events"][-1]["decoded_packet_types"] == ["StatusData"]
+    assert projected["frames"][0]["frame_sha256"] == hashlib.sha256(frame).hexdigest()
+    assert projected["frames"][0]["event"] == "write_attempt"
+    from scripts.hil.review_wizard import _has_trace_operation
+
+    action = {
+        "session_generation": 2,
+        "transaction": {
+            "kind": "output",
+            "session_generation": 2,
+            "transaction_sha256": transaction_sha256,
+            "write_seq": 1,
+            "submitted_seq": 2,
+            "confirmed_seq": 3,
+        },
+        "trace_evidence_sha256": ["e" * 64],
+    }
+    assert _has_trace_operation(
+        action,
+        {"e" * 64: projected},
+        feature="ac_output",
+        state="on",
+        route="local_adapter",
+    )
+    assert not _has_trace_operation(
+        action,
+        {"e" * 64: projected},
+        feature="ac_output",
+        state="on",
+        route="active_proxy",
+    )
+    unrelated_confirmation = {
+        **projected,
+        "events": [dict(row) for row in projected["events"]],
+    }
+    unrelated_confirmation["events"][2]["transaction_sha256"] = "0" * 64
+    assert not _has_trace_operation(
+        action,
+        {"e" * 64: unrelated_confirmation},
+        feature="ac_output",
+        state="on",
+        route="local_adapter",
+    )
+    setting_trace = {
+        "kind": "gatt_trace_metadata",
+        "observed_route": "local_adapter",
+        "complete": True,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "transaction_id": "public-setting-transaction",
+        "frames": [
+            {
+                "seq": 4,
+                "event": "write_attempt",
+                "direction": "tx",
+                "command_type": "settings_control",
+                "frame_validation": "validated_tx",
+                "session_generation": 2,
+                "frame_sha256": "f" * 64,
+                "transaction_sha256": hashlib.sha256(
+                    b"public-setting-transaction"
+                ).hexdigest(),
+                "setting_states": {
+                    "eco_mode": True,
+                    "work_mode": 0,
+                    "eco_timeout": 4,
+                    "car_charger": False,
+                },
+            }
+        ],
+        "events": [
+            {
+                "seq": seq,
+                "event": event,
+                "session_generation": 2,
+                "observed_route": "local_adapter",
+                "transaction_kind": "settings",
+                "transaction_sha256": hashlib.sha256(
+                    b"public-setting-transaction"
+                ).hexdigest(),
+                **(
+                    {"transaction_reason": "matching_validated_telemetry"}
+                    if event == "transaction_confirmed"
+                    else {}
+                ),
+            }
+            for seq, event in (
+                (4, "write_attempt"),
+                (5, "transaction_submitted"),
+                (6, "transaction_confirmed"),
+            )
+        ],
+    }
+    setting_action = {
+        "session_generation": 2,
+        "transaction": {
+            "kind": "settings",
+            "session_generation": 2,
+            "transaction_sha256": hashlib.sha256(
+                b"public-setting-transaction"
+            ).hexdigest(),
+            "write_seq": 4,
+            "submitted_seq": 5,
+            "confirmed_seq": 6,
+        },
+        "trace_evidence_sha256": ["f" * 64],
+    }
+    assert _has_trace_operation(
+        setting_action,
+        {"f" * 64: setting_trace},
+        feature="eco_mode",
+        state=True,
+        route="local_adapter",
+    )
+    assert not _has_trace_operation(
+        setting_action,
+        {"f" * 64: setting_trace},
+        feature="eco_mode",
+        state=False,
+        route="local_adapter",
+    )
+
+
+def test_schema_v3_validates_normalized_frame_against_imported_artifact_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification as validation
+    from scripts.hil.evidence import _public_tier_artifact
+
+    frame = bytearray.fromhex("a56500b10101000200")
+    checksum = 0
+    for value in frame[:-1]:
+        checksum ^= value
+    frame[-1] = checksum
+    transaction_id = "sample-output-transaction"
+    transaction_sha256 = hashlib.sha256(transaction_id.encode()).hexdigest()
+    frame_content = (
+        json.dumps(
+            {
+                "seq": 4,
+                "event": "write_attempt",
+                "direction": "tx",
+                "command_type": "output_control",
+                "frame_validation": "validated_tx",
+                "session_generation": 2,
+                "transaction_id": transaction_id,
+                "hex": frame.hex(),
+            }
+        )
+        + "\n"
+    ).encode()
+    events_content = (
+        b"\n".join(
+            json.dumps(
+                {
+                    "seq": seq,
+                    "event": event,
+                    "utc": f"2026-11-09T12:00:0{seq}+00:00",
+                    "elapsed_ms": seq * 100,
+                    "session_generation": 2,
+                    "observed_route": "local_adapter",
+                    "transaction_kind": "output",
+                    "transaction_id": transaction_id,
+                    **(
+                        {"reason": "matching_validated_telemetry"}
+                        if event == "transaction_confirmed"
+                        else {}
+                    ),
+                }
+            ).encode()
+            for seq, event in (
+                (4, "write_attempt"),
+                (5, "transaction_submitted"),
+                (6, "transaction_confirmed"),
+            )
+        )
+        + b"\n"
+    )
+    trace = _public_tier_artifact(
+        "trace.json",
+        json.dumps(
+            {
+                "schema_version": 2,
+                "scenario_id": "output_ac_cycle",
+                "requested_route": "local_adapter",
+                "observed_route": "local_adapter",
+                "complete": True,
+                "event_count": 3,
+                "frame_count": 1,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+            }
+        ).encode(),
+        trace_files={"events.jsonl": events_content, "frames.jsonl": frame_content},
+    )
+    trace_sha = "a" * 64
+    step_sha = "b" * 64
+    bundle_path = "tests/hil/fixtures/sample/runs/archive-sample/tier-artifacts.json"
+    execution_path = "tests/hil/fixtures/sample/runs/archive-sample/tier-execution.json"
+    capture_path = "tests/hil/fixtures/sample/runs/archive-sample/review.jsonl"
+    bundle = {
+        "artifacts": [
+            {
+                "artifact_id": "step-01-evidence-01",
+                "source_sha256": trace_sha,
+                "content": trace,
+            },
+            {
+                "artifact_id": "step-01-evidence-02",
+                "source_sha256": step_sha,
+                "content": {
+                    "kind": "guided_step_evidence",
+                    "step_id": "ac_output_cycle",
+                    "outcome": "pass",
+                    "target_state": "on",
+                    "initial_state": "off",
+                    "physical_change_outcome": "correct",
+                    "physical_restore_outcome": "correct",
+                    "output_cycles": [
+                        {
+                            "initial_state": "off",
+                            "target_state": "on",
+                            "change_action_index": 0,
+                            "restore_action_index": 1,
+                            "physical_change_outcome": "correct",
+                            "physical_restore_outcome": "correct",
+                        },
+                        {
+                            "initial_state": "on",
+                            "target_state": "off",
+                            "change_action_index": 1,
+                            "restore_action_index": 2,
+                            "physical_change_outcome": "correct",
+                            "physical_restore_outcome": "correct",
+                        },
+                    ],
+                    "final_restore_action_index": 3,
+                    "final_restore_outcome": "correct",
+                    "actions": [
+                        {
+                            "outcome": "confirmed",
+                            "confirmed": True,
+                            "trace_valid": True,
+                            "trace_complete": True,
+                            "route": "local_adapter",
+                            "session_generation": 2,
+                            "transaction": {
+                                "kind": "output",
+                                "session_generation": 2,
+                                "transaction_sha256": transaction_sha256,
+                                "write_seq": 4,
+                                "submitted_seq": 5,
+                                "confirmed_seq": 6,
+                            },
+                            "trace_evidence_sha256": [trace_sha],
+                        }
+                    ],
+                },
+            },
+        ]
+    }
+    execution = {
+        "steps": [
+            {
+                "step_id": "ac_output_cycle",
+                "authorization_context": "production",
+                "authorization_context_source": "runtime_production_authorized",
+                "machine_evidence_sha256": [trace_sha],
+                "machine_evidence": [
+                    {"artifact_id": "step-01-evidence-02", "source_sha256": step_sha}
+                ],
+            }
+        ]
+    }
+    for relative, content in (
+        (bundle_path, bundle),
+        (execution_path, execution),
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(content), encoding="utf-8")
+    monkeypatch.setattr(validation, "ROOT", tmp_path)
+    scope = {
+        "route": "local_adapter",
+        "revision_id": "sample",
+        "model": "ALLPOWERS R600",
+        "hardware_revision": "0.3",
+        "firmware_version": "1.1",
+        "run_id": "archive-sample",
+        "captured_at": "2026-11-09T12:00:00+00:00",
+        "session_id": "archive-session-sample",
+        "build_fingerprint": "c" * 64,
+    }
+    row = {
+        **scope,
+        "capability": "ac_output",
+        "operation_id": "ac_output",
+        "action_stage": "transition",
+        "requested_state": True,
+        "direction": "write",
+        "verdict": "ok",
+        "physical_outcome": "pass",
+        "session_generation": 2,
+        "source_trace_sha256": trace_sha,
+        "source_frame_sha256": hashlib.sha256(frame).hexdigest(),
+        "source_transaction_sha256": transaction_sha256,
+        "source_frame_seq": 4,
+        "source_step_id": "ac_output_cycle",
+        "source_action_index": 0,
+    }
+
+    assert validation._valid_public_frame_capture(
+        row,
+        [bundle_path, execution_path, capture_path],
+        scope=scope,
+        feature="ac_output",
+        requested_state=True,
+        action_stage="transition",
+    )
+    row["source_transaction_sha256"] = "e" * 64
+    assert not validation._valid_public_frame_capture(
+        row,
+        [bundle_path, execution_path, capture_path],
+        scope=scope,
+        feature="ac_output",
+        requested_state=True,
+        action_stage="transition",
+    )
+    row["source_transaction_sha256"] = transaction_sha256
+    execution["steps"][0]["authorization_context"] = "experimental_hil"
+    execution["steps"][0]["authorization_context_source"] = "experimental_hil_grant"
+    execution_file = tmp_path / execution_path
+    execution_file.write_text(json.dumps(execution), encoding="utf-8")
+    assert not validation._valid_public_frame_capture(
+        row,
+        [bundle_path, execution_path, capture_path],
+        scope=scope,
+        feature="ac_output",
+        requested_state=True,
+        action_stage="transition",
+    )
+    execution["steps"][0]["authorization_context"] = "production"
+    execution["steps"][0]["authorization_context_source"] = (
+        "runtime_production_authorized"
+    )
+    execution_file.write_text(json.dumps(execution), encoding="utf-8")
+    row["source_frame_sha256"] = "d" * 64
+    assert not validation._valid_public_frame_capture(
+        row,
+        [bundle_path, execution_path, capture_path],
+        scope=scope,
+        feature="ac_output",
+        requested_state=True,
+        action_stage="transition",
+    )
+
+
+@pytest.mark.parametrize(
+    ("tier", "blocker"),
+    [
+        (
+            "silver",
+            "imported machine proof did not produce a supported schema-v3 result",
+        ),
+        (
+            "gold",
+            "imported machine proof did not produce a supported schema-v3 result",
+        ),
+        ("platinum", "continuous 24-hour soak evidence"),
+    ],
+)
+def test_higher_tier_review_fails_closed_when_public_proof_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+    blocker: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _public_archive(tmp_path / "source", guided_tier=True)
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    before = matrix_path.read_bytes()
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier=tier, repo_root=tmp_path)
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert blocker in output
+    assert "Model / hardware revision: ALLPOWERS R600 / 0.3" in output
+    assert f"Run ID: {run_id}" in output
+    assert "Session ID:" in output
+    assert "Build fingerprint:" in output
+    assert matrix_path.read_bytes() == before
+
+
+def test_interactive_higher_tier_review_does_not_infer_off_from_on_restoration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.hil.review_wizard import (
+        _has_trace_operation,
+        _interactive_higher_tier_review,
+    )
+
+    def trace(target: bool) -> dict[str, Any]:
+        transaction_id = "output-on" if target else "output-off"
+        transaction_sha256 = hashlib.sha256(transaction_id.encode()).hexdigest()
+        return {
+            "kind": "gatt_trace_metadata",
+            "observed_route": "local_adapter",
+            "complete": True,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "frames": [
+                {
+                    "seq": 1,
+                    "event": "write_attempt",
+                    "direction": "tx",
+                    "command_type": "output_control",
+                    "frame_validation": "validated_tx",
+                    "session_generation": 3,
+                    "frame_sha256": ("a" if target else "b") * 64,
+                    "transaction_sha256": transaction_sha256,
+                    "output_states": {
+                        "ac_output": target,
+                        "dc_output": False,
+                        "light_output": False,
+                    },
+                }
+            ],
+            "events": [
+                {
+                    "seq": seq,
+                    "event": event,
+                    "session_generation": 3,
+                    "observed_route": "local_adapter",
+                    "transaction_kind": "output",
+                    "transaction_sha256": transaction_sha256,
+                    **(
+                        {"transaction_reason": "matching_validated_telemetry"}
+                        if event == "transaction_confirmed"
+                        else {}
+                    ),
+                }
+                for seq, event in (
+                    (1, "write_attempt"),
+                    (2, "transaction_submitted"),
+                    (3, "transaction_confirmed"),
+                )
+            ],
+        }
+
+    change_sha, restore_sha = "a" * 64, "b" * 64
+    guide = {
+        "kind": "guided_step_evidence",
+        "step_id": "ac_output_cycle",
+        "outcome": "pass",
+        "initial_state": "off",
+        "target_state": "on",
+        "restored_state": "off",
+        "physical_change_outcome": "correct",
+        "physical_restore_outcome": "correct",
+        "actions": [
+            {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "trace_valid": True,
+                "trace_complete": True,
+                "route": "local_adapter",
+                "session_generation": 3,
+                "transaction": {
+                    "kind": "output",
+                    "session_generation": 3,
+                    "transaction_sha256": hashlib.sha256(
+                        "output-on".encode()
+                    ).hexdigest(),
+                    "write_seq": 1,
+                    "submitted_seq": 2,
+                    "confirmed_seq": 3,
+                },
+                "trace_evidence_sha256": [change_sha],
+            },
+            {
+                "outcome": "confirmed",
+                "confirmed": True,
+                "trace_valid": True,
+                "trace_complete": True,
+                "route": "local_adapter",
+                "session_generation": 3,
+                "transaction": {
+                    "kind": "output",
+                    "session_generation": 3,
+                    "transaction_sha256": hashlib.sha256(
+                        "output-off".encode()
+                    ).hexdigest(),
+                    "write_seq": 1,
+                    "submitted_seq": 2,
+                    "confirmed_seq": 3,
+                },
+                "trace_evidence_sha256": [restore_sha],
+            },
+        ],
+    }
+    artifacts = {
+        "artifacts": [
+            {"artifact_id": "step-01-evidence-01", "content": guide},
+            {"source_sha256": change_sha, "content": trace(True)},
+            {"source_sha256": restore_sha, "content": trace(False)},
+        ]
+    }
+    traces_by_digest = {change_sha: trace(True), restore_sha: trace(False)}
+    assert _has_trace_operation(
+        guide["actions"][0],
+        traces_by_digest,
+        feature="ac_output",
+        state="on",
+        route="local_adapter",
+    )
+    assert _has_trace_operation(
+        guide["actions"][1],
+        traces_by_digest,
+        feature="ac_output",
+        state="off",
+        route="local_adapter",
+    )
+    execution = {
+        "steps": [
+            {
+                "step_id": "ac_output_cycle",
+                "machine_evidence": [{"artifact_id": "step-01-evidence-01"}],
+                "authorization_context": "production",
+                "authorization_context_source": "runtime_production_authorized",
+            }
+        ]
+    }
+    members = {
+        "tier-artifacts.json": json.dumps(artifacts).encode(),
+        "tier-execution.json": json.dumps(execution).encode(),
+    }
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = iter(["reviewer one", "yes", "yes", "yes", "no"])
+    prompts: list[str] = []
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    result = _interactive_higher_tier_review(
+        tier="silver",
+        run={
+            "run_id": "archive-example",
+            "archive_sha256": "d" * 64,
+            "route": "local_adapter",
+        },
+        members=members,
+        repo_root=tmp_path,
+    )
+
+    assert result == 2
+    assert len(prompts) == 0
+    output = capsys.readouterr().out
+    assert "both on and off transitions" in output
+    assert "No PASS can be recorded" in output
+    audit_files = list((tmp_path / "hil-results" / "tier-reviews").glob("*.json"))
+    assert audit_files == []
+
+
+def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _guided_setting_review_archive(tmp_path / "archive")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+    imported_run = matrix["revisions"][0]["runs"][0]
+
+    _tty(monkeypatch)
+    answers = iter(["independent reviewer", "yes", "yes", "yes", "yes", "APPLY REVIEW"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "reviewed_capabilities" in output
+    assert "Model / hardware revision: ALLPOWERS R600 / 0.3" in output
+    assert f"Run ID: {run_id}" in output
+    assert f"Session ID: {imported_run['session_id']}" in output
+    assert f"Observed route: {imported_run['route']}" in output
+    assert f"Firmware: {imported_run['firmware_version']}" in output
+    assert f"Build fingerprint: {imported_run['build_fingerprint']}" in output
+
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    capability = run["write_capabilities"]["eco_mode"]
+    assert capability["status"] == "pass"
+    assert capability["physical_review"]["outcome"] == "confirmed_pass"
+    assert capability["physical_review"]["reviewed_by"] == "independent reviewer"
+    assert run["authorization_context"] == "production"
+    assert run["authorization_context_source"] == "reviewed_production_session"
+    assert any("eco_mode-restoration.json" in item for item in capability["evidence"])
+    errors, _ = validate_hil_qualification.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "unqualified"
+
+
+def test_inventory_preflight_survives_public_archive_and_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from custom_components.allpowers_ble.model_support import (
+        MODEL_FEATURE_PROFILES,
+        ModelFeature,
+        identify_model,
+        model_feature_capability,
+    )
+    from scripts import validate_hil_qualification
+    from scripts.hil.cli import _collect_physical_inventory_preflight
+    from scripts.hil.evidence import _public_tier_plan, export_archive
+    from scripts.hil.guided import build_tier_plan
+    from scripts.hil.review_wizard import interactive_review
+
+    support = identify_model("R600", hardware_version="0.3", raw_hardware_version=3)
+    capabilities = {
+        "model": support.model,
+        "profile": support.profile,
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+        "verified": support.verified,
+        "identity_conflicted": False,
+        "features": {
+            feature.value: {
+                "physical_presence": model_feature_capability(
+                    support, feature
+                ).physical_presence.value,
+                "production_authorized": model_feature_capability(
+                    support, feature
+                ).production_authorized,
+                "candidate_hil_eligible": model_feature_capability(
+                    support, feature
+                ).hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature in ModelFeature
+        },
+    }
+    controls = {
+        name: {"available": True, "eligible": True, "state": "off"}
+        for name in (
+            "ac_output",
+            "dc_output",
+            "light",
+            "eco_mode",
+            "work_mode",
+            "eco_timeout",
+            "car_charger",
+        )
+    }
+    inventory = _collect_physical_inventory_preflight(
+        capabilities, controls, prompt=lambda _message: "PRESENT"
+    )
+    plan = build_tier_plan(
+        "gold",
+        capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    projected_plan = _public_tier_plan(plan)
+    assert projected_plan is not None
+    assert _public_tier_plan(projected_plan) == projected_plan
+    tampered_plan = json.loads(json.dumps(projected_plan))
+    tampered_plan["physical_inventory_preflight"]["features"]["ac_output"]["basis"] = (
+        "ha_entity_visible"
+    )
+    assert _public_tier_plan(tampered_plan) is None
+    tampered_plan = json.loads(json.dumps(projected_plan))
+    next(step for step in tampered_plan["steps"] if step["feature"] == "ac_output")[
+        "physical_presence"
+    ] = "present"
+    assert _public_tier_plan(tampered_plan) is None
+    expected_inspected = {
+        step["feature"]
+        for step in plan["steps"]
+        if step.get("inventory_preflight") == "operator_inspected_present"
+    }
+    assert expected_inspected
+    assert set(projected_plan["physical_inventory_preflight"]["features"]) == (
+        expected_inspected
+    )
+    for step in projected_plan["steps"]:
+        if step["feature"] in expected_inspected:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "operator_inspected_present"
+
+    uninspected_plan = build_tier_plan(
+        "gold", capabilities, controls, observed_route="local_adapter"
+    )
+    uninspected_public = _public_tier_plan(uninspected_plan)
+    assert uninspected_public is not None
+    assert uninspected_public["physical_inventory_preflight"]["features"] == {}
+    for step in uninspected_public["steps"]:
+        if step["feature"] in expected_inspected:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "unknown"
+    unauthorized_capabilities = json.loads(json.dumps(capabilities))
+    unauthorized_capabilities["features"]["eco_mode"]["production_authorized"] = False
+    unauthorized_plan = build_tier_plan(
+        "gold",
+        unauthorized_capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    unauthorized_public = _public_tier_plan(unauthorized_plan)
+    assert unauthorized_public is not None
+    assert (
+        "eco_mode"
+        not in unauthorized_public["physical_inventory_preflight"]["features"]
+    )
+    unauthorized_eco = next(
+        step for step in unauthorized_public["steps"] if step["feature"] == "eco_mode"
+    )
+    assert unauthorized_eco["physical_presence"] == "unknown"
+    assert unauthorized_eco["inventory_preflight"] == "unknown"
+    lite_profile = MODEL_FEATURE_PROFILES["ap-r1500-lite-hw-0.1-evidence"]
+    lite_capabilities = {
+        "model": lite_profile.model,
+        "profile": lite_profile.profile,
+        "hardware_revision": lite_profile.hardware_revision,
+        "firmware_revision": "1.1",
+        "verified": False,
+        "identity_conflicted": False,
+        "features": {
+            feature.value: {
+                "physical_presence": declaration.physical_presence.value,
+                "production_authorized": declaration.production_authorized,
+                "candidate_hil_eligible": declaration.hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature, declaration in lite_profile.features.items()
+        },
+    }
+    lite_controls = {
+        name: {
+            "available": name != "light",
+            "eligible": False,
+            "state": "off",
+        }
+        for name in controls
+    }
+    absent_plan = build_tier_plan(
+        "gold",
+        lite_capabilities,
+        lite_controls,
+        observed_route="local_adapter",
+        inventory_preflight={
+            "light_output": {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
+        },
+    )
+    absent_public = _public_tier_plan(absent_plan)
+    assert absent_public is not None
+    assert absent_public["physical_inventory_preflight"]["features"] == {}
+    light_step = next(
+        step for step in absent_public["steps"] if step["feature"] == "light_output"
+    )
+    assert light_step["physical_presence"] == "absent"
+    assert light_step["inventory_preflight"] == "not_required"
+
+    source = tmp_path / "source"
+    archive = _captured_archive(
+        source,
+        "local_adapter",
+        "1.1",
+        "abcdef0123456789",
+        bronze_reviewable=True,
+    )
+    run_root = source / "run-abcdef0123456789"
+    private_session = run_root / "private" / "session.json"
+    session = json.loads(private_session.read_text(encoding="utf-8"))
+    session["test_plan"] = plan
+    private_session.write_text(json.dumps(session), encoding="utf-8")
+    archive = export_archive(run_root, confirmed=True)
+    _verified, public_members, _digest = verify_public_archive(
+        archive, include_contents=True
+    )
+    public_session = json.loads(public_members["session.json"])
+    exported_plan = public_session["data"]["test_plan"]
+    assert (
+        exported_plan["physical_inventory_preflight"]["features"]
+        == (projected_plan["physical_inventory_preflight"]["features"])
+    )
+    assert _public_tier_plan(exported_plan) == exported_plan
+
+    matrix_path = _matrix(tmp_path / "imported")
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 2
+    )
+    wizard_output = capsys.readouterr().out
+    assert "Operator physical-inventory preflight (acquisition eligibility only;" in (
+        wizard_output
+    )
+    assert "not independent qualification" in wizard_output
+    assert "independently inspect the actual transitions and restorations" in (
+        wizard_output
+    )
+
+
+def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from datetime import UTC, datetime
+
+    from scripts import validate_hil_qualification
+    from scripts.hil.evidence import export_archive
+    from scripts.hil.importer import import_archive
+    from scripts.hil.review import review_imported_tier_run
+    from scripts.hil.review_wizard import interactive_review
+
+    def make_archive(path: Path, *, plan_model: str) -> Path:
+        run_id = "abcdef0123456789"
+        source = path / "source"
+        _captured_archive(
+            source,
+            "local_adapter",
+            "1.1",
+            run_id,
+            bronze_reviewable=True,
+        )
+        run_root = source / f"run-{run_id}"
+        private = run_root / "private"
+        session_path = private / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["test_plan"] = {
+            "schema_version": 1,
+            "requested_tier": "silver",
+            "attained_tier": None,
+            "review_state": "pending",
+            "device": {
+                "model": plan_model,
+                "hardware_revision": "0.3",
+                "firmware_revision": "1.1",
+                "verified_route": "local_adapter",
+            },
+            "operator_actions_estimate": 1,
+            "steps": [
+                {
+                    "id": "light_output_cycle",
+                    "feature": "light_output",
+                    "eligibility": "not_applicable",
+                    "physical_presence": "absent",
+                    "outcome": "pending",
+                    "reasons": ["runtime profile substantiates physical absence"],
+                    "human_review": "pending",
+                }
+            ],
+        }
+        session_path.write_text(json.dumps(session), encoding="utf-8")
+        (private / "tier-execution.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "requested_tier": "silver",
+                    "execution_tier": "silver",
+                    "requested_route": "local_adapter",
+                    "device": {
+                        "model": "R600",
+                        "hardware_revision": "0.3",
+                        "firmware_revision": "1.1",
+                    },
+                    "review_state": "pending",
+                    "steps": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return export_archive(run_root, confirmed=True)
+
+    archive = make_archive(tmp_path / "positive-source", plan_model="R600")
+    positive_root = tmp_path / "positive"
+    matrix_path = _matrix(positive_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", positive_root)
+    assert (
+        import_archive(
+            archive, matrix_path=matrix_path, apply=True, repo_root=positive_root
+        )
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = imported["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    positive_answers = iter(
+        ["independent reviewer", "yes", "yes", "yes", "APPLY REVIEW"]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(positive_answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=positive_root
+        )
+        == 0
+    )
+    capsys.readouterr()
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    revision = reviewed["revisions"][0]
+    run = revision["runs"][0]
+    assert revision["model"] == "ALLPOWERS R600"
+    assert run["feature_presence"]["light_output"]["status"] == "absent"
+    assert run["write_capabilities"]["light_output"]["status"] == "not_applicable"
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+
+    independent_root = tmp_path / "not-independent"
+    independent_matrix = _matrix(independent_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", independent_root)
+    assert (
+        import_archive(
+            archive,
+            matrix_path=independent_matrix,
+            apply=True,
+            repo_root=independent_root,
+        )
+        == 0
+    )
+    before = independent_matrix.read_bytes()
+    independent_run_id = json.loads(before)["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    non_independent_answers = iter(["operator", "no", "yes", "yes"])
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt="": next(non_independent_answers)
+    )
+    assert (
+        interactive_review(
+            independent_matrix,
+            run_id=independent_run_id,
+            tier="silver",
+            repo_root=independent_root,
+        )
+        == 2
+    )
+    capsys.readouterr()
+    assert independent_matrix.read_bytes() == before
+    unreviewed = json.loads(before)["revisions"][0]["runs"][0]
+    assert unreviewed["feature_presence"]["light_output"]["status"] == "unknown"
+
+    mismatched_archive = make_archive(
+        tmp_path / "mismatched-source", plan_model="VOLIX P1800"
+    )
+    mismatched_root = tmp_path / "mismatched"
+    mismatched_matrix = _matrix(mismatched_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", mismatched_root)
+    assert (
+        import_archive(
+            mismatched_archive,
+            matrix_path=mismatched_matrix,
+            apply=True,
+            repo_root=mismatched_root,
+        )
+        == 0
+    )
+    mismatched_before = mismatched_matrix.read_bytes()
+    mismatched_data = json.loads(mismatched_before)
+    mismatched_run = mismatched_data["revisions"][0]["runs"][0]
+    audit_path = mismatched_root / "hil-results" / "mismatched-absence.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tier": "silver",
+                "archive_sha256": mismatched_run["archive_sha256"],
+                "run_id": mismatched_run["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "reviewer_independent_from_operator": True,
+                "transitions": [],
+                "scenarios": [],
+                "absences": [
+                    {
+                        "feature": "light_output",
+                        "source_step_id": "light_output_cycle",
+                        "physical_absence_confirmed": True,
+                        "safe_disable_confirmed": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        review_imported_tier_run(
+            mismatched_matrix,
+            run_id=mismatched_run["run_id"],
+            review_file=audit_path,
+            tier="silver",
+            apply=True,
+            repo_root=mismatched_root,
+        )
+        == 2
+    )
+    assert mismatched_matrix.read_bytes() == mismatched_before
+
+
+def test_standard_tier_export_review_apply_reaches_silver_and_gold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _standard_tier_suite_archive(tmp_path / "standard")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = imported["revisions"][0]["runs"][0]["run_id"]
+
+    _tty(monkeypatch)
+
+    def answer_review(responses: list[str]) -> None:
+        iterator = iter(responses)
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(iterator))
+
+    answer_review(
+        _review_answers(reviewer="Bronze reviewer", inspected=True, apply=True)
+    )
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+
+    # Six output cycles each require authorization, change, and restore
+    # confirmations; each output's final restoration is also confirmed.
+    answer_review(["Silver reviewer", *(["yes"] * 24), "APPLY REVIEW"])
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    silver = evaluate_tiers(matrix)["tiers"][0]
+    assert silver["tier"] == "silver"
+    assert set(silver["qualified_features"]) >= {
+        "ac_output",
+        "dc_output",
+        "light_output",
+    }
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+    for feature in ("ac_output", "dc_output", "light_output"):
+        physical_review = run["write_capabilities"][feature]["physical_review"]
+        final_restoration = physical_review["final_restoration"]
+        assert final_restoration["state"] == "off"
+        assert final_restoration["confirmed"] is True
+        assert final_restoration["reviewer_independent_from_operator"] is True
+        assert final_restoration["frame_evidence"]["source_action_index"] == 3
+        final_rows = [
+            json.loads(line)
+            for line in (tmp_path / final_restoration["capture_evidence"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert len(final_rows) == 1
+        assert final_rows[0]["source_action_index"] == 3
+        transitions = physical_review["output_transitions"]
+        for transition in transitions:
+            capture = tmp_path / transition["restoration_capture"]
+            rows = [json.loads(line) for line in capture.read_text().splitlines()]
+            assert all(row["source_action_index"] != 3 for row in rows)
+
+    # Gold repeats the independent output review and additionally reviews all
+    # four settings cycles before dry-run and apply.
+    answer_review(["Gold reviewer", *(["yes"] * 36), "APPLY REVIEW"])
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    errors, _ = validate_hil_qualification.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    gold = evaluate_tiers(matrix)["tiers"][0]
+    assert gold["tier"] == "gold"
+    assert set(gold["qualified_features"]) == {
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+        "car_charger",
+    }
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+    # Removing the optional digest and final proof cannot turn off the archive
+    # gate: imported origin comes from the archive identity and retained member
+    # provenance, and the ordinary digest manifest is recomputed here.
+    missing_proof = json.loads(json.dumps(matrix))
+    missing_run = missing_proof["revisions"][0]["runs"][0]
+    missing_result = missing_run["write_capabilities"]["ac_output"]
+    missing_review = missing_result["physical_review"]
+    missing_capture = missing_review["final_restoration"]["capture_evidence"]
+    missing_review.pop("final_restoration")
+    missing_run.pop("archive_sha256")
+    missing_result["evidence"].remove(missing_capture)
+    missing_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        missing_result["evidence"]
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        missing_proof, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any("archive provenance" in error for error in errors)
+    assert any("final restoration" in error for error in errors)
+    regressed = evaluate_tiers(missing_proof)["tiers"][0]
+    assert regressed["tier"] == "bronze"
+    assert "ac_output" not in regressed["qualified_features"]
+
+    # A syntactically valid raw frame is not a substitute for the normalized
+    # action-3 TX in the imported graph, even when its fake source references
+    # agree with both the row and the edited review metadata.
+    raw_bypass = json.loads(json.dumps(matrix))
+    raw_run = raw_bypass["revisions"][0]["runs"][0]
+    raw_result = raw_run["write_capabilities"]["ac_output"]
+    raw_review = raw_result["physical_review"]
+    raw_restoration = raw_review["final_restoration"]
+    original_capture = tmp_path / raw_restoration["capture_evidence"]
+    raw_path = original_capture.with_name("ac-output-final-restoration-raw.jsonl")
+    raw_row = json.loads(original_capture.read_text(encoding="utf-8"))
+    assert raw_row["source_action_index"] == 3
+    fake_references = {
+        "trace_sha256": "1" * 64,
+        "frame_sha256": "2" * 64,
+        "transaction_sha256": "3" * 64,
+        "frame_seq": 999,
+    }
+    raw_row.update(
+        source_trace_sha256=fake_references["trace_sha256"],
+        source_frame_sha256=fake_references["frame_sha256"],
+        source_transaction_sha256=fake_references["transaction_sha256"],
+        source_frame_seq=fake_references["frame_seq"],
+        frame_hex="a56500b10101000071",
+    )
+    raw_path.write_text(json.dumps(raw_row, sort_keys=True) + "\n")
+    raw_result["evidence"].append(raw_path.relative_to(tmp_path).as_posix())
+    raw_restoration["capture_evidence"] = raw_path.relative_to(tmp_path).as_posix()
+    raw_restoration["frame_evidence"].update(fake_references)
+    raw_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        raw_result["evidence"]
+    )
+    raw_scope = {
+        "route": raw_run["route"],
+        "revision_id": raw_bypass["revisions"][0]["id"],
+        "firmware_version": raw_run["firmware_version"],
+        "run_id": raw_run["run_id"],
+        "captured_at": raw_run["captured_at"],
+        "session_id": raw_run["session_id"],
+        "build_fingerprint": raw_run["build_fingerprint"],
+    }
+    assert validate_hil_qualification._valid_tier_capture_row(
+        raw_row,
+        raw_scope,
+        "ac_output",
+        False,
+        "restoration",
+        raw_result["evidence"],
+        final_restoration=True,
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        raw_bypass, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any("final restoration" in error for error in errors)
+    regressed = evaluate_tiers(raw_bypass)["tiers"][0]
+    assert regressed["tier"] == "bronze"
+    assert "ac_output" not in regressed["qualified_features"]
+
+    # A Gold setting PASS needs durable evidence for both the changed target
+    # and its restoration. Keeping only the valid restoration row must not
+    # preserve the setting qualification after the review digest is resealed.
+    missing_setting_change = json.loads(json.dumps(matrix))
+    setting_run = missing_setting_change["revisions"][0]["runs"][0]
+    setting_result = setting_run["write_capabilities"]["eco_mode"]
+    setting_review = setting_result["physical_review"]
+    setting_capture = tmp_path / setting_review["restoration_capture"]
+    setting_rows = [
+        json.loads(line) for line in setting_capture.read_text().splitlines()
+    ]
+    assert {row["action_stage"] for row in setting_rows} == {
+        "transition",
+        "restoration",
+    }
+    setting_rows = [row for row in setting_rows if row["action_stage"] != "transition"]
+    setting_capture.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in setting_rows)
+    )
+    setting_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        setting_result["evidence"]
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        missing_setting_change,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert any("safe-restoration evidence" in error for error in errors)
+    regressed = evaluate_tiers(missing_setting_change)["tiers"][0]
+    assert "eco_mode" not in regressed["qualified_features"]
+
+    # Archive-backed output transitions must also remain bound to the imported
+    # trace graph. A valid command frame cannot replace the source references
+    # on action 0 while the genuine final action-3 proof remains intact.
+    raw_transition = json.loads(json.dumps(matrix))
+    transition_run = raw_transition["revisions"][0]["runs"][0]
+    transition_result = transition_run["write_capabilities"]["ac_output"]
+    transition_review = transition_result["physical_review"]
+    on_transition = next(
+        entry
+        for entry in transition_review["output_transitions"]
+        if entry["state"] == "on"
+    )
+    transition_path = tmp_path / on_transition["capture_evidence"]
+    transition_rows = [
+        json.loads(line) for line in transition_path.read_text().splitlines()
+    ]
+    transition_rows_to_mutate = [
+        row for row in transition_rows if row["action_stage"] == "transition"
+    ]
+    assert len(transition_rows_to_mutate) == 1
+    transition_row = transition_rows_to_mutate[0]
+    assert transition_row["source_action_index"] == 0
+    transition_row.update(
+        source_trace_sha256="4" * 64,
+        source_frame_sha256="5" * 64,
+        source_transaction_sha256="6" * 64,
+        source_frame_seq=999,
+        frame_hex="a56500b10101000273",
+    )
+    transition_path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in transition_rows)
+    )
+    transition_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        transition_result["evidence"]
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        raw_transition,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert any("on transition lacks bound observation" in error for error in errors)
+    regressed = evaluate_tiers(raw_transition)["tiers"][0]
+    assert "ac_output" not in regressed["qualified_features"]
+
+
+def test_output_review_without_final_restoration_confirmation_stays_unqualified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _standard_tier_suite_archive(tmp_path / "standard")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+
+    _tty(monkeypatch)
+    answers = iter(
+        _review_answers(reviewer="Bronze reviewer", inspected=True, apply=True)
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+
+    # Confirm both cycles for all outputs, then decline the separately prompted
+    # final action 4 restoration for every feature. Reconnect can still pass, but
+    # no output may receive a Silver PASS without that independent observation.
+    answers = iter(
+        [
+            "Silver reviewer",
+            "yes",
+            *("yes" for _ in range(18)),
+            "no",
+            "no",
+            "no",
+            "yes",
+            "yes",
+            "APPLY REVIEW",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+    assert all(
+        run["write_capabilities"][feature]["status"] != "pass"
+        for feature in ("ac_output", "dc_output", "light_output")
+    )
+
+
+def test_higher_tier_review_requires_reviewer_independence_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_tier_run
+
+    archive = _guided_setting_review_archive(tmp_path / "archive")
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    review_file = tmp_path / "hil-results" / "not-independent.json"
+    review_file.parent.mkdir(parents=True)
+    review_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tier": "gold",
+                "archive_sha256": run["archive_sha256"],
+                "run_id": run["run_id"],
+                "reviewed_by": "original HIL operator",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "reviewer_independent_from_operator": False,
+                "transitions": [],
+                "scenarios": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    before = matrix_path.read_bytes()
+    assert (
+        review_imported_tier_run(
+            matrix_path,
+            run_id=run["run_id"],
+            review_file=review_file,
+            tier="gold",
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 2
+    )
+    assert "did not confirm independence" in capsys.readouterr().out
+    assert matrix_path.read_bytes() == before
+
+
+def test_higher_tier_review_rejects_trace_from_another_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+
+    archive = _guided_setting_review_archive(
+        tmp_path / "archive", observed_route="active_proxy"
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix_before = matrix_path.read_bytes()
+    run_id = json.loads(matrix_before)["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
+        == 2
+    )
+    assert matrix_path.read_bytes() == matrix_before
+    assert "No PASS can be recorded" in capsys.readouterr().out
 
 
 def test_verified_build_provenance_is_retained_in_imported_matrix(

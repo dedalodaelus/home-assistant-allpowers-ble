@@ -14,6 +14,54 @@ from .suite_runtime import SuiteServices
 from .storage import run_root
 
 
+def _has_status_refresh_exchange(
+    trace: Any, *, session_generation: int, observed_route: str
+) -> bool:
+    """Require this capture's completed status request and later decoded reply."""
+    if not isinstance(trace, dict):
+        return False
+    events = trace.get("events")
+    frames = trace.get("frames")
+    if not isinstance(events, list) or not isinstance(frames, list):
+        return False
+    for frame in frames:
+        if not (
+            isinstance(frame, dict)
+            and frame.get("event") == "write_attempt"
+            and frame.get("direction") == "tx"
+            and frame.get("command_type") == "status_request"
+            and frame.get("frame_validation") == "validated_tx"
+            and frame.get("session_generation") == session_generation
+            and frame.get("observed_route") == observed_route
+            and isinstance(frame.get("transaction_id"), str)
+        ):
+            continue
+        transaction_id = frame["transaction_id"]
+        frame_seq = frame.get("seq", 0)
+        for write in events:
+            if not (
+                isinstance(write, dict)
+                and write.get("event") == "write_ok"
+                and write.get("transaction_id") == transaction_id
+                and write.get("session_generation") == session_generation
+                and write.get("observed_route") == observed_route
+                and write.get("seq", 0) > frame_seq
+            ):
+                continue
+            if any(
+                isinstance(event, dict)
+                and event.get("event") == "notification_decoded"
+                and event.get("session_generation") == session_generation
+                and event.get("observed_route") == observed_route
+                and event.get("seq", 0) > write.get("seq", 0)
+                and isinstance(event.get("decoded_packet_types"), list)
+                and "StatusData" in event["decoded_packet_types"]
+                for event in events
+            ):
+                return True
+    return False
+
+
 def _execute_recovery_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -326,6 +374,13 @@ def _execute_recovery_suite(
             ):
                 capture_id = start["capture_id"]
                 try:
+                    if guided_reconnect_required:
+                        refresh_button = device.refresh_button
+                        if refresh_button is None:
+                            raise HAAPIError(
+                                "A registry-resolved status refresh button is required"
+                            )
+                        api.request_read_only_refresh(refresh_button)
                     if vendor_action or guided_reconnect_required:
                         ttl_seconds = start.get("ttl_seconds")
                         if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 120:
@@ -354,15 +409,33 @@ def _execute_recovery_suite(
                                 if isinstance(partial, dict)
                                 else None
                             )
-                            if isinstance(events, list) and any(
-                                isinstance(event, dict)
-                                and event.get("event") == "notification_decoded"
-                                and event.get("session_generation")
-                                == observed_session["session_generation"]
-                                and isinstance(event.get("decoded_packet_types"), list)
-                                and "StatusData" in event["decoded_packet_types"]
-                                for event in events
-                            ):
+                            matching_status = (
+                                _has_status_refresh_exchange(
+                                    partial,
+                                    session_generation=observed_session[
+                                        "session_generation"
+                                    ],
+                                    observed_route=(
+                                        partial.get("observed_route")
+                                        if isinstance(partial, dict)
+                                        else "unverified"
+                                    ),
+                                )
+                                if guided_reconnect_required
+                                else isinstance(events, list)
+                                and any(
+                                    isinstance(event, dict)
+                                    and event.get("event") == "notification_decoded"
+                                    and event.get("session_generation")
+                                    == observed_session["session_generation"]
+                                    and isinstance(
+                                        event.get("decoded_packet_types"), list
+                                    )
+                                    and "StatusData" in event["decoded_packet_types"]
+                                    for event in events
+                                )
+                            )
+                            if matching_status:
                                 break
                             remaining = capture_deadline - services.monotonic()
                             if remaining > 0:
@@ -422,16 +495,24 @@ def _execute_recovery_suite(
                     observation["disconnect_observed"] = True
                     if recovered is None:
                         observation["ha_observation"] = "inconclusive"
-                observation["fresh_status_telemetry"] = bool(
-                    isinstance(events, list)
-                    and any(
-                        isinstance(event, dict)
-                        and event.get("event") == "notification_decoded"
-                        and event.get("session_generation")
-                        == observed_session["session_generation"]
-                        and isinstance(event.get("decoded_packet_types"), list)
-                        and "StatusData" in event["decoded_packet_types"]
-                        for event in events
+                observation["fresh_status_telemetry"] = (
+                    _has_status_refresh_exchange(
+                        trace,
+                        session_generation=observed_session["session_generation"],
+                        observed_route=trace.get("observed_route", "unverified"),
+                    )
+                    if guided_reconnect_required
+                    else bool(
+                        isinstance(events, list)
+                        and any(
+                            isinstance(event, dict)
+                            and event.get("event") == "notification_decoded"
+                            and event.get("session_generation")
+                            == observed_session["session_generation"]
+                            and isinstance(event.get("decoded_packet_types"), list)
+                            and "StatusData" in event["decoded_packet_types"]
+                            for event in events
+                        )
                     )
                 )
         except KeyboardInterrupt:

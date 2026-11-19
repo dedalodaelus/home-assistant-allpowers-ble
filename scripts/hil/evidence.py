@@ -206,11 +206,10 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         "auto",
         "unknown",
         "unavailable",
-        "yes",
-        "no",
-        "unable_to_observe",
         "could_not_connect",
         "unable_or_unwilling",
+        "yes",
+        "route interruption and restoration",
         "connected",
         "ha_stable",
         "ha_recovered",
@@ -226,7 +225,13 @@ def _public_observation(scenario_id: str, step: dict[str, Any]) -> dict[str, Any
         return value if isinstance(value, str) and value in allowed_values else None
 
     observation: dict[str, Any] = {}
-    for name in ("pre_state", "post_state", "cleanup_post_state"):
+    for name in (
+        "pre_state",
+        "post_state",
+        "cleanup_post_state",
+        "physical_outcome",
+        "operator_action",
+    ):
         value = state_value(name)
         if value is not None:
             observation[name] = value
@@ -369,6 +374,7 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "pre_state",
         "post_state",
         "cleanup_post_state",
+        "physical_outcome",
         "connected",
         "status_fresh",
         "disconnect_observed",
@@ -408,6 +414,9 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
     state_values = {
         "on",
         "off",
+        "yes",
+        "no",
+        "unable_to_observe",
         "two_hours",
         "standard",
         "mute",
@@ -416,9 +425,6 @@ def _valid_public_observation(value: Any, *, nested: bool = False) -> bool:
         "auto",
         "unknown",
         "unavailable",
-        "yes",
-        "no",
-        "unable_to_observe",
         "could_not_connect",
         "connected",
         "unable_or_unwilling",
@@ -1015,6 +1021,7 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "minimum output requirement awaits a reviewed output PASS",
         "tier requires a basic output PASS; all declared outputs are absent",
         "no present, production-authorized or reviewed candidate output is available",
+        "operator physical-inventory preflight permits acquisition only; independent review is still required",
     }
     safe_step_ids = {
         "read_only_probe",
@@ -1046,11 +1053,45 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
     device = value.get("device")
     if not isinstance(device, dict):
         return None
+    inventory_present = "physical_inventory_preflight" in value
+    inventory_features: dict[str, dict[str, str]] = {}
+    inventory_feature_names = {
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+        "car_charger",
+    }
+    if inventory_present:
+        inventory = value.get("physical_inventory_preflight")
+        if (
+            not isinstance(inventory, dict)
+            or set(inventory) != {"source", "features"}
+            or inventory.get("source") != "operator_physical_inspection"
+            or not isinstance(inventory.get("features"), dict)
+            or set(inventory["features"]) - inventory_feature_names
+        ):
+            return None
+        for feature, inspection in inventory["features"].items():
+            if (
+                not isinstance(inspection, dict)
+                or set(inspection) != {"outcome", "basis"}
+                or inspection.get("outcome") != "present"
+                or inspection.get("basis") != "operator_physical_inspection"
+            ):
+                return None
+            inventory_features[feature] = {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
     model = safe_model(device.get("model")) or "unknown"
     route = device.get("verified_route")
     if route not in {None, "local_adapter", "active_proxy"}:
         route = None
     steps = []
+    projected_inventory_features: set[str] = set()
     for step in value["steps"]:
         if not isinstance(step, dict):
             return None
@@ -1068,11 +1109,45 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
             )
         ):
             return None
+        inventory_status = step.get("inventory_preflight")
+        feature = step.get("feature")
+        if inventory_present and inventory_status is None and feature != "output":
+            return None
+        if (
+            inventory_present
+            and inventory_status is not None
+            and inventory_status
+            not in {
+                "operator_inspected_present",
+                "not_required",
+                "unknown",
+            }
+        ):
+            return None
+        if inventory_status == "operator_inspected_present":
+            if (
+                not inventory_present
+                or feature not in inventory_feature_names
+                or feature not in inventory_features
+                or step.get("physical_presence") != "unknown"
+                or "operator physical-inventory preflight permits acquisition only; independent review is still required"
+                not in step["reasons"]
+            ):
+                return None
+            projected_inventory_features.add(feature)
+        elif inventory_present and feature in inventory_features:
+            return None
+        if (
+            "operator physical-inventory preflight permits acquisition only; independent review is still required"
+            in step["reasons"]
+            and inventory_status != "operator_inspected_present"
+        ):
+            return None
         steps.append(
             {
                 "id": step["id"],
-                "feature": step.get("feature")
-                if step.get("feature")
+                "feature": feature
+                if feature
                 in {
                     "telemetry",
                     "ac_output",
@@ -1086,11 +1161,21 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
                 }
                 else "unknown",
                 "eligibility": step["eligibility"],
+                "physical_presence": step.get("physical_presence")
+                if step.get("physical_presence") in {"present", "absent", "unknown"}
+                else "unknown",
                 "outcome": step["outcome"],
                 "reasons": step["reasons"],
                 "human_review": step["human_review"],
+                **(
+                    {"inventory_preflight": inventory_status}
+                    if inventory_present and inventory_status is not None
+                    else {}
+                ),
             }
         )
+    if inventory_present and projected_inventory_features != set(inventory_features):
+        return None
     projected = {
         "schema_version": 1,
         "requested_tier": value["requested_tier"],
@@ -1105,19 +1190,29 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "operator_actions_estimate": value["operator_actions_estimate"],
         "steps": steps,
     }
+    if inventory_present:
+        projected["physical_inventory_preflight"] = {
+            "source": "operator_physical_inspection",
+            "features": inventory_features,
+        }
     execution_tier = value.get("execution_tier", value["requested_tier"])
     if execution_tier != value["requested_tier"]:
         projected["execution_tier"] = execution_tier
     return projected
 
 
-def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
+def _public_tier_artifact(
+    name: str,
+    content: bytes,
+    *,
+    trace_files: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
     """Project one verified private guided artifact without paths or run IDs."""
     if name == "trace.json":
         value = _load_public_json(content)
         route = value.get("observed_route")
         requested_route = value.get("requested_route")
-        return {
+        projected = {
             "kind": "gatt_trace_metadata",
             "schema_version": value.get("schema_version")
             if type(value.get("schema_version")) is int
@@ -1149,6 +1244,20 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
             and 0 <= value["dropped_frames"] <= 1_000_000
             else 0,
         }
+        if trace_files is not None:
+            event_content = _public_tier_artifact(
+                "events.jsonl", trace_files["events.jsonl"]
+            )
+            frame_content = _public_tier_artifact(
+                "frames.jsonl", trace_files["frames.jsonl"]
+            )
+            projected.update(
+                events_sha256=hashlib.sha256(trace_files["events.jsonl"]).hexdigest(),
+                frames_sha256=hashlib.sha256(trace_files["frames.jsonl"]).hexdigest(),
+                events=event_content["rows"],
+                frames=frame_content["rows"],
+            )
+        return projected
     if name == "events.jsonl":
         rows = []
         for raw in content.splitlines():
@@ -1176,9 +1285,22 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
                 in {"local_adapter", "active_proxy", "unverified"}
                 else "unverified",
             }
+            transaction_id = row.get("transaction_id")
+            if isinstance(transaction_id, str) and transaction_id:
+                projected["transaction_sha256"] = hashlib.sha256(
+                    transaction_id.encode("utf-8")
+                ).hexdigest()
             kind = row.get("transaction_kind")
             if kind in {"output", "settings"}:
                 projected["transaction_kind"] = kind
+            if row.get("reason") == "matching_validated_telemetry":
+                projected["transaction_reason"] = row["reason"]
+            packet_types = row.get("decoded_packet_types")
+            if isinstance(packet_types, list) and all(
+                item in {"StatusData", "SettingsData", "DeviceNameData"}
+                for item in packet_types
+            ):
+                projected["decoded_packet_types"] = sorted(set(packet_types))
             rows.append(projected)
         return {"kind": "gatt_events", "rows": rows}
     if name == "frames.jsonl":
@@ -1189,32 +1311,50 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
             row = _load_public_json(raw)
             if row.get("event") not in EVENT_NAMES:
                 continue
-            rows.append(
-                {
-                    "seq": row.get("seq"),
-                    "direction": row.get("direction")
-                    if row.get("direction") in {"rx", "tx"}
-                    else "rx",
-                    "command_type": row.get("command_type")
-                    if row.get("command_type")
-                    in {
-                        "status_request",
-                        "output_control",
-                        "settings_control",
-                        "unknown",
-                    }
-                    else "unknown",
-                    "frame_validation": row.get("frame_validation")
-                    if row.get("frame_validation")
-                    in {"validated_tx", "unvalidated_chunk"}
-                    else "unvalidated_chunk",
-                    "session_generation": row.get("session_generation")
-                    if type(row.get("session_generation")) is int
-                    and 1 <= row["session_generation"] <= 1_000_000
-                    else None,
-                    "payload_omitted": True,
+            projected = {
+                "seq": row.get("seq"),
+                "event": row.get("event"),
+                "direction": row.get("direction")
+                if row.get("direction") in {"rx", "tx"}
+                else "rx",
+                "command_type": row.get("command_type")
+                if row.get("command_type")
+                in {
+                    "status_request",
+                    "output_control",
+                    "settings_control",
+                    "unknown",
                 }
-            )
+                else "unknown",
+                "frame_validation": row.get("frame_validation")
+                if row.get("frame_validation") in {"validated_tx", "unvalidated_chunk"}
+                else "unvalidated_chunk",
+                "session_generation": row.get("session_generation")
+                if type(row.get("session_generation")) is int
+                and 1 <= row["session_generation"] <= 1_000_000
+                else None,
+                "payload_omitted": True,
+            }
+            encoded = row.get("hex")
+            if (
+                isinstance(encoded, str)
+                and len(encoded) % 2 == 0
+                and re.fullmatch(r"[0-9a-f]*", encoded) is not None
+            ):
+                frame = bytes.fromhex(encoded)
+                projected["frame_sha256"] = hashlib.sha256(frame).hexdigest()
+                output_states = _public_output_states(frame)
+                setting_states = _public_setting_states(frame)
+                if output_states is not None:
+                    projected["output_states"] = output_states
+                if setting_states is not None:
+                    projected["setting_states"] = setting_states
+            transaction_id = row.get("transaction_id")
+            if isinstance(transaction_id, str) and transaction_id:
+                projected["transaction_sha256"] = hashlib.sha256(
+                    transaction_id.encode("utf-8")
+                ).hexdigest()
+            rows.append(projected)
         return {"kind": "gatt_frames", "rows": rows}
     if name == "checkpoint.json":
         value = _load_public_json(content)
@@ -1259,12 +1399,66 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
         if value.get("outcome") in OUTCOMES | {"blocked"}
         else "inconclusive",
     }
+    setting_types = {
+        "eco_mode_reversal": bool,
+        "car_charger_reversal": bool,
+        "work_mode_reversal": int,
+        "eco_timeout_reversal": int,
+    }
     for key in ("initial_state", "target_state", "restored_state", "readback_state"):
-        if value.get(key) in {"on", "off"}:
-            safe[key] = value[key]
+        state = value.get(key)
+        if isinstance(state, str) and state in {"on", "off"}:
+            safe[key] = state
+        elif step_id in setting_types and type(state) is setting_types[step_id]:
+            valid = (
+                state in {True, False}
+                if setting_types[step_id] is bool
+                else state
+                in ({0, 1, 2} if step_id == "work_mode_reversal" else {1, 2, 4, 6})
+            )
+            if valid:
+                safe[key] = state
     for key in ("physical_change_outcome", "physical_restore_outcome"):
         if value.get(key) in {"correct", "incorrect", "unable_to_observe"}:
             safe[key] = value[key]
+    output_cycles = value.get("output_cycles")
+    if step_id in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}:
+        if isinstance(output_cycles, list) and len(output_cycles) == 2:
+            safe_cycles = []
+            for cycle in output_cycles:
+                if not isinstance(cycle, dict) or set(cycle) != {
+                    "initial_state",
+                    "target_state",
+                    "change_action_index",
+                    "restore_action_index",
+                    "physical_change_outcome",
+                    "physical_restore_outcome",
+                }:
+                    raise HAAPIError("Invalid guided output cycle evidence")
+                if (
+                    cycle.get("initial_state") not in {"on", "off"}
+                    or cycle.get("target_state") not in {"on", "off"}
+                    or cycle["initial_state"] == cycle["target_state"]
+                    or type(cycle.get("change_action_index")) is not int
+                    or type(cycle.get("restore_action_index")) is not int
+                    or cycle.get("restore_action_index")
+                    != cycle.get("change_action_index") + 1
+                    or cycle.get("physical_change_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    or cycle.get("physical_restore_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                ):
+                    raise HAAPIError("Invalid guided output cycle evidence")
+                safe_cycles.append(dict(cycle))
+            safe["output_cycles"] = safe_cycles
+        if type(value.get("final_restore_action_index")) is int:
+            safe["final_restore_action_index"] = value["final_restore_action_index"]
+        if value.get("final_restore_outcome") in {
+            "correct",
+            "incorrect",
+            "unable_to_observe",
+        }:
+            safe["final_restore_outcome"] = value["final_restore_outcome"]
     actions = value.get("actions", [])
     if not isinstance(actions, list) or len(actions) > 4:
         raise HAAPIError("Invalid guided step action evidence")
@@ -1295,10 +1489,26 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
             kind = transaction.get("kind")
             transaction_generation = transaction.get("session_generation")
             if kind in {"output", "settings"} and type(transaction_generation) is int:
-                projected["transaction"] = {
+                safe_transaction = {
                     "kind": kind,
                     "session_generation": transaction_generation,
                 }
+                transaction_id = transaction.get("transaction_id")
+                sequence_keys = ("write_seq", "submitted_seq", "confirmed_seq")
+                sequences = [transaction.get(key) for key in sequence_keys]
+                if (
+                    isinstance(transaction_id, str)
+                    and transaction_id
+                    and all(type(value) is int and value > 0 for value in sequences)
+                    and sequences[0] < sequences[1] < sequences[2]
+                ):
+                    safe_transaction.update(
+                        transaction_sha256=hashlib.sha256(
+                            transaction_id.encode("utf-8")
+                        ).hexdigest(),
+                        **dict(zip(sequence_keys, sequences, strict=True)),
+                    )
+                projected["transaction"] = safe_transaction
         trace_digests = []
         for trace_artifact in action.get("trace_evidence", []):
             if not isinstance(trace_artifact, dict):
@@ -1317,24 +1527,119 @@ def _public_tier_artifact(name: str, content: bytes) -> dict[str, Any]:
     return safe
 
 
+def _xor_bytes(frame: bytes) -> int:
+    checksum = 0
+    for value in frame:
+        checksum ^= value
+    return checksum
+
+
+def _public_output_states(frame: bytes) -> dict[str, bool] | None:
+    """Expose decoded output targets from a checksummed private TX frame."""
+    if (
+        len(frame) != 9
+        or frame[:6] != bytes.fromhex("a56500b10101")
+        or frame[6] != 0
+        or frame[7] & ~0x23
+        or _xor_bytes(frame) != 0
+    ):
+        return None
+    flags = frame[7]
+    return {
+        "ac_output": bool(flags & 0x02),
+        "dc_output": bool(flags & 0x01),
+        "light_output": bool(flags & 0x20),
+    }
+
+
+def _public_setting_states(frame: bytes) -> dict[str, Any] | None:
+    """Expose only decoded setting targets from a checksummed private TX frame."""
+    if (
+        len(frame) != 10
+        or frame[:6] != bytes.fromhex("a56500b10102")
+        or frame[6] != 2
+        or (frame[7] & 0x06) >> 1 not in {0, 1, 2}
+        or frame[8] not in {1, 2, 4, 6}
+        or _xor_bytes(frame) != 0
+    ):
+        return None
+    return {
+        "eco_mode": bool(frame[7] & 0x01),
+        "work_mode": (frame[7] & 0x06) >> 1,
+        "car_charger": bool(frame[7] & 0x10),
+        "eco_timeout": frame[8],
+    }
+
+
+def _valid_guided_state(step_id: Any, value: Any) -> bool:
+    """Validate the state type encoded by one guided feature step."""
+    if step_id in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}:
+        return isinstance(value, str) and value in {"on", "off"}
+    if step_id in {"eco_mode_reversal", "car_charger_reversal"}:
+        return type(value) is bool
+    if step_id == "work_mode_reversal":
+        return type(value) is int and value in {0, 1, 2}
+    if step_id == "eco_timeout_reversal":
+        return type(value) is int and value in {1, 2, 4, 6}
+    return False
+
+
+def _valid_public_transaction(value: Any) -> bool:
+    """Validate a payload-free transaction reference in exported tier evidence."""
+    basic_keys = {"kind", "session_generation"}
+    complete_keys = basic_keys | {
+        "transaction_sha256",
+        "write_seq",
+        "submitted_seq",
+        "confirmed_seq",
+    }
+    if (
+        not isinstance(value, dict)
+        or frozenset(value) not in {frozenset(basic_keys), frozenset(complete_keys)}
+        or value.get("kind") not in {"output", "settings"}
+        or type(value.get("session_generation")) is not int
+        or not 1 <= value["session_generation"] <= 1_000_000
+    ):
+        return False
+    if set(value) == basic_keys:
+        return True
+    sequences = [
+        value.get(key) for key in ("write_seq", "submitted_seq", "confirmed_seq")
+    ]
+    return bool(
+        isinstance(value.get("transaction_sha256"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", value["transaction_sha256"]) is not None
+        and all(type(seq) is int and seq >= 1 for seq in sequences)
+        and sequences[0] < sequences[1] < sequences[2]
+    )
+
+
 def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
     """Enforce the public artifact allowlist again when importing a ZIP."""
     kind = value.get("kind")
     if kind == "gatt_trace_metadata":
+        base_keys = {
+            "kind",
+            "schema_version",
+            "scenario_id",
+            "requested_route",
+            "observed_route",
+            "complete",
+            "event_count",
+            "frame_count",
+            "dropped_events",
+            "dropped_frames",
+        }
+        bundle_keys = {
+            "events_sha256",
+            "frames_sha256",
+            "events",
+            "frames",
+        }
+        bundled_trace = set(value) == base_keys | bundle_keys
         return bool(
-            set(value)
-            == {
-                "kind",
-                "schema_version",
-                "scenario_id",
-                "requested_route",
-                "observed_route",
-                "complete",
-                "event_count",
-                "frame_count",
-                "dropped_events",
-                "dropped_frames",
-            }
+            frozenset(value)
+            in {frozenset(base_keys), frozenset(base_keys | bundle_keys)}
             and value.get("schema_version") in {1, 2}
             and value.get("scenario_id") in SCENARIO_IDS | {None}
             and value.get("requested_route") in REQUESTED_ROUTES
@@ -1348,6 +1653,22 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                     "frame_count",
                     "dropped_events",
                     "dropped_frames",
+                )
+            )
+            and (
+                not bundled_trace
+                or all(
+                    isinstance(value.get(key), str)
+                    and re.fullmatch(r"[a-f0-9]{64}", value[key]) is not None
+                    for key in ("events_sha256", "frames_sha256")
+                )
+                and isinstance(value.get("events"), list)
+                and isinstance(value.get("frames"), list)
+                and _valid_public_tier_artifact(
+                    {"kind": "gatt_events", "rows": value["events"]}
+                )
+                and _valid_public_tier_artifact(
+                    {"kind": "gatt_frames", "rows": value["frames"]}
                 )
             )
         )
@@ -1368,6 +1689,9 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                 "session_generation",
                 "observed_route",
                 "transaction_kind",
+                "transaction_sha256",
+                "transaction_reason",
+                "decoded_packet_types",
             }:
                 return False
             if (
@@ -1390,6 +1714,22 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                 or row.get("observed_route")
                 not in {"local_adapter", "active_proxy", "unverified"}
                 or row.get("transaction_kind") not in {None, "output", "settings"}
+                or "transaction_sha256" in row
+                and (
+                    not isinstance(row["transaction_sha256"], str)
+                    or re.fullmatch(r"[a-f0-9]{64}", row["transaction_sha256"]) is None
+                )
+                or "transaction_reason" in row
+                and row["transaction_reason"] != "matching_validated_telemetry"
+                or row.get("decoded_packet_types") is not None
+                and (
+                    not isinstance(row["decoded_packet_types"], list)
+                    or len(row["decoded_packet_types"]) > 8
+                    or any(
+                        item not in {"StatusData", "SettingsData", "DeviceNameData"}
+                        for item in row["decoded_packet_types"]
+                    )
+                )
             ):
                 return False
         return True
@@ -1403,17 +1743,32 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             return False
         return all(
             isinstance(row, dict)
-            and set(row)
-            == {
+            and {
                 "seq",
+                "event",
                 "direction",
                 "command_type",
                 "frame_validation",
                 "session_generation",
                 "payload_omitted",
+            }.issubset(row)
+            and set(row)
+            <= {
+                "seq",
+                "event",
+                "direction",
+                "command_type",
+                "frame_validation",
+                "session_generation",
+                "payload_omitted",
+                "frame_sha256",
+                "transaction_sha256",
+                "output_states",
+                "setting_states",
             }
             and type(row.get("seq")) is int
             and row["seq"] >= 1
+            and row.get("event") in EVENT_NAMES
             and row.get("direction") in {"rx", "tx"}
             and row.get("command_type")
             in {"status_request", "output_control", "settings_control", "unknown"}
@@ -1424,6 +1779,41 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                 and 1 <= row["session_generation"] <= 1_000_000
             )
             and row.get("payload_omitted") is True
+            and (
+                "frame_sha256" not in row
+                or isinstance(row["frame_sha256"], str)
+                and re.fullmatch(r"[a-f0-9]{64}", row["frame_sha256"]) is not None
+            )
+            and (
+                "transaction_sha256" not in row
+                or isinstance(row["transaction_sha256"], str)
+                and re.fullmatch(r"[a-f0-9]{64}", row["transaction_sha256"]) is not None
+            )
+            and (
+                "output_states" not in row
+                or isinstance(row["output_states"], dict)
+                and set(row["output_states"])
+                == {"ac_output", "dc_output", "light_output"}
+                and all(type(state) is bool for state in row["output_states"].values())
+                and row.get("command_type") == "output_control"
+                and row.get("direction") == "tx"
+                and row.get("frame_validation") == "validated_tx"
+                and "frame_sha256" in row
+            )
+            and (
+                "setting_states" not in row
+                or isinstance(row["setting_states"], dict)
+                and set(row["setting_states"])
+                == {"eco_mode", "work_mode", "car_charger", "eco_timeout"}
+                and type(row["setting_states"].get("eco_mode")) is bool
+                and row["setting_states"].get("work_mode") in {0, 1, 2}
+                and type(row["setting_states"].get("car_charger")) is bool
+                and row["setting_states"].get("eco_timeout") in {1, 2, 4, 6}
+                and row.get("command_type") == "settings_control"
+                and row.get("direction") == "tx"
+                and row.get("frame_validation") == "validated_tx"
+                and "frame_sha256" in row
+            )
             for row in rows
         )
     if kind == "scenario_checkpoint":
@@ -1455,6 +1845,9 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             "readback_state",
             "physical_change_outcome",
             "physical_restore_outcome",
+            "output_cycles",
+            "final_restore_action_index",
+            "final_restore_outcome",
             "actions",
         }
         actions = value.get("actions")
@@ -1464,7 +1857,7 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             or value.get("step_id") not in TIER_STEP_IDS
             or value.get("outcome") not in OUTCOMES | {"blocked"}
             or any(
-                value.get(key) not in {"on", "off"}
+                not _valid_guided_state(value.get("step_id"), value.get(key))
                 for key in (
                     "initial_state",
                     "target_state",
@@ -1480,6 +1873,46 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
             )
             or not isinstance(actions, list)
             or len(actions) > 4
+            or "output_cycles" in value
+            and (
+                value.get("step_id")
+                not in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}
+                or not isinstance(value.get("output_cycles"), list)
+                or len(value["output_cycles"]) != 2
+                or any(
+                    not isinstance(cycle, dict)
+                    or set(cycle)
+                    != {
+                        "initial_state",
+                        "target_state",
+                        "change_action_index",
+                        "restore_action_index",
+                        "physical_change_outcome",
+                        "physical_restore_outcome",
+                    }
+                    or cycle.get("initial_state") not in {"on", "off"}
+                    or cycle.get("target_state") not in {"on", "off"}
+                    or cycle.get("initial_state") == cycle.get("target_state")
+                    or type(cycle.get("change_action_index")) is not int
+                    or type(cycle.get("restore_action_index")) is not int
+                    or cycle.get("restore_action_index")
+                    != cycle.get("change_action_index") + 1
+                    or cycle.get("physical_change_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    or cycle.get("physical_restore_outcome")
+                    not in {"correct", "incorrect", "unable_to_observe"}
+                    for cycle in value["output_cycles"]
+                )
+            )
+            or "final_restore_action_index" in value
+            and (
+                value.get("step_id")
+                not in {"ac_output_cycle", "dc_output_cycle", "light_output_cycle"}
+                or type(value.get("final_restore_action_index")) is not int
+                or value.get("final_restore_action_index") != 3
+                or value.get("final_restore_outcome")
+                not in {"correct", "incorrect", "unable_to_observe"}
+            )
         ):
             return False
         action_fields = {
@@ -1517,12 +1950,7 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                     or not 1 <= action["session_generation"] <= 1_000_000
                 )
                 or action.get("transaction") is not None
-                and (
-                    not isinstance(action["transaction"], dict)
-                    or set(action["transaction"]) != {"kind", "session_generation"}
-                    or action["transaction"].get("kind") not in {"output", "settings"}
-                    or type(action["transaction"].get("session_generation")) is not int
-                )
+                and not _valid_public_transaction(action["transaction"])
                 or action.get("trace_evidence_sha256") is not None
                 and (
                     not isinstance(action["trace_evidence_sha256"], list)
@@ -1687,6 +2115,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             raise HAAPIError("Invalid private guided tier execution")
         public_steps = []
         public_artifacts = []
+        seen_step_ids: set[str] = set()
         for step_index, step in enumerate(tier_execution["steps"]):
             if (
                 not isinstance(step, dict)
@@ -1697,6 +2126,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 not in OUTCOMES | {"blocked", "pending_review", "shared_evidence"}
             ):
                 raise HAAPIError("Invalid private guided tier step")
+            if step["step_id"] in seen_step_ids:
+                raise HAAPIError("Duplicate private guided tier step")
+            seen_step_ids.add(step["step_id"])
             evidence_hashes = []
             evidence_refs = []
             seen_sources: set[Path] = set()
@@ -1775,6 +2207,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 ):
                     raise HAAPIError("Invalid guided tier evidence digest")
                 pending_sources.append((evidence_path, expected_digest))
+            trace_files: dict[str, bytes] | None = None
             cursor = 0
             while cursor < len(pending_sources):
                 evidence_path, expected_digest = pending_sources[cursor]
@@ -1810,6 +2243,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     try:
                         events_bytes = _regular(events_path)
                         frames_bytes = _regular(frames_path)
+                        trace_files = {
+                            "events.jsonl": events_bytes,
+                            "frames.jsonl": frames_bytes,
+                        }
                         trace = {
                             **trace_meta,
                             "events": [
@@ -1852,7 +2289,13 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         evidence_hashes.append(sibling_digest)
                         if sibling_path not in seen_sources:
                             pending_sources.append((sibling_path, sibling_digest))
-                projected = _public_tier_artifact(evidence_path.name, evidence_bytes)
+                projected = _public_tier_artifact(
+                    evidence_path.name,
+                    evidence_bytes,
+                    trace_files=trace_files
+                    if evidence_path.name == "trace.json"
+                    else None,
+                )
                 artifact_id = (
                     f"step-{step_index + 1:02d}-evidence-{len(evidence_refs) + 1:02d}"
                 )
@@ -1901,6 +2344,29 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 "machine_evidence_sha256": sorted(set(evidence_hashes)),
                 "machine_evidence": evidence_refs,
             }
+            authorization_context = step.get("authorization_context")
+            authorization_source = step.get("authorization_context_source")
+            expected_authorization_source = {
+                "production": "runtime_production_authorized",
+                "experimental_hil": "experimental_hil_grant",
+            }.get(authorization_context)
+            if authorization_context is not None:
+                if authorization_source != expected_authorization_source or step[
+                    "step_id"
+                ] not in {
+                    "ac_output_cycle",
+                    "dc_output_cycle",
+                    "light_output_cycle",
+                    "eco_mode_reversal",
+                    "work_mode_reversal",
+                    "eco_timeout_reversal",
+                    "car_charger_reversal",
+                }:
+                    raise HAAPIError("Invalid guided step authorization provenance")
+                public_step["authorization_context"] = authorization_context
+                public_step["authorization_context_source"] = authorization_source
+            elif authorization_source is not None:
+                raise HAAPIError("Invalid guided step authorization provenance")
             if step.get("human_review") in {"pending", "reviewed"}:
                 public_step["human_review"] = step["human_review"]
             public_steps.append(public_step)
@@ -3484,6 +3950,7 @@ def verify_public_archive(
                     or len(value["steps"]) > 32
                 ):
                     raise HAAPIError("Invalid public guided tier execution")
+                seen_tier_step_ids: set[str] = set()
                 for row in value["steps"]:
                     hashes = (
                         row.get("machine_evidence_sha256")
@@ -3497,6 +3964,8 @@ def verify_public_archive(
                             "step_id",
                             "outcome",
                             "human_review",
+                            "authorization_context",
+                            "authorization_context_source",
                             "machine_evidence_sha256",
                             "machine_evidence",
                         }
@@ -3505,6 +3974,22 @@ def verify_public_archive(
                         not in OUTCOMES
                         | {"blocked", "pending_review", "shared_evidence"}
                         or row.get("human_review") not in {None, "pending", "reviewed"}
+                        or (
+                            row.get("authorization_context") is not None
+                            and (
+                                row.get("authorization_context")
+                                not in {"production", "experimental_hil"}
+                                or row.get("authorization_context_source")
+                                != {
+                                    "production": "runtime_production_authorized",
+                                    "experimental_hil": "experimental_hil_grant",
+                                }.get(row.get("authorization_context"))
+                            )
+                        )
+                        or (
+                            row.get("authorization_context") is None
+                            and row.get("authorization_context_source") is not None
+                        )
                         or not isinstance(hashes, list)
                         or not isinstance(row.get("machine_evidence"), list)
                         or len(row["machine_evidence"]) > 32
@@ -3516,6 +4001,9 @@ def verify_public_archive(
                         )
                     ):
                         raise HAAPIError("Invalid public guided tier step")
+                    if row["step_id"] in seen_tier_step_ids:
+                        raise HAAPIError("Duplicate public guided tier step")
+                    seen_tier_step_ids.add(row["step_id"])
                     references = row["machine_evidence"]
                     if any(
                         not isinstance(reference, dict)

@@ -17,6 +17,7 @@ def build_tier_plan(
     *,
     observed_route: str | None,
     build_provenance: dict[str, Any] | None = None,
+    inventory_preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build an ordered, fail-closed operator plan from one runtime snapshot.
 
@@ -32,6 +33,9 @@ def build_tier_plan(
     capability_flags = snapshot.get("capabilities", {})
     capability_flags = capability_flags if isinstance(capability_flags, dict) else {}
     controls = controls if isinstance(controls, dict) else {}
+    inventory_preflight = (
+        inventory_preflight if isinstance(inventory_preflight, dict) else {}
+    )
     model = snapshot.get("model")
     if not isinstance(model, str):
         model = "unknown"
@@ -41,6 +45,20 @@ def build_tier_plan(
         facts = feature_map.get(feature, {})
         facts = facts if isinstance(facts, dict) else {}
         presence = facts.get("physical_presence", "unknown")
+        inspection = inventory_preflight.get(feature)
+        inspected_present = bool(
+            presence == "unknown"
+            and facts.get("production_authorized") is True
+            and snapshot.get("verified") is True
+            and snapshot.get("identity_conflicted") is False
+            and isinstance(snapshot.get("model"), str)
+            and snapshot.get("model") != "unknown"
+            and isinstance(snapshot.get("hardware_revision"), str)
+            and isinstance(inspection, dict)
+            and inspection.get("outcome") == "present"
+            and inspection.get("basis") == "operator_physical_inspection"
+        )
+        eligibility_presence = "present" if inspected_present else presence
         control_key = _CONTROL.get(feature, feature)
         control = controls.get(control_key, {})
         control = control if isinstance(control, dict) else {}
@@ -65,9 +83,13 @@ def build_tier_plan(
             ):
                 status = "blocked"
                 reasons.append("fresh connected telemetry preflight is not ready")
-        elif presence != "present":
+        elif eligibility_presence != "present":
             status = "blocked"
             reasons.append("physical presence is unknown or unreviewed")
+        elif inspected_present:
+            reasons.append(
+                "operator physical-inventory preflight permits acquisition only; independent review is still required"
+            )
         if action == "write":
             if facts.get("production_authorized") is not True:
                 status = "blocked"
@@ -102,6 +124,16 @@ def build_tier_plan(
             {
                 "id": step_id,
                 "feature": feature,
+                "physical_presence": presence
+                if presence in {"present", "absent", "unknown"}
+                else "unknown",
+                "inventory_preflight": (
+                    "operator_inspected_present"
+                    if inspected_present
+                    else "unknown"
+                    if presence == "unknown"
+                    else "not_required"
+                ),
                 "action": action,
                 "original_state": None if absent else original,
                 "target_state": (
@@ -229,5 +261,19 @@ def build_tier_plan(
             if step["eligibility"] != "not_applicable"
         ),
         "restoration_plan": "Restore each changed control to its captured original state with separate consent; stop after disconnect or ambiguous outcome.",
+        "physical_inventory_preflight": {
+            "source": "operator_physical_inspection",
+            "features": {
+                feature: {"outcome": "present", "basis": "operator_physical_inspection"}
+                for feature in sorted(
+                    {
+                        step["feature"]
+                        for step in steps
+                        if step.get("inventory_preflight")
+                        == "operator_inspected_present"
+                    }
+                )
+            },
+        },
         "steps": steps,
     }

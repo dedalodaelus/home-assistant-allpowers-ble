@@ -155,12 +155,18 @@ def make_parser() -> argparse.ArgumentParser:
     )
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)
+    review_parser.add_argument(
+        "--tier",
+        choices=("bronze", "silver", "gold", "platinum"),
+        default="bronze",
+        help="Support tier to review (Bronze remains the default)",
+    )
     review_mode_input = review_parser.add_mutually_exclusive_group(required=True)
     review_mode_input.add_argument("--review-file", type=Path)
     review_mode_input.add_argument(
         "--interactive",
         action="store_true",
-        help="Interactively review an imported Bronze run offline",
+        help="Interactively review an imported run offline",
     )
     review_mode = review_parser.add_mutually_exclusive_group()
     review_mode.add_argument("--dry-run", action="store_true")
@@ -718,6 +724,7 @@ def _execute_tier_suite(
     plan_steps = plan["steps"]
     for planned in plan_steps:
         step_id = planned["id"]
+        facts: dict[str, Any] = {}
         if stop_reason is not None:
             execution["steps"].append(
                 {
@@ -1072,10 +1079,7 @@ def _execute_tier_suite(
                     "human_review": "pending",
                 }
             )
-            if getattr(args, "onboarding", False) and plan.get("requested_tier") in {
-                "silver",
-                "gold",
-            }:
+            if plan.get("requested_tier") in {"silver", "gold"}:
                 from .guided import build_tier_plan
 
                 observed_route = (
@@ -1096,12 +1100,22 @@ def _execute_tier_suite(
                 )
                 requested_tier = plan["requested_tier"]
                 build_provenance = plan.get("device", {}).get("build_provenance", {})
+                inventory_preflight = (
+                    {}
+                    if args.non_interactive
+                    else _collect_physical_inventory_preflight(
+                        refreshed_capabilities,
+                        refreshed_controls,
+                        prompt=services.prompt,
+                    )
+                )
                 refreshed_plan = build_tier_plan(
                     requested_tier,
                     refreshed_capabilities,
                     refreshed_controls,
                     observed_route=observed_route,
                     build_provenance=build_provenance,
+                    inventory_preflight=inventory_preflight,
                 )
                 for refreshed_step in refreshed_plan["steps"]:
                     if _candidate_step_needs_authorization(
@@ -1141,7 +1155,8 @@ def _execute_tier_suite(
                     )
                     try:
                         continue_bronze = (
-                            services.prompt(
+                            not args.non_interactive
+                            and services.prompt(
                                 "Type BRONZE to keep only the read-only diagnostics, or press Enter to stop: "
                             ).strip()
                             == "BRONZE"
@@ -1155,6 +1170,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         print(
@@ -1168,6 +1184,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         overall = 2
@@ -1178,7 +1195,8 @@ def _execute_tier_suite(
                 else:
                     try:
                         proceed = (
-                            services.prompt(
+                            not args.non_interactive
+                            and services.prompt(
                                 "Type RUN after reviewing the refreshed plan to authorize proceeding to individually consented steps: "
                             ).strip()
                             == "RUN"
@@ -1192,6 +1210,7 @@ def _execute_tier_suite(
                             refreshed_controls,
                             observed_route=observed_route,
                             build_provenance=build_provenance,
+                            inventory_preflight=inventory_preflight,
                         )
                         execution["execution_tier"] = "bronze"
                         overall = 2
@@ -1265,15 +1284,23 @@ def _execute_tier_suite(
                     }
                 )
                 continue
-            if (
-                not isinstance(facts, dict)
-                or facts.get("physical_presence") != "present"
+            if not isinstance(facts, dict) or not (
+                facts.get("physical_presence") == "present"
+                or (
+                    facts.get("physical_presence") == "unknown"
+                    and facts.get("production_authorized") is True
+                    and planned.get("inventory_preflight")
+                    == "operator_inspected_present"
+                    and isinstance(plan.get("physical_inventory_preflight"), dict)
+                    and plan["physical_inventory_preflight"].get("source")
+                    == "operator_physical_inspection"
+                )
             ):
                 execution["steps"].append(
                     {
                         "step_id": step_id,
                         "outcome": "blocked",
-                        "reason": "physical presence is unknown or unreviewed",
+                        "reason": "physical presence is unknown and no valid production-authorized inventory preflight is recorded",
                     }
                 )
                 overall = 2
@@ -1292,6 +1319,10 @@ def _execute_tier_suite(
                         step_id,
                         feature,
                         services,
+                    )
+                    candidate_result["authorization_context"] = "experimental_hil"
+                    candidate_result["authorization_context_source"] = (
+                        "experimental_hil_grant"
                     )
                     execution["steps"].append(candidate_result)
                     if candidate_result.get("outcome") != "pass":
@@ -1403,6 +1434,26 @@ def _execute_tier_suite(
             and any(Path(item).name == "trace.json" for item in evidence_paths)
             and all(row.get("outcome") == "pass" for row in rows)
         )
+        review_evidence_path: Path | None = None
+        if (
+            passed
+            and isinstance(facts, dict)
+            and facts.get("production_authorized") is True
+        ):
+            review_artifact = _reviewable_tier_step_artifact(
+                parent_private=output_dir,
+                child_private=child_root,
+                step_id=step_id,
+                feature=feature,
+                checkpoint_rows=rows,
+            )
+            if review_artifact is not None:
+                review_evidence_path = output_dir / f"tier-{step_id}.json"
+                review_evidence_path.write_text(
+                    json.dumps(review_artifact, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                review_evidence_path.chmod(0o600)
         reconnect_reason = None
         if passed and step_id == "basic_reconnect":
             action_row = next(
@@ -1443,6 +1494,22 @@ def _execute_tier_suite(
             if isinstance(failed_reason, str) and failed_reason.strip()
             else "guided scenario did not complete with confirmed evidence"
         )
+        machine_evidence = [
+            {
+                "path": f"../../tier_{child_run_id}/private/{item}",
+                "sha256": hashlib.sha256((child_root / item).read_bytes()).hexdigest(),
+            }
+            for item in evidence_paths
+        ]
+        if review_evidence_path is not None:
+            machine_evidence.append(
+                {
+                    "path": review_evidence_path.name,
+                    "sha256": hashlib.sha256(
+                        review_evidence_path.read_bytes()
+                    ).hexdigest(),
+                }
+            )
         execution["steps"].append(
             {
                 "step_id": step_id,
@@ -1451,15 +1518,16 @@ def _execute_tier_suite(
                 **({} if passed else {"reason": step_reason}),
                 "observed_routes": sorted(verified_routes),
                 "human_review": "pending",
-                "machine_evidence": [
+                **(
                     {
-                        "path": f"../../tier_{child_run_id}/private/{item}",
-                        "sha256": hashlib.sha256(
-                            (child_root / item).read_bytes()
-                        ).hexdigest(),
+                        "authorization_context": "production",
+                        "authorization_context_source": "runtime_production_authorized",
                     }
-                    for item in evidence_paths
-                ],
+                    if isinstance(facts, dict)
+                    and facts.get("production_authorized") is True
+                    else {}
+                ),
+                "machine_evidence": machine_evidence,
                 "evidence_run": f"../../tier_{child_run_id}/private",
             }
         )
@@ -1486,6 +1554,62 @@ def _execute_tier_suite(
         "Requested tier is not an attained qualification; independent review remains pending."
     )
     return overall
+
+
+def _collect_physical_inventory_preflight(
+    capabilities: dict[str, Any] | None,
+    controls: dict[str, Any],
+    *,
+    prompt: Callable[[str], str],
+) -> dict[str, dict[str, str]]:
+    """Collect an operator inspection gate, separate from independent review."""
+    features = (
+        capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
+    )
+    if not isinstance(features, dict):
+        return {}
+    control_keys = {
+        "ac_output": "ac_output",
+        "dc_output": "dc_output",
+        "light_output": "light",
+        "eco_mode": "eco_mode",
+        "work_mode": "work_mode",
+        "eco_timeout": "eco_timeout",
+        "car_charger": "car_charger",
+    }
+    result: dict[str, dict[str, str]] = {}
+    identity = " ".join(
+        str(value)
+        for value in (
+            capabilities.get("model"),
+            capabilities.get("hardware_revision"),
+            capabilities.get("firmware_revision"),
+        )
+        if isinstance(value, str) and value
+    )
+    for feature, control_key in control_keys.items():
+        facts = features.get(feature)
+        control = controls.get(control_key)
+        if (
+            not isinstance(facts, dict)
+            or facts.get("physical_presence") != "unknown"
+            or facts.get("production_authorized") is not True
+            or not isinstance(control, dict)
+            or control.get("available") is not True
+        ):
+            continue
+        try:
+            answer = prompt(
+                f"Physically inspect {identity}: confirm {feature} is present and belongs to this exact unit. Type PRESENT only after inspection (anything else leaves it blocked): "
+            ).strip()
+        except EOFError, KeyboardInterrupt:
+            answer = ""
+        if answer == "PRESENT":
+            result[feature] = {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
+    return result
 
 
 def _execute_experimental_output_step(
@@ -2014,6 +2138,203 @@ def _suite_services() -> SuiteServices:
     )
 
 
+def _reviewable_tier_step_artifact(
+    *,
+    parent_private: Path,
+    child_private: Path,
+    step_id: str,
+    feature: str,
+    checkpoint_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Bind standard production-suite actions for offline physical review."""
+    actions = []
+    setting_states = {
+        "eco_mode": {"on": True, "off": False},
+        "car_charger": {"on": True, "off": False},
+        "work_mode": {"mute": 0, "standard": 1, "fast": 2},
+        "eco_timeout": {
+            "one_hour": 1,
+            "two_hours": 2,
+            "four_hours": 4,
+            "six_hours": 6,
+        },
+    }
+
+    def protocol_state(value: Any) -> Any:
+        if feature in setting_states and isinstance(value, str):
+            return setting_states[feature].get(value)
+        return value
+
+    for row in checkpoint_rows:
+        if row.get("target") != feature or row.get("outcome") != "pass":
+            continue
+        trace_name = row.get("trace")
+        if not isinstance(trace_name, str):
+            continue
+        trace_dir = (child_private / trace_name).resolve()
+        try:
+            trace_dir.relative_to(child_private.resolve())
+            trace = json.loads((trace_dir / "trace.json").read_text(encoding="utf-8"))
+            trace["events"] = [
+                json.loads(line)
+                for line in (trace_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+            trace["frames"] = [
+                json.loads(line)
+                for line in (trace_dir / "frames.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+        except OSError, ValueError, UnicodeError:
+            continue
+        evidence = []
+        for filename in ("trace.json", "events.jsonl", "frames.jsonl"):
+            source = trace_dir / filename
+            if not source.is_file():
+                continue
+            relative = Path(os.path.relpath(source, parent_private)).as_posix()
+            evidence.append(
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
+        transaction = row.get("transaction")
+        generation = row.get("session_generation")
+        route = row.get("route")
+        kind = (
+            "output"
+            if feature in {"ac_output", "dc_output", "light_output"}
+            else "settings"
+        )
+        correlated = (
+            correlate_transaction(trace, expected_generation=generation, kind=kind)
+            if type(generation) is int
+            else None
+        )
+        trace_valid = bool(
+            evidence
+            and trace.get("complete") is True
+            and trace.get("dropped_events") == 0
+            and trace.get("dropped_frames") == 0
+            and route in {"local_adapter", "active_proxy"}
+            and trace.get("observed_route") == route
+            and type(generation) is int
+            and isinstance(transaction, dict)
+            and transaction.get("session_generation") == generation
+            and correlated == transaction
+        )
+        actions.append(
+            {
+                "outcome": "confirmed" if trace_valid else "inconclusive",
+                "confirmed": trace_valid,
+                "trace_valid": trace_valid,
+                "trace_complete": trace_valid,
+                "route": route,
+                "trace_route": trace.get("observed_route"),
+                "session_generation": generation,
+                "transaction": transaction,
+                "trace_evidence": evidence,
+            }
+        )
+    rows = [
+        row
+        for row in checkpoint_rows
+        if row.get("target") == feature and row.get("trace")
+    ]
+    physical = {"yes": "correct", "no": "incorrect"}
+    output_feature = feature in {"ac_output", "dc_output", "light_output"}
+    if not output_feature:
+        if len(actions) != 2 or len(rows) != 2:
+            return None
+        initial = protocol_state(rows[0].get("pre_state"))
+        target = protocol_state(rows[0].get("expected"))
+        restored = protocol_state(rows[-1].get("post_state"))
+        physical_change = physical.get(
+            rows[0].get("physical_outcome"), "unable_to_observe"
+        )
+        physical_restore = physical.get(
+            rows[-1].get("physical_outcome"), "unable_to_observe"
+        )
+        complete = (
+            all(action.get("confirmed") is True for action in actions)
+            and initial != target
+            and restored == initial
+            and physical_change == "correct"
+            and physical_restore == "correct"
+        )
+        return {
+            "schema_version": 1,
+            "step_id": step_id,
+            "initial_state": initial,
+            "target_state": target,
+            "restored_state": restored,
+            "physical_change_outcome": physical_change,
+            "physical_restore_outcome": physical_restore,
+            "outcome": "pass" if complete else "inconclusive",
+            "actions": actions,
+        }
+    if len(actions) != 4 or len(rows) != 4:
+        return None
+    output_cycles = [
+        {
+            "initial_state": protocol_state(rows[0].get("pre_state")),
+            "target_state": protocol_state(rows[0].get("expected")),
+            "change_action_index": 0,
+            "restore_action_index": 1,
+            "physical_change_outcome": physical.get(
+                rows[0].get("physical_outcome"), "unable_to_observe"
+            ),
+            "physical_restore_outcome": physical.get(
+                rows[1].get("physical_outcome"), "unable_to_observe"
+            ),
+        },
+        {
+            "initial_state": protocol_state(rows[1].get("pre_state")),
+            "target_state": protocol_state(rows[1].get("expected")),
+            "change_action_index": 1,
+            "restore_action_index": 2,
+            "physical_change_outcome": physical.get(
+                rows[1].get("physical_outcome"), "unable_to_observe"
+            ),
+            "physical_restore_outcome": physical.get(
+                rows[2].get("physical_outcome"), "unable_to_observe"
+            ),
+        },
+    ]
+    complete = (
+        all(item.get("confirmed") is True for item in actions)
+        and [row.get("expected") for row in rows] == ["on", "off", "on", "off"]
+        and rows[0].get("pre_state") == "off"
+        and rows[-1].get("post_state") == "off"
+        and all(row.get("physical_outcome") == "yes" for row in rows)
+    )
+    return {
+        "schema_version": 1,
+        "step_id": step_id,
+        "initial_state": protocol_state(rows[0].get("pre_state")),
+        "target_state": protocol_state(rows[0].get("expected")),
+        "restored_state": protocol_state(rows[-1].get("post_state")),
+        "physical_change_outcome": physical.get(
+            rows[0].get("physical_outcome"), "unable_to_observe"
+        ),
+        "physical_restore_outcome": physical.get(
+            rows[-1].get("physical_outcome"), "unable_to_observe"
+        ),
+        "output_cycles": output_cycles,
+        "final_restore_action_index": 3,
+        "final_restore_outcome": physical.get(
+            rows[-1].get("physical_outcome"), "unable_to_observe"
+        ),
+        "outcome": "pass" if complete else "inconclusive",
+        "actions": actions,
+    }
+
+
 def _execute_output_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -2132,7 +2453,11 @@ def execute(args: argparse.Namespace) -> int:
                 )
             from .review_wizard import interactive_review
 
-            return interactive_review(args.matrix, run_id=args.run_id)
+            if args.tier == "bronze":
+                return interactive_review(args.matrix, run_id=args.run_id)
+            return interactive_review(args.matrix, run_id=args.run_id, tier=args.tier)
+        if args.tier != "bronze":
+            raise HAAPIError("--tier applies only to --interactive review")
         from .review import review_imported_run
 
         return review_imported_run(

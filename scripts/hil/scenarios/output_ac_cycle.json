@@ -2,7 +2,7 @@
   "id": "output_ac_cycle",
   "schema_version": 1,
   "suite": "outputs",
-  "title": "Turn AC output on and return it to the initial off state",
+  "title": "Verify AC output on and off cycles and restore the initial off state",
   "mode": "interactive_write",
   "steps": [
     {
@@ -15,6 +15,22 @@
     },
     {
       "id": "ac_off",
+      "instruction": "Turn AC output off to restore the first cycle and verify the off transition.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "ac_output",
+      "expected": "off"
+    },
+    {
+      "id": "ac_on_second_cycle",
+      "instruction": "Turn AC output on to restore the off cycle.",
+      "timeout_seconds": 30,
+      "action": "switch",
+      "target": "ac_output",
+      "expected": "on"
+    },
+    {
+      "id": "ac_final_restore",
       "instruction": "Turn AC output off and confirm the initial safe state is restored.",
       "timeout_seconds": 30,
       "action": "switch",
