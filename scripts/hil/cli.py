@@ -3590,8 +3590,23 @@ def _onboard_import_review(
         )
         from .evidence import _bronze_samples_fresh
 
+        freshness = bronze_evidence.get("status_freshness")
+        freshness_event = next(
+            (
+                event
+                for event in public_events
+                if isinstance(freshness, dict)
+                and event.get("capture_id") == freshness.get("capture_id")
+                and event.get("seq") == freshness.get("decoded_response_seq")
+            ),
+            None,
+        )
+
         fresh_samples_verified = _bronze_samples_fresh(
-            bronze_evidence["samples"], allow_missing_source=True
+            bronze_evidence["samples"],
+            status_evidence=freshness,
+            status_event=freshness_event,
+            allow_missing_source=True,
         )
     except (
         HAAPIError,

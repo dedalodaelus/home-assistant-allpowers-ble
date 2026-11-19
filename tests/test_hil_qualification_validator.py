@@ -14,6 +14,61 @@ import pytest
 from scripts import validate_hil_qualification as validator
 
 
+def test_capture_bound_fresh_telemetry_requires_matching_public_status_event(
+    tmp_path: Path,
+) -> None:
+    samples = []
+    measurements = {
+        "battery": 50,
+        "input_power": 0,
+        "output_power": 0,
+        "remaining_time": 0,
+    }
+    for age, timestamp in (
+        (815, "2026-11-20T10:00:00+00:00"),
+        (816, "2026-11-20T10:00:01+00:00"),
+    ):
+        telemetry = {
+            key: {"value": value, "verified": True, "sample_age_seconds": age}
+            for key, value in measurements.items()
+        }
+        telemetry["telemetry_available"] = {"value": "on", "verified": True}
+        samples.append({"sampled_at_utc": timestamp, "telemetry": telemetry})
+    freshness = {
+        "capture_id": "capture-1",
+        "session_generation": 7,
+        "status_notification_count_before": 0,
+        "status_notification_count_after": 1,
+        "decoded_response_seq": 4,
+        "decoded_response_at_utc": "2026-11-20T10:00:02+00:00",
+        "capture_started_seq": 1,
+        "capture_stopped_seq": 5,
+        "status_measurement": measurements,
+    }
+    decoded = {
+        "event": "status_data_decoded",
+        "capture_id": "capture-1",
+        "session_generation": 7,
+        "seq": 4,
+        "utc": freshness["decoded_response_at_utc"],
+        "status_measurement": measurements,
+    }
+    (tmp_path / "tier-bronze-read-only.json").write_text(
+        json.dumps({"samples": samples, "status_freshness": freshness}),
+        encoding="utf-8",
+    )
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text(json.dumps(decoded) + "\n", encoding="utf-8")
+    item = {"evidence": ["tier-bronze-read-only.json", "events.jsonl"]}
+
+    assert validator._capture_bound_fresh_telemetry(item, tmp_path)
+    events_path.write_text(
+        json.dumps({**decoded, "capture_id": "different-capture"}) + "\n",
+        encoding="utf-8",
+    )
+    assert not validator._capture_bound_fresh_telemetry(item, tmp_path)
+
+
 def _digest_manifest(root: Path, evidence: list[str]) -> dict[str, str]:
     return {
         item: hashlib.sha256((root / item).read_bytes()).hexdigest()

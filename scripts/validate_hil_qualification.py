@@ -1348,6 +1348,63 @@ def _validate_run(
     return run_id if isinstance(run_id, str) else None
 
 
+def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
+    """Validate fallback freshness against imported public bytes and decoded event."""
+    paths = item.get("evidence")
+    if not isinstance(paths, list):
+        return False
+    bronze_path = next(
+        (
+            path
+            for path in paths
+            if isinstance(path, str) and Path(path).name == "tier-bronze-read-only.json"
+        ),
+        None,
+    )
+    events_path = next(
+        (
+            path
+            for path in paths
+            if isinstance(path, str) and Path(path).name == "events.jsonl"
+        ),
+        None,
+    )
+    if bronze_path is None or events_path is None:
+        return False
+    try:
+        bronze = json.loads((root / bronze_path).read_text(encoding="utf-8"))
+        events = [
+            json.loads(line)
+            for line in (root / events_path).read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        freshness = bronze.get("status_freshness")
+        event = next(
+            (
+                row
+                for row in events
+                if isinstance(freshness, dict)
+                and row.get("capture_id") == freshness.get("capture_id")
+                and row.get("seq") == freshness.get("decoded_response_seq")
+            ),
+            None,
+        )
+        from scripts.hil.evidence import _bronze_samples_fresh
+
+        return bool(
+            isinstance(bronze, dict)
+            and isinstance(bronze.get("samples"), list)
+            and _bronze_samples_fresh(
+                bronze["samples"],
+                status_evidence=freshness,
+                status_event=event,
+                allow_missing_source=True,
+            )
+        )
+    except OSError, UnicodeError, ValueError, TypeError:
+        return False
+
+
 def _check_bronze_evidence(
     run: dict[str, Any],
     context: str,
@@ -1417,13 +1474,26 @@ def _check_bronze_evidence(
             continue
         if claim == "identity" and artifact.get("identity_confirmed") is not True:
             _error(errors, f"{claim_context} must confirm model and revision identity")
-        elif claim == "fresh_telemetry" and not (
-            artifact.get("fresh") is True
-            and artifact.get("plausible") is True
-            and type(artifact.get("sample_age_seconds")) is int
-            and 0 <= artifact["sample_age_seconds"] <= 60
-        ):
-            _error(errors, f"{claim_context} must establish fresh plausible telemetry")
+        elif claim == "fresh_telemetry":
+            age = artifact.get("sample_age_seconds")
+            basis = artifact.get("freshness_basis")
+            valid = (
+                artifact.get("fresh") is True
+                and artifact.get("plausible") is True
+                and type(age) is int
+                and age >= 0
+                and (
+                    basis == "recent_rest_sample"
+                    and age <= 60
+                    or basis == "capture_bound_status"
+                    and age > 60
+                    and _capture_bound_fresh_telemetry(item, ROOT)
+                )
+            )
+            if not valid:
+                _error(
+                    errors, f"{claim_context} must establish fresh plausible telemetry"
+                )
         elif claim == "protocol_probe":
             capture_path = item.get("capture_evidence")
             if capture_path not in paths or not _has_bound_bronze_probe(
