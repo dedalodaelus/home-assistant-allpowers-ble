@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -479,6 +479,7 @@ def _captured_archive(
     bronze_decoded_packet_types: tuple[str, ...] = ("StatusData",),
     bronze_protocol_outcome: str = "pass",
     bronze_write_completion: str = "write_ok",
+    stale_rest_fallback: bool = False,
 ) -> Path:
     environment = {
         "schema_version": 1,
@@ -613,9 +614,10 @@ def _captured_archive(
             ],
         }
         if bronze_reviewable:
+            sequence_offset = int(stale_rest_fallback)
             status_frame = {
                 **common,
-                "seq": 2,
+                "seq": 2 + sequence_offset,
                 "utc": stamp,
                 "elapsed_ms": 1.0,
                 "event": "write_attempt",
@@ -627,14 +629,14 @@ def _captured_archive(
             }
             notification_event = {
                 **common,
-                "seq": 3,
+                "seq": 3 + sequence_offset,
                 "utc": stamp,
                 "elapsed_ms": 2.0,
                 "event": "notification_received",
             }
             write_completion_event = {
                 **common,
-                "seq": 5,
+                "seq": 5 + sequence_offset,
                 "utc": stamp,
                 "elapsed_ms": 4.0,
                 "event": bronze_write_completion,
@@ -642,20 +644,56 @@ def _captured_archive(
             }
             decoded_event = {
                 **common,
-                "seq": 4,
+                "seq": 4 + sequence_offset,
                 "utc": stamp,
                 "elapsed_ms": 3.0,
                 "event": "notification_decoded",
                 "decoded_packet_types": list(bronze_decoded_packet_types),
             }
+            status_measurement = {
+                "battery": 50,
+                "input_power": 0,
+                "output_power": 0,
+                "remaining_time": 0,
+            }
+            if stale_rest_fallback:
+                decoded_event["status_measurement"] = status_measurement
             trace["events"] = [
                 route_event,
+                *(
+                    [
+                        {
+                            **common,
+                            "seq": 2,
+                            "utc": stamp,
+                            "elapsed_ms": 0.5,
+                            "event": "capture_started",
+                            "capture_id": trace["capture_id"],
+                        }
+                    ]
+                    if stale_rest_fallback
+                    else []
+                ),
                 {**status_frame, "direction": "write"},
                 notification_event,
                 decoded_event,
                 *(
                     [write_completion_event]
                     if bronze_write_completion != "missing"
+                    else []
+                ),
+                *(
+                    [
+                        {
+                            **common,
+                            "seq": 7,
+                            "utc": stamp,
+                            "elapsed_ms": 5.0,
+                            "event": "capture_stopped",
+                            "capture_id": trace["capture_id"],
+                        }
+                    ]
+                    if stale_rest_fallback
                     else []
                 ),
             ]
@@ -678,19 +716,58 @@ def _captured_archive(
             bronze_trace = private / "traces" / "bronze_read_only"
             bronze_trace.mkdir(parents=True)
             _save_private_trace(bronze_trace, trace)
-            sample_time = datetime.now(UTC).isoformat()
+            sample_time = datetime.now(UTC)
             sample = {
-                "sampled_at_utc": sample_time,
+                "sampled_at_utc": (
+                    (
+                        sample_time - timedelta(seconds=1)
+                        if stale_rest_fallback
+                        else sample_time
+                    ).isoformat()
+                ),
                 "telemetry": {
                     "battery": {
                         "value": 50,
                         "verified": True,
                         "source": "ha_rest_entity_state",
-                        "sample_age_seconds": 5,
+                        "sample_age_seconds": 815 if stale_rest_fallback else 5,
                     },
                     "telemetry_available": {"value": "on", "verified": True},
                 },
             }
+            second_sample = {
+                **sample,
+                "sampled_at_utc": (
+                    (
+                        sample_time + timedelta(seconds=1)
+                        if stale_rest_fallback
+                        else sample_time
+                    ).isoformat()
+                ),
+                "telemetry": {
+                    key: (
+                        {**record, "sample_age_seconds": 816}
+                        if key == "battery" and stale_rest_fallback
+                        else record
+                    )
+                    for key, record in sample["telemetry"].items()
+                },
+            }
+            status_freshness = (
+                {
+                    "capture_id": trace["capture_id"],
+                    "session_generation": generation,
+                    "status_notification_count_before": 0,
+                    "status_notification_count_after": 1,
+                    "decoded_response_seq": decoded_event["seq"],
+                    "decoded_response_at_utc": stamp,
+                    "capture_started_seq": 2,
+                    "capture_stopped_seq": 7,
+                    "status_measurement": status_measurement,
+                }
+                if stale_rest_fallback
+                else None
+            )
             (private / "tier-bronze-read-only.json").write_text(
                 json.dumps(
                     {
@@ -698,12 +775,13 @@ def _captured_archive(
                         "step_id": "read_only_probe",
                         "sample_sha256": [
                             hashlib.sha256(
-                                json.dumps(sample, sort_keys=True).encode()
+                                json.dumps(item, sort_keys=True).encode()
                             ).hexdigest()
-                        ]
-                        * 2,
-                        "samples": [sample, sample],
+                            for item in (sample, second_sample)
+                        ],
+                        "samples": [sample, second_sample],
                         "fresh_verified_samples": True,
+                        "status_freshness": status_freshness,
                         "protocol_probe": {
                             "outcome": bronze_protocol_outcome,
                             "trace": "traces/bronze_read_only",
@@ -712,8 +790,8 @@ def _captured_archive(
                             ).hexdigest(),
                             "route": observed_route,
                             "session_generation": generation,
-                            "status_request_seq": 2,
-                            "status_write_ok_seq": 5,
+                            "status_request_seq": status_frame["seq"],
+                            "status_write_ok_seq": write_completion_event["seq"],
                             "decoded_response_seq": decoded_event["seq"],
                             "status_request_hex": "a565b1000106010000000000",
                         },
@@ -3987,11 +4065,12 @@ def test_exported_captures_import_with_route_firmware_and_steps_scoped(
 
 
 @pytest.mark.parametrize(
-    ("packet_types", "protocol_outcome"),
+    ("packet_types", "protocol_outcome", "stale_rest_fallback"),
     [
-        (("StatusData",), "pass"),
-        (("SettingsData",), "inconclusive"),
-        ((), "inconclusive"),
+        (("StatusData",), "pass", False),
+        (("SettingsData",), "inconclusive", False),
+        ((), "inconclusive", False),
+        (("StatusData",), "pass", True),
     ],
 )
 def test_export_import_and_independent_bronze_review_requires_status_data(
@@ -4000,6 +4079,7 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
     capsys: pytest.CaptureFixture[str],
     packet_types: tuple[str, ...],
     protocol_outcome: str,
+    stale_rest_fallback: bool,
 ) -> None:
     from scripts import validate_hil_qualification
     from scripts.hil.review import review_imported_run
@@ -4012,6 +4092,7 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         bronze_reviewable=True,
         bronze_decoded_packet_types=packet_types,
         bronze_protocol_outcome=protocol_outcome,
+        stale_rest_fallback=stale_rest_fallback,
     )
     from scripts.hil.evidence import verify_public_archive
 
@@ -4118,7 +4199,15 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
         "fresh_telemetry": "pass",
     }
     if expected_status == "pass":
-        assert '"tier": "bronze"' in review_output
+        assert '"tier": "bronze"' in review_output, review_output
+        if stale_rest_fallback:
+            claim_path = (
+                tmp_path
+                / reviewed["bronze_evidence"]["fresh_telemetry"]["claim_artifact"]
+            )
+            claim = json.loads(claim_path.read_text(encoding="utf-8"))
+            assert claim["sample_age_seconds"] == 816
+            assert claim["freshness_basis"] == "capture_bound_status"
     else:
         assert '"tier": "unqualified"' in review_output
         assert '"protocol_probe": "inconclusive"' in review_output
