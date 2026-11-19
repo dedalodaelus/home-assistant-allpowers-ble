@@ -935,6 +935,95 @@ def _check_result_map(
                 )
 
 
+def _archive_backed_run(run: Any) -> bool:
+    """Identify imported public archives independently of optional digest fields."""
+    if not isinstance(run, dict):
+        return False
+    run_id = run.get("run_id")
+    if isinstance(run_id, str) and run_id.startswith("archive-"):
+        return True
+    if any(key in run for key in ("archive_sha256", "content_sha256", "source_run_id")):
+        return True
+    evidence = run.get("evidence")
+    return isinstance(evidence, list) and any(
+        isinstance(value, str)
+        and Path(value).name in {"manifest.json", "tier-artifacts.json"}
+        for value in evidence
+    )
+
+
+def _valid_archive_provenance(
+    run: dict[str, Any],
+    *,
+    revision_id: str,
+    revision_model: str,
+    hardware_revision: str,
+    firmware_version: Any,
+    route: Any,
+) -> bool:
+    """Rebuild the imported content identity from its retained public members."""
+    archive_sha = run.get("archive_sha256")
+    content_sha = run.get("content_sha256")
+    if (
+        not isinstance(archive_sha, str)
+        or re.fullmatch(r"[a-f0-9]{64}", archive_sha) is None
+        or not isinstance(content_sha, str)
+        or re.fullmatch(r"[a-f0-9]{64}", content_sha) is None
+        or "source_run_id" not in run
+    ):
+        return False
+    source_run_id = run.get("source_run_id")
+    if source_run_id is not None and (
+        not isinstance(source_run_id, str) or not source_run_id
+    ):
+        return False
+
+    try:
+        from scripts.hil.evidence import PUBLIC_NAMES
+        from scripts.hil.importer import (
+            _canonical_content_sha256,
+            _canonical_model,
+            _logical_run_id,
+        )
+
+        members: dict[str, bytes] = {}
+        for value in run.get("evidence", []):
+            if not isinstance(value, str) or Path(value).name not in PUBLIC_NAMES:
+                continue
+            name = Path(value).name
+            if name in members:
+                return False
+            path = (ROOT / value).resolve()
+            path.relative_to(ROOT.resolve())
+            members[name] = path.read_bytes()
+        if "manifest.json" not in members or "session.json" not in members:
+            return False
+        rebuilt_content_sha = _canonical_content_sha256(members)
+        if rebuilt_content_sha != content_sha:
+            return False
+        model = _canonical_model(revision_model)
+        if model in {None, "unknown"}:
+            model = None
+        hardware = hardware_revision
+        if hardware == "unknown":
+            hardware = None
+        scope = {
+            "revision_id": revision_id,
+            "model": model,
+            "hardware_version": hardware,
+            "firmware_version": firmware_version,
+            "route": route,
+        }
+        expected_run_id = _logical_run_id(
+            source_run_id=source_run_id,
+            content_sha256=content_sha,
+            scope=scope,
+        )
+        return run.get("run_id") == expected_run_id
+    except OSError, ValueError, TypeError, KeyError:
+        return False
+
+
 def _validate_run(
     run: Any,
     context: str,
@@ -947,6 +1036,7 @@ def _validate_run(
     hardware_revision: str,
     protocol_profile_supported: bool,
     feature_scope: str | None = None,
+    check_archive_provenance: bool = True,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
@@ -1024,6 +1114,20 @@ def _validate_run(
         )
     run_evidence = run.get("evidence")
     _check_evidence(run_evidence, context, errors)
+    archive_backed = _archive_backed_run(run)
+    if (
+        archive_backed
+        and check_archive_provenance
+        and not _valid_archive_provenance(
+            run,
+            revision_id=revision_id,
+            revision_model=revision_model,
+            hardware_revision=hardware_revision,
+            firmware_version=firmware,
+            route=route,
+        )
+    ):
+        _error(errors, f"{context} has invalid imported archive provenance")
     qualification = run.get("qualification_status")
     if not isinstance(qualification, str) or qualification not in STATUSES:
         _error(
@@ -1092,7 +1196,7 @@ def _validate_run(
         capability=True,
         strict_keys={feature_scope} if feature_scope is not None else None,
         tier_evidence=isinstance(run.get("bronze_evidence"), dict),
-        require_final_restoration=bool(run.get("archive_sha256")),
+        require_final_restoration=archive_backed,
     )
     if qualification == "pass":
         result_maps = (run.get("scenarios"), run.get("write_capabilities"))
@@ -1932,13 +2036,22 @@ def _valid_final_output_restoration(
             capability=True,
             expected_verdict="ok",
         )
-        and _valid_tier_capture_row(
+        and all(row.get(key) == value for key, value in scope.items())
+        and row.get("capability") == feature
+        and row.get("operation_id") == feature
+        and row.get("action_stage") == "restoration"
+        and type(row.get("requested_state")) is bool
+        and row.get("requested_state") is requested_state
+        and row.get("direction") == "write"
+        and row.get("verdict") == "ok"
+        and row.get("physical_outcome") == "pass"
+        and _valid_public_frame_capture(
             row,
-            scope,
-            feature,
-            requested_state,
-            "restoration",
             item.get("evidence"),
+            scope=scope,
+            feature=feature,
+            requested_state=requested_state,
+            action_stage="restoration",
             final_restoration=True,
         )
     )
@@ -2191,6 +2304,7 @@ def validate_matrix(
     revision_scope: str | None = None,
     firmware_scope: str | None = None,
     feature_scope: str | None = None,
+    check_archive_provenance: bool = True,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     summaries: list[str] = []
@@ -2253,6 +2367,7 @@ def validate_matrix(
                 revision_model=revision.get("model", ""),
                 hardware_revision=revision.get("hardware_version", ""),
                 protocol_profile_supported=protocol_profile_supported,
+                check_archive_provenance=check_archive_provenance,
             )
             if run_id is not None:
                 if run_id in seen_runs:

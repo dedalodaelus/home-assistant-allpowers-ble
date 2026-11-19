@@ -152,6 +152,10 @@ def _build_proposal(
         matrix_path=matrix_path,
         require_pass=False,
         max_age_days=30,
+        # Preserve the importer's more specific source and file conflict
+        # diagnostics. The proposed matrix is fully provenance-validated
+        # before any write in _apply_proposal.
+        check_archive_provenance=False,
     )
     if matrix_errors:
         raise HAAPIError(

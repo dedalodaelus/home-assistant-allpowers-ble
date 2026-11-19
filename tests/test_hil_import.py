@@ -3136,25 +3136,84 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     run = matrix["revisions"][0]["runs"][0]
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
 
-    # Recompute the ordinary review digest after replacing the durable final
-    # restoration reference. Schema validation and evaluation must still reject
-    # this otherwise successful PASS on its evidence semantics.
-    ac_result = run["write_capabilities"]["ac_output"]
-    ac_review = ac_result["physical_review"]
-    final_capture = tmp_path / ac_review["final_restoration"]["capture_evidence"]
-    final_row = json.loads(final_capture.read_text(encoding="utf-8"))
-    assert final_row["source_action_index"] == 3
-    final_row["source_action_index"] = 2
-    final_capture.write_text(json.dumps(final_row, sort_keys=True) + "\n")
-    ac_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
-        ac_result["evidence"]
+    # Removing the optional digest and final proof cannot turn off the archive
+    # gate: imported origin comes from the archive identity and retained member
+    # provenance, and the ordinary digest manifest is recomputed here.
+    missing_proof = json.loads(json.dumps(matrix))
+    missing_run = missing_proof["revisions"][0]["runs"][0]
+    missing_result = missing_run["write_capabilities"]["ac_output"]
+    missing_review = missing_result["physical_review"]
+    missing_capture = missing_review["final_restoration"]["capture_evidence"]
+    missing_review.pop("final_restoration")
+    missing_run.pop("archive_sha256")
+    missing_result["evidence"].remove(missing_capture)
+    missing_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        missing_result["evidence"]
     )
-    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
     errors, _ = validate_hil_qualification.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        missing_proof, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any("archive provenance" in error for error in errors)
+    assert any("final restoration" in error for error in errors)
+    regressed = evaluate_tiers(missing_proof)["tiers"][0]
+    assert regressed["tier"] == "bronze"
+    assert "ac_output" not in regressed["qualified_features"]
+
+    # A syntactically valid raw frame is not a substitute for the normalized
+    # action-3 TX in the imported graph, even when its fake source references
+    # agree with both the row and the edited review metadata.
+    raw_bypass = json.loads(json.dumps(matrix))
+    raw_run = raw_bypass["revisions"][0]["runs"][0]
+    raw_result = raw_run["write_capabilities"]["ac_output"]
+    raw_review = raw_result["physical_review"]
+    raw_restoration = raw_review["final_restoration"]
+    original_capture = tmp_path / raw_restoration["capture_evidence"]
+    raw_path = original_capture.with_name("ac-output-final-restoration-raw.jsonl")
+    raw_row = json.loads(original_capture.read_text(encoding="utf-8"))
+    assert raw_row["source_action_index"] == 3
+    fake_references = {
+        "trace_sha256": "1" * 64,
+        "frame_sha256": "2" * 64,
+        "transaction_sha256": "3" * 64,
+        "frame_seq": 999,
+    }
+    raw_row.update(
+        source_trace_sha256=fake_references["trace_sha256"],
+        source_frame_sha256=fake_references["frame_sha256"],
+        source_transaction_sha256=fake_references["transaction_sha256"],
+        source_frame_seq=fake_references["frame_seq"],
+        frame_hex="a56500b10101000071",
+    )
+    raw_path.write_text(json.dumps(raw_row, sort_keys=True) + "\n")
+    raw_result["evidence"].append(raw_path.relative_to(tmp_path).as_posix())
+    raw_restoration["capture_evidence"] = raw_path.relative_to(tmp_path).as_posix()
+    raw_restoration["frame_evidence"].update(fake_references)
+    raw_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        raw_result["evidence"]
+    )
+    raw_scope = {
+        "route": raw_run["route"],
+        "revision_id": raw_bypass["revisions"][0]["id"],
+        "firmware_version": raw_run["firmware_version"],
+        "run_id": raw_run["run_id"],
+        "captured_at": raw_run["captured_at"],
+        "session_id": raw_run["session_id"],
+        "build_fingerprint": raw_run["build_fingerprint"],
+    }
+    assert validate_hil_qualification._valid_tier_capture_row(
+        raw_row,
+        raw_scope,
+        "ac_output",
+        False,
+        "restoration",
+        raw_result["evidence"],
+        final_restoration=True,
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        raw_bypass, matrix_path=matrix_path, require_pass=False, max_age_days=None
     )
     assert any("final restoration" in error for error in errors)
-    regressed = evaluate_tiers(matrix)["tiers"][0]
+    regressed = evaluate_tiers(raw_bypass)["tiers"][0]
     assert regressed["tier"] == "bronze"
     assert "ac_output" not in regressed["qualified_features"]
 

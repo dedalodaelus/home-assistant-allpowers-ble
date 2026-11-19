@@ -474,7 +474,9 @@ def _output_pass(
     transitions = review.get("output_transitions")
     if not isinstance(transitions, list) or len(transitions) != 2:
         return False
-    if run.get("archive_sha256") and not hil_validation._valid_final_output_restoration(
+    if hil_validation._archive_backed_run(
+        run
+    ) and not hil_validation._valid_final_output_restoration(
         item,
         feature,
         {

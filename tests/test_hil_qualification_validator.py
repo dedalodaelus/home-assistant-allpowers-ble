@@ -586,7 +586,7 @@ def test_strict_gate_uses_latest_eligible_run_and_ignores_imported_inconclusive(
             **_qualified_run(
                 tmp_path,
                 "local_adapter",
-                "archive-import",
+                "synthetic-import",
                 now,
             ),
             "qualification_status": "inconclusive",
