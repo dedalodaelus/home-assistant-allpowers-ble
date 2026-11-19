@@ -2832,6 +2832,208 @@ def test_inventory_preflight_survives_public_archive_and_import(
     )
 
 
+def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from datetime import UTC, datetime
+
+    from scripts import validate_hil_qualification
+    from scripts.hil.evidence import export_archive
+    from scripts.hil.importer import import_archive
+    from scripts.hil.review import review_imported_tier_run
+    from scripts.hil.review_wizard import interactive_review
+
+    def make_archive(path: Path, *, plan_model: str) -> Path:
+        run_id = "abcdef0123456789"
+        source = path / "source"
+        _captured_archive(
+            source,
+            "local_adapter",
+            "1.1",
+            run_id,
+            bronze_reviewable=True,
+        )
+        run_root = source / f"run-{run_id}"
+        private = run_root / "private"
+        session_path = private / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["test_plan"] = {
+            "schema_version": 1,
+            "requested_tier": "silver",
+            "attained_tier": None,
+            "review_state": "pending",
+            "device": {
+                "model": plan_model,
+                "hardware_revision": "0.3",
+                "firmware_revision": "1.1",
+                "verified_route": "local_adapter",
+            },
+            "operator_actions_estimate": 1,
+            "steps": [
+                {
+                    "id": "light_output_cycle",
+                    "feature": "light_output",
+                    "eligibility": "not_applicable",
+                    "physical_presence": "absent",
+                    "outcome": "pending",
+                    "reasons": ["runtime profile substantiates physical absence"],
+                    "human_review": "pending",
+                }
+            ],
+        }
+        session_path.write_text(json.dumps(session), encoding="utf-8")
+        (private / "tier-execution.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "requested_tier": "silver",
+                    "execution_tier": "silver",
+                    "requested_route": "local_adapter",
+                    "device": {
+                        "model": "R600",
+                        "hardware_revision": "0.3",
+                        "firmware_revision": "1.1",
+                    },
+                    "review_state": "pending",
+                    "steps": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return export_archive(run_root, confirmed=True)
+
+    archive = make_archive(tmp_path / "positive-source", plan_model="R600")
+    positive_root = tmp_path / "positive"
+    matrix_path = _matrix(positive_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", positive_root)
+    assert (
+        import_archive(
+            archive, matrix_path=matrix_path, apply=True, repo_root=positive_root
+        )
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = imported["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    positive_answers = iter(
+        ["independent reviewer", "yes", "yes", "yes", "APPLY REVIEW"]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(positive_answers))
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=positive_root
+        )
+        == 0
+    )
+    capsys.readouterr()
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    revision = reviewed["revisions"][0]
+    run = revision["runs"][0]
+    assert revision["model"] == "ALLPOWERS R600"
+    assert run["feature_presence"]["light_output"]["status"] == "absent"
+    assert run["write_capabilities"]["light_output"]["status"] == "not_applicable"
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+
+    independent_root = tmp_path / "not-independent"
+    independent_matrix = _matrix(independent_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", independent_root)
+    assert (
+        import_archive(
+            archive,
+            matrix_path=independent_matrix,
+            apply=True,
+            repo_root=independent_root,
+        )
+        == 0
+    )
+    before = independent_matrix.read_bytes()
+    independent_run_id = json.loads(before)["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    non_independent_answers = iter(["operator", "no", "yes", "yes"])
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt="": next(non_independent_answers)
+    )
+    assert (
+        interactive_review(
+            independent_matrix,
+            run_id=independent_run_id,
+            tier="silver",
+            repo_root=independent_root,
+        )
+        == 2
+    )
+    capsys.readouterr()
+    assert independent_matrix.read_bytes() == before
+    unreviewed = json.loads(before)["revisions"][0]["runs"][0]
+    assert unreviewed["feature_presence"]["light_output"]["status"] == "unknown"
+
+    mismatched_archive = make_archive(
+        tmp_path / "mismatched-source", plan_model="VOLIX P1800"
+    )
+    mismatched_root = tmp_path / "mismatched"
+    mismatched_matrix = _matrix(mismatched_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", mismatched_root)
+    assert (
+        import_archive(
+            mismatched_archive,
+            matrix_path=mismatched_matrix,
+            apply=True,
+            repo_root=mismatched_root,
+        )
+        == 0
+    )
+    mismatched_before = mismatched_matrix.read_bytes()
+    mismatched_data = json.loads(mismatched_before)
+    mismatched_run = mismatched_data["revisions"][0]["runs"][0]
+    audit_path = mismatched_root / "hil-results" / "mismatched-absence.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tier": "silver",
+                "archive_sha256": mismatched_run["archive_sha256"],
+                "run_id": mismatched_run["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "reviewer_independent_from_operator": True,
+                "transitions": [],
+                "scenarios": [],
+                "absences": [
+                    {
+                        "feature": "light_output",
+                        "source_step_id": "light_output_cycle",
+                        "physical_absence_confirmed": True,
+                        "safe_disable_confirmed": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        review_imported_tier_run(
+            mismatched_matrix,
+            run_id=mismatched_run["run_id"],
+            review_file=audit_path,
+            tier="silver",
+            apply=True,
+            repo_root=mismatched_root,
+        )
+        == 2
+    )
+    assert mismatched_matrix.read_bytes() == mismatched_before
+
+
 def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

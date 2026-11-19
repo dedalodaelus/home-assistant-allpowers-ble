@@ -793,11 +793,21 @@ def _valid_reviewed_absence(
     data = session.get("data", {})
     plan = data.get("test_plan", {}) if isinstance(data, dict) else {}
     device = data.get("device", {}) if isinstance(data, dict) else {}
+    from scripts.hil.importer import _canonical_model
+
+    canonical_revision_model = _canonical_model(revision_model)
+    canonical_plan_model = _canonical_model(
+        plan.get("device", {}).get("model") if isinstance(plan, dict) else None
+    )
+    canonical_device_model = _canonical_model(
+        device.get("model", {}).get("value") if isinstance(device, dict) else None
+    )
     return bool(
         isinstance(plan, dict)
-        and plan.get("device", {}).get("model") == revision_model
+        and canonical_revision_model is not None
+        and canonical_plan_model == canonical_revision_model
+        and canonical_device_model == canonical_revision_model
         and isinstance(device, dict)
-        and device.get("model", {}).get("value") == revision_model
         and device.get("hardware_version", {}).get("value") == hardware_revision
         and device.get("firmware_version", {}).get("value")
         == run.get("firmware_version")

@@ -426,11 +426,14 @@ def _interactive_higher_tier_review(
         model = session_device.get("model", {}).get("value")
         hardware = session_device.get("hardware_version", {}).get("value")
         firmware = session_device.get("firmware_version", {}).get("value")
+        canonical_model = _canonical_model(model)
+        revision_model = _canonical_model(revision.get("model"))
+        plan_model = _canonical_model(plan_device.get("model"))
         if (
-            _canonical_model(model) == _canonical_model(revision.get("model"))
+            canonical_model is not None
+            and canonical_model == revision_model == plan_model
             and hardware == revision.get("hardware_version")
             and firmware == run.get("firmware_version")
-            and _canonical_model(plan_device.get("model")) == _canonical_model(model)
         ):
             inventory = test_plan.get("physical_inventory_preflight", {})
             declared_inventory = (

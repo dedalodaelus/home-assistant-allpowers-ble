@@ -15,6 +15,7 @@ from .api import HAAPIError
 from .evidence import _bronze_samples_fresh
 from .importer import (
     _atomic_write,
+    _canonical_model,
     _canonical_content_sha256,
     _reject_symlink_components,
 )
@@ -1194,13 +1195,16 @@ def review_imported_tier_run(
         session_data = session.get("data", {})
         test_plan = session_data.get("test_plan", {})
         session_device = session_data.get("device", {})
+        session_model = _canonical_model(session_device.get("model", {}).get("value"))
+        revision_model = _canonical_model(revision.get("model"))
+        plan_model = _canonical_model(test_plan.get("device", {}).get("model"))
         if (
-            session_device.get("model", {}).get("value") == revision.get("model")
+            session_model is not None
+            and session_model == revision_model == plan_model
             and session_device.get("hardware_version", {}).get("value")
             == revision.get("hardware_version")
             and session_device.get("firmware_version", {}).get("value")
             == run.get("firmware_version")
-            and test_plan.get("device", {}).get("model") == revision.get("model")
         ):
             absence_plan = {
                 step.get("feature"): step.get("id")
