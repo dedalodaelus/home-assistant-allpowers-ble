@@ -4407,6 +4407,7 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         bronze_reviewable=True,
         bronze_decoded_packet_types=("StatusData",),
         bronze_protocol_outcome="pass",
+        stale_rest_fallback=True,
     )
     answers = iter(
         [
@@ -4457,6 +4458,7 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         in generated_body
     )
     assert "Telemetry sample interval:" in generated_body
+    assert "Telemetry sample interval: 2 seconds" in generated_body
     assert "Observation duration:" not in generated_body
     assert (
         "does not establish that the decoded notification was causally caused by that request"
