@@ -1539,6 +1539,7 @@ def _valid_tier_capture_row(
     evidence: Any = None,
     *,
     final_restoration: bool = False,
+    require_source_graph: bool = False,
 ) -> bool:
     """Validate one physical write row, including its encoded target state."""
     if not isinstance(row, dict):
@@ -1554,7 +1555,8 @@ def _valid_tier_capture_row(
         and row.get("verdict") == "ok"
         and row.get("physical_outcome") == "pass"
         and (
-            isinstance(row.get("frame_hex"), str)
+            not require_source_graph
+            and isinstance(row.get("frame_hex"), str)
             and _valid_protocol_frame(
                 row["frame_hex"], "write", feature, requested_state
             )
@@ -1901,6 +1903,9 @@ def _check_output_transitions(
                     expected_request,
                     "transition",
                     item.get("evidence"),
+                    require_source_graph=_archive_backed_run(
+                        {"run_id": scope["run_id"]}
+                    ),
                 )
                 for row in rows
             )
@@ -2068,6 +2073,7 @@ def _check_feature_restoration(
     review = item.get("physical_review")
     path = review.get("restoration_evidence") if isinstance(review, dict) else None
     artifact = _tier_artifact(path, item.get("evidence"), "feature_restoration", scope)
+    archive_backed = _archive_backed_run({"run_id": scope.get("run_id")})
     if not artifact or (
         artifact.get("feature") != feature
         or artifact.get("restored") is not True
@@ -2079,6 +2085,7 @@ def _check_feature_restoration(
             scope,
             feature,
             artifact.get("pre_state"),
+            require_change=archive_backed,
         )
     ):
         _error(errors, f"{context} requires scope-bound safe-restoration evidence")
@@ -2090,7 +2097,12 @@ def _valid_restoration_capture(
     scope: dict[str, Any],
     feature: str,
     restored_state: Any,
+    *,
+    require_change: bool = False,
 ) -> bool:
+    require_source_graph = require_change or _archive_backed_run(
+        {"run_id": scope.get("run_id")}
+    )
     if not isinstance(capture, str) or capture not in item.get("evidence", []):
         return False
     rows = _capture_rows([capture])
@@ -2117,8 +2129,26 @@ def _valid_restoration_capture(
                 restored_state,
                 "restoration",
                 item.get("evidence"),
+                require_source_graph=require_source_graph,
             )
             for row in rows
+        )
+        and (
+            not require_change
+            or any(
+                _valid_tier_capture_row(
+                    row,
+                    scope,
+                    feature,
+                    row.get("requested_state"),
+                    "transition",
+                    item.get("evidence"),
+                    require_source_graph=True,
+                )
+                and type(row.get("requested_state")) is type(restored_state)
+                and row.get("requested_state") != restored_state
+                for row in rows
+            )
         )
     )
 

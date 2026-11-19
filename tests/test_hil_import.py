@@ -3217,6 +3217,83 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert regressed["tier"] == "bronze"
     assert "ac_output" not in regressed["qualified_features"]
 
+    # A Gold setting PASS needs durable evidence for both the changed target
+    # and its restoration. Keeping only the valid restoration row must not
+    # preserve the setting qualification after the review digest is resealed.
+    missing_setting_change = json.loads(json.dumps(matrix))
+    setting_run = missing_setting_change["revisions"][0]["runs"][0]
+    setting_result = setting_run["write_capabilities"]["eco_mode"]
+    setting_review = setting_result["physical_review"]
+    setting_capture = tmp_path / setting_review["restoration_capture"]
+    setting_rows = [
+        json.loads(line) for line in setting_capture.read_text().splitlines()
+    ]
+    assert {row["action_stage"] for row in setting_rows} == {
+        "transition",
+        "restoration",
+    }
+    setting_rows = [row for row in setting_rows if row["action_stage"] != "transition"]
+    setting_capture.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in setting_rows)
+    )
+    setting_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        setting_result["evidence"]
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        missing_setting_change,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert any("safe-restoration evidence" in error for error in errors)
+    regressed = evaluate_tiers(missing_setting_change)["tiers"][0]
+    assert "eco_mode" not in regressed["qualified_features"]
+
+    # Archive-backed output transitions must also remain bound to the imported
+    # trace graph. A valid command frame cannot replace the source references
+    # on action 0 while the genuine final action-3 proof remains intact.
+    raw_transition = json.loads(json.dumps(matrix))
+    transition_run = raw_transition["revisions"][0]["runs"][0]
+    transition_result = transition_run["write_capabilities"]["ac_output"]
+    transition_review = transition_result["physical_review"]
+    on_transition = next(
+        entry
+        for entry in transition_review["output_transitions"]
+        if entry["state"] == "on"
+    )
+    transition_path = tmp_path / on_transition["capture_evidence"]
+    transition_rows = [
+        json.loads(line) for line in transition_path.read_text().splitlines()
+    ]
+    transition_rows_to_mutate = [
+        row for row in transition_rows if row["action_stage"] == "transition"
+    ]
+    assert len(transition_rows_to_mutate) == 1
+    transition_row = transition_rows_to_mutate[0]
+    assert transition_row["source_action_index"] == 0
+    transition_row.update(
+        source_trace_sha256="4" * 64,
+        source_frame_sha256="5" * 64,
+        source_transaction_sha256="6" * 64,
+        source_frame_seq=999,
+        frame_hex="a56500b10101000273",
+    )
+    transition_path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in transition_rows)
+    )
+    transition_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        transition_result["evidence"]
+    )
+    errors, _ = validate_hil_qualification.validate_matrix(
+        raw_transition,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert any("on transition lacks bound observation" in error for error in errors)
+    regressed = evaluate_tiers(raw_transition)["tiers"][0]
+    assert "ac_output" not in regressed["qualified_features"]
+
 
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(
     tmp_path: Path,

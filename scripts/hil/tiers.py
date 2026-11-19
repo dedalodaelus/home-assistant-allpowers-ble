@@ -459,6 +459,7 @@ def _bound_capture(
                 requested_state,
                 action_stage,
                 evidence,
+                require_source_graph=hil_validation._archive_backed_run(run),
             )
             for row in rows
         )
@@ -541,6 +542,15 @@ def _restoration_pass(
     feature: str,
 ) -> bool:
     review = item.get("physical_review")
+    scope = {
+        "route": run.get("route"),
+        "revision_id": revision.get("id"),
+        "firmware_version": run.get("firmware_version"),
+        "run_id": run.get("run_id"),
+        "captured_at": run.get("captured_at"),
+        "session_id": run.get("session_id"),
+        "build_fingerprint": run.get("build_fingerprint"),
+    }
     artifact = _scope_artifact(
         review.get("restoration_evidence") if isinstance(review, dict) else None,
         run,
@@ -575,6 +585,17 @@ def _restoration_pass(
             revision,
             feature,
             artifact.get("pre_state"),
+        )
+        and (
+            not hil_validation._archive_backed_run(run)
+            or hil_validation._valid_restoration_capture(
+                review.get("restoration_capture"),
+                item,
+                scope,
+                feature,
+                artifact.get("pre_state"),
+                require_change=True,
+            )
         )
     )
 
