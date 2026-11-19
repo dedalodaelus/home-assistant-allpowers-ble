@@ -177,6 +177,12 @@ def _valid_bronze_capture(
     freshness = bronze.get("status_freshness")
     if freshness is None:
         return True
+    capture_started = [
+        event for event in events if event.get("event") == "capture_started"
+    ]
+    capture_stopped = [
+        event for event in events if event.get("event") == "capture_stopped"
+    ]
     return bool(
         isinstance(freshness, dict)
         and set(freshness)
@@ -187,6 +193,8 @@ def _valid_bronze_capture(
             "status_notification_count_after",
             "decoded_response_seq",
             "decoded_response_at_utc",
+            "capture_started_seq",
+            "capture_stopped_seq",
             "status_measurement",
         }
         and freshness.get("capture_id") == probe.get("capture_id")
@@ -194,6 +202,17 @@ def _valid_bronze_capture(
         and freshness.get("decoded_response_seq") == decoded.get("seq")
         and freshness.get("decoded_response_at_utc") == decoded.get("utc")
         and freshness.get("status_measurement") == decoded.get("status_measurement")
+        and len(capture_started) == 1
+        and len(capture_stopped) == 1
+        and freshness.get("capture_started_seq") == capture_started[0].get("seq")
+        and freshness.get("capture_stopped_seq") == capture_stopped[0].get("seq")
+        and type(freshness.get("capture_started_seq")) is int
+        and type(freshness.get("capture_stopped_seq")) is int
+        and capture_started[0].get("session_generation")
+        == status_tx.get("session_generation")
+        and freshness["capture_started_seq"]
+        < decoded["seq"]
+        < freshness["capture_stopped_seq"]
         and type(freshness.get("status_notification_count_before")) is int
         and type(freshness.get("status_notification_count_after")) is int
         and 0
@@ -693,6 +712,12 @@ def assess_run_gate(
                                 ),
                                 "utc": bronze["status_freshness"].get(
                                     "decoded_response_at_utc"
+                                ),
+                                "capture_started_seq": bronze["status_freshness"].get(
+                                    "capture_started_seq"
+                                ),
+                                "capture_stopped_seq": bronze["status_freshness"].get(
+                                    "capture_stopped_seq"
                                 ),
                                 "status_measurement": bronze["status_freshness"].get(
                                     "status_measurement"

@@ -690,10 +690,11 @@ def _bronze_status_freshness(
     before: dict[str, Any],
     after: dict[str, Any],
     decoded: dict[str, Any] | None,
+    events: list[dict[str, Any]],
     *,
     capture_id: str,
 ) -> dict[str, Any] | None:
-    """Bind a new same-session status notification to the two REST samples."""
+    """Bind a new same-session status notification to the sample window."""
     if (
         decoded is None
         or before.get("connected") is not True
@@ -705,6 +706,8 @@ def _bronze_status_freshness(
     count_before = before.get("status_notification_count")
     count_after = after.get("status_notification_count")
     measurement = decoded.get("status_measurement")
+    started = [event for event in events if event.get("event") == "capture_started"]
+    stopped = [event for event in events if event.get("event") == "capture_stopped"]
     if (
         type(generation) is not int
         or generation < 1
@@ -716,6 +719,12 @@ def _bronze_status_freshness(
         or not isinstance(decoded.get("seq"), int)
         or not isinstance(decoded.get("utc"), str)
         or not isinstance(measurement, dict)
+        or len(started) != 1
+        or len(stopped) != 1
+        or type(started[0].get("seq")) is not int
+        or type(stopped[0].get("seq")) is not int
+        or not started[0]["seq"] < decoded["seq"] < stopped[0]["seq"]
+        or started[0].get("session_generation") != generation
     ):
         return None
     return {
@@ -725,6 +734,8 @@ def _bronze_status_freshness(
         "status_notification_count_after": count_after,
         "decoded_response_seq": decoded["seq"],
         "decoded_response_at_utc": decoded["utc"],
+        "capture_started_seq": started[0]["seq"],
+        "capture_stopped_seq": stopped[0]["seq"],
         "status_measurement": measurement,
     }
 
@@ -827,17 +838,18 @@ def _execute_tier_suite(
                 )
                 overall = 2
                 continue
-            first_sampled_at = services.datetime.now(UTC).isoformat()
             try:
                 first_sample = services.read_only_sample(api, device)
             except HAAPIError:
                 first_sample = {}
+            first_sampled_at = services.datetime.now(UTC).isoformat()
             status_marker_before: dict[str, Any] = {}
             status_marker_after: dict[str, Any] = {}
             second_sampled_at = services.datetime.now(UTC).isoformat()
             second_sample: dict[str, Any] = {}
             protocol_probe: dict[str, Any] = {"outcome": "inconclusive"}
             decoded_status_event: dict[str, Any] | None = None
+            capture_events: list[dict[str, Any]] = []
             if (
                 device.entry_state == "loaded"
                 and device.config_entry_id is not None
@@ -926,11 +938,6 @@ def _execute_tier_suite(
                             if poll_index + 1 >= maximum_polls or remaining <= 0:
                                 break
                             services.sleep(min(0.5, remaining))
-                        second_sampled_at = services.datetime.now(UTC).isoformat()
-                        second_sample = services.read_only_sample(api, device)
-                        status_marker_after = _bronze_status_marker(
-                            api, device.config_entry_id
-                        )
                         stop_command = {
                             "type": "allpowers_ble/hil/stop",
                             "entry_id": device.config_entry_id,
@@ -951,11 +958,20 @@ def _execute_tier_suite(
                             expected_version=2,
                         )
                         events = trace.get("events", [])
+                        capture_events = events
                         frames = trace.get("frames", [])
                         status_tx, status_write_ok, decoded, write_failed = (
                             _bronze_status_exchange(events, frames)
                         )
                         decoded_status_event = decoded
+                        status_marker_after = _bronze_status_marker(
+                            api, device.config_entry_id
+                        )
+                        # The sealed capture is causally between the two REST
+                        # reads. This avoids comparing Home Assistant's UTC
+                        # clock with the HIL runner's clock.
+                        second_sample = services.read_only_sample(api, device)
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
                         route = trace.get("observed_route")
                         protocol_verified = bool(
                             trace.get("complete") is True
@@ -1007,8 +1023,8 @@ def _execute_tier_suite(
                         }
                         failure_stage = "complete"
                     else:
-                        second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
+                        second_sampled_at = services.datetime.now(UTC).isoformat()
                         status_marker_after = _bronze_status_marker(
                             api, device.config_entry_id
                         )
@@ -1049,8 +1065,8 @@ def _execute_tier_suite(
             else:
                 services.sleep(1)
                 try:
-                    second_sampled_at = services.datetime.now(UTC).isoformat()
                     second_sample = services.read_only_sample(api, device)
+                    second_sampled_at = services.datetime.now(UTC).isoformat()
                     if device.config_entry_id is not None:
                         status_marker_after = _bronze_status_marker(
                             api, device.config_entry_id
@@ -1065,6 +1081,7 @@ def _execute_tier_suite(
                     status_marker_before,
                     status_marker_after,
                     decoded_status_event,
+                    capture_events,
                     capture_id=protocol_probe["capture_id"],
                 )
                 if protocol_probe.get("outcome") == "pass"

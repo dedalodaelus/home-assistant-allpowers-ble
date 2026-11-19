@@ -981,6 +981,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
         "unmatched_response_sequence",
         "mismatched_measurement",
         "outside_recency_window",
+        "response_outside_capture_window",
         "missing_status_measurement",
     ],
 )
@@ -1018,6 +1019,8 @@ def test_bronze_stale_rest_samples_need_bound_status_freshness(mutation):
         "status_notification_count_after": 8,
         "decoded_response_seq": 12,
         "decoded_response_at_utc": "2026-11-19T20:00:01+00:00",
+        "capture_started_seq": 3,
+        "capture_stopped_seq": 13,
         "status_measurement": {
             "battery": 50,
             "input_power": 100,
@@ -1051,12 +1054,68 @@ def test_bronze_stale_rest_samples_need_bound_status_freshness(mutation):
     elif mutation == "mismatched_measurement":
         samples[1]["telemetry"]["battery"]["value"] = 49
     elif mutation == "outside_recency_window":
-        event["utc"] = "2026-11-19T20:01:01+00:00"
-        proof["decoded_response_at_utc"] = event["utc"]
+        samples[1]["sampled_at_utc"] = "2026-11-19T20:01:01+00:00"
+    elif mutation == "response_outside_capture_window":
+        proof["capture_started_seq"] = proof["decoded_response_seq"]
     elif mutation == "missing_status_measurement":
         event.pop("status_measurement")
         proof.pop("status_measurement")
     assert not _bronze_samples_fresh(samples, status_evidence=proof, status_event=event)
+
+
+@pytest.mark.parametrize("clock_offset_seconds", [-90, 90])
+def test_bronze_freshness_uses_capture_order_across_host_clock_offsets(
+    clock_offset_seconds,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from scripts.hil.evidence import _bronze_samples_fresh
+
+    samples = [
+        {
+            "sampled_at_utc": "2026-11-19T20:00:00+00:00",
+            "telemetry": {
+                "battery": {"value": 50, "verified": True, "sample_age_seconds": 815},
+                "telemetry_available": {"value": "on", "verified": True},
+            },
+        },
+        {
+            "sampled_at_utc": "2026-11-19T20:00:02+00:00",
+            "telemetry": {
+                "battery": {"value": 50, "verified": True, "sample_age_seconds": 816},
+                "telemetry_available": {"value": "on", "verified": True},
+            },
+        },
+    ]
+    event_time = (
+        datetime(2026, 11, 19, 20, 0, 1, tzinfo=UTC)
+        + timedelta(seconds=clock_offset_seconds)
+    ).isoformat()
+    proof = {
+        "capture_id": "capture-0001",
+        "session_generation": 4,
+        "status_notification_count_before": 7,
+        "status_notification_count_after": 8,
+        "decoded_response_seq": 12,
+        "decoded_response_at_utc": event_time,
+        "capture_started_seq": 3,
+        "capture_stopped_seq": 13,
+        "status_measurement": {
+            "battery": 50,
+            "input_power": 100,
+            "output_power": 25,
+            "remaining_time": 90,
+        },
+    }
+    event = {
+        "capture_id": "capture-0001",
+        "event": "status_data_decoded",
+        "session_generation": 4,
+        "seq": 12,
+        "utc": event_time,
+        "status_measurement": proof["status_measurement"],
+    }
+    assert _bronze_samples_fresh(samples, status_evidence=proof, status_event=event)
 
 
 @pytest.mark.parametrize(
@@ -1224,6 +1283,8 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                     self.capture.record("capture_started", session_generation=3)
                     self.observer = HilClientTracer(self.capture)
                     real_status_client.attach_observer(self.observer)
+                else:
+                    self.capture.record("capture_started", session_generation=3)
                 return [
                     {
                         "schema_version": 2,
@@ -1245,7 +1306,7 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             assert command["type"].endswith("/stop")
             if self.observer is not None:
                 real_status_client.detach_observer(self.observer)
-                self.capture.record("capture_stopped", session_generation=3)
+            self.capture.record("capture_stopped", session_generation=3)
             self.capture.stop()
             return [self.capture.snapshot()]
 

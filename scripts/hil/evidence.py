@@ -2031,6 +2031,8 @@ def _bronze_samples_fresh(
             "status_notification_count_after",
             "decoded_response_seq",
             "decoded_response_at_utc",
+            "capture_started_seq",
+            "capture_stopped_seq",
             "status_measurement",
         }
         or not isinstance(status_event, dict)
@@ -2055,6 +2057,11 @@ def _bronze_samples_fresh(
         or type(status_evidence.get("decoded_response_seq")) is not int
         or status_evidence["decoded_response_seq"] < 1
         or not isinstance(status_evidence.get("capture_id"), str)
+        or type(status_evidence.get("capture_started_seq")) is not int
+        or type(status_evidence.get("capture_stopped_seq")) is not int
+        or not status_evidence["capture_started_seq"]
+        < status_evidence["decoded_response_seq"]
+        < status_evidence["capture_stopped_seq"]
     ):
         return False
     measurements = status_event.get("status_measurement")
@@ -2068,15 +2075,11 @@ def _bronze_samples_fresh(
         or measurements != status_evidence.get("status_measurement")
     ):
         return False
-    event_time = _parse_utc(status_event["utc"])
     sample_times = [_parse_utc(sample.get("sampled_at_utc")) for sample in samples]
     if (
-        event_time is None
-        or sample_times[0] is None
+        sample_times[0] is None
         or sample_times[1] is None
-        or not sample_times[0] < event_time <= sample_times[1]
-        or (event_time - sample_times[0]).total_seconds() > 60
-        or (sample_times[1] - event_time).total_seconds() > 60
+        or not sample_times[0] < sample_times[1]
         or (sample_times[1] - sample_times[0]).total_seconds() > 60
     ):
         return False
@@ -2102,6 +2105,35 @@ def _bronze_samples_fresh(
         if not matched:
             return False
     return True
+
+
+def _bronze_capture_bounds(
+    events: Any, *, response_seq: Any, session_generation: Any
+) -> tuple[int, int] | None:
+    """Return same-capture event boundaries around a decoded response."""
+    if not isinstance(events, list):
+        return None
+    started = [
+        row
+        for row in events
+        if isinstance(row, dict) and row.get("event") == "capture_started"
+    ]
+    stopped = [
+        row
+        for row in events
+        if isinstance(row, dict) and row.get("event") == "capture_stopped"
+    ]
+    if (
+        len(started) != 1
+        or len(stopped) != 1
+        or type(started[0].get("seq")) is not int
+        or type(stopped[0].get("seq")) is not int
+        or type(response_seq) is not int
+        or started[0].get("session_generation") != session_generation
+        or not started[0]["seq"] < response_seq < stopped[0]["seq"]
+    ):
+        return None
+    return started[0]["seq"], stopped[0]["seq"]
 
 
 def _valid_status_measurement(value: Any) -> bool:
@@ -2625,6 +2657,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 raise HAAPIError("Invalid private Bronze protocol reference")
         protocol_pass = False
         decoded_status_event = None
+        trace_events: list[dict[str, Any]] = []
         if protocol_outcome == "pass":
             if (
                 protocol.get("trace") != "traces/bronze_read_only"
@@ -2713,10 +2746,31 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 raise HAAPIError("Bronze protocol evidence binding failed")
         status_freshness = bronze.get("status_freshness")
         if status_freshness is not None:
-            if not protocol_pass or not _bronze_samples_fresh(
-                private_samples,
-                status_evidence=status_freshness,
-                status_event=decoded_status_event,
+            capture_bounds = _bronze_capture_bounds(
+                trace_events,
+                response_seq=(
+                    decoded_status_event.get("seq")
+                    if isinstance(decoded_status_event, dict)
+                    else None
+                ),
+                session_generation=(
+                    decoded_status_event.get("session_generation")
+                    if isinstance(decoded_status_event, dict)
+                    else None
+                ),
+            )
+            if (
+                not protocol_pass
+                or not _bronze_samples_fresh(
+                    private_samples,
+                    status_evidence=status_freshness,
+                    status_event=decoded_status_event,
+                )
+                or capture_bounds
+                != (
+                    status_freshness.get("capture_started_seq"),
+                    status_freshness.get("capture_stopped_seq"),
+                )
             ):
                 raise HAAPIError("Bronze status freshness evidence is unbound")
         samples_fresh = _bronze_samples_fresh(
@@ -4301,6 +4355,8 @@ def verify_public_archive(
                             "status_notification_count_after",
                             "decoded_response_seq",
                             "decoded_response_at_utc",
+                            "capture_started_seq",
+                            "capture_stopped_seq",
                             "status_measurement",
                         }
                         or not isinstance(
@@ -4335,6 +4391,13 @@ def verify_public_archive(
                         or type(value["status_freshness"].get("decoded_response_seq"))
                         is not int
                         or value["status_freshness"]["decoded_response_seq"] < 1
+                        or type(value["status_freshness"].get("capture_started_seq"))
+                        is not int
+                        or type(value["status_freshness"].get("capture_stopped_seq"))
+                        is not int
+                        or not value["status_freshness"]["capture_started_seq"]
+                        < value["status_freshness"]["decoded_response_seq"]
+                        < value["status_freshness"]["capture_stopped_seq"]
                         or _safe_utc(
                             value["status_freshness"].get("decoded_response_at_utc")
                         )
@@ -4451,6 +4514,18 @@ def verify_public_archive(
                         ),
                         None,
                     )
+                    capture_started_events = [
+                        row
+                        for row in public_events
+                        if row.get("capture_id") == capture_id
+                        and row.get("event") == "capture_started"
+                    ]
+                    capture_stopped_events = [
+                        row
+                        for row in public_events
+                        if row.get("capture_id") == capture_id
+                        and row.get("event") == "capture_stopped"
+                    ]
                     status_frame = next(
                         (
                             row
@@ -4494,7 +4569,9 @@ def verify_public_archive(
                         )
                     freshness = value.get("status_freshness")
                     if freshness is not None and (
-                        freshness.get("capture_id") != capture_id
+                        len(capture_started_events) != 1
+                        or len(capture_stopped_events) != 1
+                        or freshness.get("capture_id") != capture_id
                         or freshness.get("session_generation")
                         != decoded_event.get("session_generation")
                         or freshness.get("decoded_response_seq") != decoded_seq
@@ -4502,6 +4579,12 @@ def verify_public_archive(
                         != decoded_event.get("utc")
                         or freshness.get("status_measurement")
                         != decoded_event.get("status_measurement")
+                        or freshness.get("capture_started_seq")
+                        != capture_started_events[0].get("seq")
+                        or freshness.get("capture_stopped_seq")
+                        != capture_stopped_events[0].get("seq")
+                        or capture_started_events[0].get("session_generation")
+                        != decoded_event.get("session_generation")
                     ):
                         raise HAAPIError("Bronze status freshness is not capture-bound")
                     samples_fresh = _bronze_samples_fresh(
