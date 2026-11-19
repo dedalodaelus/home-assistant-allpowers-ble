@@ -682,7 +682,12 @@ def _captured_archive(
             sample = {
                 "sampled_at_utc": sample_time,
                 "telemetry": {
-                    "battery": {"value": 50, "verified": True, "sample_age_seconds": 5},
+                    "battery": {
+                        "value": 50,
+                        "verified": True,
+                        "source": "ha_rest_entity_state",
+                        "sample_age_seconds": 5,
+                    },
                     "telemetry_available": {"value": "on", "verified": True},
                 },
             }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import re
 import stat
@@ -48,6 +49,68 @@ def _finding(step_id: str, outcome: str, reason: str, evidence: Path) -> dict[st
         "reason": reason,
         "evidence": str(evidence),
     }
+
+
+def _bronze_sample_window_exceeded(bronze: Any) -> bool:
+    """Identify a valid runner-clock sample interval longer than 60 seconds."""
+    samples = bronze.get("samples") if isinstance(bronze, dict) else None
+    if not isinstance(samples, list) or len(samples) != 2:
+        return False
+    timestamps = []
+    for sample in samples:
+        value = sample.get("sampled_at_utc") if isinstance(sample, dict) else None
+        if not isinstance(value, str):
+            return False
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return False
+        timestamps.append(timestamp.astimezone(UTC))
+    return (timestamps[1] - timestamps[0]).total_seconds() > 60
+
+
+def _bronze_sample_window_is_only_freshness_failure(bronze: Any) -> bool:
+    """Check whether the 60-second runner sample interval is the sole failure."""
+    if not _bronze_sample_window_exceeded(bronze):
+        return False
+    samples = bronze.get("samples")
+    freshness = bronze.get("status_freshness")
+    if (
+        not isinstance(samples, list)
+        or len(samples) != 2
+        or not isinstance(freshness, dict)
+    ):
+        return False
+    try:
+        first_time = datetime.fromisoformat(
+            samples[0]["sampled_at_utc"].replace("Z", "+00:00")
+        )
+    except AttributeError, KeyError, TypeError, ValueError:
+        return False
+    normalized_samples = [dict(samples[0]), dict(samples[1])]
+    normalized_samples[1]["sampled_at_utc"] = (
+        first_time + timedelta(seconds=60)
+    ).isoformat()
+    status_event = {
+        "event": "notification_decoded",
+        "capture_id": freshness.get("capture_id"),
+        "session_generation": freshness.get("session_generation"),
+        "seq": freshness.get("decoded_response_seq"),
+        "utc": freshness.get("decoded_response_at_utc"),
+        "status_measurement": freshness.get("status_measurement"),
+    }
+    try:
+        from .evidence import _bronze_samples_fresh
+
+        return _bronze_samples_fresh(
+            normalized_samples,
+            status_evidence=freshness,
+            status_event=status_event,
+        )
+    except ImportError, TypeError, ValueError:
+        return False
 
 
 def _safe_read_file(run_directory: Path, relative: str) -> bytes | None:
@@ -600,16 +663,34 @@ def assess_run_gate(
                         and freshness["status_notification_count_after"]
                         > freshness["status_notification_count_before"]
                     )
+                    window_exceeded = bool(
+                        marker_advanced
+                        and _bronze_sample_window_is_only_freshness_failure(bronze)
+                        and status_exchange is not None
+                        and isinstance(routes, list)
+                        and _valid_bronze_capture(
+                            run_directory,
+                            bronze,
+                            run_id=execution.get("run_id", ""),
+                            routes=routes,
+                            requested_route=requested_route,
+                            status_exchange=status_exchange,
+                        )
+                    )
                     blockers.append(
                         _finding(
                             step_id,
                             (
-                                "uncorrelated_capture"
+                                "sample_window_exceeded"
+                                if marker_advanced and window_exceeded
+                                else "uncorrelated_capture"
                                 if marker_advanced
                                 else "missing_new_status_notification"
                             ),
                             (
-                                "the accepted status notification is not correlated with the sampled values"
+                                "the interval between REST samples exceeds the 60-second freshness window"
+                                if marker_advanced and window_exceeded
+                                else "the accepted status notification is not correlated with the sampled values"
                                 if marker_advanced
                                 else "no advancing status-notification marker was observed in the current session"
                             ),
@@ -760,6 +841,9 @@ def assess_run_gate(
                 elif not status_capture_valid:
                     freshness_reason = "uncorrelated_capture"
                     freshness_message = "the status notification is not bound to the captured request and current session"
+                elif _bronze_sample_window_is_only_freshness_failure(bronze):
+                    freshness_reason = "sample_window_exceeded"
+                    freshness_message = "the interval between REST samples exceeds the 60-second freshness window"
                 else:
                     freshness_reason = "rest_timestamp_stale"
                     freshness_message = "REST sample timestamps are stale and the accepted status does not prove both samples fresh within 60 seconds"

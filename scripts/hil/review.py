@@ -719,7 +719,7 @@ def _claim_support(
     telemetry = bool(
         bronze.get("fresh_verified_samples") is True
         and bronze.get("physical_observation") == "plausible"
-        and _bronze_samples_fresh(samples)
+        and _bronze_samples_fresh(samples, allow_missing_source=True)
     )
     protocol = False
     protocol_evidence: list[str] = []

@@ -995,6 +995,7 @@ def test_bronze_stale_rest_samples_need_bound_status_freshness(mutation):
                 "battery": {
                     "value": 50,
                     "verified": True,
+                    "source": "ha_rest_entity_state",
                     "sample_age_seconds": 815,
                 },
                 "telemetry_available": {"value": "on", "verified": True},
@@ -1006,6 +1007,7 @@ def test_bronze_stale_rest_samples_need_bound_status_freshness(mutation):
                 "battery": {
                     "value": 50,
                     "verified": True,
+                    "source": "ha_rest_entity_state",
                     "sample_age_seconds": 816,
                 },
                 "telemetry_available": {"value": "on", "verified": True},
@@ -1075,14 +1077,24 @@ def test_bronze_freshness_uses_capture_order_across_host_clock_offsets(
         {
             "sampled_at_utc": "2026-11-19T20:00:00+00:00",
             "telemetry": {
-                "battery": {"value": 50, "verified": True, "sample_age_seconds": 815},
+                "battery": {
+                    "value": 50,
+                    "verified": True,
+                    "source": "ha_rest_entity_state",
+                    "sample_age_seconds": 815,
+                },
                 "telemetry_available": {"value": "on", "verified": True},
             },
         },
         {
             "sampled_at_utc": "2026-11-19T20:00:02+00:00",
             "telemetry": {
-                "battery": {"value": 50, "verified": True, "sample_age_seconds": 816},
+                "battery": {
+                    "value": 50,
+                    "verified": True,
+                    "source": "ha_rest_entity_state",
+                    "sample_age_seconds": 816,
+                },
                 "telemetry_available": {"value": "on", "verified": True},
             },
         },
@@ -1885,6 +1897,7 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
                 "battery": {
                     "verified": True,
                     "value": 50,
+                    "source": "ha_rest_entity_state",
                     "sample_age_seconds": 2,
                 },
             },

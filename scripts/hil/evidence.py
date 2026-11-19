@@ -1976,48 +1976,71 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
     return False
 
 
+def _bronze_numeric_measurements(
+    telemetry: Any, *, allow_missing_source: bool = False
+) -> list[dict[str, Any]]:
+    if not isinstance(telemetry, dict):
+        return []
+    return [
+        record
+        for key, record in telemetry.items()
+        if key in {"battery", "input_power", "output_power", "remaining_time"}
+        and isinstance(record, dict)
+        and record.get("verified") is True
+        and type(record.get("value")) in {int, float}
+        and math.isfinite(record["value"])
+        and (
+            record.get("source") == "ha_rest_entity_state"
+            or allow_missing_source
+            and "source" not in record
+        )
+    ]
+
+
+def _bronze_samples_have_numeric_rest_measurement(
+    samples: Any, *, allow_missing_source: bool = False
+) -> bool:
+    return bool(
+        isinstance(samples, list)
+        and len(samples) == 2
+        and all(
+            isinstance(sample, dict)
+            and _bronze_numeric_measurements(
+                sample.get("telemetry"), allow_missing_source=allow_missing_source
+            )
+            for sample in samples
+        )
+    )
+
+
 def _bronze_samples_fresh(
     samples: list[Any],
     *,
     status_evidence: Any = None,
     status_event: Any = None,
+    allow_missing_source: bool = False,
 ) -> bool:
-    if len(samples) != 2:
+    if not _bronze_samples_have_numeric_rest_measurement(
+        samples, allow_missing_source=allow_missing_source
+    ):
         return False
     has_recent_rest_sample = True
     for sample in samples:
-        if not isinstance(sample, dict) or not isinstance(
-            sample.get("telemetry"), dict
-        ):
-            return False
         telemetry = sample["telemetry"]
-        measurement = any(
-            key in {"battery", "input_power", "output_power", "remaining_time"}
-            and isinstance(record, dict)
-            and record.get("verified") is True
-            and (
-                type(record.get("sample_age_seconds")) is int
-                and 0 <= record["sample_age_seconds"] <= 60
-                or type(record.get("value")) in {int, float}
-                and math.isfinite(record["value"])
-            )
-            for key, record in telemetry.items()
+        numeric_measurements = _bronze_numeric_measurements(
+            telemetry, allow_missing_source=allow_missing_source
         )
         available = telemetry.get("telemetry_available")
         if (
-            not measurement
-            or not isinstance(available, dict)
+            not isinstance(available, dict)
             or available.get("verified") is not True
             or available.get("value") != "on"
         ):
             return False
         has_recent_rest_sample = has_recent_rest_sample and any(
-            key in {"battery", "input_power", "output_power", "remaining_time"}
-            and isinstance(record, dict)
-            and record.get("verified") is True
-            and type(record.get("sample_age_seconds")) is int
+            type(record.get("sample_age_seconds")) is int
             and 0 <= record["sample_age_seconds"] <= 60
-            for key, record in telemetry.items()
+            for record in numeric_measurements
         )
     if has_recent_rest_sample:
         return True
@@ -2582,7 +2605,9 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
         ):
             raise HAAPIError("Invalid private Bronze read-only evidence")
         public_samples = []
-        samples_fresh = len(private_samples) == 2
+        private_measurements_valid = _bronze_samples_have_numeric_rest_measurement(
+            private_samples
+        )
         for sample in private_samples:
             sampled_at = (
                 _safe_utc(sample.get("sampled_at_utc"))
@@ -2597,7 +2622,6 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             ):
                 raise HAAPIError("Invalid private Bronze telemetry sample")
             public_telemetry = {}
-            has_fresh_measurement = False
             telemetry = sample["telemetry"]
             for key in SENSOR_KEYS + BINARY_KEYS:
                 record = telemetry.get(key)
@@ -2612,20 +2636,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 }
                 if verified and type(age) is int and 0 <= age <= 86_400:
                     safe_record["sample_age_seconds"] = age
-                    if (
-                        key
-                        in {"battery", "input_power", "output_power", "remaining_time"}
-                        and age <= 60
-                    ):
-                        has_fresh_measurement = True
                 public_telemetry[key] = safe_record
-            sample_fresh = bool(
-                has_fresh_measurement
-                and public_telemetry.get("telemetry_available", {}).get("value") == "on"
-                and public_telemetry.get("telemetry_available", {}).get("verified")
-                is True
-            )
-            samples_fresh = samples_fresh and sample_fresh
             public_samples.append(
                 {
                     "sampled_at_utc": sampled_at,
@@ -2773,10 +2784,11 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 )
             ):
                 raise HAAPIError("Bronze status freshness evidence is unbound")
-        samples_fresh = _bronze_samples_fresh(
+        samples_fresh = private_measurements_valid and _bronze_samples_fresh(
             public_samples,
             status_evidence=status_freshness,
             status_event=decoded_status_event,
+            allow_missing_source=True,
         )
         files["tier-bronze-read-only.json"] = (
             json.dumps(
@@ -4591,13 +4603,16 @@ def verify_public_archive(
                         value["samples"],
                         status_evidence=freshness,
                         status_event=decoded_event,
+                        allow_missing_source=True,
                     )
                 else:
                     if value.get("status_freshness") is not None:
                         raise HAAPIError(
                             "Bronze status freshness has no verified protocol trace"
                         )
-                    samples_fresh = _bronze_samples_fresh(value["samples"])
+                    samples_fresh = _bronze_samples_fresh(
+                        value["samples"], allow_missing_source=True
+                    )
                 if value["fresh_verified_samples"] != samples_fresh:
                     raise HAAPIError(
                         "Bronze freshness claim does not match its evidence"

@@ -29,18 +29,39 @@ def _run(tmp_path):
 
     capture_id = "capture-1"
     generation = 4
+    sampled_at = datetime.now(UTC)
+    status_measurement = {
+        "battery": 50,
+        "input_power": 100,
+        "output_power": 25,
+        "remaining_time": 90,
+    }
     events = [
+        {
+            "event": "capture_started",
+            "seq": 0,
+            "session_generation": generation,
+        },
         {
             "event": "write_ok",
             "seq": 2,
             "session_generation": generation,
             "transaction_id": "tx-1",
+            "capture_id": capture_id,
         },
         {
             "event": "notification_decoded",
             "seq": 3,
             "session_generation": generation,
             "decoded_packet_types": ["StatusData"],
+            "capture_id": capture_id,
+            "utc": (sampled_at + timedelta(seconds=1)).isoformat(),
+            "status_measurement": status_measurement,
+        },
+        {
+            "event": "capture_stopped",
+            "seq": 4,
+            "session_generation": generation,
         },
     ]
     frames = [
@@ -76,20 +97,39 @@ def _run(tmp_path):
     bronze = {
         "fresh_verified_samples": True,
         "physical_observation": "plausible",
+        "status_freshness": {
+            "capture_id": capture_id,
+            "session_generation": generation,
+            "status_notification_count_before": 7,
+            "status_notification_count_after": 8,
+            "decoded_response_seq": 3,
+            "decoded_response_at_utc": (sampled_at + timedelta(seconds=1)).isoformat(),
+            "capture_started_seq": 0,
+            "capture_stopped_seq": 4,
+            "status_measurement": status_measurement,
+        },
         "samples": [
             {
-                "sampled_at_utc": datetime.now(UTC).isoformat(),
+                "sampled_at_utc": sampled_at.isoformat(),
                 "telemetry": {
-                    "battery": {"verified": True, "sample_age_seconds": 0},
+                    "battery": {
+                        "value": 50,
+                        "verified": True,
+                        "source": "ha_rest_entity_state",
+                        "sample_age_seconds": 0,
+                    },
                     "telemetry_available": {"verified": True, "value": "on"},
                 },
             },
             {
-                "sampled_at_utc": (
-                    datetime.now(UTC) + timedelta(seconds=1)
-                ).isoformat(),
+                "sampled_at_utc": (sampled_at + timedelta(seconds=2)).isoformat(),
                 "telemetry": {
-                    "battery": {"verified": True, "sample_age_seconds": 0},
+                    "battery": {
+                        "value": 50,
+                        "verified": True,
+                        "source": "ha_rest_entity_state",
+                        "sample_age_seconds": 0,
+                    },
                     "telemetry_available": {"verified": True, "value": "on"},
                 },
             },
@@ -192,6 +232,14 @@ def _save(private, session, execution):
     )
 
 
+def _save_bronze_artifact(private, session, execution, artifact, bronze):
+    artifact.write_text(json.dumps(bronze), encoding="utf-8")
+    execution["steps"][0]["machine_evidence"][0]["sha256"] = hashlib.sha256(
+        artifact.read_bytes()
+    ).hexdigest()
+    _save(private, session, execution)
+
+
 def test_complete_bronze_run_is_eligible_for_review(tmp_path):
     private, _, _, _, status_exchange = _run(tmp_path)
 
@@ -203,6 +251,81 @@ def test_complete_bronze_run_is_eligible_for_review(tmp_path):
             status_exchange=status_exchange,
         )
         == []
+    )
+
+
+@pytest.mark.parametrize("bad_measurement", ["missing", "non_numeric", "wrong_source"])
+def test_bronze_gate_rejects_recent_samples_without_numeric_rest_measurement(
+    tmp_path, bad_measurement
+):
+    private, session, execution, artifact, status_exchange = _run(tmp_path)
+    bronze = json.loads(artifact.read_text(encoding="utf-8"))
+    for sample in bronze["samples"]:
+        battery = sample["telemetry"]["battery"]
+        if bad_measurement == "missing":
+            battery.pop("value")
+        elif bad_measurement == "non_numeric":
+            battery["value"] = "50"
+        else:
+            battery["source"] = "unverified"
+    _save_bronze_artifact(private, session, execution, artifact, bronze)
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="bronze",
+        status_exchange=status_exchange,
+    )
+
+    assert any(
+        item["step_id"] == "read_only_probe"
+        and item["outcome"] == "rest_timestamp_stale"
+        for item in blockers
+    )
+
+
+def test_bronze_gate_reports_overlong_sample_window_separately(tmp_path):
+    private, session, execution, artifact, status_exchange = _run(tmp_path)
+    bronze = json.loads(artifact.read_text(encoding="utf-8"))
+    first_sample_time = datetime.now(UTC)
+    decoded_time = first_sample_time + timedelta(seconds=30)
+    bronze["samples"][0]["sampled_at_utc"] = first_sample_time.isoformat()
+    bronze["samples"][1]["sampled_at_utc"] = (
+        first_sample_time + timedelta(seconds=61)
+    ).isoformat()
+    for index, sample in enumerate(bronze["samples"]):
+        sample["telemetry"]["battery"]["sample_age_seconds"] = 815 + index
+    bronze["fresh_verified_samples"] = False
+    bronze["status_freshness"]["decoded_response_at_utc"] = decoded_time.isoformat()
+    execution["steps"][0]["outcome"] = "inconclusive"
+    _save_bronze_artifact(private, session, execution, artifact, bronze)
+
+    events_path = private / "traces" / "bronze_read_only" / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    decoded = next(
+        event for event in events if event["event"] == "notification_decoded"
+    )
+    decoded["utc"] = decoded_time.isoformat()
+    events_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="bronze",
+        status_exchange=status_exchange,
+    )
+
+    assert any(
+        item["step_id"] == "read_only_probe"
+        and item["outcome"] == "sample_window_exceeded"
+        for item in blockers
+    )
+    assert not any(
+        item["step_id"] == "read_only_probe"
+        and item["outcome"] == "uncorrelated_capture"
+        for item in blockers
     )
 
 

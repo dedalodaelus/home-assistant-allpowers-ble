@@ -3590,7 +3590,9 @@ def _onboard_import_review(
         )
         from .evidence import _bronze_samples_fresh
 
-        fresh_samples_verified = _bronze_samples_fresh(bronze_evidence["samples"])
+        fresh_samples_verified = _bronze_samples_fresh(
+            bronze_evidence["samples"], allow_missing_source=True
+        )
     except (
         HAAPIError,
         KeyError,
