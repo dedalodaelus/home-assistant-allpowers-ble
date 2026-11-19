@@ -2615,6 +2615,223 @@ def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
     assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "unqualified"
 
 
+def test_inventory_preflight_survives_public_archive_and_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from custom_components.allpowers_ble.model_support import (
+        MODEL_FEATURE_PROFILES,
+        ModelFeature,
+        identify_model,
+        model_feature_capability,
+    )
+    from scripts import validate_hil_qualification
+    from scripts.hil.cli import _collect_physical_inventory_preflight
+    from scripts.hil.evidence import _public_tier_plan, export_archive
+    from scripts.hil.guided import build_tier_plan
+    from scripts.hil.review_wizard import interactive_review
+
+    support = identify_model("R600", hardware_version="0.3", raw_hardware_version=3)
+    capabilities = {
+        "model": support.model,
+        "profile": support.profile,
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+        "verified": support.verified,
+        "identity_conflicted": False,
+        "features": {
+            feature.value: {
+                "physical_presence": model_feature_capability(
+                    support, feature
+                ).physical_presence.value,
+                "production_authorized": model_feature_capability(
+                    support, feature
+                ).production_authorized,
+                "candidate_hil_eligible": model_feature_capability(
+                    support, feature
+                ).hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature in ModelFeature
+        },
+    }
+    controls = {
+        name: {"available": True, "eligible": True, "state": "off"}
+        for name in (
+            "ac_output",
+            "dc_output",
+            "light",
+            "eco_mode",
+            "work_mode",
+            "eco_timeout",
+            "car_charger",
+        )
+    }
+    inventory = _collect_physical_inventory_preflight(
+        capabilities, controls, prompt=lambda _message: "PRESENT"
+    )
+    plan = build_tier_plan(
+        "gold",
+        capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    projected_plan = _public_tier_plan(plan)
+    assert projected_plan is not None
+    assert _public_tier_plan(projected_plan) == projected_plan
+    tampered_plan = json.loads(json.dumps(projected_plan))
+    tampered_plan["physical_inventory_preflight"]["features"]["ac_output"]["basis"] = (
+        "ha_entity_visible"
+    )
+    assert _public_tier_plan(tampered_plan) is None
+    tampered_plan = json.loads(json.dumps(projected_plan))
+    next(step for step in tampered_plan["steps"] if step["feature"] == "ac_output")[
+        "physical_presence"
+    ] = "present"
+    assert _public_tier_plan(tampered_plan) is None
+    expected_inspected = {
+        step["feature"]
+        for step in plan["steps"]
+        if step.get("inventory_preflight") == "operator_inspected_present"
+    }
+    assert expected_inspected
+    assert set(projected_plan["physical_inventory_preflight"]["features"]) == (
+        expected_inspected
+    )
+    for step in projected_plan["steps"]:
+        if step["feature"] in expected_inspected:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "operator_inspected_present"
+
+    uninspected_plan = build_tier_plan(
+        "gold", capabilities, controls, observed_route="local_adapter"
+    )
+    uninspected_public = _public_tier_plan(uninspected_plan)
+    assert uninspected_public is not None
+    assert uninspected_public["physical_inventory_preflight"]["features"] == {}
+    for step in uninspected_public["steps"]:
+        if step["feature"] in expected_inspected:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "unknown"
+    unauthorized_capabilities = json.loads(json.dumps(capabilities))
+    unauthorized_capabilities["features"]["eco_mode"]["production_authorized"] = False
+    unauthorized_plan = build_tier_plan(
+        "gold",
+        unauthorized_capabilities,
+        controls,
+        observed_route="local_adapter",
+        inventory_preflight=inventory,
+    )
+    unauthorized_public = _public_tier_plan(unauthorized_plan)
+    assert unauthorized_public is not None
+    assert (
+        "eco_mode"
+        not in unauthorized_public["physical_inventory_preflight"]["features"]
+    )
+    unauthorized_eco = next(
+        step for step in unauthorized_public["steps"] if step["feature"] == "eco_mode"
+    )
+    assert unauthorized_eco["physical_presence"] == "unknown"
+    assert unauthorized_eco["inventory_preflight"] == "unknown"
+    lite_profile = MODEL_FEATURE_PROFILES["ap-r1500-lite-hw-0.1-evidence"]
+    lite_capabilities = {
+        "model": lite_profile.model,
+        "profile": lite_profile.profile,
+        "hardware_revision": lite_profile.hardware_revision,
+        "firmware_revision": "1.1",
+        "verified": False,
+        "identity_conflicted": False,
+        "features": {
+            feature.value: {
+                "physical_presence": declaration.physical_presence.value,
+                "production_authorized": declaration.production_authorized,
+                "candidate_hil_eligible": declaration.hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature, declaration in lite_profile.features.items()
+        },
+    }
+    lite_controls = {
+        name: {
+            "available": name != "light",
+            "eligible": False,
+            "state": "off",
+        }
+        for name in controls
+    }
+    absent_plan = build_tier_plan(
+        "gold",
+        lite_capabilities,
+        lite_controls,
+        observed_route="local_adapter",
+        inventory_preflight={
+            "light_output": {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
+        },
+    )
+    absent_public = _public_tier_plan(absent_plan)
+    assert absent_public is not None
+    assert absent_public["physical_inventory_preflight"]["features"] == {}
+    light_step = next(
+        step for step in absent_public["steps"] if step["feature"] == "light_output"
+    )
+    assert light_step["physical_presence"] == "absent"
+    assert light_step["inventory_preflight"] == "not_required"
+
+    source = tmp_path / "source"
+    archive = _captured_archive(
+        source,
+        "local_adapter",
+        "1.1",
+        "abcdef0123456789",
+        bronze_reviewable=True,
+    )
+    run_root = source / "run-abcdef0123456789"
+    private_session = run_root / "private" / "session.json"
+    session = json.loads(private_session.read_text(encoding="utf-8"))
+    session["test_plan"] = plan
+    private_session.write_text(json.dumps(session), encoding="utf-8")
+    archive = export_archive(run_root, confirmed=True)
+    _verified, public_members, _digest = verify_public_archive(
+        archive, include_contents=True
+    )
+    public_session = json.loads(public_members["session.json"])
+    exported_plan = public_session["data"]["test_plan"]
+    assert (
+        exported_plan["physical_inventory_preflight"]["features"]
+        == (projected_plan["physical_inventory_preflight"]["features"])
+    )
+    assert _public_tier_plan(exported_plan) == exported_plan
+
+    matrix_path = _matrix(tmp_path / "imported")
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+    _tty(monkeypatch)
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 2
+    )
+    wizard_output = capsys.readouterr().out
+    assert "Operator physical-inventory preflight (acquisition eligibility only;" in (
+        wizard_output
+    )
+    assert "not independent qualification" in wizard_output
+    assert "independently inspect the actual transitions and restorations" in (
+        wizard_output
+    )
+
+
 def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

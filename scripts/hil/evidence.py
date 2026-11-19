@@ -1021,6 +1021,7 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "minimum output requirement awaits a reviewed output PASS",
         "tier requires a basic output PASS; all declared outputs are absent",
         "no present, production-authorized or reviewed candidate output is available",
+        "operator physical-inventory preflight permits acquisition only; independent review is still required",
     }
     safe_step_ids = {
         "read_only_probe",
@@ -1052,11 +1053,45 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
     device = value.get("device")
     if not isinstance(device, dict):
         return None
+    inventory_present = "physical_inventory_preflight" in value
+    inventory_features: dict[str, dict[str, str]] = {}
+    inventory_feature_names = {
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+        "car_charger",
+    }
+    if inventory_present:
+        inventory = value.get("physical_inventory_preflight")
+        if (
+            not isinstance(inventory, dict)
+            or set(inventory) != {"source", "features"}
+            or inventory.get("source") != "operator_physical_inspection"
+            or not isinstance(inventory.get("features"), dict)
+            or set(inventory["features"]) - inventory_feature_names
+        ):
+            return None
+        for feature, inspection in inventory["features"].items():
+            if (
+                not isinstance(inspection, dict)
+                or set(inspection) != {"outcome", "basis"}
+                or inspection.get("outcome") != "present"
+                or inspection.get("basis") != "operator_physical_inspection"
+            ):
+                return None
+            inventory_features[feature] = {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
     model = safe_model(device.get("model")) or "unknown"
     route = device.get("verified_route")
     if route not in {None, "local_adapter", "active_proxy"}:
         route = None
     steps = []
+    projected_inventory_features: set[str] = set()
     for step in value["steps"]:
         if not isinstance(step, dict):
             return None
@@ -1074,11 +1109,45 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
             )
         ):
             return None
+        inventory_status = step.get("inventory_preflight")
+        feature = step.get("feature")
+        if inventory_present and inventory_status is None and feature != "output":
+            return None
+        if (
+            inventory_present
+            and inventory_status is not None
+            and inventory_status
+            not in {
+                "operator_inspected_present",
+                "not_required",
+                "unknown",
+            }
+        ):
+            return None
+        if inventory_status == "operator_inspected_present":
+            if (
+                not inventory_present
+                or feature not in inventory_feature_names
+                or feature not in inventory_features
+                or step.get("physical_presence") != "unknown"
+                or "operator physical-inventory preflight permits acquisition only; independent review is still required"
+                not in step["reasons"]
+            ):
+                return None
+            projected_inventory_features.add(feature)
+        elif inventory_present and feature in inventory_features:
+            return None
+        if (
+            "operator physical-inventory preflight permits acquisition only; independent review is still required"
+            in step["reasons"]
+            and inventory_status != "operator_inspected_present"
+        ):
+            return None
         steps.append(
             {
                 "id": step["id"],
-                "feature": step.get("feature")
-                if step.get("feature")
+                "feature": feature
+                if feature
                 in {
                     "telemetry",
                     "ac_output",
@@ -1098,8 +1167,15 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
                 "outcome": step["outcome"],
                 "reasons": step["reasons"],
                 "human_review": step["human_review"],
+                **(
+                    {"inventory_preflight": inventory_status}
+                    if inventory_present and inventory_status is not None
+                    else {}
+                ),
             }
         )
+    if inventory_present and projected_inventory_features != set(inventory_features):
+        return None
     projected = {
         "schema_version": 1,
         "requested_tier": value["requested_tier"],
@@ -1114,6 +1190,11 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "operator_actions_estimate": value["operator_actions_estimate"],
         "steps": steps,
     }
+    if inventory_present:
+        projected["physical_inventory_preflight"] = {
+            "source": "operator_physical_inspection",
+            "features": inventory_features,
+        }
     execution_tier = value.get("execution_tier", value["requested_tier"])
     if execution_tier != value["requested_tier"]:
         projected["execution_tier"] = execution_tier

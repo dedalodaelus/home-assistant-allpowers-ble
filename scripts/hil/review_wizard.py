@@ -9,7 +9,7 @@ import re
 import sys
 from typing import Any
 from .api import HAAPIError
-from .importer import _reject_symlink_components
+from .importer import _canonical_model, _reject_symlink_components
 from .review import (
     CLAIMS,
     _claim_support,
@@ -427,10 +427,10 @@ def _interactive_higher_tier_review(
         hardware = session_device.get("hardware_version", {}).get("value")
         firmware = session_device.get("firmware_version", {}).get("value")
         if (
-            model == revision.get("model")
+            _canonical_model(model) == _canonical_model(revision.get("model"))
             and hardware == revision.get("hardware_version")
             and firmware == run.get("firmware_version")
-            and plan_device.get("model") == model
+            and _canonical_model(plan_device.get("model")) == _canonical_model(model)
         ):
             inventory = test_plan.get("physical_inventory_preflight", {})
             declared_inventory = (

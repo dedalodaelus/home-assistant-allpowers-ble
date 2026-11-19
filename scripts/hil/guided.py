@@ -130,9 +130,9 @@ def build_tier_plan(
                 "inventory_preflight": (
                     "operator_inspected_present"
                     if inspected_present
-                    else "not_required"
-                    if presence == "present"
                     else "unknown"
+                    if presence == "unknown"
+                    else "not_required"
                 ),
                 "action": action,
                 "original_state": None if absent else original,
@@ -265,13 +265,14 @@ def build_tier_plan(
             "source": "operator_physical_inspection",
             "features": {
                 feature: {"outcome": "present", "basis": "operator_physical_inspection"}
-                for feature in _OUTPUTS + _SETTINGS
-                if isinstance(inventory_preflight.get(feature), dict)
-                and inventory_preflight[feature].get("outcome") == "present"
-                and inventory_preflight[feature].get("basis")
-                == "operator_physical_inspection"
-                and isinstance(feature_map.get(feature), dict)
-                and feature_map[feature].get("physical_presence") == "unknown"
+                for feature in sorted(
+                    {
+                        step["feature"]
+                        for step in steps
+                        if step.get("inventory_preflight")
+                        == "operator_inspected_present"
+                    }
+                )
             },
         },
         "steps": steps,
