@@ -1379,13 +1379,50 @@ def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
             if line
         ]
         freshness = bronze.get("status_freshness")
+        capture_id = bronze.get("protocol_capture_id")
+        generation = bronze.get("protocol_session_generation")
+        decoded_seq = bronze.get("protocol_decoded_response_seq")
+        request_seq = bronze.get("protocol_status_request_seq")
+        write_ok_seq = bronze.get("protocol_status_write_ok_seq")
         event = next(
             (
                 row
                 for row in events
                 if isinstance(freshness, dict)
-                and row.get("capture_id") == freshness.get("capture_id")
+                and row.get("capture_id") == capture_id
                 and row.get("seq") == freshness.get("decoded_response_seq")
+            ),
+            None,
+        )
+        started = [
+            row
+            for row in events
+            if row.get("capture_id") == capture_id
+            and row.get("event") == "capture_started"
+        ]
+        stopped = [
+            row
+            for row in events
+            if row.get("capture_id") == capture_id
+            and row.get("event") == "capture_stopped"
+        ]
+        write_attempt = next(
+            (
+                row
+                for row in events
+                if row.get("capture_id") == capture_id
+                and row.get("seq") == request_seq
+                and row.get("event") == "write_attempt"
+            ),
+            None,
+        )
+        write_ok = next(
+            (
+                row
+                for row in events
+                if row.get("capture_id") == capture_id
+                and row.get("seq") == write_ok_seq
+                and row.get("event") == "write_ok"
             ),
             None,
         )
@@ -1393,6 +1430,31 @@ def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
 
         return bool(
             isinstance(bronze, dict)
+            and bronze.get("protocol_probe") == "verified"
+            and isinstance(capture_id, str)
+            and type(generation) is int
+            and type(decoded_seq) is int
+            and type(request_seq) is int
+            and type(write_ok_seq) is int
+            and request_seq < write_ok_seq
+            and request_seq < decoded_seq
+            and freshness.get("capture_id") == capture_id
+            and freshness.get("session_generation") == generation
+            and freshness.get("decoded_response_seq") == decoded_seq
+            and len(started) == len(stopped) == 1
+            and started[0].get("session_generation") == generation
+            and stopped[0].get("session_generation") == generation
+            and started[0].get("seq") == freshness.get("capture_started_seq")
+            and stopped[0].get("seq") == freshness.get("capture_stopped_seq")
+            and isinstance(write_attempt, dict)
+            and write_attempt.get("session_generation") == generation
+            and isinstance(write_ok, dict)
+            and write_ok.get("session_generation") == generation
+            and isinstance(event, dict)
+            and event.get("event") == "status_data_decoded"
+            and event.get("session_generation") == generation
+            and event.get("utc") == freshness.get("decoded_response_at_utc")
+            and event.get("status_measurement") == freshness.get("status_measurement")
             and isinstance(bronze.get("samples"), list)
             and _bronze_samples_fresh(
                 bronze["samples"],

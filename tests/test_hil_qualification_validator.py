@@ -45,25 +45,71 @@ def test_capture_bound_fresh_telemetry_requires_matching_public_status_event(
         "capture_stopped_seq": 5,
         "status_measurement": measurements,
     }
-    decoded = {
-        "event": "status_data_decoded",
-        "capture_id": "capture-1",
-        "session_generation": 7,
-        "seq": 4,
-        "utc": freshness["decoded_response_at_utc"],
-        "status_measurement": measurements,
+    events = [
+        {
+            "event": "capture_started",
+            "capture_id": "capture-1",
+            "session_generation": 7,
+            "seq": 1,
+        },
+        {
+            "event": "write_attempt",
+            "capture_id": "capture-1",
+            "session_generation": 7,
+            "seq": 2,
+        },
+        {
+            "event": "write_ok",
+            "capture_id": "capture-1",
+            "session_generation": 7,
+            "seq": 3,
+        },
+        {
+            "event": "status_data_decoded",
+            "capture_id": "capture-1",
+            "session_generation": 7,
+            "seq": 4,
+            "utc": freshness["decoded_response_at_utc"],
+            "status_measurement": measurements,
+        },
+        {
+            "event": "capture_stopped",
+            "capture_id": "capture-1",
+            "session_generation": 7,
+            "seq": 5,
+        },
+    ]
+    bronze = {
+        "samples": samples,
+        "status_freshness": freshness,
+        "protocol_probe": "verified",
+        "protocol_capture_id": "capture-1",
+        "protocol_session_generation": 7,
+        "protocol_status_request_seq": 2,
+        "protocol_status_write_ok_seq": 3,
+        "protocol_decoded_response_seq": 4,
     }
     (tmp_path / "tier-bronze-read-only.json").write_text(
-        json.dumps({"samples": samples, "status_freshness": freshness}),
+        json.dumps(bronze),
         encoding="utf-8",
     )
     events_path = tmp_path / "events.jsonl"
-    events_path.write_text(json.dumps(decoded) + "\n", encoding="utf-8")
+    events_path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
     item = {"evidence": ["tier-bronze-read-only.json", "events.jsonl"]}
 
     assert validator._capture_bound_fresh_telemetry(item, tmp_path)
     events_path.write_text(
-        json.dumps({**decoded, "capture_id": "different-capture"}) + "\n",
+        "".join(
+            json.dumps(
+                {**event, "capture_id": "different-capture"}
+                if event["event"] == "status_data_decoded"
+                else event
+            )
+            + "\n"
+            for event in events
+        ),
         encoding="utf-8",
     )
     assert not validator._capture_bound_fresh_telemetry(item, tmp_path)
