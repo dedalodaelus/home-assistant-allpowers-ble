@@ -1446,8 +1446,24 @@ def review_imported_tier_run(
                 by_state[target] = cycle
         if set(by_state) != {"on", "off"}:
             continue
+        final_state = cycles[0]["final_restore_state"]
+        final_reference = cycles[0]["final_restore_frame_evidence"]
+        if (
+            final_state not in {"on", "off"}
+            or final_reference.get("source_action_index") != 3
+            or final_reference.get("action_stage") != "restoration"
+            or final_reference.get("requested_state") != (final_state == "on")
+            or any(
+                cycle["final_restore_state"] != final_state
+                or cycle["final_restore_frame_evidence"] != final_reference
+                for cycle in cycles
+            )
+        ):
+            continue
+        final_capture = capture_path(feature, 3)
+        add_capture(final_capture, [final_reference], feature)
         transitions = []
-        evidence = list(common_evidence)
+        evidence = [*common_evidence, final_capture]
         for state_index, state in enumerate(("on", "off"), start=1):
             cycle = by_state[state]
             expected_initial = "off" if state == "on" else "on"
@@ -1459,7 +1475,6 @@ def review_imported_tier_run(
                 [
                     cycle["change_frame_evidence"],
                     cycle["restore_frame_evidence"],
-                    cycle["final_restore_frame_evidence"],
                 ],
                 feature,
             )
@@ -1497,7 +1512,15 @@ def review_imported_tier_run(
                 "outcome": "confirmed_pass",
                 "reviewed_by": reviewer,
                 "reviewed_at": reviewed_at,
+                "reviewer_independent_from_operator": True,
                 "output_transitions": transitions,
+                "final_restoration": {
+                    "state": final_state,
+                    "capture_evidence": final_capture,
+                    "frame_evidence": final_reference,
+                    "confirmed": True,
+                    "reviewer_independent_from_operator": True,
+                },
             },
         }
         updated["write_capabilities"][feature]["physical_review"]["evidence_sha256"] = (

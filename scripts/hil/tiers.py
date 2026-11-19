@@ -474,6 +474,20 @@ def _output_pass(
     transitions = review.get("output_transitions")
     if not isinstance(transitions, list) or len(transitions) != 2:
         return False
+    if run.get("archive_sha256") and not hil_validation._valid_final_output_restoration(
+        item,
+        feature,
+        {
+            "route": run.get("route"),
+            "revision_id": revision.get("id"),
+            "firmware_version": run.get("firmware_version"),
+            "run_id": run.get("run_id"),
+            "captured_at": run.get("captured_at"),
+            "session_id": run.get("session_id"),
+            "build_fingerprint": run.get("build_fingerprint"),
+        },
+    ):
+        return False
     states: set[str] = set()
     for entry in transitions:
         if not isinstance(entry, dict) or entry.get("state") not in {"on", "off"}:

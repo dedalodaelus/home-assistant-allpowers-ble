@@ -3090,13 +3090,25 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     run = matrix["revisions"][0]["runs"][0]
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
     for feature in ("ac_output", "dc_output", "light_output"):
-        transitions = run["write_capabilities"][feature]["physical_review"][
-            "output_transitions"
+        physical_review = run["write_capabilities"][feature]["physical_review"]
+        final_restoration = physical_review["final_restoration"]
+        assert final_restoration["state"] == "off"
+        assert final_restoration["confirmed"] is True
+        assert final_restoration["reviewer_independent_from_operator"] is True
+        assert final_restoration["frame_evidence"]["source_action_index"] == 3
+        final_rows = [
+            json.loads(line)
+            for line in (tmp_path / final_restoration["capture_evidence"])
+            .read_text(encoding="utf-8")
+            .splitlines()
         ]
+        assert len(final_rows) == 1
+        assert final_rows[0]["source_action_index"] == 3
+        transitions = physical_review["output_transitions"]
         for transition in transitions:
             capture = tmp_path / transition["restoration_capture"]
             rows = [json.loads(line) for line in capture.read_text().splitlines()]
-            assert any(row["source_action_index"] == 3 for row in rows)
+            assert all(row["source_action_index"] != 3 for row in rows)
 
     # Gold repeats the independent output review and additionally reviews all
     # four settings cycles before dry-run and apply.
@@ -3123,6 +3135,28 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     }
     run = matrix["revisions"][0]["runs"][0]
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+    # Recompute the ordinary review digest after replacing the durable final
+    # restoration reference. Schema validation and evaluation must still reject
+    # this otherwise successful PASS on its evidence semantics.
+    ac_result = run["write_capabilities"]["ac_output"]
+    ac_review = ac_result["physical_review"]
+    final_capture = tmp_path / ac_review["final_restoration"]["capture_evidence"]
+    final_row = json.loads(final_capture.read_text(encoding="utf-8"))
+    assert final_row["source_action_index"] == 3
+    final_row["source_action_index"] = 2
+    final_capture.write_text(json.dumps(final_row, sort_keys=True) + "\n")
+    ac_review["evidence_sha256"] = validate_hil_qualification._evidence_digests(
+        ac_result["evidence"]
+    )
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    errors, _ = validate_hil_qualification.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any("final restoration" in error for error in errors)
+    regressed = evaluate_tiers(matrix)["tiers"][0]
+    assert regressed["tier"] == "bronze"
+    assert "ac_output" not in regressed["qualified_features"]
 
 
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(

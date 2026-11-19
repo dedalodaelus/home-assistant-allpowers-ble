@@ -840,6 +840,7 @@ def _check_result_map(
     capability: bool = False,
     strict_keys: set[str] | None = None,
     tier_evidence: bool = False,
+    require_final_restoration: bool = False,
 ) -> None:
     if not isinstance(results, dict):
         _error(errors, f"{context} must be an object")
@@ -878,7 +879,12 @@ def _check_result_map(
             }
             if capability and key in {"ac_output", "dc_output", "light_output"}:
                 _check_output_transitions(
-                    item, item_context, key, errors, scope=item_scope
+                    item,
+                    item_context,
+                    key,
+                    errors,
+                    scope=item_scope,
+                    require_final_restoration=require_final_restoration,
                 )
             elif capability:
                 _check_feature_restoration(
@@ -1086,6 +1092,7 @@ def _validate_run(
         capability=True,
         strict_keys={feature_scope} if feature_scope is not None else None,
         tier_evidence=isinstance(run.get("bronze_evidence"), dict),
+        require_final_restoration=bool(run.get("archive_sha256")),
     )
     if qualification == "pass":
         result_maps = (run.get("scenarios"), run.get("write_capabilities"))
@@ -1426,6 +1433,8 @@ def _valid_tier_capture_row(
     requested_state: Any,
     action_stage: str,
     evidence: Any = None,
+    *,
+    final_restoration: bool = False,
 ) -> bool:
     """Validate one physical write row, including its encoded target state."""
     if not isinstance(row, dict):
@@ -1452,6 +1461,7 @@ def _valid_tier_capture_row(
                 feature=feature,
                 requested_state=requested_state,
                 action_stage=action_stage,
+                final_restoration=final_restoration,
             )
         )
     )
@@ -1465,6 +1475,7 @@ def _valid_public_frame_capture(
     feature: str,
     requested_state: Any,
     action_stage: str | None = None,
+    final_restoration: bool = False,
 ) -> bool:
     """Validate a payload-free capture against its imported source artifact graph."""
     if not isinstance(row, dict):
@@ -1669,23 +1680,33 @@ def _valid_public_frame_capture(
         state_key = "target_state" if action_stage == "transition" else "initial_state"
         output_reference_valid = True
         if feature in {"ac_output", "dc_output", "light_output"}:
-            output_reference_valid = any(
-                isinstance(cycle, dict)
-                and cycle.get(
-                    "change_action_index"
-                    if action_stage == "transition"
-                    else "restore_action_index"
+            if final_restoration:
+                output_reference_valid = bool(
+                    action_stage == "restoration"
+                    and action_index == 3
+                    and guided.get("final_restore_action_index") == 3
+                    and guided.get("final_restore_outcome") == "correct"
+                    and guided.get("initial_state")
+                    == ("on" if requested_state else "off")
                 )
-                == action_index
-                and cycle.get(state_key) == ("on" if requested_state else "off")
-                and cycle.get(
-                    "physical_change_outcome"
-                    if action_stage == "transition"
-                    else "physical_restore_outcome"
+            else:
+                output_reference_valid = any(
+                    isinstance(cycle, dict)
+                    and cycle.get(
+                        "change_action_index"
+                        if action_stage == "transition"
+                        else "restore_action_index"
+                    )
+                    == action_index
+                    and cycle.get(state_key) == ("on" if requested_state else "off")
+                    and cycle.get(
+                        "physical_change_outcome"
+                        if action_stage == "transition"
+                        else "physical_restore_outcome"
+                    )
+                    == "correct"
+                    for cycle in guided.get("output_cycles", [])
                 )
-                == "correct"
-                for cycle in guided.get("output_cycles", [])
-            )
         if not (
             expected_step == step_id
             and (
@@ -1729,6 +1750,7 @@ def _check_output_transitions(
     errors: list[str],
     *,
     scope: dict[str, Any],
+    require_final_restoration: bool,
 ) -> None:
     review = item.get("physical_review")
     transitions = review.get("output_transitions") if isinstance(review, dict) else None
@@ -1805,6 +1827,121 @@ def _check_output_transitions(
         states.add(state)
     if states != {"on", "off"}:
         _error(errors, f"{context} requires both on and off transition evidence")
+    if require_final_restoration and not _valid_final_output_restoration(
+        item, feature, scope
+    ):
+        _error(
+            errors,
+            f"{context} requires independently reviewed final restoration to the original state",
+        )
+
+
+def _valid_final_output_restoration(
+    item: dict[str, Any], feature: str, scope: dict[str, Any]
+) -> bool:
+    """Require persisted proof of the separate final output restoration action."""
+    review = item.get("physical_review")
+    final = review.get("final_restoration") if isinstance(review, dict) else None
+    reference_keys = {
+        "trace_sha256",
+        "frame_sha256",
+        "frame_seq",
+        "transaction_sha256",
+        "session_generation",
+        "source_action_index",
+        "action_stage",
+        "source_step_id",
+        "requested_state",
+    }
+    if (
+        not isinstance(final, dict)
+        or set(final)
+        != {
+            "state",
+            "capture_evidence",
+            "frame_evidence",
+            "confirmed",
+            "reviewer_independent_from_operator",
+        }
+        or final.get("state") not in {"on", "off"}
+        or final.get("confirmed") is not True
+        or final.get("reviewer_independent_from_operator") is not True
+        or not isinstance(review, dict)
+        or not isinstance(review.get("reviewed_by"), str)
+        or not review["reviewed_by"].strip()
+        or not isinstance(final.get("capture_evidence"), str)
+        or final["capture_evidence"] not in item.get("evidence", [])
+        or not isinstance(final.get("frame_evidence"), dict)
+        or set(final["frame_evidence"]) != reference_keys
+    ):
+        return False
+    reference = final["frame_evidence"]
+    requested_state = final["state"] == "on"
+    if (
+        reference.get("source_action_index") != 3
+        or reference.get("action_stage") != "restoration"
+        or reference.get("source_step_id")
+        != {
+            "ac_output": "ac_output_cycle",
+            "dc_output": "dc_output_cycle",
+            "light_output": "light_output_cycle",
+        }.get(feature)
+        or type(reference.get("requested_state")) is not bool
+        or reference.get("requested_state") is not requested_state
+        or any(
+            not isinstance(reference.get(key), str)
+            or re.fullmatch(r"[a-f0-9]{64}", reference[key]) is None
+            for key in ("trace_sha256", "frame_sha256", "transaction_sha256")
+        )
+        or type(reference.get("frame_seq")) is not int
+        or reference["frame_seq"] < 1
+        or type(reference.get("session_generation")) is not int
+        or reference["session_generation"] < 1
+    ):
+        return False
+    rows = _capture_rows([final["capture_evidence"]])
+    if not rows or len(rows) != 1:
+        return False
+    row = rows[0]
+    if any(
+        row.get(row_key) != reference.get(reference_key)
+        for row_key, reference_key in {
+            "source_trace_sha256": "trace_sha256",
+            "source_frame_sha256": "frame_sha256",
+            "source_frame_seq": "frame_seq",
+            "source_transaction_sha256": "transaction_sha256",
+            "session_generation": "session_generation",
+            "source_action_index": "source_action_index",
+            "action_stage": "action_stage",
+            "source_step_id": "source_step_id",
+            "requested_state": "requested_state",
+        }.items()
+    ):
+        return False
+    return bool(
+        _has_bound_capture(
+            [final["capture_evidence"], *item.get("evidence", [])],
+            route=scope["route"],
+            revision_id=scope["revision_id"],
+            firmware_version=scope["firmware_version"],
+            run_id=scope["run_id"],
+            captured_at=scope["captured_at"],
+            session_id=scope["session_id"],
+            build_fingerprint=scope["build_fingerprint"],
+            result_key=feature,
+            capability=True,
+            expected_verdict="ok",
+        )
+        and _valid_tier_capture_row(
+            row,
+            scope,
+            feature,
+            requested_state,
+            "restoration",
+            item.get("evidence"),
+            final_restoration=True,
+        )
+    )
 
 
 def _check_feature_restoration(
