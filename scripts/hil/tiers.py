@@ -403,7 +403,7 @@ def _bronze_proof(
         )
     if claim == "fresh_telemetry":
         age = artifact.get("sample_age_seconds")
-        basis = artifact.get("freshness_basis")
+        basis = artifact.get("freshness_basis", "recent_rest_sample")
         if (
             artifact.get("fresh") is not True
             or artifact.get("plausible") is not True

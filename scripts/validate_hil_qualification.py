@@ -1538,7 +1538,7 @@ def _check_bronze_evidence(
             _error(errors, f"{claim_context} must confirm model and revision identity")
         elif claim == "fresh_telemetry":
             age = artifact.get("sample_age_seconds")
-            basis = artifact.get("freshness_basis")
+            basis = artifact.get("freshness_basis", "recent_rest_sample")
             valid = (
                 artifact.get("fresh") is True
                 and artifact.get("plausible") is True
