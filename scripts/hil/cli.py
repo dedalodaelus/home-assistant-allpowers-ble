@@ -667,6 +667,68 @@ def _bronze_status_exchange(
     return status_tx, status_write_ok, decoded, write_failed
 
 
+def _bronze_status_marker(api: HAClient, entry_id: str) -> dict[str, Any]:
+    """Read the allowlisted current-session freshness marker for Bronze proof."""
+    read_capabilities = getattr(api, "hil_capabilities", None)
+    if not callable(read_capabilities):
+        return {}
+    try:
+        snapshot = read_capabilities(entry_id)
+    except HAAPIError:
+        return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        "connected": snapshot.get("connected"),
+        "status_fresh": snapshot.get("status_fresh"),
+        "session_generation": snapshot.get("session_generation"),
+        "status_notification_count": snapshot.get("status_notification_count"),
+    }
+
+
+def _bronze_status_freshness(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    decoded: dict[str, Any] | None,
+    *,
+    capture_id: str,
+) -> dict[str, Any] | None:
+    """Bind a new same-session status notification to the two REST samples."""
+    if (
+        decoded is None
+        or before.get("connected") is not True
+        or after.get("connected") is not True
+        or after.get("status_fresh") is not True
+    ):
+        return None
+    generation = before.get("session_generation")
+    count_before = before.get("status_notification_count")
+    count_after = after.get("status_notification_count")
+    measurement = decoded.get("status_measurement")
+    if (
+        type(generation) is not int
+        or generation < 1
+        or after.get("session_generation") != generation
+        or decoded.get("session_generation") != generation
+        or type(count_before) is not int
+        or type(count_after) is not int
+        or not 0 <= count_before < count_after <= 1_000_000_000
+        or not isinstance(decoded.get("seq"), int)
+        or not isinstance(decoded.get("utc"), str)
+        or not isinstance(measurement, dict)
+    ):
+        return None
+    return {
+        "capture_id": capture_id,
+        "session_generation": generation,
+        "status_notification_count_before": count_before,
+        "status_notification_count_after": count_after,
+        "decoded_response_seq": decoded["seq"],
+        "decoded_response_at_utc": decoded["utc"],
+        "status_measurement": measurement,
+    }
+
+
 def _execute_tier_suite(
     api: HAClient,
     args: argparse.Namespace,
@@ -770,9 +832,12 @@ def _execute_tier_suite(
                 first_sample = services.read_only_sample(api, device)
             except HAAPIError:
                 first_sample = {}
+            status_marker_before: dict[str, Any] = {}
+            status_marker_after: dict[str, Any] = {}
             second_sampled_at = services.datetime.now(UTC).isoformat()
             second_sample: dict[str, Any] = {}
             protocol_probe: dict[str, Any] = {"outcome": "inconclusive"}
+            decoded_status_event: dict[str, Any] | None = None
             if (
                 device.entry_state == "loaded"
                 and device.config_entry_id is not None
@@ -780,6 +845,9 @@ def _execute_tier_suite(
             ):
                 capture_id = None
                 failure_stage = "capture_start"
+                status_marker_before = _bronze_status_marker(
+                    api, device.config_entry_id
+                )
                 try:
                     started = api.websocket(
                         [
@@ -860,6 +928,9 @@ def _execute_tier_suite(
                             services.sleep(min(0.5, remaining))
                         second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
+                        status_marker_after = _bronze_status_marker(
+                            api, device.config_entry_id
+                        )
                         stop_command = {
                             "type": "allpowers_ble/hil/stop",
                             "entry_id": device.config_entry_id,
@@ -884,6 +955,7 @@ def _execute_tier_suite(
                         status_tx, status_write_ok, decoded, write_failed = (
                             _bronze_status_exchange(events, frames)
                         )
+                        decoded_status_event = decoded
                         route = trace.get("observed_route")
                         protocol_verified = bool(
                             trace.get("complete") is True
@@ -937,6 +1009,9 @@ def _execute_tier_suite(
                     else:
                         second_sampled_at = services.datetime.now(UTC).isoformat()
                         second_sample = services.read_only_sample(api, device)
+                        status_marker_after = _bronze_status_marker(
+                            api, device.config_entry_id
+                        )
                 except HAAPIError, OSError, TypeError, ValueError, KeyError:
                     second_sample = {}
                     protocol_probe = {
@@ -976,12 +1051,35 @@ def _execute_tier_suite(
                 try:
                     second_sampled_at = services.datetime.now(UTC).isoformat()
                     second_sample = services.read_only_sample(api, device)
+                    if device.config_entry_id is not None:
+                        status_marker_after = _bronze_status_marker(
+                            api, device.config_entry_id
+                        )
                 except HAAPIError:
                     second_sampled_at = services.datetime.now(UTC).isoformat()
                     second_sample = {}
-            samples_valid = services.has_verified_telemetry(
-                first_sample
-            ) and services.has_verified_telemetry(second_sample)
+            from .evidence import _bronze_samples_fresh
+
+            status_freshness = (
+                _bronze_status_freshness(
+                    status_marker_before,
+                    status_marker_after,
+                    decoded_status_event,
+                    capture_id=protocol_probe["capture_id"],
+                )
+                if protocol_probe.get("outcome") == "pass"
+                and isinstance(protocol_probe.get("capture_id"), str)
+                else None
+            )
+            samples = [
+                {"sampled_at_utc": first_sampled_at, "telemetry": first_sample},
+                {"sampled_at_utc": second_sampled_at, "telemetry": second_sample},
+            ]
+            samples_valid = _bronze_samples_fresh(
+                samples,
+                status_evidence=status_freshness,
+                status_event=decoded_status_event,
+            )
             try:
                 physical = services.prompt(
                     "Physical plausibility: 1=telemetry matches the attended station, 2=does not match, 3=unable to observe: "
@@ -1009,6 +1107,7 @@ def _execute_tier_suite(
                     },
                 ],
                 "fresh_verified_samples": bool(samples_valid),
+                "status_freshness": status_freshness,
                 "protocol_probe": protocol_probe,
                 "physical_observation": {
                     "1": "plausible",

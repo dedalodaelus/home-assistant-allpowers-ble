@@ -18,6 +18,31 @@ import pytest
 from scripts.hil import api, cli, discovery, environment, storage
 
 
+def _rewrite_public_json_member(archive_path, destination, member_name, mutate):
+    """Rewrite one public JSON member and reseal the ordinary manifest hashes."""
+    with zipfile.ZipFile(archive_path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    public_name = f"public/{member_name}"
+    value = json.loads(members[public_name])
+    mutate(value)
+    members[public_name] = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+    manifest = json.loads(members["public/manifest.json"])
+    for entry in manifest["files"]:
+        if entry["name"] == member_name:
+            entry["size"] = len(members[public_name])
+            entry["sha256"] = hashlib.sha256(members[public_name]).hexdigest()
+            break
+    else:
+        raise AssertionError(f"Missing manifest entry for {member_name}")
+    members["public/manifest.json"] = (
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n"
+    ).encode()
+    with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, contents in members.items():
+            archive.writestr(name, contents)
+    return destination
+
+
 def test_onboard_parser_declares_interactive_command():
     args = cli.make_parser().parse_args(["onboard", "--ha-url", "https://ha.example"])
     assert args.command == "onboard"
@@ -948,10 +973,98 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_notification_marker",
+        "unchanged_notification_count",
+        "different_session",
+        "unmatched_response_sequence",
+        "mismatched_measurement",
+        "outside_recency_window",
+        "missing_status_measurement",
+    ],
+)
+def test_bronze_stale_rest_samples_need_bound_status_freshness(mutation):
+    from scripts.hil.evidence import _bronze_samples_fresh
+
+    samples = [
+        {
+            "sampled_at_utc": "2026-11-19T20:00:00+00:00",
+            "telemetry": {
+                "battery": {
+                    "value": 50,
+                    "verified": True,
+                    "sample_age_seconds": 815,
+                },
+                "telemetry_available": {"value": "on", "verified": True},
+            },
+        },
+        {
+            "sampled_at_utc": "2026-11-19T20:00:02+00:00",
+            "telemetry": {
+                "battery": {
+                    "value": 50,
+                    "verified": True,
+                    "sample_age_seconds": 816,
+                },
+                "telemetry_available": {"value": "on", "verified": True},
+            },
+        },
+    ]
+    proof = {
+        "capture_id": "capture-0001",
+        "session_generation": 4,
+        "status_notification_count_before": 7,
+        "status_notification_count_after": 8,
+        "decoded_response_seq": 12,
+        "decoded_response_at_utc": "2026-11-19T20:00:01+00:00",
+        "status_measurement": {
+            "battery": 50,
+            "input_power": 100,
+            "output_power": 25,
+            "remaining_time": 90,
+        },
+    }
+    event = {
+        "capture_id": "capture-0001",
+        "event": "status_data_decoded",
+        "session_generation": 4,
+        "seq": 12,
+        "utc": "2026-11-19T20:00:01+00:00",
+        "status_measurement": proof["status_measurement"],
+    }
+    assert _bronze_samples_fresh(samples, status_evidence=proof, status_event=event)
+
+    samples = json.loads(json.dumps(samples))
+    proof = json.loads(json.dumps(proof))
+    event = json.loads(json.dumps(event))
+    if mutation == "missing_notification_marker":
+        proof = None
+    elif mutation == "unchanged_notification_count":
+        proof["status_notification_count_after"] = proof[
+            "status_notification_count_before"
+        ]
+    elif mutation == "different_session":
+        event["session_generation"] += 1
+    elif mutation == "unmatched_response_sequence":
+        event["seq"] += 1
+    elif mutation == "mismatched_measurement":
+        samples[1]["telemetry"]["battery"]["value"] = 49
+    elif mutation == "outside_recency_window":
+        event["utc"] = "2026-11-19T20:01:01+00:00"
+        proof["decoded_response_at_utc"] = event["utc"]
+    elif mutation == "missing_status_measurement":
+        event.pop("status_measurement")
+        proof.pop("status_measurement")
+    assert not _bronze_samples_fresh(samples, status_evidence=proof, status_event=event)
+
+
+@pytest.mark.parametrize(
     (
         "packet_types",
         "write_completion",
         "notification_mode",
+        "rest_sample_age",
         "expected_probe",
         "expected_public_event",
     ),
@@ -960,17 +1073,19 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
             ["SettingsData"],
             "write_ok",
             "synthetic",
+            2,
             "inconclusive",
             "notification_decoded",
         ),
-        ([], "write_ok", "synthetic", "inconclusive", "notification_decoded"),
-        ([], "write_ok", "no_response", "inconclusive", None),
-        ([], "write_ok", "refresh_rejected", "inconclusive", None),
-        ([], "write_ok", "refresh_unavailable", "inconclusive", None),
+        ([], "write_ok", "synthetic", 2, "inconclusive", "notification_decoded"),
+        ([], "write_ok", "no_response", 815, "inconclusive", None),
+        ([], "write_ok", "refresh_rejected", 2, "inconclusive", None),
+        ([], "write_ok", "refresh_unavailable", 2, "inconclusive", None),
         (
             ["StatusData"],
             "write_ok",
             "during_write",
+            2,
             "pass",
             "status_data_decoded",
         ),
@@ -978,6 +1093,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
             ["StatusData"],
             "missing",
             "synthetic",
+            2,
             "inconclusive",
             "status_data_decoded",
         ),
@@ -985,6 +1101,7 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
             ["StatusData"],
             "write_error",
             "synthetic",
+            2,
             "inconclusive",
             "status_data_decoded",
         ),
@@ -992,6 +1109,15 @@ def test_tier_plan_is_persisted_and_privacy_safe_on_export(
             ["StatusData"],
             "write_ok",
             "delayed_after_write",
+            2,
+            "pass",
+            "status_data_decoded",
+        ),
+        (
+            ["StatusData"],
+            "write_ok",
+            "during_write",
+            815,
             "pass",
             "status_data_decoded",
         ),
@@ -1004,6 +1130,7 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     packet_types,
     write_completion,
     notification_mode,
+    rest_sample_age,
     expected_probe,
     expected_public_event,
 ):
@@ -1021,10 +1148,10 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     status_request = bytes.fromhex("a565b1000106010000000000")
     sample = {
         "battery": {
-            "value": 55,
+            "value": 50,
             "verified": True,
             "source": "ha_rest_entity_state",
-            "sample_age_seconds": 2,
+            "sample_age_seconds": rest_sample_age,
         },
         "telemetry_available": {
             "value": "on",
@@ -1059,6 +1186,20 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
             self.notification_delivered = False
             self.fetch_count = 0
             self.refresh_service_calls = []
+            self.synthetic_status_count = 0
+
+        def hil_capabilities(self, _entry_id):
+            count = (
+                real_status_client.session_status_notification_count
+                if use_production_client
+                else self.synthetic_status_count
+            )
+            return {
+                "connected": True,
+                "status_fresh": count is not None and count > 0,
+                "session_generation": 3,
+                "status_notification_count": count,
+            }
 
         def websocket(self, commands):
             command = commands[0]
@@ -1168,7 +1309,21 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
                 session_hardware_revision="0.3",
                 discarded_frames=0,
                 discarded_bytes=0,
+                **(
+                    {
+                        "status_measurement": {
+                            "battery": 50,
+                            "input_power": 100,
+                            "output_power": 25,
+                            "remaining_time": 90,
+                        }
+                    }
+                    if "StatusData" in packet_types
+                    else {}
+                ),
             )
+            if "StatusData" in packet_types:
+                self.synthetic_status_count += 1
 
     api_fake = BronzeProbeHA()
     (device,) = discovery.find_devices(
@@ -1352,6 +1507,19 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
         assert any(
             blocker["outcome"] == "incomplete_protocol_proof" for blocker in blockers
         )
+    if rest_sample_age > 60 and expected_probe != "pass":
+        from scripts.hil.onboard import assess_run_gate
+
+        blockers = assess_run_gate(
+            run_dir,
+            run_result=result,
+            requested_tier="bronze",
+            status_exchange=cli._bronze_status_exchange,
+        )
+        assert any(
+            blocker["outcome"] == "missing_new_status_notification"
+            for blocker in blockers
+        )
     archive = export_archive(run_dir.parent, confirmed=True)
     _, public, _ = verify_public_archive(archive, include_contents=True)
     public_bronze = json.loads(public["tier-bronze-read-only.json"])
@@ -1369,6 +1537,32 @@ def test_bronze_protocol_probe_requires_status_data_through_public_export(
     assert public_bronze["protocol_probe"] == (
         "verified" if expected_probe == "pass" else "inconclusive"
     )
+    if rest_sample_age > 60 and expected_probe == "pass":
+        assert public_bronze["fresh_verified_samples"] is True
+        assert (
+            public_bronze["status_freshness"]["status_notification_count_after"]
+            > (public_bronze["status_freshness"]["status_notification_count_before"])
+        )
+        assert decoded["status_measurement"]["battery"] == 50
+        cross_session_archive = _rewrite_public_json_member(
+            archive,
+            tmp_path / "cross-session-bronze.zip",
+            "tier-bronze-read-only.json",
+            lambda bronze: bronze["status_freshness"].__setitem__(
+                "session_generation",
+                bronze["status_freshness"]["session_generation"] + 1,
+            ),
+        )
+        with pytest.raises(api.HAAPIError, match="freshness is not capture-bound"):
+            verify_public_archive(cross_session_archive)
+        forged_claim_archive = _rewrite_public_json_member(
+            archive,
+            tmp_path / "forged-bronze-freshness.zip",
+            "tier-bronze-read-only.json",
+            lambda bronze: bronze.__setitem__("fresh_verified_samples", False),
+        )
+        with pytest.raises(api.HAAPIError, match="claim does not match"):
+            verify_public_archive(forged_claim_archive)
     if expected_public_event is None:
         assert decoded is None
     else:
@@ -1625,8 +1819,14 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
         "_suite_services",
         lambda: replace(
             base_services,
-            read_only_sample=lambda *_args: {"sample": "fresh"},
-            has_verified_telemetry=lambda sample: sample == {"sample": "fresh"},
+            read_only_sample=lambda *_args: {
+                "telemetry_available": {"verified": True, "value": "on"},
+                "battery": {
+                    "verified": True,
+                    "value": 50,
+                    "sample_age_seconds": 2,
+                },
+            },
             validate_trace_result=lambda *_args, **_kwargs: None,
             save_private_trace=lambda path, trace: (
                 path.mkdir(parents=True, exist_ok=True),

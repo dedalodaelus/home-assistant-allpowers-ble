@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 import hashlib
 import ipaddress
 import math
@@ -1301,6 +1301,9 @@ def _public_tier_artifact(
                 for item in packet_types
             ):
                 projected["decoded_packet_types"] = sorted(set(packet_types))
+            measurement = row.get("status_measurement")
+            if isinstance(measurement, dict):
+                projected["status_measurement"] = dict(measurement)
             rows.append(projected)
         return {"kind": "gatt_events", "rows": rows}
     if name == "frames.jsonl":
@@ -1692,6 +1695,7 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                 "transaction_sha256",
                 "transaction_reason",
                 "decoded_packet_types",
+                "status_measurement",
             }:
                 return False
             if (
@@ -1729,6 +1733,11 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
                         item not in {"StatusData", "SettingsData", "DeviceNameData"}
                         for item in row["decoded_packet_types"]
                     )
+                )
+                or row.get("status_measurement") is not None
+                and (
+                    row.get("event") != "notification_decoded"
+                    or not _valid_status_measurement(row["status_measurement"])
                 )
             ):
                 return False
@@ -1967,9 +1976,15 @@ def _valid_public_tier_artifact(value: dict[str, Any]) -> bool:
     return False
 
 
-def _bronze_samples_fresh(samples: list[Any]) -> bool:
+def _bronze_samples_fresh(
+    samples: list[Any],
+    *,
+    status_evidence: Any = None,
+    status_event: Any = None,
+) -> bool:
     if len(samples) != 2:
         return False
+    has_recent_rest_sample = True
     for sample in samples:
         if not isinstance(sample, dict) or not isinstance(
             sample.get("telemetry"), dict
@@ -1980,8 +1995,12 @@ def _bronze_samples_fresh(samples: list[Any]) -> bool:
             key in {"battery", "input_power", "output_power", "remaining_time"}
             and isinstance(record, dict)
             and record.get("verified") is True
-            and type(record.get("sample_age_seconds")) is int
-            and 0 <= record["sample_age_seconds"] <= 60
+            and (
+                type(record.get("sample_age_seconds")) is int
+                and 0 <= record["sample_age_seconds"] <= 60
+                or type(record.get("value")) in {int, float}
+                and math.isfinite(record["value"])
+            )
             for key, record in telemetry.items()
         )
         available = telemetry.get("telemetry_available")
@@ -1992,7 +2011,116 @@ def _bronze_samples_fresh(samples: list[Any]) -> bool:
             or available.get("value") != "on"
         ):
             return False
+        has_recent_rest_sample = has_recent_rest_sample and any(
+            key in {"battery", "input_power", "output_power", "remaining_time"}
+            and isinstance(record, dict)
+            and record.get("verified") is True
+            and type(record.get("sample_age_seconds")) is int
+            and 0 <= record["sample_age_seconds"] <= 60
+            for key, record in telemetry.items()
+        )
+    if has_recent_rest_sample:
+        return True
+    if (
+        not isinstance(status_evidence, dict)
+        or set(status_evidence)
+        != {
+            "capture_id",
+            "session_generation",
+            "status_notification_count_before",
+            "status_notification_count_after",
+            "decoded_response_seq",
+            "decoded_response_at_utc",
+            "status_measurement",
+        }
+        or not isinstance(status_event, dict)
+        or status_event.get("event")
+        not in {"notification_decoded", "status_data_decoded"}
+        or status_event.get("session_generation")
+        != status_evidence.get("session_generation")
+        or status_event.get("seq") != status_evidence.get("decoded_response_seq")
+        or status_event.get("capture_id")
+        not in {None, status_evidence.get("capture_id")}
+        or status_event.get("utc") != status_evidence.get("decoded_response_at_utc")
+        or status_evidence.get("status_notification_count_after", 0)
+        <= status_evidence.get("status_notification_count_before", 0)
+        or type(status_evidence.get("session_generation")) is not int
+        or not 1 <= status_evidence["session_generation"] <= 1_000_000
+        or type(status_evidence.get("status_notification_count_before")) is not int
+        or type(status_evidence.get("status_notification_count_after")) is not int
+        or not 0
+        <= status_evidence["status_notification_count_before"]
+        < status_evidence["status_notification_count_after"]
+        <= 1_000_000_000
+        or type(status_evidence.get("decoded_response_seq")) is not int
+        or status_evidence["decoded_response_seq"] < 1
+        or not isinstance(status_evidence.get("capture_id"), str)
+    ):
+        return False
+    measurements = status_event.get("status_measurement")
+    if (
+        not isinstance(measurements, dict)
+        or set(measurements)
+        != {"battery", "input_power", "output_power", "remaining_time"}
+        or any(type(value) is not int or value < 0 for value in measurements.values())
+        or measurements["battery"] > 100
+        or any(value > 65_535 for value in measurements.values())
+        or measurements != status_evidence.get("status_measurement")
+    ):
+        return False
+    event_time = _parse_utc(status_event["utc"])
+    sample_times = [_parse_utc(sample.get("sampled_at_utc")) for sample in samples]
+    if (
+        event_time is None
+        or sample_times[0] is None
+        or sample_times[1] is None
+        or not sample_times[0] < event_time <= sample_times[1]
+        or (event_time - sample_times[0]).total_seconds() > 60
+        or (sample_times[1] - event_time).total_seconds() > 60
+        or (sample_times[1] - sample_times[0]).total_seconds() > 60
+    ):
+        return False
+    measurement_keys = {
+        "battery": "battery",
+        "input_power": "input_power",
+        "output_power": "output_power",
+        "remaining_time": "remaining_time",
+    }
+    for sample in samples:
+        telemetry = sample["telemetry"]
+        matched = False
+        for sensor_key, protocol_key in measurement_keys.items():
+            record = telemetry.get(sensor_key)
+            if not isinstance(record, dict) or record.get("verified") is not True:
+                continue
+            value = record.get("value")
+            if type(value) not in {int, float} or not math.isfinite(value):
+                return False
+            if value != measurements[protocol_key]:
+                return False
+            matched = True
+        if not matched:
+            return False
     return True
+
+
+def _valid_status_measurement(value: Any) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == {"battery", "input_power", "output_power", "remaining_time"}
+        and all(type(item) is int and 0 <= item <= 65_535 for item in value.values())
+        and value["battery"] <= 100
+    )
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]]:
@@ -2496,6 +2624,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             if value is not None and (type(value) is not int or value < 1):
                 raise HAAPIError("Invalid private Bronze protocol reference")
         protocol_pass = False
+        decoded_status_event = None
         if protocol_outcome == "pass":
             if (
                 protocol.get("trace") != "traces/bronze_read_only"
@@ -2544,6 +2673,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 ),
                 None,
             )
+            decoded_status_event = decoded
             status_write_ok = next(
                 (
                     event
@@ -2581,6 +2711,19 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
             )
             if not protocol_pass:
                 raise HAAPIError("Bronze protocol evidence binding failed")
+        status_freshness = bronze.get("status_freshness")
+        if status_freshness is not None:
+            if not protocol_pass or not _bronze_samples_fresh(
+                private_samples,
+                status_evidence=status_freshness,
+                status_event=decoded_status_event,
+            ):
+                raise HAAPIError("Bronze status freshness evidence is unbound")
+        samples_fresh = _bronze_samples_fresh(
+            public_samples,
+            status_evidence=status_freshness,
+            status_event=decoded_status_event,
+        )
         files["tier-bronze-read-only.json"] = (
             json.dumps(
                 {
@@ -2589,6 +2732,14 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     "samples": public_samples,
                     "fresh_verified_samples": bool(
                         bronze["fresh_verified_samples"] and samples_fresh
+                    ),
+                    "status_freshness": (
+                        {
+                            **status_freshness,
+                            "capture_id": None,
+                        }
+                        if protocol_pass and isinstance(status_freshness, dict)
+                        else None
                     ),
                     "physical_observation": bronze["physical_observation"],
                     "protocol_probe": "verified" if protocol_pass else protocol_outcome,
@@ -2775,8 +2926,17 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     {item["seq"]: item for item in source_events},
                     {item["seq"]: item for item in source_frames},
                 )
-            rows = [
-                {
+            rows = []
+            for (
+                seq,
+                event,
+                item_utc,
+                elapsed_ms,
+                generation,
+                event_route,
+            ) in capture_rows:
+                item = source_by_seq[seq]
+                public_row = {
                     "schema_version": PUBLIC_SCHEMA,
                     "capture_id": public_capture_id,
                     "seq": seq,
@@ -2792,8 +2952,10 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         (f"traces/{base.name}", seq)
                     ),
                 }
-                for seq, event, item_utc, elapsed_ms, generation, event_route in capture_rows
-            ]
+                measurement = item.get("status_measurement")
+                if event == "status_data_decoded" and isinstance(measurement, dict):
+                    public_row["status_measurement"] = dict(measurement)
+                rows.append(public_row)
             existing = files.get("events.jsonl", b"")
             files["events.jsonl"] = existing + b"".join(
                 (json.dumps(row, sort_keys=True) + "\n").encode() for row in rows
@@ -2958,6 +3120,8 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     == status_event.get("session_generation")
                 ):
                     bronze_public["protocol_capture_id"] = capture_id
+                    if isinstance(bronze_public.get("status_freshness"), dict):
+                        bronze_public["status_freshness"]["capture_id"] = capture_id
                     bronze_public["protocol_evidence"] = [
                         f"{capture_id}:{status_seq}",
                         f"{capture_id}:{write_ok_seq}",
@@ -2965,6 +3129,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                     ]
                 else:
                     bronze_public["protocol_probe"] = "inconclusive"
+                    bronze_public["status_freshness"] = None
                     for key in (
                         "protocol_trace_sha256",
                         "protocol_status_request_hex",
@@ -2977,6 +3142,7 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                         bronze_public[key] = None
             else:
                 bronze_public["protocol_probe"] = "inconclusive"
+                bronze_public["status_freshness"] = None
         files["tier-bronze-read-only.json"] = (
             json.dumps(bronze_public, sort_keys=True, indent=2) + "\n"
         ).encode()
@@ -4074,6 +4240,7 @@ def verify_public_archive(
                         "sample_sha256",
                         "samples",
                         "fresh_verified_samples",
+                        "status_freshness",
                         "physical_observation",
                         "protocol_probe",
                         "protocol_trace_sha256",
@@ -4123,8 +4290,59 @@ def verify_public_archive(
                         )
                         for sample in value["samples"]
                     )
-                    or value["fresh_verified_samples"]
-                    != _bronze_samples_fresh(value["samples"])
+                    or value.get("status_freshness") is not None
+                    and (
+                        not isinstance(value["status_freshness"], dict)
+                        or set(value["status_freshness"])
+                        != {
+                            "capture_id",
+                            "session_generation",
+                            "status_notification_count_before",
+                            "status_notification_count_after",
+                            "decoded_response_seq",
+                            "decoded_response_at_utc",
+                            "status_measurement",
+                        }
+                        or not isinstance(
+                            value["status_freshness"].get("capture_id"), str
+                        )
+                        or re.fullmatch(
+                            r"capture-[0-9]{4}",
+                            value["status_freshness"]["capture_id"],
+                        )
+                        is None
+                        or type(value["status_freshness"].get("session_generation"))
+                        is not int
+                        or not 1
+                        <= value["status_freshness"]["session_generation"]
+                        <= 1_000_000
+                        or type(
+                            value["status_freshness"].get(
+                                "status_notification_count_before"
+                            )
+                        )
+                        is not int
+                        or type(
+                            value["status_freshness"].get(
+                                "status_notification_count_after"
+                            )
+                        )
+                        is not int
+                        or not 0
+                        <= value["status_freshness"]["status_notification_count_before"]
+                        < value["status_freshness"]["status_notification_count_after"]
+                        <= 1_000_000_000
+                        or type(value["status_freshness"].get("decoded_response_seq"))
+                        is not int
+                        or value["status_freshness"]["decoded_response_seq"] < 1
+                        or _safe_utc(
+                            value["status_freshness"].get("decoded_response_at_utc")
+                        )
+                        != value["status_freshness"].get("decoded_response_at_utc")
+                        or not _valid_status_measurement(
+                            value["status_freshness"].get("status_measurement")
+                        )
+                    )
                     or value.get("physical_observation")
                     not in {"plausible", "implausible", "unable_to_observe"}
                     or value.get("protocol_probe")
@@ -4188,6 +4406,7 @@ def verify_public_archive(
                 ):
                     raise HAAPIError("Invalid public Bronze evidence")
                 if value.get("protocol_probe") == "verified":
+                    decoded_event = None
                     try:
                         public_events = [
                             _load_public_json(line)
@@ -4273,6 +4492,33 @@ def verify_public_archive(
                         raise HAAPIError(
                             "Bronze protocol evidence is not capture-bound"
                         )
+                    freshness = value.get("status_freshness")
+                    if freshness is not None and (
+                        freshness.get("capture_id") != capture_id
+                        or freshness.get("session_generation")
+                        != decoded_event.get("session_generation")
+                        or freshness.get("decoded_response_seq") != decoded_seq
+                        or freshness.get("decoded_response_at_utc")
+                        != decoded_event.get("utc")
+                        or freshness.get("status_measurement")
+                        != decoded_event.get("status_measurement")
+                    ):
+                        raise HAAPIError("Bronze status freshness is not capture-bound")
+                    samples_fresh = _bronze_samples_fresh(
+                        value["samples"],
+                        status_evidence=freshness,
+                        status_event=decoded_event,
+                    )
+                else:
+                    if value.get("status_freshness") is not None:
+                        raise HAAPIError(
+                            "Bronze status freshness has no verified protocol trace"
+                        )
+                    samples_fresh = _bronze_samples_fresh(value["samples"])
+                if value["fresh_verified_samples"] != samples_fresh:
+                    raise HAAPIError(
+                        "Bronze freshness claim does not match its evidence"
+                    )
         elif name.endswith(".jsonl"):
             try:
                 for line in data[name].splitlines():
@@ -4333,18 +4579,33 @@ def verify_public_archive(
                     if (
                         not isinstance(event, dict)
                         or set(event)
-                        != {
-                            "schema_version",
-                            "capture_id",
-                            "seq",
-                            "event",
-                            "layer",
-                            "utc",
-                            "elapsed_ms",
-                            "session_generation",
-                            "observed_route",
-                            "transaction_kind",
-                        }
+                        not in (
+                            {
+                                "schema_version",
+                                "capture_id",
+                                "seq",
+                                "event",
+                                "layer",
+                                "utc",
+                                "elapsed_ms",
+                                "session_generation",
+                                "observed_route",
+                                "transaction_kind",
+                            },
+                            {
+                                "schema_version",
+                                "capture_id",
+                                "seq",
+                                "event",
+                                "layer",
+                                "utc",
+                                "elapsed_ms",
+                                "session_generation",
+                                "observed_route",
+                                "transaction_kind",
+                                "status_measurement",
+                            },
+                        )
                         or event.get("schema_version") != PUBLIC_SCHEMA
                         or not isinstance(event.get("capture_id"), str)
                         or re.fullmatch(r"capture-[0-9]{4}", event["capture_id"])
@@ -4353,6 +4614,13 @@ def verify_public_archive(
                         or event.get("seq") < 1
                         or not isinstance(event.get("event"), str)
                         or event.get("event") not in PUBLIC_EVENT_NAMES
+                        or "status_measurement" in event
+                        and (
+                            event.get("event") != "status_data_decoded"
+                            or not _valid_status_measurement(
+                                event["status_measurement"]
+                            )
+                        )
                         or event.get("layer") != "gatt_api"
                         or not isinstance(event.get("utc"), str)
                         or datetime.fromisoformat(event["utc"]).utcoffset() is None

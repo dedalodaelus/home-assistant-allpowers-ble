@@ -1837,10 +1837,28 @@ class AllpowersBLEClient:
                 self._observe_model_identity(packet.name.strip())
 
         if self._observer is not None:
+            latest_status = next(
+                (
+                    packet
+                    for packet in reversed(packets)
+                    if isinstance(packet, StatusData)
+                ),
+                None,
+            )
             self._observer.emit(
                 "notification_decoded",
                 self._active_session_generation,
                 packet_types=tuple(type(packet).__name__ for packet in packets),
+                status_measurement=(
+                    {
+                        "battery": latest_status.battery_percent,
+                        "input_power": latest_status.input_power_w,
+                        "output_power": latest_status.output_power_w,
+                        "remaining_time": latest_status.remaining_minutes,
+                    }
+                    if latest_status is not None
+                    else None
+                ),
                 profile=self._runtime_model_support().profile,
                 hardware_revision=(
                     self._session_hardware_revision[0]

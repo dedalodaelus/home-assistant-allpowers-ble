@@ -223,6 +223,7 @@ class HilClientTracer:
         generation: int | None,
         *,
         packet_types: tuple[str, ...],
+        status_measurement: dict[str, int] | None = None,
         profile: str,
         hardware_revision: str | None,
         discarded_frames: int,
@@ -230,6 +231,24 @@ class HilClientTracer:
         transaction_id: str | None = None,
     ) -> None:
         """Describe validated decoder results, not guesses about raw chunks."""
+        fields: dict[str, Any] = {}
+        if (
+            self.capture.scenario_id == "read_only_snapshot"
+            and isinstance(status_measurement, dict)
+            and set(status_measurement)
+            == {
+                "battery",
+                "input_power",
+                "output_power",
+                "remaining_time",
+            }
+            and all(
+                type(value) is int and 0 <= value <= 65_535
+                for value in status_measurement.values()
+            )
+            and 0 <= status_measurement["battery"] <= 100
+        ):
+            fields["status_measurement"] = dict(status_measurement)
         self.capture.record(
             "notification_decoded",
             session_generation=generation,
@@ -240,6 +259,7 @@ class HilClientTracer:
             session_hardware_revision=hardware_revision,
             discarded_frames=discarded_frames,
             discarded_bytes=discarded_bytes,
+            **fields,
             **_correlation_fields(transaction_id),
         )
 

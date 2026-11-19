@@ -93,6 +93,7 @@ class ClientObserver(Protocol):
         generation: int | None,
         *,
         packet_types: tuple[str, ...],
+        status_measurement: dict[str, int] | None = None,
         profile: str,
         hardware_revision: str | None,
         discarded_frames: int,

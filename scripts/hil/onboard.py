@@ -156,7 +156,7 @@ def _valid_bronze_capture(
         return False
     status_tx, write_ok, decoded, write_failed = status_exchange(events, frames)
     correlated_records = (status_tx, write_ok, decoded)
-    return bool(
+    correlated = bool(
         status_tx is not None
         and write_ok is not None
         and decoded is not None
@@ -171,6 +171,35 @@ def _valid_bronze_capture(
         and status_tx.get("seq") == probe.get("status_request_seq")
         and write_ok.get("seq") == probe.get("status_write_ok_seq")
         and decoded.get("seq") == probe.get("decoded_response_seq")
+    )
+    if not correlated:
+        return False
+    freshness = bronze.get("status_freshness")
+    if freshness is None:
+        return True
+    return bool(
+        isinstance(freshness, dict)
+        and set(freshness)
+        == {
+            "capture_id",
+            "session_generation",
+            "status_notification_count_before",
+            "status_notification_count_after",
+            "decoded_response_seq",
+            "decoded_response_at_utc",
+            "status_measurement",
+        }
+        and freshness.get("capture_id") == probe.get("capture_id")
+        and freshness.get("session_generation") == status_tx.get("session_generation")
+        and freshness.get("decoded_response_seq") == decoded.get("seq")
+        and freshness.get("decoded_response_at_utc") == decoded.get("utc")
+        and freshness.get("status_measurement") == decoded.get("status_measurement")
+        and type(freshness.get("status_notification_count_before")) is int
+        and type(freshness.get("status_notification_count_after")) is int
+        and 0
+        <= freshness["status_notification_count_before"]
+        < freshness["status_notification_count_after"]
+        <= 1_000_000_000
     )
 
 
@@ -517,6 +546,57 @@ def assess_run_gate(
         outcome = row.get("outcome")
         if outcome not in PASS_OUTCOMES:
             failure_category = row.get("failure_category")
+            if step_id == "read_only_probe":
+                artifacts = _verified_artifact_refs(row, run_directory)
+                bronze_artifact = next(
+                    (
+                        item
+                        for item in artifacts
+                        if Path(item["path"]).name == "tier-bronze-read-only.json"
+                    ),
+                    None,
+                )
+                bronze_bytes = (
+                    _safe_read_file(run_directory, bronze_artifact["path"])
+                    if bronze_artifact is not None
+                    else None
+                )
+                try:
+                    bronze = (
+                        json.loads(bronze_bytes) if bronze_bytes is not None else None
+                    )
+                except UnicodeError, ValueError:
+                    bronze = None
+                if (
+                    isinstance(bronze, dict)
+                    and bronze.get("fresh_verified_samples") is not True
+                ):
+                    freshness = bronze.get("status_freshness")
+                    marker_advanced = bool(
+                        isinstance(freshness, dict)
+                        and type(freshness.get("status_notification_count_before"))
+                        is int
+                        and type(freshness.get("status_notification_count_after"))
+                        is int
+                        and freshness["status_notification_count_after"]
+                        > freshness["status_notification_count_before"]
+                    )
+                    blockers.append(
+                        _finding(
+                            step_id,
+                            (
+                                "uncorrelated_capture"
+                                if marker_advanced
+                                else "missing_new_status_notification"
+                            ),
+                            (
+                                "the accepted status notification is not correlated with the sampled values"
+                                if marker_advanced
+                                else "no advancing status-notification marker was observed in the current session"
+                            ),
+                            execution_path,
+                        )
+                    )
             refresh_failed = failure_category in {
                 "refresh_failed",
                 "refresh_unavailable",
@@ -596,18 +676,40 @@ def assess_run_gate(
 
                 samples_fresh = bool(
                     isinstance(bronze, dict)
-                    and _bronze_samples_fresh(bronze.get("samples", []))
+                    and _bronze_samples_fresh(
+                        bronze.get("samples", []),
+                        status_evidence=bronze.get("status_freshness"),
+                        status_event=(
+                            {
+                                "event": "notification_decoded",
+                                "capture_id": bronze["status_freshness"].get(
+                                    "capture_id"
+                                ),
+                                "session_generation": bronze["status_freshness"].get(
+                                    "session_generation"
+                                ),
+                                "seq": bronze["status_freshness"].get(
+                                    "decoded_response_seq"
+                                ),
+                                "utc": bronze["status_freshness"].get(
+                                    "decoded_response_at_utc"
+                                ),
+                                "status_measurement": bronze["status_freshness"].get(
+                                    "status_measurement"
+                                ),
+                            }
+                            if isinstance(bronze.get("status_freshness"), dict)
+                            else None
+                        ),
+                    )
                 )
             except ImportError, TypeError:
                 samples_fresh = False
-            if (
-                not isinstance(bronze, dict)
-                or bronze.get("fresh_verified_samples") is not True
-                or not samples_fresh
-                or bronze.get("physical_observation") != "plausible"
-                or status_exchange is None
-                or not isinstance(routes, list)
-                or not _valid_bronze_capture(
+            status_capture_valid = bool(
+                isinstance(bronze, dict)
+                and status_exchange is not None
+                and isinstance(routes, list)
+                and _valid_bronze_capture(
                     run_directory,
                     bronze,
                     run_id=execution.get("run_id", ""),
@@ -615,12 +717,47 @@ def assess_run_gate(
                     requested_route=requested_route,
                     status_exchange=status_exchange,
                 )
+            )
+            if not samples_fresh:
+                freshness = (
+                    bronze.get("status_freshness") if isinstance(bronze, dict) else None
+                )
+                if (
+                    not isinstance(freshness, dict)
+                    or type(freshness.get("status_notification_count_before"))
+                    is not int
+                    or type(freshness.get("status_notification_count_after")) is not int
+                    or freshness["status_notification_count_after"]
+                    <= freshness["status_notification_count_before"]
+                ):
+                    freshness_reason = "missing_new_status_notification"
+                    freshness_message = "no advancing status-notification marker was observed in the current session"
+                elif not status_capture_valid:
+                    freshness_reason = "uncorrelated_capture"
+                    freshness_message = "the status notification is not bound to the captured request and current session"
+                else:
+                    freshness_reason = "rest_timestamp_stale"
+                    freshness_message = "REST sample timestamps are stale and the accepted status does not prove both samples fresh within 60 seconds"
+                blockers.append(
+                    _finding(
+                        step_id,
+                        freshness_reason,
+                        freshness_message,
+                        execution_path,
+                    )
+                )
+            if (
+                not isinstance(bronze, dict)
+                or bronze.get("fresh_verified_samples") is not True
+                or not samples_fresh
+                or bronze.get("physical_observation") != "plausible"
+                or not status_capture_valid
             ):
                 blockers.append(
                     _finding(
                         step_id,
                         "incomplete_protocol_proof",
-                        "fresh telemetry, physical observation, or correlated complete status trace is missing",
+                        "physical observation or correlated complete status trace is missing",
                         execution_path,
                     )
                 )
