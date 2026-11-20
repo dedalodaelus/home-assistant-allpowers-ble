@@ -693,6 +693,8 @@ def _captured_archive(
                             "elapsed_ms": 5.0,
                             "event": "capture_stopped",
                             "capture_id": trace["capture_id"],
+                            "session_generation": None,
+                            "observed_route": "unverified",
                         }
                     ]
                     if stale_rest_fallback
