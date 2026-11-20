@@ -3308,50 +3308,84 @@ def _verified_review_stage_paths(
     if len(matches) != 1:
         return None
     run = matches[0]
-    references = run.get("evidence")
-    if (
-        not isinstance(references, list)
-        or not references
-        or any(not isinstance(item, str) for item in references)
-        or len(set(references)) != len(references)
-    ):
-        return None
-    stage_references = set(references)
-    for section in (
-        "bronze_evidence",
-        "write_capabilities",
-        "scenarios",
-        "feature_presence",
-    ):
-        rows = run.get(section)
-        if not isinstance(rows, dict):
-            continue
-        for item in rows.values():
-            evidence_refs = item.get("evidence") if isinstance(item, dict) else None
-            if isinstance(evidence_refs, list):
-                if any(not isinstance(reference, str) for reference in evidence_refs):
-                    return None
-                stage_references.update(evidence_refs)
-    expected_run_dir = (
-        PurePosixPath("tests/hil/fixtures") / revision_id / "runs" / run_id
-    )
+    # Include every matrix artifact so the printed git add command can produce
+    # a checkout in which validate_matrix can verify all included runs.
+    stage_references: set[str] = set()
     digests: dict[str, str] = {}
     try:
-        for reference in stage_references:
-            relative = PurePosixPath(reference)
+        for matrix_revision in matrix.get("revisions", []):
+            if not isinstance(matrix_revision, dict):
+                return None
+            matrix_revision_id = matrix_revision.get("id")
             if (
-                "\\" in reference
-                or relative.is_absolute()
-                or any(part in {"", ".", ".."} for part in relative.parts)
-                or not relative.is_relative_to(expected_run_dir)
+                not isinstance(matrix_revision_id, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", matrix_revision_id)
+                is None
             ):
                 return None
-            target = repo_root.joinpath(*relative.parts)
-            _reject_symlink_components(target, repo_root)
-            metadata = target.lstat()
-            if not stat.S_ISREG(metadata.st_mode):
-                return None
-            digests[reference] = hashlib.sha256(target.read_bytes()).hexdigest()
+            for matrix_run in matrix_revision.get("runs", []):
+                if not isinstance(matrix_run, dict):
+                    return None
+                matrix_run_id = matrix_run.get("run_id")
+                if (
+                    not isinstance(matrix_run_id, str)
+                    or re.fullmatch(r"archive-[a-f0-9]{64}", matrix_run_id) is None
+                ):
+                    return None
+                references = matrix_run.get("evidence")
+                if (
+                    not isinstance(references, list)
+                    or not references
+                    or any(not isinstance(item, str) for item in references)
+                    or len(set(references)) != len(references)
+                ):
+                    return None
+                run_references = set(references)
+                for section in (
+                    "bronze_evidence",
+                    "write_capabilities",
+                    "scenarios",
+                    "feature_presence",
+                ):
+                    rows = matrix_run.get(section)
+                    if not isinstance(rows, dict):
+                        continue
+                    for item in rows.values():
+                        evidence_refs = (
+                            item.get("evidence") if isinstance(item, dict) else None
+                        )
+                        if isinstance(evidence_refs, list):
+                            if any(
+                                not isinstance(reference, str)
+                                for reference in evidence_refs
+                            ):
+                                return None
+                            run_references.update(evidence_refs)
+                expected_run_dir = (
+                    PurePosixPath("tests/hil/fixtures")
+                    / matrix_revision_id
+                    / "runs"
+                    / matrix_run_id
+                )
+                for reference in run_references:
+                    relative = PurePosixPath(reference)
+                    if (
+                        "\\" in reference
+                        or relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or not relative.is_relative_to(expected_run_dir)
+                    ):
+                        return None
+                    target = repo_root.joinpath(*relative.parts)
+                    _reject_symlink_components(target, repo_root)
+                    metadata = target.lstat()
+                    if not stat.S_ISREG(metadata.st_mode):
+                        return None
+                    if matrix_run_id == run_id:
+                        digests[reference] = hashlib.sha256(
+                            target.read_bytes()
+                        ).hexdigest()
+                stage_references.update(run_references)
     except HAAPIError, OSError, ValueError:
         return None
 
@@ -3748,7 +3782,13 @@ def _onboard_import_review(
         )
         return False
 
-    attained_tier = selected["tier"].title()
+    # Scope evaluation can be higher because of older runs. State only the
+    # highest tier independently attained by this acquisition and reviewed in
+    # this onboarding request.
+    attained_tier = min(
+        (isolated_tier, requested_tier),
+        key=lambda tier: tier_rank.get(tier, 0),
+    ).title()
     title = f"test(hil): add reviewed {model} {attained_tier} evidence"
     evidence_paths = stage_paths[1:]
     controls = (
@@ -3860,13 +3900,16 @@ def _onboard_import_review(
             "(higher-tier reviewer); #330 (onboard orchestration)"
         ),
         "summary": (
-            f"Add independently reviewed {attained_tier} qualification evidence for {model}, "
+            f"Add independently reviewed {attained_tier} qualification evidence for run "
+            f"{run_id} on {model}, "
             f"hardware {hardware}, firmware {firmware}, on the observed {route} "
             "route. The linked public evidence paths substantiate the hardware and "
             "revision checklist item for this exact scope. The related qualification "
             "and reviewer issues are linked; a duplicate issue/PR search has not been "
             "automatically performed, so that checklist item remains unchecked. "
-            "No output-write capability is claimed. Release tooling owns "
+            "No new production write authorization is requested or granted; "
+            f"scope-specific reviewed control evidence is included for {', '.join(reviewed_controls) or 'no controls'}. "
+            "Release tooling owns "
             "CHANGELOG.md; no changelog entry is included. No user-facing strings "
             "changed, so translations are not applicable. The main-source-branch "
             "checklist item applies only to main-target PRs."
@@ -3891,7 +3934,7 @@ def _onboard_import_review(
         print("Unable to generate the complete PR body:", ex)
         return False
     print(
-        f"REVIEWED TIER: {selected['tier'].title()} ({model} / {hardware} / {firmware} / {route})"
+        f"REVIEWED TIER: {attained_tier} ({model} / {hardware} / {firmware} / {route})"
     )
     print("READY FOR QUALIFICATION PR. Inspect the staged diff and body first.")
     print("Local PR body:", body_path)

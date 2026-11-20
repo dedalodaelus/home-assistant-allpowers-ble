@@ -482,6 +482,7 @@ def _captured_archive(
     bronze_protocol_outcome: str = "pass",
     bronze_write_completion: str = "write_ok",
     stale_rest_fallback: bool = False,
+    started_at: str | None = None,
 ) -> Path:
     environment = {
         "schema_version": 1,
@@ -506,7 +507,7 @@ def _captured_archive(
         "qualification_status": "inconclusive",
         "mode": "read_only_preflight",
         "scenario_id": "read_only_snapshot",
-        "started_at": "2026-11-09T12:00:00+00:00",
+        "started_at": started_at or "2026-11-09T12:00:00+00:00",
         "device": {
             "model": _fact("R600", "ha_device_registry"),
             "hardware_version": _fact("0.3", "ha_device_registry"),
@@ -808,14 +809,18 @@ def _captured_archive(
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
-def _standard_tier_suite_archive(path: Path) -> Path:
+def _standard_tier_suite_archive(
+    path: Path,
+    *,
+    run_id: str = "abcdef0123456789",
+    started_at: str = "2026-11-09T12:00:00+00:00",
+) -> Path:
     """Export schema-realistic Bronze, Silver, Gold, and reconnect fixtures."""
     from scripts.hil.cli import _reviewable_tier_step_artifact
     from scripts.hil.evidence import export_archive
     from scripts.hil.runner import correlate_transaction
 
     route = "local_adapter"
-    run_id = "abcdef0123456789"
     source_root = path / "source"
     archive = _captured_archive(
         source_root,
@@ -823,6 +828,7 @@ def _standard_tier_suite_archive(path: Path) -> Path:
         "1.1",
         run_id,
         bronze_reviewable=True,
+        started_at=started_at,
     )
     del archive
     parent_root = source_root / f"run-{run_id}"
@@ -4589,6 +4595,212 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         text=True,
     )
     assert "HIL qualification validation passed" in direct_validation.stdout
+
+
+def _onboard_review_answers(tier: str, *, reviewer: str) -> list[str]:
+    count = {"silver": 24, "gold": 36}[tier]
+    return [
+        "yes",
+        "APPLY IMPORT",
+        "REVIEWER READY",
+        *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
+        reviewer,
+        "yes",
+        *("yes" for _ in range(count - 1)),
+        "APPLY REVIEW",
+    ]
+
+
+@pytest.mark.parametrize(("tier", "prior_gold"), [("silver", True), ("gold", False)])
+def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+    prior_gold: bool,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    template_target = repo_root / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    template_target.parent.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_target,
+    )
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "scripts",
+        repo_root / "scripts",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+
+    def complete_handoff(archive: Path, requested_tier: str, output: Path) -> str:
+        output.mkdir(parents=True, exist_ok=True)
+        responses = iter(
+            _onboard_review_answers(requested_tier, reviewer="independent reviewer")
+        )
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+        proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+        assert cli._onboard_import_review(
+            archive,
+            output,
+            requested_tier,
+            repo_root=repo_root,
+            matrix_path=matrix_path,
+        )
+        return proposal["run_id"]
+
+    if prior_gold:
+        old_archive = _standard_tier_suite_archive(
+            tmp_path / "older-gold", run_id="1111111111111111"
+        )
+        complete_handoff(old_archive, "gold", tmp_path / "old-output")
+        capsys.readouterr()
+
+    archive = _standard_tier_suite_archive(
+        tmp_path / "new-acquisition",
+        run_id="2222222222222222",
+        started_at=(
+            "2026-11-08T12:00:00+00:00" if prior_gold else "2026-11-09T12:00:00+00:00"
+        ),
+    )
+    expected_run_id = complete_handoff(archive, tier, tmp_path / "operator-run")
+    output = capsys.readouterr().out
+    generated_body = (tmp_path / "operator-run" / "pr.md").read_text(encoding="utf-8")
+    expected_tier = tier.title()
+    assert f"REVIEWED TIER: {expected_tier}" in output
+    assert f"add reviewed R600 {expected_tier} evidence" in output
+    assert expected_run_id in generated_body
+    if prior_gold:
+        assert "add reviewed R600 Gold evidence" not in output
+    assert (
+        "No new production write authorization is requested or granted"
+        in generated_body
+    )
+    assert "scope-specific reviewed control evidence" in generated_body
+
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    runs = [run for revision in matrix["revisions"] for run in revision["runs"]]
+    from scripts.hil.tiers import evaluate_tiers
+
+    scope_tier = evaluate_tiers(matrix)["tiers"][0]["tier"]
+    if prior_gold:
+        assert scope_tier == "gold"
+        assert expected_tier == "Silver"
+    isolated = json.loads(json.dumps(matrix))
+    for revision in isolated["revisions"]:
+        revision["runs"] = [
+            run for run in revision["runs"] if run["run_id"] == expected_run_id
+        ]
+    assert evaluate_tiers(isolated)["tiers"][0]["tier"] == tier
+    expected_paths = {matrix_path.relative_to(repo_root).as_posix()}
+    for run in runs:
+        expected_paths.update(run["evidence"])
+        for section in (
+            "bronze_evidence",
+            "write_capabilities",
+            "scenarios",
+            "feature_presence",
+        ):
+            for record in run.get(section, {}).values():
+                expected_paths.update(record.get("evidence", []))
+    add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
+    stage_paths = shlex.split(add_line)[2:]
+    assert set(stage_paths) == expected_paths
+    subprocess.run(["git", "-C", str(repo_root), "add", *stage_paths], check=True)
+    staged = subprocess.run(
+        ["git", "-C", str(repo_root), "diff", "--cached", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert set(staged) == expected_paths
+
+    clean_checkout = tmp_path / "clean-checkout"
+    clean_checkout.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout-index",
+            "--prefix",
+            str(clean_checkout) + "/",
+            "-a",
+        ],
+        check=True,
+    )
+    clean_matrix = clean_checkout / matrix_path.relative_to(repo_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", clean_checkout)
+    errors, _ = validate_hil_qualification.validate_matrix(
+        json.loads(clean_matrix.read_text(encoding="utf-8")),
+        matrix_path=clean_matrix,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+    run = next(item for item in runs if item["run_id"] == expected_run_id)
+    assert (clean_checkout / run["evidence"][0]).is_file()
+
+
+def test_inconclusive_silver_review_does_not_generate_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    template_target = repo_root / ".github" / "PULL_REQUEST_TEMPLATE.md"
+    template_target.parent.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_target,
+    )
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _standard_tier_suite_archive(
+        tmp_path / "inconclusive", run_id="3333333333333333"
+    )
+    (tmp_path / "operator-run").mkdir()
+    responses = iter(
+        [
+            "yes",
+            "APPLY IMPORT",
+            "REVIEWER READY",
+            *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
+            "Silver reviewer",
+            "yes",
+            *("no" for _ in range(23)),
+            "APPLY REVIEW",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+
+    assert not cli._onboard_import_review(
+        archive,
+        tmp_path / "operator-run",
+        "silver",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+    output = capsys.readouterr().out
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (tmp_path / "operator-run" / "pr.md").exists()
 
 
 @pytest.mark.parametrize("review_end", ["cancel", "inconclusive"])

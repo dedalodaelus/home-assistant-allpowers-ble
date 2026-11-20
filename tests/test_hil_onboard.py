@@ -254,9 +254,7 @@ def test_complete_bronze_run_is_eligible_for_review(tmp_path):
     )
 
 
-def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
-    tmp_path,
-):
+def _silver_gate_run(tmp_path, *, absent_feature=None, claimed_presence="absent"):
     private, session, execution, artifact, status_exchange = _run(tmp_path)
     tier_steps = [
         ("ac_output_cycle", "ac_output", "write"),
@@ -279,9 +277,24 @@ def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
     session["runtime_capabilities"]["features"].update(
         {feature: {"physical_presence": "present"} for _, feature, _ in tier_steps}
     )
+    if absent_feature is not None:
+        absent_step = next(
+            step
+            for step in session["test_plan"]["steps"]
+            if step["id"] == f"{absent_feature}_cycle"
+        )
+        absent_step["action"] = "not_applicable"
+        absent_step["eligibility"] = "not_applicable"
+        absent_step["reasons"] = ["runtime profile substantiates physical absence"]
+        session["runtime_capabilities"]["features"][absent_feature] = {
+            "physical_presence": claimed_presence
+        }
     execution["requested_tier"] = "silver"
     execution["execution_tier"] = "silver"
     for step_id, _feature, _action in tier_steps:
+        if absent_feature == _feature:
+            execution["steps"].append({"step_id": step_id, "outcome": "not_applicable"})
+            continue
         machine_artifact = artifact
         if _action == "write":
             action_count = 4
@@ -345,6 +358,14 @@ def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
         )
     _save(private, session, execution)
 
+    return private, session, execution, artifact, status_exchange
+
+
+def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
+    tmp_path,
+):
+    private, session, execution, artifact, status_exchange = _silver_gate_run(tmp_path)
+
     assert (
         assess_run_gate(
             private,
@@ -375,6 +396,48 @@ def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
     assert any(
         item["step_id"] == "ac_output_cycle"
         and item["outcome"] == "incomplete_or_unsafe_restoration"
+        for item in blockers
+    )
+
+
+def test_verified_absence_can_exclude_a_required_silver_control(tmp_path):
+    private, _, _, _, status_exchange = _silver_gate_run(
+        tmp_path, absent_feature="ac_output"
+    )
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="silver",
+        status_exchange=status_exchange,
+    )
+
+    assert not any(
+        item["step_id"] == "ac_output_cycle" and item["outcome"] == "invalid_exclusion"
+        for item in blockers
+    )
+    assert blockers == []
+
+
+@pytest.mark.parametrize("claimed_presence", ["present", "unknown"])
+def test_required_silver_control_cannot_be_excluded_without_verified_absence(
+    tmp_path, claimed_presence
+):
+    private, _, _, _, status_exchange = _silver_gate_run(
+        tmp_path,
+        absent_feature="ac_output",
+        claimed_presence=claimed_presence,
+    )
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="silver",
+        status_exchange=status_exchange,
+    )
+
+    assert any(
+        item["step_id"] == "ac_output_cycle" and item["outcome"] == "invalid_exclusion"
         for item in blockers
     )
 

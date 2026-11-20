@@ -55,6 +55,16 @@ TIER_REQUIRED_STEP_IDS = {
     },
 }
 
+TIER_OPTIONAL_ABSENCE_FEATURES = {
+    "ac_output_cycle": "ac_output",
+    "dc_output_cycle": "dc_output",
+    "light_output_cycle": "light_output",
+    "eco_mode_reversal": "eco_mode",
+    "work_mode_reversal": "work_mode",
+    "eco_timeout_reversal": "eco_timeout",
+    "car_charger_reversal": "car_charger",
+}
+
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
@@ -680,8 +690,6 @@ def assess_run_gate(
             planned.get("eligibility") == "not_applicable"
             or planned.get("action") == "not_applicable"
         ):
-            if step_id in TIER_REQUIRED_STEP_IDS.get(requested_tier, set()):
-                continue
             capabilities = session.get("runtime_capabilities")
             features = (
                 capabilities.get("features") if isinstance(capabilities, dict) else None
@@ -691,9 +699,17 @@ def assess_run_gate(
                 features.get(feature) if isinstance(features, dict) else None
             )
             reasons = planned.get("reasons")
+            expected_absent_feature = TIER_OPTIONAL_ABSENCE_FEATURES.get(step_id)
             substantiated_absence = (
                 planned.get("action") == "not_applicable"
                 and planned.get("eligibility") == "not_applicable"
+                and (
+                    step_id not in TIER_REQUIRED_STEP_IDS.get(requested_tier, set())
+                    or (
+                        expected_absent_feature is not None
+                        and feature == expected_absent_feature
+                    )
+                )
                 and isinstance(feature_facts, dict)
                 and feature_facts.get("physical_presence") == "absent"
                 and isinstance(reasons, list)
@@ -709,7 +725,7 @@ def assess_run_gate(
                     _finding(
                         step_id,
                         "invalid_exclusion",
-                        "optional step exclusion is not backed by verified physical absence",
+                        "step exclusion is not backed by a unique execution result and verified physical absence",
                         execution_path,
                     )
                 )

@@ -2750,6 +2750,97 @@ def test_onboard_dispatches_candidate_through_separate_grant_consents(
                 hashlib.sha256(trace_path.read_bytes()).hexdigest()
                 == trace_artifact["sha256"]
             )
+    if expected_outcome == "pass":
+        # Feed the real Fake HA/GATT-produced action back through the production
+        # pre-export gate. This candidate acquisition has only the two consented
+        # transitions, so Silver must reject it as an incomplete four-action
+        # output cycle despite the child runner's successful step result.
+        from scripts.hil.onboard import assess_run_gate
+
+        feature = {"physical_presence": "unknown"}
+        plan_steps = [
+            {
+                "id": "read_only_probe",
+                "feature": "telemetry",
+                "action": "read_only",
+                "eligibility": "eligible",
+                "required_evidence": ["fresh telemetry", "physical plausibility"],
+            },
+            {
+                "id": "physical_plausibility_observation",
+                "feature": "telemetry",
+                "action": "manual",
+                "eligibility": "eligible",
+                "required_evidence": [
+                    "separate operator observation",
+                    "fresh telemetry context",
+                ],
+            },
+            *[
+                {
+                    "id": f"{name}_cycle",
+                    "feature": name,
+                    "action": "write",
+                    "eligibility": (
+                        "pending_authorization" if name == "dc_output" else "blocked"
+                    ),
+                    "required_evidence": [],
+                }
+                for name in ("ac_output", "dc_output", "light_output")
+            ],
+            {
+                "id": "basic_reconnect",
+                "feature": "telemetry",
+                "action": "manual",
+                "eligibility": "blocked",
+                "required_evidence": [],
+            },
+            {
+                "id": "minimum_output_requirement",
+                "feature": "output",
+                "action": "requirement",
+                "eligibility": "blocked",
+                "required_evidence": [],
+            },
+        ]
+        plan_device = {
+            "model": "S500",
+            "hardware_revision": "1",
+            "firmware_revision": "1",
+            "build_provenance": {"build_match": "verified"},
+        }
+        session = {
+            "schema_version": 1,
+            "run_id": "parent-run",
+            "device": {
+                "model": {"value": "S500", "verified": True},
+                "hardware_version": {"value": "1", "verified": True},
+                "firmware_version": {"value": "1", "verified": True},
+            },
+            "route": {"requested": "auto"},
+            "integration_build": {"build_match": "verified"},
+            "runtime_capabilities": {"features": {"dc_output": feature}},
+            "test_plan": {
+                "requested_tier": "silver",
+                "device": plan_device,
+                "steps": plan_steps,
+            },
+        }
+        (root / "session.json").write_text(json.dumps(session), encoding="utf-8")
+        (root / "environment.json").write_text(
+            json.dumps({"integration": {"build_match": "verified"}}),
+            encoding="utf-8",
+        )
+        blockers = assess_run_gate(
+            root,
+            run_result=0,
+            requested_tier="silver",
+        )
+        assert any(
+            item["step_id"] == "dc_output_cycle"
+            and item["outcome"] == "incomplete_or_unsafe_restoration"
+            for item in blockers
+        )
 
 
 def test_discovery_without_optional_config_entries(allpowers_registry):
