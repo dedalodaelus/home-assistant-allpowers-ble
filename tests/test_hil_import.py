@@ -4715,6 +4715,19 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
     add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
     stage_paths = shlex.split(add_line)[2:]
     assert set(stage_paths) == expected_paths
+    current_prefix = f"tests/hil/fixtures/r600-hw03/runs/{expected_run_id}/"
+    current_evidence = {
+        path for path in expected_paths if path.startswith(current_prefix)
+    }
+    assert current_evidence
+    assert all(path in generated_body for path in current_evidence)
+    assert f"stages all {len(stage_paths) - 1} exact public" in generated_body
+    if prior_gold:
+        old_run = next(item for item in runs if item["run_id"] != expected_run_id)
+        old_prefix = f"tests/hil/fixtures/r600-hw03/runs/{old_run['run_id']}/"
+        old_evidence = {path for path in expected_paths if path.startswith(old_prefix)}
+        assert old_evidence
+        assert not any(path in generated_body for path in old_evidence)
     subprocess.run(["git", "-C", str(repo_root), "add", *stage_paths], check=True)
     staged = subprocess.run(
         ["git", "-C", str(repo_root), "diff", "--cached", "--name-only"],

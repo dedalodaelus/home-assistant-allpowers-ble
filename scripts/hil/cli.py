@@ -3790,7 +3790,14 @@ def _onboard_import_review(
         key=lambda tier: tier_rank.get(tier, 0),
     ).title()
     title = f"test(hil): add reviewed {model} {attained_tier} evidence"
-    evidence_paths = stage_paths[1:]
+    current_run_prefix = (
+        PurePosixPath("tests/hil/fixtures") / proposal["revision_id"] / "runs" / run_id
+    ).as_posix() + "/"
+    # The git handoff includes every run needed to validate the complete matrix,
+    # while this PR's hardware claims must cite only this acquisition's evidence.
+    evidence_paths = [
+        path for path in stage_paths[1:] if path.startswith(current_run_prefix)
+    ]
     controls = (
         selected_run.get("write_capabilities", {})
         if isinstance(selected_run, dict)
@@ -3874,8 +3881,8 @@ def _onboard_import_review(
             f"Independently reviewed controls: {', '.join(reviewed_controls) or 'none'}. "
             f"Independently reviewed scenarios: {', '.join(reviewed_scenarios) or 'none'}. "
             f"Independently reviewed physical absences: {', '.join(reviewed_absences) or 'none'}. "
-            f"The validated handoff stages all {len(evidence_paths)} exact public and "
-            "review evidence files referenced by this run."
+            f"The validated handoff stages all {len(stage_paths) - 1} exact public "
+            "and review evidence files needed to validate the complete matrix."
             if requested_tier in {"silver", "gold"}
             else "This evidence does not qualify output writes or other routes, firmware, or hardware revisions."
         )
