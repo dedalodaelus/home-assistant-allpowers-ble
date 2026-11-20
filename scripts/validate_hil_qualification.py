@@ -1414,6 +1414,9 @@ def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
             if row.get("capture_id") == capture_id
             and row.get("event") == "capture_stopped"
         ]
+        stopped_generation = (
+            stopped[0].get("session_generation") if len(stopped) == 1 else None
+        )
         write_attempt = next(
             (
                 row
@@ -1451,7 +1454,12 @@ def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
             and freshness.get("decoded_response_seq") == decoded_seq
             and len(started) == len(stopped) == 1
             and started[0].get("session_generation") == generation
-            and stopped[0].get("session_generation") == generation
+            and (
+                stopped_generation is None
+                or (
+                    type(stopped_generation) is int and stopped_generation == generation
+                )
+            )
             and started[0].get("seq") == freshness.get("capture_started_seq")
             and stopped[0].get("seq") == freshness.get("capture_stopped_seq")
             and isinstance(write_attempt, dict)

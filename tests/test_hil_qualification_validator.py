@@ -103,6 +103,19 @@ def test_capture_bound_fresh_telemetry_requires_matching_public_status_event(
     events_path.write_text(
         "".join(
             json.dumps(
+                {**event, "session_generation": 8}
+                if event["event"] == "capture_stopped"
+                else event
+            )
+            + "\n"
+            for event in events
+        ),
+        encoding="utf-8",
+    )
+    assert not validator._capture_bound_fresh_telemetry(item, tmp_path)
+    events_path.write_text(
+        "".join(
+            json.dumps(
                 {**event, "capture_id": "different-capture"}
                 if event["event"] == "status_data_decoded"
                 else event
