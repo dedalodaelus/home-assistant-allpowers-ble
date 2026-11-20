@@ -115,6 +115,30 @@ def test_capture_bound_fresh_telemetry_requires_matching_public_status_event(
     assert not validator._capture_bound_fresh_telemetry(item, tmp_path)
 
 
+def test_capture_bound_fresh_telemetry_rejects_missing_status_proof(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "tier-bronze-read-only.json").write_text(
+        json.dumps(
+            {
+                "status_freshness": None,
+                "protocol_probe": "verified",
+                "protocol_capture_id": "capture-1",
+                "protocol_session_generation": 7,
+                "protocol_status_request_seq": 2,
+                "protocol_status_write_ok_seq": 3,
+                "protocol_decoded_response_seq": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "events.jsonl").write_text("", encoding="utf-8")
+
+    assert not validator._capture_bound_fresh_telemetry(
+        {"evidence": ["tier-bronze-read-only.json", "events.jsonl"]}, tmp_path
+    )
+
+
 def _digest_manifest(root: Path, evidence: list[str]) -> dict[str, str]:
     return {
         item: hashlib.sha256((root / item).read_bytes()).hexdigest()

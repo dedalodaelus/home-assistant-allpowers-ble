@@ -14,6 +14,8 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if __package__ in {None, ""} and str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 MATRIX_SCHEMA_VERSION = 3
 DEFAULT_MATRIX = ROOT / "tests" / "hil" / "qualification_matrix.json"
 STATUSES = {"pass", "fail", "pending", "not_applicable", "inconclusive"}
@@ -1373,12 +1375,18 @@ def _capture_bound_fresh_telemetry(item: dict[str, Any], root: Path) -> bool:
         return False
     try:
         bronze = json.loads((root / bronze_path).read_text(encoding="utf-8"))
+        if not isinstance(bronze, dict):
+            return False
+        freshness = bronze.get("status_freshness")
+        if not isinstance(freshness, dict):
+            return False
         events = [
             json.loads(line)
             for line in (root / events_path).read_text(encoding="utf-8").splitlines()
             if line
         ]
-        freshness = bronze.get("status_freshness")
+        if any(not isinstance(row, dict) for row in events):
+            return False
         capture_id = bronze.get("protocol_capture_id")
         generation = bronze.get("protocol_session_generation")
         decoded_seq = bronze.get("protocol_decoded_response_seq")

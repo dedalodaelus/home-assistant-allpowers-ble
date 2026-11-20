@@ -6,10 +6,12 @@ import argparse
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 from typing import Any
 import zipfile
 
@@ -4394,6 +4396,11 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         template_target,
     )
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "scripts",
+        repo_root / "scripts",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -4511,6 +4518,23 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
     )
     assert errors == []
     assert all((clean_checkout / reference).is_file() for reference in run["evidence"])
+
+    direct_env = os.environ.copy()
+    direct_env.pop("PYTHONPATH", None)
+    direct_validation = subprocess.run(
+        [
+            sys.executable,
+            "scripts/validate_hil_qualification.py",
+            "--matrix",
+            matrix_path.relative_to(repo_root).as_posix(),
+        ],
+        cwd=repo_root,
+        env=direct_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "HIL qualification validation passed" in direct_validation.stdout
 
 
 @pytest.mark.parametrize("review_end", ["cancel", "inconclusive"])
