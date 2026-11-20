@@ -3175,6 +3175,21 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
         "light_output",
     }
     run = matrix["revisions"][0]["runs"][0]
+    from scripts.hil.cli import _verified_review_stage_paths
+
+    silver_stage = _verified_review_stage_paths(
+        matrix,
+        matrix_path,
+        tmp_path,
+        revision_id="r600-hw03",
+        run_id=run_id,
+        tier="silver",
+    )
+    assert silver_stage == [
+        "qualification_matrix.json",
+        *sorted(run["evidence"]),
+    ]
+    assert all((tmp_path / path).is_file() for path in silver_stage)
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
     for feature in ("ac_output", "dc_output", "light_output"):
         physical_review = run["write_capabilities"][feature]["physical_review"]
@@ -3221,7 +3236,44 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
         "car_charger",
     }
     run = matrix["revisions"][0]["runs"][0]
+    gold_stage = _verified_review_stage_paths(
+        matrix,
+        matrix_path,
+        tmp_path,
+        revision_id="r600-hw03",
+        run_id=run_id,
+        tier="gold",
+    )
+    assert gold_stage == [
+        "qualification_matrix.json",
+        *sorted(run["evidence"]),
+    ]
+    assert all((tmp_path / path).is_file() for path in gold_stage)
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+    # An older qualified run may keep the scope's tier, but cannot qualify a
+    # newly imported run with no reviewed Bronze, control, or scenario results.
+    from scripts.hil.cli import _isolated_run_tier
+
+    mixed = json.loads(json.dumps(matrix))
+    incomplete = json.loads(json.dumps(run))
+    incomplete["run_id"] = "archive-" + "a" * 64
+    incomplete["session_id"] = "archive-session-incomplete"
+    incomplete["bronze_evidence"] = {}
+    incomplete["write_capabilities"] = {}
+    incomplete["scenarios"] = {}
+    mixed["revisions"][0]["runs"].append(incomplete)
+    assert evaluate_tiers(mixed)["tiers"][0]["tier"] == "gold"
+    assert (
+        _isolated_run_tier(
+            mixed,
+            revision_id="r600-hw03",
+            run_id=incomplete["run_id"],
+            firmware="1.1",
+            route="local_adapter",
+        )
+        == "unqualified"
+    )
 
     # Removing the optional digest and final proof cannot turn off the archive
     # gate: imported origin comes from the archive identity and retained member

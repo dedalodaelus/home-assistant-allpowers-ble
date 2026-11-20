@@ -112,14 +112,25 @@ stable support qualification.
 ## Scope
 
 The `onboard` orchestration gates the actual guided result, route, build, fresh
-telemetry, physical observation, and correlated status trace before it offers
-the privacy-safe report/export flow. The imported ZIP remains inconclusive
-until the separate Bronze reviewer applies supported claims. Only after
-schema-v3 validation and the existing tier evaluator report the requested exact
-scope does `onboard` generate `pr.md` and print allowlisted Git/`gh` commands.
-It never commits, pushes, opens, or merges a PR. Higher tiers require their
-corresponding independent review implementation; a Platinum soak alone does not
-meet the pre-existing Gold requirement.
+telemetry, physical observation, correlated status trace, and each applicable
+Silver/Gold acquisition step before it offers privacy-safe report/export. The
+minimum-output requirement stays pending for independent review and is resolved
+by the matrix validator and tier evaluator. The imported ZIP remains
+inconclusive until the Bronze reviewer and, for Silver/Gold, the matching
+higher-tier reviewer apply supported claims. The handoff re-evaluates the
+imported run in isolation so an older run in the same scope cannot complete a
+new inconclusive acquisition. Only after schema-v3 validation and the existing
+tier evaluator report the requested exact scope does `onboard` generate
+`pr.md` and print `git add` commands containing the matrix and exact validated
+public evidence files. It never commits, pushes, opens, or merges a PR.
+
+Platinum remains explicitly blocked. The public archive/import schema does not
+preserve enough information to verify a scoped, continuous 24-hour soak across
+start, stop, and resume boundaries. A dedicated follow-up must version that
+contract, add fail-closed continuity validation and fixtures, then integrate an
+independent Platinum review. A standalone soak or a collection of resumed
+segments is not Platinum evidence, and this onboarding change does not claim
+Platinum support.
 
 Use this process when you need to:
 

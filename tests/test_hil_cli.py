@@ -358,11 +358,8 @@ def test_onboard_bronze_drives_wizard_and_real_public_export(
     assert fake.calls[0] == ("get", "/api/config")
 
 
-@pytest.mark.parametrize(
-    ("tier_choice", "tier_name"), [("2", "Silver"), ("3", "Gold"), ("4", "Platinum")]
-)
-def test_onboard_rejects_unsupported_tiers_before_starting_hil(
-    monkeypatch, tmp_path, allpowers_registry, capsys, tier_choice, tier_name
+def test_onboard_keeps_platinum_explicitly_blocked_before_starting_hil(
+    monkeypatch, tmp_path, allpowers_registry, capsys
 ):
     fake = FakeHA(allpowers_registry)
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
@@ -371,7 +368,7 @@ def test_onboard_rejects_unsupported_tiers_before_starting_hil(
         "_execute_tier_suite",
         lambda *_args: pytest.fail("unsupported tier must not start the HIL runner"),
     )
-    _onboard_tty(monkeypatch, [tier_choice])
+    _onboard_tty(monkeypatch, ["4"])
     output_root = tmp_path / "onboard-unsupported-tier"
 
     result = cli.main(
@@ -386,11 +383,79 @@ def test_onboard_rejects_unsupported_tiers_before_starting_hil(
     assert result == 2
     assert not output_root.exists()
     output = capsys.readouterr().out
-    assert f"Requested tier: {tier_name}" in output
-    assert f"The {tier_name} onboarding handoff is not supported" in output
-    assert "no HIL run was started" in output
-    assert "python -m scripts.hil run --suite read-only --route auto" in output
+    assert "Requested tier: Platinum" in output
+    assert "cannot verify a scoped, continuous 24-hour soak" in output
+    assert "No HIL run was started" in output
     assert not any(call[0] == "service" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("choice", "tier", "required_steps"),
+    [
+        (
+            "2",
+            "silver",
+            {
+                "ac_output_cycle",
+                "dc_output_cycle",
+                "light_output_cycle",
+                "basic_reconnect",
+            },
+        ),
+        (
+            "3",
+            "gold",
+            {
+                "ac_output_cycle",
+                "basic_reconnect",
+                "eco_mode_reversal",
+                "work_mode_reversal",
+                "guarded_recovery",
+            },
+        ),
+    ],
+)
+def test_onboard_dispatches_existing_silver_and_gold_tier_plan(
+    monkeypatch, tmp_path, allpowers_registry, choice, tier, required_steps
+):
+    fake = FakeHA(allpowers_registry)
+    monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_onboard_import_review", lambda *_args: True)
+    monkeypatch.setattr(
+        cli,
+        "_onboard_export",
+        lambda _directory, result, **kwargs: (
+            received.update({"export_tier": kwargs["requested_tier"]}) or result
+        ),
+    )
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _onboard_tty(monkeypatch, [choice, "RUN"])
+    received = {}
+
+    def finish_existing_runner(
+        _api, _args, _device, _environment, _output_dir, _run_id, plan, _capabilities
+    ):
+        received["tier"] = plan["requested_tier"]
+        received["steps"] = {step["id"] for step in plan["steps"]}
+        return 0
+
+    monkeypatch.setattr(cli, "_execute_tier_suite", finish_existing_runner)
+    assert (
+        cli.main(
+            [
+                "onboard",
+                "--ha-url",
+                "https://example.test",
+                "--output-root",
+                str(tmp_path / tier),
+            ]
+        )
+        == 0
+    )
+    assert received["tier"] == tier
+    assert received["export_tier"] == tier
+    assert required_steps <= received["steps"]
 
 
 def test_onboard_requires_clean_topic_branch_before_run(
