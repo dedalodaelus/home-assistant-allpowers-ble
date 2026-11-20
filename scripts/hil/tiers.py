@@ -402,11 +402,22 @@ def _bronze_proof(
             else None
         )
     if claim == "fresh_telemetry":
+        age = artifact.get("sample_age_seconds")
+        basis = artifact.get("freshness_basis", "recent_rest_sample")
         if (
             artifact.get("fresh") is not True
             or artifact.get("plausible") is not True
-            or type(artifact.get("sample_age_seconds")) is not int
-            or artifact["sample_age_seconds"] > 60
+            or type(age) is not int
+            or age < 0
+            or not (
+                basis == "recent_rest_sample"
+                and age <= 60
+                or basis == "capture_bound_status"
+                and age > 60
+                and hil_validation._capture_bound_fresh_telemetry(
+                    item, hil_validation.ROOT
+                )
+            )
         ):
             return None
         return {**artifact, "evidence": item["evidence"]}

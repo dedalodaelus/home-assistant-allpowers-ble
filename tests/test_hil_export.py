@@ -129,8 +129,9 @@ def test_export_requires_confirmation_and_archive_verifies(tmp_path: Path) -> No
     assert archive.read_bytes() == previous
 
 
+@pytest.mark.parametrize("invalid_measurement", [False, True])
 def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
-    tmp_path: Path,
+    tmp_path: Path, invalid_measurement: bool
 ) -> None:
     run = tmp_path / "guided"
     private = run
@@ -199,8 +200,9 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
                         "sampled_at_utc": "2026-11-09T12:00:00+00:00",
                         "telemetry": {
                             "battery": {
-                                "value": 50,
+                                "value": "50" if invalid_measurement else 50,
                                 "verified": True,
+                                "source": "ha_rest_entity_state",
                                 "sample_age_seconds": 5,
                                 "entity_id": "sensor.private_battery",
                             },
@@ -211,8 +213,9 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
                         "sampled_at_utc": "2026-11-09T12:00:01+00:00",
                         "telemetry": {
                             "battery": {
-                                "value": 51,
+                                "value": "51" if invalid_measurement else 51,
                                 "verified": True,
+                                "source": "ha_rest_entity_state",
                                 "sample_age_seconds": 4,
                             },
                             "telemetry_available": {"value": "on", "verified": True},
@@ -258,13 +261,10 @@ def test_guided_tier_execution_exports_only_bound_privacy_safe_summary(
     bronze = json.loads(bronze_payload)
     assert bronze["protocol_probe"] == "not_observed"
     assert bronze["qualification_status"] == "inconclusive"
-    assert bronze["fresh_verified_samples"] is True
+    assert bronze["fresh_verified_samples"] is not invalid_measurement
     assert [
         sample["telemetry"]["battery"]["value"] for sample in bronze["samples"]
-    ] == [
-        50,
-        51,
-    ]
+    ] == ([None, None] if invalid_measurement else [50, 51])
     assert b"sensor.private_battery" not in bronze_payload
     assert verify_public_archive(archive)["qualification_status"] == "inconclusive"
 

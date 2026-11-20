@@ -716,10 +716,41 @@ def _claim_support(
         == run.get("firmware_version")
     )
     samples = bronze.get("samples", [])
+    status_evidence = bronze.get("status_freshness")
+    status_event = None
+    if isinstance(status_evidence, dict):
+        status_event = next(
+            (
+                row
+                for row in _rows(members.get("events.jsonl", b""))
+                if row.get("seq") == status_evidence.get("decoded_response_seq")
+                and row.get("capture_id") == status_evidence.get("capture_id")
+            ),
+            None,
+        )
     telemetry = bool(
         bronze.get("fresh_verified_samples") is True
         and bronze.get("physical_observation") == "plausible"
-        and _bronze_samples_fresh(samples)
+        and isinstance(samples, list)
+        and all(
+            any(
+                key in {"battery", "input_power", "output_power", "remaining_time"}
+                and isinstance(record, dict)
+                and record.get("verified") is True
+                and type(record.get("sample_age_seconds")) is int
+                and record["sample_age_seconds"] >= 0
+                for key, record in sample.get("telemetry", {}).items()
+            )
+            for sample in samples
+            if isinstance(sample, dict)
+        )
+        and len(samples) == 2
+        and _bronze_samples_fresh(
+            samples,
+            status_evidence=status_evidence,
+            status_event=status_event,
+            allow_missing_source=True,
+        )
     )
     protocol = False
     protocol_evidence: list[str] = []
@@ -825,6 +856,12 @@ def _claim_support(
     ]
     if claim == "protocol_probe":
         evidence.extend(protocol_evidence)
+    elif claim == "fresh_telemetry" and isinstance(status_evidence, dict):
+        evidence.extend(
+            item
+            for item in refs
+            if isinstance(item, str) and Path(item).name == "events.jsonl"
+        )
     return (
         support,
         evidence,
@@ -993,8 +1030,38 @@ def review_imported_run(
                     and record.get("verified") is True
                     and type(record.get("sample_age_seconds")) is int
                 ]
+                recent_rest_ages = [
+                    min(
+                        record["sample_age_seconds"]
+                        for key, record in sample["telemetry"].items()
+                        if key
+                        in {"battery", "input_power", "output_power", "remaining_time"}
+                        and record.get("verified") is True
+                        and type(record.get("sample_age_seconds")) is int
+                        and 0 <= record["sample_age_seconds"] <= 60
+                    )
+                    for sample in samples
+                    if any(
+                        key
+                        in {"battery", "input_power", "output_power", "remaining_time"}
+                        and record.get("verified") is True
+                        and type(record.get("sample_age_seconds")) is int
+                        and 0 <= record["sample_age_seconds"] <= 60
+                        for key, record in sample["telemetry"].items()
+                    )
+                ]
+                rest_is_fresh = len(recent_rest_ages) == len(samples)
                 artifact.update(
-                    fresh=True, plausible=True, sample_age_seconds=max(ages)
+                    fresh=True,
+                    plausible=True,
+                    sample_age_seconds=(
+                        max(recent_rest_ages) if rest_is_fresh else max(ages)
+                    ),
+                    freshness_basis=(
+                        "recent_rest_sample"
+                        if rest_is_fresh
+                        else "capture_bound_status"
+                    ),
                 )
             files[root / artifact_rel] = (
                 json.dumps(artifact, sort_keys=True, indent=2) + "\n"
