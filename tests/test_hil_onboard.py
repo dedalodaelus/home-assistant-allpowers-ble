@@ -254,6 +254,194 @@ def test_complete_bronze_run_is_eligible_for_review(tmp_path):
     )
 
 
+def _silver_gate_run(tmp_path, *, absent_feature=None, claimed_presence="absent"):
+    private, session, execution, artifact, status_exchange = _run(tmp_path)
+    tier_steps = [
+        ("ac_output_cycle", "ac_output", "write"),
+        ("dc_output_cycle", "dc_output", "write"),
+        ("light_output_cycle", "light_output", "write"),
+        ("basic_reconnect", "telemetry", "manual"),
+        ("minimum_output_requirement", "output", "requirement"),
+    ]
+    session["test_plan"]["requested_tier"] = "silver"
+    session["test_plan"]["steps"].extend(
+        {
+            "id": step_id,
+            "feature": feature,
+            "action": action,
+            "eligibility": "eligible",
+            "required_evidence": [],
+        }
+        for step_id, feature, action in tier_steps
+    )
+    session["runtime_capabilities"]["features"].update(
+        {feature: {"physical_presence": "present"} for _, feature, _ in tier_steps}
+    )
+    if absent_feature is not None:
+        absent_step = next(
+            step
+            for step in session["test_plan"]["steps"]
+            if step["id"] == f"{absent_feature}_cycle"
+        )
+        absent_step["action"] = "not_applicable"
+        absent_step["eligibility"] = "not_applicable"
+        absent_step["reasons"] = ["runtime profile substantiates physical absence"]
+        session["runtime_capabilities"]["features"][absent_feature] = {
+            "physical_presence": claimed_presence
+        }
+    execution["requested_tier"] = "silver"
+    execution["execution_tier"] = "silver"
+    for step_id, _feature, _action in tier_steps:
+        if absent_feature == _feature:
+            execution["steps"].append({"step_id": step_id, "outcome": "not_applicable"})
+            continue
+        machine_artifact = artifact
+        if _action == "write":
+            action_count = 4
+            actions = []
+            for index in range(action_count):
+                trace_path = private / "traces" / f"{step_id}-{index}.json"
+                trace_path.parent.mkdir(exist_ok=True)
+                trace_path.write_text(json.dumps({"complete": True}), encoding="utf-8")
+                actions.append(
+                    {
+                        "outcome": "confirmed",
+                        "confirmed": True,
+                        "trace_valid": True,
+                        "trace_complete": True,
+                        "route": "active_proxy",
+                        "trace_route": "active_proxy",
+                        "trace_evidence": [
+                            {
+                                "path": f"traces/{trace_path.name}",
+                                "sha256": hashlib.sha256(
+                                    trace_path.read_bytes()
+                                ).hexdigest(),
+                            }
+                        ],
+                    }
+                )
+            machine_artifact = private / f"tier-{step_id}.json"
+            machine_artifact.write_text(
+                json.dumps(
+                    {
+                        "step_id": step_id,
+                        "outcome": "pass",
+                        "initial_state": "off",
+                        "restored_state": "off",
+                        "physical_restore_outcome": "correct",
+                        "final_restore_action_index": 3,
+                        "final_restore_outcome": "correct",
+                        "actions": actions,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        execution["steps"].append(
+            {
+                "step_id": step_id,
+                "outcome": (
+                    "pending_review"
+                    if step_id == "minimum_output_requirement"
+                    else "pass"
+                ),
+                "observed_routes": ["active_proxy"],
+                "machine_evidence": [
+                    {
+                        "path": machine_artifact.name,
+                        "sha256": hashlib.sha256(
+                            machine_artifact.read_bytes()
+                        ).hexdigest(),
+                    }
+                ],
+            }
+        )
+    _save(private, session, execution)
+
+    return private, session, execution, artifact, status_exchange
+
+
+def test_silver_pending_minimum_output_is_reviewable_not_an_acquisition_failure(
+    tmp_path,
+):
+    private, session, execution, artifact, status_exchange = _silver_gate_run(tmp_path)
+
+    assert (
+        assess_run_gate(
+            private,
+            run_result=0,
+            requested_tier="silver",
+            status_exchange=status_exchange,
+        )
+        == []
+    )
+
+    output_artifact = private / "tier-ac_output_cycle.json"
+    acquisition = json.loads(output_artifact.read_text(encoding="utf-8"))
+    acquisition["final_restore_outcome"] = "inconclusive"
+    output_artifact.write_text(json.dumps(acquisition), encoding="utf-8")
+    ac_step = next(
+        row for row in execution["steps"] if row["step_id"] == "ac_output_cycle"
+    )
+    ac_step["machine_evidence"][0]["sha256"] = hashlib.sha256(
+        output_artifact.read_bytes()
+    ).hexdigest()
+    _save(private, session, execution)
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="silver",
+        status_exchange=status_exchange,
+    )
+    assert any(
+        item["step_id"] == "ac_output_cycle"
+        and item["outcome"] == "incomplete_or_unsafe_restoration"
+        for item in blockers
+    )
+
+
+def test_verified_absence_can_exclude_a_required_silver_control(tmp_path):
+    private, _, _, _, status_exchange = _silver_gate_run(
+        tmp_path, absent_feature="ac_output"
+    )
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="silver",
+        status_exchange=status_exchange,
+    )
+
+    assert not any(
+        item["step_id"] == "ac_output_cycle" and item["outcome"] == "invalid_exclusion"
+        for item in blockers
+    )
+    assert blockers == []
+
+
+@pytest.mark.parametrize("claimed_presence", ["present", "unknown"])
+def test_required_silver_control_cannot_be_excluded_without_verified_absence(
+    tmp_path, claimed_presence
+):
+    private, _, _, _, status_exchange = _silver_gate_run(
+        tmp_path,
+        absent_feature="ac_output",
+        claimed_presence=claimed_presence,
+    )
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="silver",
+        status_exchange=status_exchange,
+    )
+
+    assert any(
+        item["step_id"] == "ac_output_cycle" and item["outcome"] == "invalid_exclusion"
+        for item in blockers
+    )
+
+
 @pytest.mark.parametrize("bad_measurement", ["missing", "non_numeric", "wrong_source"])
 def test_bronze_gate_rejects_recent_samples_without_numeric_rest_measurement(
     tmp_path, bad_measurement
@@ -503,7 +691,7 @@ def test_optional_exclusion_without_absence_evidence_fails_closed(tmp_path):
     )
 
 
-def test_unsupported_tier_cannot_enter_bronze_review(tmp_path):
+def test_silver_onboarding_requires_its_tier_specific_plan(tmp_path):
     private, session, execution, _, status_exchange = _run(tmp_path)
     session["test_plan"]["requested_tier"] = "silver"
     execution["requested_tier"] = "silver"
@@ -517,7 +705,11 @@ def test_unsupported_tier_cannot_enter_bronze_review(tmp_path):
         status_exchange=status_exchange,
     )
 
-    assert any(item["step_id"] == "independent_review" for item in blockers)
+    assert any(
+        item["step_id"] in {"ac_output_cycle", "basic_reconnect"}
+        and item["outcome"] == "missing_or_ambiguous_plan_step"
+        for item in blockers
+    )
 
 
 def test_artifact_path_cannot_escape_run_tree(tmp_path):

@@ -30,6 +30,41 @@ BRONZE_REQUIRED_STEP_CONTRACTS = {
     },
 }
 
+TIER_REQUIRED_STEP_IDS = {
+    "bronze": set(BRONZE_REQUIRED_STEP_CONTRACTS),
+    "silver": {
+        *BRONZE_REQUIRED_STEP_CONTRACTS,
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+        "basic_reconnect",
+        "minimum_output_requirement",
+    },
+    "gold": {
+        *BRONZE_REQUIRED_STEP_CONTRACTS,
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+        "basic_reconnect",
+        "eco_mode_reversal",
+        "work_mode_reversal",
+        "eco_timeout_reversal",
+        "car_charger_reversal",
+        "guarded_recovery",
+        "minimum_output_requirement",
+    },
+}
+
+TIER_OPTIONAL_ABSENCE_FEATURES = {
+    "ac_output_cycle": "ac_output",
+    "dc_output_cycle": "dc_output",
+    "light_output_cycle": "light_output",
+    "eco_mode_reversal": "eco_mode",
+    "work_mode_reversal": "work_mode",
+    "eco_timeout_reversal": "eco_timeout",
+    "car_charger_reversal": "car_charger",
+}
+
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
@@ -156,6 +191,78 @@ def _verified_artifact_refs(
             continue
         valid.append({"path": relative, "sha256": digest})
     return valid
+
+
+def _valid_tier_step_acquisition(
+    run_directory: Path, step_id: str, references: list[dict[str, str]]
+) -> bool:
+    """Require the runner's reviewed-step artifact to prove safe restoration."""
+    artifact = next(
+        (
+            item
+            for item in references
+            if Path(item["path"]).name == f"tier-{step_id}.json"
+        ),
+        None,
+    )
+    content = (
+        _safe_read_file(run_directory, artifact["path"])
+        if artifact is not None
+        else None
+    )
+    try:
+        evidence = json.loads(content) if content is not None else None
+    except UnicodeError, ValueError:
+        return False
+    if not isinstance(evidence, dict) or evidence.get("step_id") != step_id:
+        return False
+    is_output = step_id.endswith("_output_cycle")
+    actions = evidence.get("actions")
+    expected_actions = 4 if is_output else 2
+    if (
+        evidence.get("outcome") != "pass"
+        or evidence.get("restored_state") != evidence.get("initial_state")
+        or evidence.get("physical_restore_outcome") != "correct"
+        or not isinstance(actions, list)
+        or len(actions) != expected_actions
+    ):
+        return False
+    if is_output and (
+        evidence.get("final_restore_action_index") != 3
+        or evidence.get("final_restore_outcome") != "correct"
+    ):
+        return False
+    for action in actions:
+        trace_refs = action.get("trace_evidence") if isinstance(action, dict) else None
+        if (
+            not isinstance(action, dict)
+            or action.get("outcome") != "confirmed"
+            or action.get("confirmed") is not True
+            or action.get("trace_valid") is not True
+            or action.get("trace_complete") is not True
+            or action.get("route") not in VERIFIED_ROUTES
+            or action.get("trace_route") != action.get("route")
+            or not isinstance(trace_refs, list)
+            or not trace_refs
+        ):
+            return False
+        for reference in trace_refs:
+            if not isinstance(reference, dict):
+                return False
+            relative = reference.get("path")
+            digest = reference.get("sha256")
+            trace_content = (
+                _safe_read_file(run_directory, relative)
+                if isinstance(relative, str)
+                else None
+            )
+            if (
+                trace_content is None
+                or not isinstance(digest, str)
+                or hashlib.sha256(trace_content).hexdigest() != digest
+            ):
+                return False
+    return True
 
 
 def _valid_bronze_capture(
@@ -409,12 +516,12 @@ def assess_run_gate(
             )
         )
 
-    if requested_tier != "bronze":
+    if requested_tier not in TIER_REQUIRED_STEP_IDS:
         blockers.append(
             _finding(
                 "independent_review",
                 "unsupported",
-                "onboard review currently supports Bronze only; higher-tier review is not available",
+                "Platinum remains blocked because the public contract cannot verify continuous 24-hour evidence",
                 execution_path,
             )
         )
@@ -488,7 +595,9 @@ def assess_run_gate(
                 execution_path,
             )
         )
-        for step_id in BRONZE_REQUIRED_STEP_CONTRACTS:
+        for step_id in TIER_REQUIRED_STEP_IDS.get(
+            requested_tier, TIER_REQUIRED_STEP_IDS["bronze"]
+        ):
             blockers.append(
                 _finding(
                     step_id,
@@ -526,6 +635,18 @@ def assess_run_gate(
     for planned in plan_steps:
         if isinstance(planned, dict) and isinstance(planned.get("id"), str):
             planned_by_id.setdefault(planned["id"], []).append(planned)
+    for step_id in TIER_REQUIRED_STEP_IDS.get(requested_tier, set()) - set(
+        BRONZE_REQUIRED_STEP_CONTRACTS
+    ):
+        if len(planned_by_id.get(step_id, [])) != 1:
+            blockers.append(
+                _finding(
+                    step_id,
+                    "missing_or_ambiguous_plan_step",
+                    f"mandatory {requested_tier.title()} step is absent or duplicated in the stored plan",
+                    session_path,
+                )
+            )
     for step_id, contract in BRONZE_REQUIRED_STEP_CONTRACTS.items():
         matching = planned_by_id.get(step_id, [])
         if len(matching) != 1:
@@ -569,8 +690,6 @@ def assess_run_gate(
             planned.get("eligibility") == "not_applicable"
             or planned.get("action") == "not_applicable"
         ):
-            if step_id in BRONZE_REQUIRED_STEP_CONTRACTS:
-                continue
             capabilities = session.get("runtime_capabilities")
             features = (
                 capabilities.get("features") if isinstance(capabilities, dict) else None
@@ -580,9 +699,17 @@ def assess_run_gate(
                 features.get(feature) if isinstance(features, dict) else None
             )
             reasons = planned.get("reasons")
+            expected_absent_feature = TIER_OPTIONAL_ABSENCE_FEATURES.get(step_id)
             substantiated_absence = (
                 planned.get("action") == "not_applicable"
                 and planned.get("eligibility") == "not_applicable"
+                and (
+                    step_id not in TIER_REQUIRED_STEP_IDS.get(requested_tier, set())
+                    or (
+                        expected_absent_feature is not None
+                        and feature == expected_absent_feature
+                    )
+                )
                 and isinstance(feature_facts, dict)
                 and feature_facts.get("physical_presence") == "absent"
                 and isinstance(reasons, list)
@@ -598,12 +725,17 @@ def assess_run_gate(
                     _finding(
                         step_id,
                         "invalid_exclusion",
-                        "optional step exclusion is not backed by verified physical absence",
+                        "step exclusion is not backed by a unique execution result and verified physical absence",
                         execution_path,
                     )
                 )
             continue
         if planned.get("eligibility") not in {"eligible", "pending_authorization"}:
+            if step_id == "minimum_output_requirement" and requested_tier in {
+                "silver",
+                "gold",
+            }:
+                continue
             blockers.append(
                 _finding(
                     step_id,
@@ -626,6 +758,37 @@ def assess_run_gate(
             continue
         row = rows[0]
         outcome = row.get("outcome")
+        if step_id == "guarded_recovery" and outcome == "shared_evidence":
+            reconnect_rows = by_id.get("basic_reconnect", [])
+            source = reconnect_rows[0] if len(reconnect_rows) == 1 else {}
+            source_artifacts = _verified_artifact_refs(source, run_directory)
+            if (
+                source.get("outcome") == "pass"
+                and row.get("evidence_run") == source.get("evidence_run")
+                and source_artifacts
+                and isinstance(source.get("observed_routes"), list)
+                and any(route in routes for route in source["observed_routes"])
+            ):
+                # The runner deliberately reuses the one real reconnect recovery
+                # acquisition for Gold's guarded recovery step.
+                continue
+            blockers.append(
+                _finding(
+                    step_id,
+                    "invalid_shared_evidence",
+                    "guarded recovery does not reference the unique verified basic reconnect acquisition",
+                    execution_path,
+                )
+            )
+            continue
+        if (
+            step_id == "minimum_output_requirement"
+            and requested_tier in {"silver", "gold"}
+            and outcome == "pending_review"
+        ):
+            # The independent reviewer and tier evaluator resolve this gate from
+            # reviewed output evidence. It is not an acquisition failure.
+            continue
         if outcome not in PASS_OUTCOMES:
             failure_category = row.get("failure_category")
             if step_id == "read_only_probe":
@@ -736,6 +899,18 @@ def assess_run_gate(
                     step_id,
                     "missing_or_invalid_artifact",
                     "passed step has no valid referenced checkpoint or artifact",
+                    execution_path,
+                )
+            )
+            continue
+        if planned.get("action") == "write" and not _valid_tier_step_acquisition(
+            run_directory, step_id, artifacts
+        ):
+            blockers.append(
+                _finding(
+                    step_id,
+                    "incomplete_or_unsafe_restoration",
+                    "the action artifact does not prove complete transactions and confirmed final restoration",
                     execution_path,
                 )
             )

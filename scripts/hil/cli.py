@@ -151,7 +151,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     tiers_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser = commands.add_parser(
-        "review", help="Review an imported Bronze archive with independent claims"
+        "review", help="Independently review an imported HIL archive by tier"
     )
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)
@@ -2814,31 +2814,23 @@ def execute(args: argparse.Namespace) -> int:
         else:
             print("HA scanner candidate inventory: unknown or unavailable")
         print("Runner-host Bluetooth hardware does not identify the remote HA adapter.")
-        print(
-            "onboard currently supports only the Bronze qualification and review handoff."
-        )
-        print("Choose desired tier: 1=Bronze (read-only).")
+        print("Choose desired tier: 1=Bronze, 2=Silver, 3=Gold, 4=Platinum (blocked).")
         tier_choice = input("Desired tier: ").strip()
         tiers = {"1": "bronze", "2": "silver", "3": "gold", "4": "platinum"}
         if tier_choice not in tiers:
             raise HAAPIError("Invalid tier selection")
         requested_tier = tiers[tier_choice]
         print(f"Requested tier: {requested_tier.title()}")
-        if requested_tier != "bronze":
+        if requested_tier == "platinum":
             print(
-                f"The {requested_tier.title()} onboarding handoff is not supported; "
-                "no HIL run was started."
+                "Platinum remains blocked: the public evidence contract cannot "
+                "verify a scoped, continuous 24-hour soak. No HIL run was started."
             )
-            print(
-                "For a separate, read-only diagnostic run without a qualification "
-                "or PR handoff, use:"
-            )
-            print("  python -m scripts.hil run --suite read-only --route auto")
             return 2
         repo_root = Path(__file__).resolve().parents[2]
         if _current_feature_branch(repo_root) is None:
             print(
-                "Cannot start the Bronze qualification workflow: select a clean "
+                "Cannot start the qualification workflow: select a clean "
                 "feature branch before running HIL. No tests were started."
             )
             print("  git fetch origin")
@@ -3278,11 +3270,14 @@ def _current_feature_branch(repo_root: Path) -> str | None:
     return branch
 
 
-def _review_resume_command(matrix_path: Path, run_id: str) -> str:
-    return (
+def _review_resume_command(matrix_path: Path, run_id: str, tier: str = "bronze") -> str:
+    command = (
         "python -m scripts.hil review --matrix "
         f"{_shell_quote(matrix_path)} --run-id {_shell_quote(run_id)} --interactive"
     )
+    if tier != "bronze":
+        command += " --tier " + _shell_quote(tier)
+    return command
 
 
 def _verified_review_stage_paths(
@@ -3292,6 +3287,7 @@ def _verified_review_stage_paths(
     *,
     revision_id: str,
     run_id: str,
+    tier: str = "bronze",
 ) -> list[str] | None:
     """Return only existing, digest-verified public files for one reviewed run."""
     from .importer import _reject_symlink_components
@@ -3312,68 +3308,169 @@ def _verified_review_stage_paths(
     if len(matches) != 1:
         return None
     run = matches[0]
-    references = run.get("evidence")
-    if (
-        not isinstance(references, list)
-        or not references
-        or any(not isinstance(item, str) for item in references)
-        or len(set(references)) != len(references)
-    ):
-        return None
-    expected_run_dir = (
-        PurePosixPath("tests/hil/fixtures") / revision_id / "runs" / run_id
-    )
+    # Include every matrix artifact so the printed git add command can produce
+    # a checkout in which validate_matrix can verify all included runs.
+    stage_references: set[str] = set()
     digests: dict[str, str] = {}
     try:
-        for reference in references:
-            relative = PurePosixPath(reference)
+        for matrix_revision in matrix.get("revisions", []):
+            if not isinstance(matrix_revision, dict):
+                return None
+            matrix_revision_id = matrix_revision.get("id")
             if (
-                "\\" in reference
-                or relative.is_absolute()
-                or any(part in {"", ".", ".."} for part in relative.parts)
-                or not relative.is_relative_to(expected_run_dir)
+                not isinstance(matrix_revision_id, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", matrix_revision_id)
+                is None
             ):
                 return None
-            target = repo_root.joinpath(*relative.parts)
-            _reject_symlink_components(target, repo_root)
-            metadata = target.lstat()
-            if not stat.S_ISREG(metadata.st_mode):
-                return None
-            digests[reference] = hashlib.sha256(target.read_bytes()).hexdigest()
+            for matrix_run in matrix_revision.get("runs", []):
+                if not isinstance(matrix_run, dict):
+                    return None
+                matrix_run_id = matrix_run.get("run_id")
+                if (
+                    not isinstance(matrix_run_id, str)
+                    or re.fullmatch(r"archive-[a-f0-9]{64}", matrix_run_id) is None
+                ):
+                    return None
+                references = matrix_run.get("evidence")
+                if (
+                    not isinstance(references, list)
+                    or not references
+                    or any(not isinstance(item, str) for item in references)
+                    or len(set(references)) != len(references)
+                ):
+                    return None
+                run_references = set(references)
+                for section in (
+                    "bronze_evidence",
+                    "write_capabilities",
+                    "scenarios",
+                    "feature_presence",
+                ):
+                    rows = matrix_run.get(section)
+                    if not isinstance(rows, dict):
+                        continue
+                    for item in rows.values():
+                        evidence_refs = (
+                            item.get("evidence") if isinstance(item, dict) else None
+                        )
+                        if isinstance(evidence_refs, list):
+                            if any(
+                                not isinstance(reference, str)
+                                for reference in evidence_refs
+                            ):
+                                return None
+                            run_references.update(evidence_refs)
+                expected_run_dir = (
+                    PurePosixPath("tests/hil/fixtures")
+                    / matrix_revision_id
+                    / "runs"
+                    / matrix_run_id
+                )
+                for reference in run_references:
+                    relative = PurePosixPath(reference)
+                    if (
+                        "\\" in reference
+                        or relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or not relative.is_relative_to(expected_run_dir)
+                    ):
+                        return None
+                    target = repo_root.joinpath(*relative.parts)
+                    _reject_symlink_components(target, repo_root)
+                    metadata = target.lstat()
+                    if not stat.S_ISREG(metadata.st_mode):
+                        return None
+                    if matrix_run_id == run_id:
+                        digests[reference] = hashlib.sha256(
+                            target.read_bytes()
+                        ).hexdigest()
+                stage_references.update(run_references)
     except HAAPIError, OSError, ValueError:
         return None
 
-    bronze = run.get("bronze_evidence")
-    if not isinstance(bronze, dict) or set(bronze) != set(CLAIMS):
-        return None
-    for claim in CLAIMS:
-        item = bronze.get(claim)
-        review = item.get("physical_review") if isinstance(item, dict) else None
-        claim_refs = item.get("evidence") if isinstance(item, dict) else None
-        if (
-            not isinstance(item, dict)
-            or item.get("status") != "pass"
-            or not isinstance(review, dict)
-            or review.get("outcome") != "confirmed_pass"
-            or not isinstance(review.get("reviewed_by"), str)
-            or not review["reviewed_by"].strip()
-            or not isinstance(claim_refs, list)
-            or not claim_refs
-            or any(
-                not isinstance(reference, str) or reference not in digests
-                for reference in claim_refs
-            )
-            or review.get("evidence_sha256")
-            != {reference: digests[reference] for reference in sorted(claim_refs)}
-            or item.get("claim_artifact") not in claim_refs
-        ):
+    if tier == "bronze":
+        bronze = run.get("bronze_evidence")
+        if not isinstance(bronze, dict) or set(bronze) != set(CLAIMS):
             return None
+        for claim in CLAIMS:
+            item = bronze.get(claim)
+            review = item.get("physical_review") if isinstance(item, dict) else None
+            claim_refs = item.get("evidence") if isinstance(item, dict) else None
+            if (
+                not isinstance(item, dict)
+                or item.get("status") != "pass"
+                or not isinstance(review, dict)
+                or review.get("outcome") != "confirmed_pass"
+                or not isinstance(review.get("reviewed_by"), str)
+                or not review["reviewed_by"].strip()
+                or not isinstance(claim_refs, list)
+                or not claim_refs
+                or any(
+                    not isinstance(reference, str) or reference not in digests
+                    for reference in claim_refs
+                )
+                or review.get("evidence_sha256")
+                != {reference: digests[reference] for reference in sorted(claim_refs)}
+                or item.get("claim_artifact") not in claim_refs
+            ):
+                return None
+    elif tier in {"silver", "gold"}:
+        controls = run.get("write_capabilities")
+        scenarios = run.get("scenarios")
+        if not isinstance(controls, dict) or not isinstance(scenarios, dict):
+            return None
+        reviewed_controls = [
+            item
+            for item in controls.values()
+            if isinstance(item, dict)
+            and item.get("status") == "pass"
+            and isinstance(item.get("physical_review"), dict)
+        ]
+        reviewed_scenarios = [
+            item
+            for item in scenarios.values()
+            if isinstance(item, dict)
+            and item.get("status") == "pass"
+            and isinstance(item.get("physical_review"), dict)
+        ]
+        if not reviewed_controls and not reviewed_scenarios:
+            return None
+    else:
+        return None
     try:
         matrix_relative = matrix_path.relative_to(repo_root).as_posix()
         _reject_symlink_components(matrix_path, repo_root)
     except HAAPIError, OSError, ValueError:
         return None
-    return [matrix_relative, *sorted(references)]
+    return [matrix_relative, *sorted(stage_references)]
+
+
+def _isolated_run_tier(
+    matrix: dict[str, Any], *, revision_id: str, run_id: str, firmware: str, route: str
+) -> str:
+    """Evaluate one reviewed run without letting older scope evidence fill gaps."""
+    isolated = json.loads(json.dumps(matrix))
+    for revision in isolated.get("revisions", []):
+        if isinstance(revision, dict):
+            revision["runs"] = [
+                item
+                for item in revision.get("runs", [])
+                if isinstance(item, dict) and item.get("run_id") == run_id
+            ]
+    from .tiers import evaluate_tiers
+
+    result = evaluate_tiers(isolated)
+    return next(
+        (
+            item.get("tier", "unqualified")
+            for item in result.get("tiers", [])
+            if item.get("scope", {}).get("revision_id") == revision_id
+            and item.get("scope", {}).get("firmware") == firmware
+            and item.get("scope", {}).get("observed_route") == route
+        ),
+        "unqualified",
+    )
 
 
 def _onboard_import_review(
@@ -3384,9 +3481,11 @@ def _onboard_import_review(
     repo_root: Path | None = None,
     matrix_path: Path | None = None,
 ) -> bool:
-    """Import reviewed public evidence, invoke independent Bronze review, and hand off."""
-    if requested_tier != "bronze":
-        print("Independent interactive review is unavailable for this tier.")
+    """Import reviewed public evidence, invoke the requested review, and hand off."""
+    if requested_tier == "platinum":
+        print(
+            "Platinum review remains blocked by the continuous-soak evidence contract."
+        )
         return False
     from . import importer
 
@@ -3451,14 +3550,26 @@ def _onboard_import_review(
     try:
         from .review_wizard import interactive_review
 
-        if interactive_review(matrix_path, run_id=run_id, repo_root=repo_root) != 0:
-            print("To continue the offline review later, run:")
-            print("  " + _review_resume_command(matrix_path, run_id))
-            return False
+        review_tiers = ["bronze"]
+        if requested_tier in {"silver", "gold"}:
+            review_tiers.append(requested_tier)
+        for review_tier in review_tiers:
+            if (
+                interactive_review(
+                    matrix_path,
+                    run_id=run_id,
+                    repo_root=repo_root,
+                    **({} if review_tier == "bronze" else {"tier": review_tier}),
+                )
+                != 0
+            ):
+                print("To continue the offline review later, run:")
+                print("  " + _review_resume_command(matrix_path, run_id, review_tier))
+                return False
     except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
         print("Independent review did not complete:", ex)
         print("To continue the offline review later, run:")
-        print("  " + _review_resume_command(matrix_path, run_id))
+        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
         return False
 
     try:
@@ -3480,21 +3591,6 @@ def _onboard_import_review(
     if errors:
         print("Schema-v3 validation failed:", "; ".join(errors))
         return False
-    stage_paths = _verified_review_stage_paths(
-        matrix,
-        matrix_path,
-        repo_root,
-        revision_id=proposal["revision_id"],
-        run_id=run_id,
-    )
-    if stage_paths is None:
-        print(
-            "This imported run lacks complete, independently applied Bronze claims "
-            "or verified public artifacts; no PR commands were generated."
-        )
-        print("After completing the independent review, run:")
-        print("  " + _review_resume_command(matrix_path, run_id))
-        return False
     from .tiers import evaluate_tiers
 
     tier_result = evaluate_tiers(matrix)
@@ -3508,18 +3604,50 @@ def _onboard_import_review(
         ),
         None,
     )
-    if selected is None or selected.get("tier") not in {
-        "bronze",
-        "silver",
-        "gold",
-        "platinum",
-    }:
-        print("Requested Bronze tier was not attained; no PR commands generated.")
+    tier_rank = {"unqualified": 0, "bronze": 1, "silver": 2, "gold": 3, "platinum": 4}
+    if selected is None or tier_rank.get(selected.get("tier"), 0) < tier_rank.get(
+        requested_tier, 99
+    ):
+        print(
+            f"Requested {requested_tier.title()} tier was not attained; no PR commands generated."
+        )
         if selected is not None:
             for reason in selected.get("unmet_requirements", []):
                 print("  -", reason)
         print("After addressing the missing evidence, review this imported run with:")
-        print("  " + _review_resume_command(matrix_path, run_id))
+        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        return False
+    # The scope evaluator can retain results from older runs. A new onboarding
+    # handoff must qualify from this exact acquisition and its own review.
+    isolated_tier = _isolated_run_tier(
+        matrix,
+        revision_id=proposal["revision_id"],
+        firmware=proposal["firmware_version"],
+        route=proposal["route"],
+        run_id=run_id,
+    )
+    if tier_rank.get(isolated_tier, 0) < tier_rank.get(requested_tier, 99):
+        print(
+            f"This imported run alone reaches {isolated_tier.title()}, below the "
+            f"requested {requested_tier.title()} tier; earlier scope evidence "
+            "cannot complete it. No PR commands generated."
+        )
+        return False
+    stage_paths = _verified_review_stage_paths(
+        matrix,
+        matrix_path,
+        repo_root,
+        revision_id=proposal["revision_id"],
+        run_id=run_id,
+        tier=requested_tier,
+    )
+    if stage_paths is None:
+        print(
+            f"This imported run lacks complete, independently applied {requested_tier.title()} "
+            "review evidence or verified public artifacts; no PR commands were generated."
+        )
+        print("After completing the independent review, run:")
+        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
         return False
     from scripts.pr_body import render_pr_body
 
@@ -3654,21 +3782,89 @@ def _onboard_import_review(
         )
         return False
 
-    title = f"test(hil): add reviewed {model} Bronze evidence"
-    evidence_paths = stage_paths[1:]
+    # Scope evaluation can be higher because of older runs. State only the
+    # highest tier independently attained by this acquisition and reviewed in
+    # this onboarding request.
+    attained_tier = min(
+        (isolated_tier, requested_tier),
+        key=lambda tier: tier_rank.get(tier, 0),
+    ).title()
+    title = f"test(hil): add reviewed {model} {attained_tier} evidence"
+    current_run_prefix = (
+        PurePosixPath("tests/hil/fixtures") / proposal["revision_id"] / "runs" / run_id
+    ).as_posix() + "/"
+    # The git handoff includes every run needed to validate the complete matrix,
+    # while this PR's hardware claims must cite only this acquisition's evidence.
+    evidence_paths = [
+        path for path in stage_paths[1:] if path.startswith(current_run_prefix)
+    ]
+    controls = (
+        selected_run.get("write_capabilities", {})
+        if isinstance(selected_run, dict)
+        else {}
+    )
+    scenarios = (
+        selected_run.get("scenarios", {}) if isinstance(selected_run, dict) else {}
+    )
+    reviewed_controls = (
+        sorted(
+            name
+            for name, item in controls.items()
+            if isinstance(item, dict)
+            and item.get("status") == "pass"
+            and isinstance(item.get("physical_review"), dict)
+        )
+        if isinstance(controls, dict)
+        else []
+    )
+    reviewed_scenarios = (
+        sorted(
+            name
+            for name, item in scenarios.items()
+            if isinstance(item, dict)
+            and item.get("status") == "pass"
+            and isinstance(item.get("physical_review"), dict)
+        )
+        if isinstance(scenarios, dict)
+        else []
+    )
+    presence = (
+        selected_run.get("feature_presence", {})
+        if isinstance(selected_run, dict)
+        else {}
+    )
+    reviewed_absences = (
+        sorted(
+            feature
+            for feature, item in presence.items()
+            if isinstance(item, dict)
+            and item.get("status") == "absent"
+            and isinstance(item.get("reviewed_by"), str)
+            and bool(item.get("evidence"))
+            and isinstance(item.get("evidence_sha256"), dict)
+        )
+        if isinstance(presence, dict)
+        else []
+    )
     validation_text = (
-        "The imported public archive passed integrity and schema checks. The exact "
-        "run's Bronze identity, protocol, and freshness claims were independently "
-        "reviewed and applied; the resulting matrix passed schema-v3 validation and "
-        "the scoped tier evaluator. This generated body describes the verified "
-        "archive behavior below; it does not claim physical output-write qualification."
+        f"The imported public archive passed integrity and schema checks. The exact "
+        f"run's Bronze identity, protocol, and freshness claims and {attained_tier} "
+        "review evidence were independently reviewed and applied. The resulting "
+        "matrix passed schema-v3 validation and the tier evaluator both in scope "
+        "and with this run isolated, so earlier evidence cannot complete this run."
     )
     safety_text = (
         "This PR adds privacy-filtered qualification evidence only. It changes no "
         "protocol implementation, writable flags, BLE timing, or connection behavior. "
-        "The evidence contains a read-only status request; no output controls were "
-        "changed. Unknown protocol bits and current-session freshness safeguards in "
-        "the integration are unaffected."
+        + (
+            "The acquisition performed independently reviewed control transitions "
+            f"({', '.join(reviewed_controls) or 'none'}) and scenarios "
+            f"({', '.join(reviewed_scenarios) or 'none'}); reviewed evidence includes "
+            f"restoration records and physical absences ({', '.join(reviewed_absences) or 'none'})."
+            if requested_tier in {"silver", "gold"}
+            else "The evidence contains a read-only status request; no output controls were changed."
+        )
+        + " Unknown protocol bits and current-session freshness safeguards in the integration are unaffected."
     )
     hardware_text = (
         f"For the exact {model}, hardware {hardware}, firmware {firmware}, and "
@@ -3680,8 +3876,16 @@ def _onboard_import_review(
         "was causally caused by that request. Two fresh telemetry samples and a "
         "plausible operator observation are present, and the identity, protocol, and "
         "freshness claims were independently reviewed and applied. Telemetry sample "
-        f"interval: {sample_interval}. This evidence does not qualify output writes "
-        "or other routes, firmware, or hardware revisions."
+        f"interval: {sample_interval}. "
+        + (
+            f"Independently reviewed controls: {', '.join(reviewed_controls) or 'none'}. "
+            f"Independently reviewed scenarios: {', '.join(reviewed_scenarios) or 'none'}. "
+            f"Independently reviewed physical absences: {', '.join(reviewed_absences) or 'none'}. "
+            f"The validated handoff stages all {len(stage_paths) - 1} exact public "
+            "and review evidence files needed to validate the complete matrix."
+            if requested_tier in {"silver", "gold"}
+            else "This evidence does not qualify output writes or other routes, firmware, or hardware revisions."
+        )
     )
     checked = {
         "For normal changes, the base branch is `devel` (`main` is release-only). If this PR comes from a fork, confirm the base repository and branch before submitting; GitHub may default to `main`.": True,
@@ -3698,15 +3902,21 @@ def _onboard_import_review(
     }
     body_data = {
         "title": title,
-        "issue": "#227 (qualification plan); #328 (independent Bronze reviewer)",
+        "issue": (
+            "#227 (qualification plan); #328 (Bronze reviewer); #329 "
+            "(higher-tier reviewer); #330 (onboard orchestration)"
+        ),
         "summary": (
-            f"Add independently reviewed Bronze qualification evidence for {model}, "
+            f"Add independently reviewed {attained_tier} qualification evidence for run "
+            f"{run_id} on {model}, "
             f"hardware {hardware}, firmware {firmware}, on the observed {route} "
             "route. The linked public evidence paths substantiate the hardware and "
             "revision checklist item for this exact scope. The related qualification "
             "and reviewer issues are linked; a duplicate issue/PR search has not been "
             "automatically performed, so that checklist item remains unchecked. "
-            "No output-write capability is claimed. Release tooling owns "
+            "No new production write authorization is requested or granted; "
+            f"scope-specific reviewed control evidence is included for {', '.join(reviewed_controls) or 'no controls'}. "
+            "Release tooling owns "
             "CHANGELOG.md; no changelog entry is included. No user-facing strings "
             "changed, so translations are not applicable. The main-source-branch "
             "checklist item applies only to main-target PRs."
@@ -3731,7 +3941,7 @@ def _onboard_import_review(
         print("Unable to generate the complete PR body:", ex)
         return False
     print(
-        f"REVIEWED TIER: {selected['tier'].title()} ({model} / {hardware} / {firmware} / {route})"
+        f"REVIEWED TIER: {attained_tier} ({model} / {hardware} / {firmware} / {route})"
     )
     print("READY FOR QUALIFICATION PR. Inspect the staged diff and body first.")
     print("Local PR body:", body_path)
