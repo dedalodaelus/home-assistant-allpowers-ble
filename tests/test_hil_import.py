@@ -4545,6 +4545,133 @@ def test_legacy_bronze_review_without_assurance_stays_inconclusive(
     assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "unqualified"
 
 
+def test_existing_legacy_bronze_pass_can_be_reattested_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    initial_review_path = tmp_path / "initial-independent-review.json"
+    initial_review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "assurance": "independently_reviewed",
+                "archive_sha256": run["archive_sha256"],
+                "run_id": run["run_id"],
+                "reviewed_by": "independent reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=run["run_id"],
+            review_file=initial_review_path,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+
+    legacy = json.loads(matrix_path.read_text())
+    legacy_run = legacy["revisions"][0]["runs"][0]
+    old_physical_reviews = {}
+    for claim, item in legacy_run["bronze_evidence"].items():
+        physical_review = item["physical_review"]
+        old_physical_reviews[claim] = json.loads(json.dumps(physical_review))
+        physical_review.pop("assurance")
+    legacy_run["review_history"] = []
+    matrix_path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
+
+    strict_errors, _ = validate_hil_qualification.validate_matrix(
+        legacy, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any(
+        "physical_review must record valid assurance" in error
+        for error in strict_errors
+    )
+    assert evaluate_tiers(legacy)["tiers"][0]["tier"] == "unqualified"
+
+    operator_review = tmp_path / "operator-reattestation.json"
+    operator_review.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "assurance": "operator_attested",
+                "archive_sha256": legacy_run["archive_sha256"],
+                "run_id": legacy_run["run_id"],
+                "reviewed_by": "original HIL operator",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=legacy_run["run_id"],
+            review_file=operator_review,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+
+    reviewed = json.loads(matrix_path.read_text())
+    reviewed_run = reviewed["revisions"][0]["runs"][0]
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
+    assert all(
+        item["status"] == "pass"
+        and item["physical_review"]["assurance"] == "operator_attested"
+        for item in reviewed_run["bronze_evidence"].values()
+    )
+    history = reviewed_run["review_history"]
+    legacy_history = next(
+        item for item in history if item.get("assurance") == "unknown"
+    )
+    expected_legacy_reviews = json.loads(json.dumps(old_physical_reviews))
+    for physical_review in expected_legacy_reviews.values():
+        physical_review.pop("assurance")
+    assert legacy_history["legacy_physical_reviews"] == expected_legacy_reviews
+    assert history[-1]["assurance"] == "operator_attested"
+    bronze = evaluate_tiers(reviewed)["tiers"][0]
+    assert bronze["tier"] == "bronze"
+    assert bronze["assurance"]["bronze"] == "operator_attested"
+
+
 def test_onboard_import_review_stages_the_complete_reviewed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -118,15 +118,43 @@ def _latest_run(
 
 
 def _assurance_label(items: list[dict[str, Any]]) -> str:
-    labels = {
-        review.get("assurance")
-        for item in items
-        if isinstance((review := item.get("physical_review")), dict)
-        and review.get("assurance") in {"operator_attested", "independently_reviewed"}
-    }
+    labels = set()
+    for item in items:
+        review = item.get("physical_review")
+        assurance = (
+            review.get("assurance")
+            if isinstance(review, dict)
+            else item.get("assurance")
+        )
+        if assurance not in {"operator_attested", "independently_reviewed"}:
+            return "unknown"
+        labels.add(assurance)
     if len(labels) == 1:
         return next(iter(labels))
     return "mixed" if labels else "unknown"
+
+
+def _presence_item(runs: list[dict[str, Any]], feature: str) -> dict[str, Any]:
+    entries = []
+    for run in runs:
+        presence = run.get("feature_presence")
+        item = presence.get(feature) if isinstance(presence, dict) else None
+        if isinstance(item, dict) and item.get("status") in {
+            "present",
+            "absent",
+            "unknown",
+        }:
+            entries.append((_stamp(run), item["status"], item))
+    if not entries:
+        return {}
+    _, _, item = max(
+        entries,
+        key=lambda entry: (
+            entry[0],
+            {"present": 0, "absent": 1, "unknown": 2}[entry[1]],
+        ),
+    )
+    return item
 
 
 def _presence(runs: list[dict[str, Any]], feature: str) -> str:
@@ -854,6 +882,11 @@ def _tier_for_scope(
 
     silver_reviews = [*bronze_reviews, reconnect]
     silver_reviews.extend(
+        _presence_item(runs, feature)
+        for feature in BASIC_OUTPUTS
+        if feature_presence[feature] in {"present", "absent"}
+    )
+    silver_reviews.extend(
         latest_features[feature]
         for feature in BASIC_OUTPUTS
         if feature_presence[feature] == "present"
@@ -920,6 +953,11 @@ def _tier_for_scope(
         )
 
     gold_reviews = list(silver_reviews)
+    gold_reviews.extend(
+        _presence_item(runs, feature)
+        for feature in ALL_FEATURES
+        if feature_presence[feature] in {"present", "absent"}
+    )
     gold_reviews.extend(
         latest_features[feature]
         for feature in ALL_FEATURES

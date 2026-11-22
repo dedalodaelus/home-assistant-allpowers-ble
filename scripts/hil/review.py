@@ -942,7 +942,11 @@ def review_imported_run(
     if not isinstance(matrix, dict) or matrix.get("schema_version") != 3:
         raise HAAPIError("Qualification matrix must use schema v3")
     errors, _ = validation.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_bronze_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -969,6 +973,15 @@ def review_imported_run(
     previous_bronze = updated.get("bronze_evidence")
     if not isinstance(previous_bronze, dict):
         previous_bronze = {}
+    legacy_physical_reviews = {
+        claim: json.loads(json.dumps(item["physical_review"]))
+        for claim, item in previous_bronze.items()
+        if isinstance(item, dict)
+        and item.get("status") == "pass"
+        and isinstance(item.get("physical_review"), dict)
+        and item["physical_review"].get("assurance")
+        not in {"operator_attested", "independently_reviewed"}
+    }
     updated["bronze_evidence"] = dict(previous_bronze)
     run_rel = Path("tests/hil/fixtures") / revision["id"] / "runs" / run_id
     for claim in CLAIMS:
@@ -1121,10 +1134,20 @@ def review_imported_run(
             item["rationale"] = (
                 "Review declined or imported machine evidence did not satisfy the Bronze claim contract."
             )
-        if passed or not (
-            isinstance(previous_bronze.get(claim), dict)
-            and previous_bronze[claim].get("status") == "pass"
-        ):
+        previous_claim = previous_bronze.get(claim)
+        previous_review = (
+            previous_claim.get("physical_review")
+            if isinstance(previous_claim, dict)
+            else None
+        )
+        previous_pass_is_attested = (
+            isinstance(previous_claim, dict)
+            and previous_claim.get("status") == "pass"
+            and isinstance(previous_review, dict)
+            and previous_review.get("assurance")
+            in {"operator_attested", "independently_reviewed"}
+        )
+        if passed or not previous_pass_is_attested:
             updated["bronze_evidence"][claim] = item
         if passed:
             for relative in evidence:
@@ -1150,6 +1173,39 @@ def review_imported_run(
     history = updated.get("review_history")
     if not isinstance(history, list):
         history = []
+    if legacy_physical_reviews:
+        legacy_reviewers = {
+            item.get("reviewed_by")
+            for item in legacy_physical_reviews.values()
+            if isinstance(item.get("reviewed_by"), str)
+        }
+        legacy_reviewed_ats = {
+            item.get("reviewed_at")
+            for item in legacy_physical_reviews.values()
+            if isinstance(item.get("reviewed_at"), str)
+        }
+        history.append(
+            {
+                "tier": "bronze",
+                "reviewed_by": (
+                    next(iter(legacy_reviewers))
+                    if len(legacy_reviewers) == 1
+                    else "legacy review history"
+                ),
+                "reviewed_at": (
+                    next(iter(legacy_reviewed_ats))
+                    if len(legacy_reviewed_ats) == 1
+                    else run["captured_at"]
+                ),
+                "assurance": "unknown",
+                "claims": {
+                    claim: previous_bronze.get(claim, {}).get("status", "unknown")
+                    for claim in CLAIMS
+                },
+                "legacy_physical_reviews": legacy_physical_reviews,
+                "archive_sha256": run["archive_sha256"],
+            }
+        )
     history.append(
         {
             "tier": "bronze",
@@ -1192,7 +1248,11 @@ def review_imported_run(
             _atomic_write(path, content)
             created.append(path)
         errors, _ = validation.validate_matrix(
-            proposed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+            proposed,
+            matrix_path=matrix_path,
+            require_pass=False,
+            max_age_days=None,
+            allow_legacy_bronze_review=True,
         )
         if errors:
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))
@@ -1238,7 +1298,11 @@ def review_imported_tier_run(
     if not isinstance(matrix, dict) or matrix.get("schema_version") != 3:
         raise HAAPIError("Qualification matrix must use schema v3")
     errors, _ = validation.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_bronze_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -1812,7 +1876,11 @@ def review_imported_tier_run(
             _atomic_write(path, content)
             created.append(path)
         errors, _ = validation.validate_matrix(
-            proposed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+            proposed,
+            matrix_path=matrix_path,
+            require_pass=False,
+            max_age_days=None,
+            allow_legacy_bronze_review=True,
         )
         if errors:
             raise HAAPIError(

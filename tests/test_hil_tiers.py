@@ -539,7 +539,14 @@ def _matrix_fixture(
                 "evidence_sha256": _digest(root, [absent]),
             }
             if feature == "light_output"
-            else {"status": "present"}
+            else {
+                "status": "present",
+                "reviewed_by": "independent-reviewer",
+                "reviewed_at": stamp,
+                "assurance": "independently_reviewed",
+                "evidence": [capture],
+                "evidence_sha256": _digest(root, [capture]),
+            }
         )
         for feature in validator.REQUIRED_WRITE_CAPABILITIES
     }
@@ -682,6 +689,24 @@ def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(
     assert errors == []
     assert result["tiers"][0]["tier"] == "silver"
     assert "light_output" in result["tiers"][0]["exclusions"]
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+def test_tier_assurance_includes_operator_attested_absent_feature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tier: str
+):
+    matrix = _matrix_fixture(tmp_path, tier)
+    light_presence = matrix["revisions"][0]["runs"][0]["feature_presence"][
+        "light_output"
+    ]
+    light_presence["reviewed_by"] = "HIL operator"
+    light_presence["assurance"] = "operator_attested"
+
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+
+    assert errors == []
+    assert result["tiers"][0]["tier"] == tier
+    assert result["tiers"][0]["assurance"][tier] == "mixed"
 
 
 def test_v3_capture_scope_does_not_require_model_or_hardware_revision_fields(

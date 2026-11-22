@@ -694,7 +694,12 @@ def _has_bound_bronze_probe(
 
 
 def _check_physical_review(
-    item: dict[str, Any], status: str, context: str, errors: list[str]
+    item: dict[str, Any],
+    status: str,
+    context: str,
+    errors: list[str],
+    *,
+    allow_legacy_unknown_assurance: bool = False,
 ) -> None:
     review = item.get("physical_review")
     if not isinstance(review, dict):
@@ -707,12 +712,20 @@ def _check_physical_review(
     except AttributeError, ValueError:
         parsed = None
     digest_manifest = _evidence_digests(item.get("evidence"))
+    legacy_unknown_assurance = (
+        allow_legacy_unknown_assurance
+        and "assurance" not in review
+        and "reviewer_independent_from_operator" not in review
+    )
     if (
         review.get("outcome") != expected
         or not isinstance(review.get("reviewed_by"), str)
         or not review["reviewed_by"].strip()
-        or review.get("assurance")
-        not in {"operator_attested", "independently_reviewed"}
+        or (
+            review.get("assurance")
+            not in {"operator_attested", "independently_reviewed"}
+            and not legacy_unknown_assurance
+        )
         or (
             "reviewer_independent_from_operator" in review
             and review.get("reviewer_independent_from_operator")
@@ -1053,6 +1066,7 @@ def _validate_run(
     protocol_profile_supported: bool,
     feature_scope: str | None = None,
     check_archive_provenance: bool = True,
+    allow_legacy_bronze_review: bool = False,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
@@ -1359,7 +1373,13 @@ def _validate_run(
             f"{context} cannot claim pass without complete, dated, firmware- and route-attributed evidence",
         )
     _check_bronze_evidence(
-        run, context, revision_id, revision_model, hardware_revision, errors
+        run,
+        context,
+        revision_id,
+        revision_model,
+        hardware_revision,
+        errors,
+        allow_legacy_unknown_assurance=allow_legacy_bronze_review,
     )
     return run_id if isinstance(run_id, str) else None
 
@@ -1504,6 +1524,8 @@ def _check_bronze_evidence(
     revision_model: str,
     hardware_revision: str,
     errors: list[str],
+    *,
+    allow_legacy_unknown_assurance: bool = False,
 ) -> None:
     records = run.get("bronze_evidence")
     if records is None:
@@ -1539,7 +1561,13 @@ def _check_bronze_evidence(
                 )
             continue
         _check_evidence(item.get("evidence"), claim_context, errors, required=True)
-        _check_physical_review(item, status, claim_context, errors)
+        _check_physical_review(
+            item,
+            status,
+            claim_context,
+            errors,
+            allow_legacy_unknown_assurance=allow_legacy_unknown_assurance,
+        )
         paths = item.get("evidence")
         artifact_path = item.get("claim_artifact")
         if not isinstance(paths, list) or artifact_path not in paths:
@@ -2501,6 +2529,7 @@ def validate_matrix(
     firmware_scope: str | None = None,
     feature_scope: str | None = None,
     check_archive_provenance: bool = True,
+    allow_legacy_bronze_review: bool = False,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     summaries: list[str] = []
@@ -2564,6 +2593,7 @@ def validate_matrix(
                 hardware_revision=revision.get("hardware_version", ""),
                 protocol_profile_supported=protocol_profile_supported,
                 check_archive_provenance=check_archive_provenance,
+                allow_legacy_bronze_review=allow_legacy_bronze_review,
             )
             if run_id is not None:
                 if run_id in seen_runs:
