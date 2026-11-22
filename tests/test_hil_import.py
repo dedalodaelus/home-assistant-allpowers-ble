@@ -4922,6 +4922,269 @@ def test_existing_legacy_bronze_pass_can_be_reattested_offline(
     assert bronze["assurance"]["bronze"] == "operator_attested"
 
 
+def test_multi_run_legacy_bronze_reviews_can_be_reattested_sequentially(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archives = {
+        "local_adapter": _captured_archive(
+            tmp_path / "local-source",
+            "local_adapter",
+            "1.1",
+            "0123456789abcdef",
+            bronze_reviewable=True,
+        ),
+        "active_proxy": _captured_archive(
+            tmp_path / "proxy-source",
+            "active_proxy",
+            "1.1",
+            "fedcba9876543210",
+            bronze_reviewable=True,
+        ),
+    }
+    archive_digests = {
+        route: hashlib.sha256(path.read_bytes()).hexdigest()
+        for route, path in archives.items()
+    }
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    runs = {}
+    for route, archive in archives.items():
+        assert (
+            import_archive(
+                archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path
+            )
+            == 0
+        )
+        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+        run = next(
+            item
+            for revision in matrix["revisions"]
+            for item in revision["runs"]
+            if item["route"] == route
+        )
+        review_path = tmp_path / f"{route}-initial-review.json"
+        reviewed_at = datetime.now(UTC).isoformat()
+        reviewer = f"initial {route} reviewer"
+        review_payload = {
+            "schema_version": 2,
+            "assurance": "independently_reviewed",
+            "archive_sha256": run["archive_sha256"],
+            "run_id": run["run_id"],
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+            "claims": {
+                claim: "pass"
+                for claim in ("identity", "protocol_probe", "fresh_telemetry")
+            },
+        }
+        review_path.write_text(json.dumps(review_payload), encoding="utf-8")
+        assert (
+            review_imported_run(
+                matrix_path,
+                run_id=run["run_id"],
+                review_file=review_path,
+                apply=True,
+                repo_root=tmp_path,
+            )
+            == 0
+        )
+        runs[route] = {
+            "run_id": run["run_id"],
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+        }
+
+    legacy = json.loads(matrix_path.read_text(encoding="utf-8"))
+    legacy_records = {}
+    legacy_audits = {}
+    legacy_histories = {}
+    audit_dir = tmp_path / "hil-results" / "bronze-reviews"
+    audit_dir.mkdir(parents=True)
+    for route, facts in runs.items():
+        run = next(
+            item
+            for revision in legacy["revisions"]
+            for item in revision["runs"]
+            if item["run_id"] == facts["run_id"]
+        )
+        for item in run["bronze_evidence"].values():
+            physical_review = item["physical_review"]
+            physical_review.pop("assurance")
+            physical_review.pop("evidence_sha256")
+            physical_review["reviewer_independent_from_operator"] = True
+        legacy_records[route] = json.loads(json.dumps(run["bronze_evidence"]))
+        history = next(
+            item for item in run["review_history"] if item.get("tier") == "bronze"
+        )
+        history.pop("assurance")
+        history["reviewer_independent_from_operator"] = True
+        legacy_histories[route] = json.loads(json.dumps(run["review_history"]))
+        audit_path = audit_dir / f"{facts['run_id']}-schema-v1.json"
+        audit_payload = {
+            "schema_version": 1,
+            "archive_sha256": run["archive_sha256"],
+            "run_id": run["run_id"],
+            "reviewed_by": facts["reviewed_by"],
+            "reviewed_at": facts["reviewed_at"],
+            "reviewer_independent_from_operator": True,
+            "claims": {
+                claim: "pass"
+                for claim in ("identity", "protocol_probe", "fresh_telemetry")
+            },
+        }
+        audit_path.write_text(json.dumps(audit_payload, indent=2) + "\n")
+        legacy_audits[route] = {
+            "path": audit_path,
+            "bytes": audit_path.read_bytes(),
+        }
+    matrix_path.write_text(
+        json.dumps(legacy, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    strict_errors, _ = validate_hil_qualification.validate_matrix(
+        legacy, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any(
+        "physical_review must record valid assurance" in e for e in strict_errors
+    )
+
+    from scripts.hil.cli import _isolated_run_tier
+
+    assert all(
+        _isolated_run_tier(
+            legacy,
+            revision_id="r600-hw03",
+            run_id=facts["run_id"],
+            firmware="1.1",
+            route=route,
+        )
+        == "unqualified"
+        for route, facts in runs.items()
+    )
+    _tty(monkeypatch)
+
+    def reattest(route: str) -> dict[str, Any]:
+        facts = runs[route]
+        answers = iter(
+            [
+                "1",
+                f"operator {route}",
+                "yes",
+                *(answer for _ in range(3) for answer in ("pass", "yes")),
+                "APPLY REVIEW",
+            ]
+        )
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+        assert (
+            interactive_review(
+                matrix_path,
+                run_id=facts["run_id"],
+                tier="bronze",
+                repo_root=tmp_path,
+            )
+            == 0
+        )
+        reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+        errors, _ = validate_hil_qualification.validate_matrix(
+            reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        )
+        assert errors == []
+        assert (
+            hashlib.sha256(archives[route].read_bytes()).hexdigest()
+            == archive_digests[route]
+        )
+        for _prior_route, prior_audit in legacy_audits.items():
+            assert prior_audit["path"].read_bytes() == prior_audit["bytes"]
+        for prior_route, prior_history in legacy_histories.items():
+            current_run = next(
+                item
+                for revision in reviewed["revisions"]
+                for item in revision["runs"]
+                if item["run_id"] == runs[prior_route]["run_id"]
+            )
+            assert all(
+                entry in current_run["review_history"] for entry in prior_history
+            )
+        return reviewed
+
+    after_first = reattest("local_adapter")
+    assert (
+        _isolated_run_tier(
+            after_first,
+            revision_id="r600-hw03",
+            run_id=runs["local_adapter"]["run_id"],
+            firmware="1.1",
+            route="local_adapter",
+        )
+        == "bronze"
+    )
+    proxy_run = next(
+        item
+        for revision in after_first["revisions"]
+        for item in revision["runs"]
+        if item["run_id"] == runs["active_proxy"]["run_id"]
+    )
+    assert {item["status"] for item in proxy_run["bronze_evidence"].values()} == {
+        "inconclusive"
+    }
+    assert (
+        _isolated_run_tier(
+            after_first,
+            revision_id="r600-hw03",
+            run_id=runs["active_proxy"]["run_id"],
+            firmware="1.1",
+            route="active_proxy",
+        )
+        == "unqualified"
+    )
+    proxy_legacy_history = next(
+        item
+        for item in proxy_run["review_history"]
+        if item.get("legacy_bronze_evidence")
+    )
+    assert proxy_legacy_history["assurance"] == "unknown"
+    assert (
+        proxy_legacy_history["legacy_bronze_evidence"] == legacy_records["active_proxy"]
+    )
+    assert {item["status"] for item in proxy_run["bronze_evidence"].values()} == {
+        "inconclusive"
+    }
+
+    after_second = reattest("active_proxy")
+    assert all(
+        _isolated_run_tier(
+            after_second,
+            revision_id="r600-hw03",
+            run_id=facts["run_id"],
+            firmware="1.1",
+            route=route,
+        )
+        == "bronze"
+        for route, facts in runs.items()
+    )
+    for route, facts in runs.items():
+        run = next(
+            item
+            for revision in after_second["revisions"]
+            for item in revision["runs"]
+            if item["run_id"] == facts["run_id"]
+        )
+        assert run["archive_sha256"] == next(
+            old["archive_sha256"]
+            for revision in legacy["revisions"]
+            for old in revision["runs"]
+            if old["run_id"] == facts["run_id"]
+        )
+        assert set(run["evidence"]) >= {
+            path for item in legacy_records[route].values() for path in item["evidence"]
+        }
+    assert evaluate_tiers(after_second)["tiers"]
+
+
 def test_onboard_import_review_stages_the_complete_reviewed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

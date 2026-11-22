@@ -975,6 +975,67 @@ def _suspend_legacy_tier_evidence(run: dict[str, Any]) -> dict[str, Any]:
     return {category: values for category, values in archived.items() if values}
 
 
+def _suspend_legacy_bronze_evidence(run: dict[str, Any]) -> dict[str, Any]:
+    """Move unassured Bronze PASS records out of another run's active proof."""
+    records = run.get("bronze_evidence")
+    if not isinstance(records, dict):
+        return {}
+    archived = {}
+    for claim, item in list(records.items()):
+        review = item.get("physical_review") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "pass"
+            or not isinstance(review, dict)
+            or "assurance" in review
+        ):
+            continue
+        archived[claim] = json.loads(json.dumps(item))
+        records[claim] = {
+            "status": "inconclusive",
+            "evidence": [],
+            "rationale": "Legacy Bronze review is retained in review history pending explicit re-attestation.",
+        }
+    return archived
+
+
+def _record_suspended_legacy_reviews(
+    run: dict[str, Any], *, bronze: dict[str, Any], tier: dict[str, Any]
+) -> None:
+    """Append unknown-provenance snapshots for evidence suspended in a run."""
+    if not bronze and not tier:
+        return
+    history = run.get("review_history")
+    if not isinstance(history, list):
+        history = []
+    archive_sha256 = run.get("archive_sha256")
+    reviewed_at = run.get("captured_at")
+    if bronze:
+        history.append(
+            {
+                "tier": "bronze",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": reviewed_at,
+                "assurance": "unknown",
+                "legacy_bronze_evidence": bronze,
+                "archive_sha256": archive_sha256,
+            }
+        )
+    if tier:
+        history.append(
+            {
+                "tier": "silver",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": reviewed_at,
+                "assurance": "unknown",
+                "legacy_tier_evidence": tier,
+                "archive_sha256": archive_sha256,
+            }
+        )
+    run["review_history"] = history
+    run["qualification_status"] = "pending"
+
+
 def review_imported_run(
     matrix_path: Path,
     *,
@@ -1214,15 +1275,27 @@ def review_imported_run(
             item["physical_review"]["evidence_sha256"] = _evidence_digests(
                 item["evidence"], files, root
             )
-    new_revision = json.loads(json.dumps(revision))
-    new_revision["runs"] = [
-        updated if item.get("run_id") == run_id else item for item in revision["runs"]
-    ]
-    proposed = dict(matrix)
+    proposed = json.loads(json.dumps(matrix))
+    for proposed_revision in proposed.get("revisions", []):
+        if not isinstance(proposed_revision, dict):
+            continue
+        proposed_runs = proposed_revision.get("runs")
+        if not isinstance(proposed_runs, list):
+            continue
+        for index, candidate in enumerate(proposed_runs):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("run_id") == run_id:
+                proposed_runs[index] = updated
+                continue
+            if not str(candidate.get("run_id", "")).startswith("archive-"):
+                continue
+            suspended_bronze = _suspend_legacy_bronze_evidence(candidate)
+            suspended_tier = _suspend_legacy_tier_evidence(candidate)
+            _record_suspended_legacy_reviews(
+                candidate, bronze=suspended_bronze, tier=suspended_tier
+            )
     proposed["generated_at"] = datetime.now(UTC).date().isoformat()
-    proposed["revisions"] = [
-        new_revision if item is revision else item for item in matrix["revisions"]
-    ]
     statuses = {
         claim: item["status"] for claim, item in updated["bronze_evidence"].items()
     }
