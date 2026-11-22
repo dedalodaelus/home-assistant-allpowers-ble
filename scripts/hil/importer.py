@@ -376,9 +376,9 @@ def _build_proposal(
         if prior is not None:
             if prior.get("content_sha256") != content_sha256:
                 raise HAAPIError("Source run identity conflicts with existing contents")
-            # Independent Bronze review adds qualification and evidence fields
-            # after import. Compare every source-derived field while preserving
-            # that reviewed enrichment for an idempotent re-import.
+            # Offline Bronze and tier reviews enrich these fields after import.
+            # Compare every source-derived field while preserving review state
+            # for an idempotent re-import of the same verified archive.
             review_fields = {
                 "archive_sha256",
                 "qualification_status",
@@ -386,7 +386,10 @@ def _build_proposal(
                 "authorization_context_source",
                 "bronze_evidence",
                 "evidence",
+                "feature_presence",
                 "review_history",
+                "scenarios",
+                "write_capabilities",
             }
             if any(
                 prior.get(key) != value

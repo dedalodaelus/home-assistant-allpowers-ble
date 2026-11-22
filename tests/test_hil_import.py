@@ -3130,6 +3130,7 @@ def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
 def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from scripts import validate_hil_qualification
     from scripts.hil.review_wizard import interactive_review
@@ -3256,6 +3257,37 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     ]
     assert all((tmp_path / path).is_file() for path in gold_stage)
     assert run["scenarios"]["reconnect_failover"]["status"] == "pass"
+
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    reviewed_state = {
+        key: json.loads(json.dumps(run[key]))
+        for key in (
+            "archive_sha256",
+            "feature_presence",
+            "review_history",
+            "scenarios",
+            "write_capabilities",
+        )
+    }
+    assert run["archive_sha256"] == archive_sha256
+    assert evaluate_tiers(matrix)["tiers"][0]["assurance"]["gold"] == (
+        "independently_reviewed"
+    )
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    assert "This archive is already imported; no changes needed." in (
+        capsys.readouterr().out
+    )
+    reimported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert len(reimported["revisions"][0]["runs"]) == 1
+    reimported_run = reimported["revisions"][0]["runs"][0]
+    assert {key: reimported_run[key] for key in reviewed_state} == reviewed_state
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
+    reimported_tier = evaluate_tiers(reimported)["tiers"][0]
+    assert reimported_tier["tier"] == "gold"
+    assert reimported_tier["assurance"]["gold"] == "independently_reviewed"
 
     # An older qualified run may keep the scope's tier, but cannot qualify a
     # newly imported run with no reviewed Bronze, control, or scenario results.
