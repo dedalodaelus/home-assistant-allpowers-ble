@@ -3059,6 +3059,32 @@ def test_safe_disabled_car_charger_public_export_review_and_gold_are_end_to_end(
         def __init__(self) -> None:
             self.write_calls: list[Any] = []
 
+        @staticmethod
+        def discovery() -> tuple[list[Any], list[Any], None, list[Any]]:
+            return (
+                [],
+                [
+                    {
+                        "id": "private-device",
+                        "config_entry_id": "private-entry",
+                        "identifiers": [["allpowers_ble", "private-id"]],
+                        "model": "R600",
+                    }
+                ],
+                None,
+                [
+                    {
+                        "entry_id": "private-entry",
+                        "domain": "allpowers_ble",
+                        "state": "loaded",
+                    }
+                ],
+            )
+
+        @staticmethod
+        def hil_capabilities(_entry_id: str) -> dict[str, Any]:
+            return capabilities
+
         def call_control(self, *args: Any, **kwargs: Any) -> None:
             self.write_calls.append((args, kwargs))
             raise AssertionError("an exclusion must not issue a control write")

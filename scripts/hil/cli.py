@@ -309,7 +309,7 @@ def _scenario_controls(
         entity_id = device.control_entities.get(key)
         if entity_id is None:
             observed = {"available": False, "state": None, "options": []}
-            availability_verified = True
+            availability_verified = key not in device.ambiguous_controls
         else:
             control_state = getattr(api, "control_state", None)
             if not callable(control_state):
@@ -380,6 +380,59 @@ def _scenario_controls(
             ),
         }
     return result
+
+
+def _persist_exclusion_snapshot(
+    output_dir: Path,
+    *,
+    capabilities: dict[str, Any] | None,
+    controls: dict[str, Any],
+    planned_step: dict[str, Any],
+) -> bool:
+    """Atomically bind the current exclusion decision to its source snapshot."""
+    import secrets
+
+    session_path = output_dir / "session.json"
+    temporary_path: Path | None = None
+    try:
+        metadata = session_path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+            return False
+        saved_session = json.loads(session_path.read_text(encoding="utf-8"))
+        saved_plan = saved_session.get("test_plan")
+        saved_steps = saved_plan.get("steps") if isinstance(saved_plan, dict) else None
+        if not isinstance(saved_steps, list):
+            return False
+        for index, step in enumerate(saved_steps):
+            if isinstance(step, dict) and step.get("id") == "car_charger_reversal":
+                saved_steps[index] = planned_step
+                break
+        else:
+            return False
+        saved_session["runtime_capabilities"] = capabilities
+        saved_session["controls"] = controls
+        encoded = (
+            json.dumps(saved_session, indent=2, sort_keys=True, ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+        temporary_path = output_dir / f".session.{secrets.token_hex(8)}.tmp"
+        descriptor = os.open(
+            temporary_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, session_path)
+        return True
+    except OSError, UnicodeError, ValueError, TypeError, AttributeError:
+        return False
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _pending_plan_status(step: dict[str, Any]) -> tuple[str, str]:
@@ -1401,6 +1454,83 @@ def _execute_tier_suite(
             )
             continue
         if planned.get("action") == "exclude":
+            from .guided import build_tier_plan
+
+            current_capabilities = None
+            current_controls = dict(runtime_controls)
+            current_step = {
+                **planned,
+                "action": "write",
+                "eligibility": "blocked",
+                "safe_disable_proof": None,
+                "reasons": ["fresh exclusion preflight could not be established"],
+            }
+            try:
+                registry_reader = getattr(api, "discovery", None)
+                capability_reader = getattr(api, "hil_capabilities", None)
+                if (
+                    device.config_entry_id is None
+                    or not callable(registry_reader)
+                    or not callable(capability_reader)
+                ):
+                    raise HAAPIError("Entry-scoped capability refresh is unavailable")
+                entities, registry_devices, _manifest, entries = registry_reader()
+                current_devices = find_devices(entities, registry_devices, entries)
+                matching_devices = [
+                    current_device
+                    for current_device in current_devices
+                    if current_device.device_id == device.device_id
+                    and current_device.config_entry_id == device.config_entry_id
+                ]
+                if len(matching_devices) != 1:
+                    raise HAAPIError(
+                        "Selected device registry mapping is no longer unique"
+                    )
+                current_device = matching_devices[0]
+                current_capabilities = capability_reader(device.config_entry_id)
+                current_controls = _scenario_controls(
+                    api, current_device, current_capabilities
+                )
+                plan_device = plan.get("device", {})
+                current_plan = build_tier_plan(
+                    plan.get("requested_tier", "gold"),
+                    current_capabilities,
+                    current_controls,
+                    observed_route=(
+                        plan_device.get("verified_route")
+                        if isinstance(plan_device, dict)
+                        else None
+                    ),
+                    build_provenance=(
+                        plan_device.get("build_provenance", {})
+                        if isinstance(plan_device, dict)
+                        else {}
+                    ),
+                    inventory_preflight=plan.get("physical_inventory_preflight"),
+                )
+                current_step = next(
+                    step
+                    for step in current_plan["steps"]
+                    if step.get("id") == "car_charger_reversal"
+                )
+            except HAAPIError, StopIteration:
+                current_capabilities = None
+                current_controls = dict(runtime_controls)
+                current_car_control = current_controls.get("car_charger")
+                if isinstance(current_car_control, dict):
+                    current_controls["car_charger"] = {
+                        **current_car_control,
+                        "available": False,
+                        "availability_verified": False,
+                        "eligible": False,
+                    }
+            capabilities = current_capabilities
+            runtime_controls = current_controls
+            features = (
+                capabilities.get("features", {})
+                if isinstance(capabilities, dict)
+                else {}
+            )
             capability_flags = (
                 capabilities.get("capabilities", {})
                 if isinstance(capabilities, dict)
@@ -1410,9 +1540,26 @@ def _execute_tier_suite(
             facts = (
                 features.get("car_charger", {}) if isinstance(features, dict) else {}
             )
+            refreshed_exclusion = bool(
+                current_step.get("action") == "exclude"
+                and current_step.get("eligibility") == "review_required"
+                and current_step.get("safe_disable_proof")
+                == {
+                    "runtime_option_enabled": False,
+                    "normal_control_available": False,
+                }
+            )
+            snapshot_saved = _persist_exclusion_snapshot(
+                output_dir,
+                capabilities=current_capabilities,
+                controls=current_controls,
+                planned_step=current_step,
+            )
             if (
                 step_id == "car_charger_reversal"
-                and planned.get("eligibility") == "review_required"
+                and planned.get("feature") == "car_charger"
+                and refreshed_exclusion
+                and snapshot_saved
                 and isinstance(capabilities, dict)
                 and isinstance(capability_flags, dict)
                 and capabilities.get("schema_version") == 2

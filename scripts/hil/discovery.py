@@ -56,6 +56,7 @@ class Device:
     control_entities: dict[str, str] = field(default_factory=dict)
     config_entry_id: str | None = None
     refresh_button: ReadOnlyRefreshButton | None = None
+    ambiguous_controls: set[str] = field(default_factory=set)
 
 
 def safe_model(value: Any) -> str:
@@ -314,6 +315,7 @@ def find_devices(
                 state_entities=mapping,
                 entry_state=_entry_state(raw_device, entries),
                 control_entities=control_mapping,
+                ambiguous_controls=ambiguous_controls,
                 config_entry_id=_loaded_entry_id(raw_device, entries),
                 refresh_button=refresh_button,
             )
