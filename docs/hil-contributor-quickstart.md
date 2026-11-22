@@ -70,8 +70,12 @@ continuing.
 Run the same doctor command on Linux/macOS or Windows PowerShell:
 
 ```console
-python -m scripts.hil doctor
+python -m scripts.hil doctor --ha-url https://home-assistant.example:8123
 ```
+
+The doctor needs the HA origin from `--ha-url` or `HA_HIL_URL`; unlike
+`onboard`, it does not prompt for a missing origin. It prompts securely for a
+missing token.
 
 `doctor` is a read-only preflight. It does not establish a connected BLE route;
 onboarding verifies route evidence from the connected backend.
@@ -130,9 +134,12 @@ Use only those printed allowlisted paths; never add private `hil-results/`, raw
 captures, secrets, or the original ZIP. Keep the PR base at `devel` and link the
 relevant issue. The wizard does not commit, push, or open a PR automatically.
 
-Agent-created commits must be signed and verified as described in
-[`AGENTS.md`](../AGENTS.md); signing is optional for human contributors under
-[`CONTRIBUTING.md`](../CONTRIBUTING.md).
+The handoff prints signed commit and verification commands. Agents must run
+them as printed, as required by [`AGENTS.md`](../AGENTS.md). Human contributors
+may remove `-S` from the printed commit command and omit the
+`git verify-commit HEAD` command when signing is not configured. Signing is
+optional under [`CONTRIBUTING.md`](../CONTRIBUTING.md). Keep commit hooks
+enabled and never use `--no-verify`.
 
 ## Troubleshooting
 
