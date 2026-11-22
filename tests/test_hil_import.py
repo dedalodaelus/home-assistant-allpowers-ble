@@ -5375,6 +5375,9 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         Path(__file__).resolve().parents[1] / ".github" / "PULL_REQUEST_TEMPLATE.md",
         template_target,
     )
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".gitignore", repo_root / ".gitignore"
+    )
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
     shutil.copytree(
         Path(__file__).resolve().parents[1] / "scripts",
@@ -5556,6 +5559,182 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         text=True,
     )
     assert "HIL qualification validation passed" in direct_validation.stdout
+
+
+def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli, review_wizard
+    from scripts.hil.cli import _verified_review_stage_paths
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "original checkout"
+    repo_root.mkdir()
+    source_root = Path(__file__).resolve().parents[1]
+    shutil.copytree(
+        source_root / "scripts",
+        repo_root / "scripts",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shutil.copyfile(source_root / ".gitignore", repo_root / ".gitignore")
+
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    matrix_path = matrix_path.with_name("custom qualification matrix.json")
+    (repo_root / "tests" / "hil" / "qualification_matrix.json").rename(matrix_path)
+
+    subprocess.run(["git", "init", "-b", "feat/bootstrap", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
+    previous_archive = _captured_archive(
+        tmp_path / "previous source",
+        "local_adapter",
+        "1.1",
+        "1111111111111111",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    import_archive(
+        previous_archive, matrix_path=matrix_path, apply=True, repo_root=repo_root
+    )
+    _commit_checkout(repo_root)
+    previous_matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    previous_run_id = previous_matrix["revisions"][0]["runs"][0]["run_id"]
+    subprocess.run(["git", "-C", str(repo_root), "switch", "-c", "devel"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "update-ref",
+            "refs/remotes/origin/devel",
+            "HEAD",
+        ],
+        check=True,
+    )
+
+    unrelated_dirty = repo_root / "operator-notes.txt"
+    unrelated_dirty.write_text("preserve this local note\n", encoding="utf-8")
+    archive = _captured_archive(
+        tmp_path / "private results",
+        "local_adapter",
+        "1.1",
+        "2222222222222222",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    archive_before = archive.read_bytes()
+    original_matrix_before = matrix_path.read_bytes()
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+
+    assert (
+        cli.main(["import", str(archive), "--matrix", str(matrix_path), "--apply"]) == 2
+    )
+    handoff_output = capsys.readouterr().out
+    assert "The evidence ZIP is preserved" in handoff_output
+    assert unrelated_dirty.read_text(encoding="utf-8") == "preserve this local note\n"
+    assert matrix_path.read_bytes() == original_matrix_before
+    assert archive.read_bytes() == archive_before
+
+    worktree_command = next(
+        shlex.split(line.strip())
+        for line in handoff_output.splitlines()
+        if line.strip().startswith("git -C ") and "worktree" in line
+    )
+    subprocess.run(worktree_command, check=True, capture_output=True, text=True)
+    worktree_line = next(
+        line.strip()[3:]
+        for line in handoff_output.splitlines()
+        if line.strip().startswith("cd ")
+    )
+    worktree = Path(shlex.split(worktree_line)[0])
+    relative_matrix = matrix_path.relative_to(repo_root).as_posix()
+    import_lines = [
+        line.strip()
+        for line in handoff_output.splitlines()
+        if line.strip().startswith("python -m scripts.hil import ")
+    ]
+    assert len(import_lines) == 2
+    for import_line in import_lines:
+        command = shlex.split(import_line)
+        assert command[command.index("--matrix") + 1] == relative_matrix
+        result = subprocess.run(
+            [sys.executable, *command[1:]],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "HIL evidence import preview" in result.stdout
+
+    imported_matrix = worktree / relative_matrix
+    imported = json.loads(imported_matrix.read_text(encoding="utf-8"))
+    runs = imported["revisions"][0]["runs"]
+    current_run = next(run for run in runs if run["run_id"] == proposal["run_id"])
+    older_run = next(run for run in runs if run["run_id"] == previous_run_id)
+    assert archive.read_bytes() == archive_before
+
+    review_line = next(
+        line.strip()
+        for line in handoff_output.splitlines()
+        if line.strip().startswith("python -m scripts.hil review --matrix ")
+    )
+    review_command = shlex.split(review_line)
+    assert review_command[review_command.index("--matrix") + 1] == relative_matrix
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.chdir(worktree)
+    monkeypatch.setattr(review_wizard.sys, "stdin", TTY())
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", worktree)
+    answers = iter(
+        ["1", *_operator_review_answers(reviewer="HIL operator", apply=True)]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert cli.main(review_command[3:]) == 0
+
+    reviewed_matrix = json.loads(imported_matrix.read_text(encoding="utf-8"))
+    from scripts.hil.cli import _isolated_run_summary
+
+    isolated = _isolated_run_summary(
+        reviewed_matrix,
+        revision_id="r600-hw03",
+        run_id=current_run["run_id"],
+        firmware="1.1",
+        route="local_adapter",
+    )
+    assert isolated is not None
+    assert isolated["tier"] == "bronze"
+    assert isolated["assurance"]["bronze"] == "operator_attested"
+    stage_paths = _verified_review_stage_paths(
+        reviewed_matrix,
+        imported_matrix,
+        worktree,
+        revision_id="r600-hw03",
+        run_id=current_run["run_id"],
+    )
+    assert stage_paths is not None
+    assert relative_matrix in stage_paths
+    assert all(reference in stage_paths for reference in current_run["evidence"])
+    assert all(reference not in stage_paths for reference in older_run["evidence"])
+    subprocess.run(["git", "-C", str(worktree), "add", *stage_paths], check=True)
+    staged = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--cached", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert set(staged) == set(stage_paths)
+    assert unrelated_dirty.read_text(encoding="utf-8") == "preserve this local note\n"
+    assert matrix_path.read_bytes() == original_matrix_before
+    assert archive.read_bytes() == archive_before
 
 
 def test_onboard_without_independent_reviewer_leaves_offline_resume_path(
@@ -5873,6 +6052,7 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
         )
         complete_handoff(old_archive, "gold", tmp_path / "old-output")
         capsys.readouterr()
+        _commit_checkout(repo_root)
 
     archive = _standard_tier_suite_archive(
         tmp_path / "new-acquisition",
@@ -5911,16 +6091,16 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
         ]
     assert evaluate_tiers(isolated)["tiers"][0]["tier"] == tier
     expected_paths = {matrix_path.relative_to(repo_root).as_posix()}
-    for run in runs:
-        expected_paths.update(run["evidence"])
-        for section in (
-            "bronze_evidence",
-            "write_capabilities",
-            "scenarios",
-            "feature_presence",
-        ):
-            for record in run.get(section, {}).values():
-                expected_paths.update(record.get("evidence", []))
+    reviewed_run = next(run for run in runs if run["run_id"] == expected_run_id)
+    expected_paths.update(reviewed_run["evidence"])
+    for section in (
+        "bronze_evidence",
+        "write_capabilities",
+        "scenarios",
+        "feature_presence",
+    ):
+        for record in reviewed_run.get(section, {}).values():
+            expected_paths.update(record.get("evidence", []))
     add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
     stage_paths = shlex.split(add_line)[2:]
     assert set(stage_paths) == expected_paths
@@ -5930,12 +6110,18 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
     }
     assert current_evidence
     assert all(path in generated_body for path in current_evidence)
-    assert f"stages all {len(stage_paths) - 1} exact public" in generated_body
+    assert (
+        f"includes only this run's {len(stage_paths) - 1} verified public and review"
+        in generated_body
+    )
     if prior_gold:
         old_run = next(item for item in runs if item["run_id"] != expected_run_id)
         old_prefix = f"tests/hil/fixtures/r600-hw03/runs/{old_run['run_id']}/"
-        old_evidence = {path for path in expected_paths if path.startswith(old_prefix)}
+        old_evidence = {
+            path for path in old_run["evidence"] if path.startswith(old_prefix)
+        }
         assert old_evidence
+        assert not old_evidence.intersection(stage_paths)
         assert not any(path in generated_body for path in old_evidence)
     subprocess.run(["git", "-C", str(repo_root), "add", *stage_paths], check=True)
     staged = subprocess.run(
@@ -6515,8 +6701,12 @@ def test_interactive_review_interruption_never_applies(
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", interrupted_input)
 
-    def use_test_repository(matrix: Path, *, run_id: str) -> int:
-        return run_interactive_review(matrix, run_id=run_id, repo_root=tmp_path)
+    def use_test_repository(
+        matrix: Path, *, run_id: str, repo_root: Path | None = None
+    ) -> int:
+        return run_interactive_review(
+            matrix, run_id=run_id, repo_root=repo_root or tmp_path
+        )
 
     monkeypatch.setattr(
         "scripts.hil.review_wizard.interactive_review", use_test_repository

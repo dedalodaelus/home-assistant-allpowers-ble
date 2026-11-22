@@ -272,9 +272,11 @@ continuous 24-hour soak evidence.
 
 After a fully reviewed and validated Bronze import, `onboard` writes a concrete
 `pr.md` beside the private run record and prints shell-quoted commands that stage
-only the allowlisted matrix and public evidence files. Inspect that body and the
-staged diff before committing or opening a PR. The handoff never commits, pushes,
-opens, or merges anything.
+only the qualification matrix and the target run's verified public and review
+evidence. Earlier runs must already be present in branch history; their files are
+verified as part of the complete matrix but are not re-staged. Inspect that body
+and the staged diff before committing or opening a PR. The handoff never commits,
+pushes, opens, or merges anything.
 
 For other PRs, structured facts can be rendered from the complete repository
 template without losing headings or checklist items:

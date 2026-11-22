@@ -700,6 +700,70 @@ def test_review_checkout_allows_only_scoped_hil_changes(tmp_path):
     )
 
 
+def test_review_checkout_only_allows_target_run_evidence(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    matrix_path = repo / "tests/hil/qualification_matrix.json"
+    target_run = "archive-" + "a" * 64
+    older_run = "archive-" + "b" * 64
+    target_evidence = "tests/hil/fixtures/r600-hw03/runs/" + target_run + "/report.md"
+    target_claim = "tests/hil/fixtures/r600-hw03/runs/" + target_run + "/claim.json"
+    older_evidence = "tests/hil/fixtures/r600-hw03/runs/" + older_run + "/report.md"
+    matrix_path.parent.mkdir(parents=True)
+    matrix = {
+        "schema_version": 3,
+        "revisions": [
+            {
+                "id": "r600-hw03",
+                "runs": [
+                    {
+                        "run_id": older_run,
+                        "evidence": [older_evidence],
+                    },
+                    {
+                        "run_id": target_run,
+                        "evidence": [target_evidence],
+                        "bronze_evidence": {"identity": {"evidence": [target_claim]}},
+                    },
+                ],
+            }
+        ],
+    }
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    for relative in (target_evidence, target_claim, older_evidence):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize review checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "-c", "feat/review"], check=True)
+
+    allowed = cli._review_evidence_paths(matrix_path, target_run)
+    assert allowed == [target_evidence, target_claim]
+    (repo / target_evidence).write_text("target evidence changed\n", encoding="utf-8")
+    matrix_path.write_text(json.dumps(matrix) + "\n", encoding="utf-8")
+    assert cli._review_checkout_safe(repo, matrix_path, allowed)
+
+    (repo / target_evidence).write_text("base\n", encoding="utf-8")
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    (repo / older_evidence).write_text("older evidence changed\n", encoding="utf-8")
+    assert not cli._review_checkout_safe(repo, matrix_path, allowed)
+
+    matrix["revisions"][0]["runs"][1]["evidence"] = ["operator-notes.txt"]
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    assert cli._review_evidence_paths(matrix_path, target_run) is None
+
+
 def test_candidate_control_preflight_does_not_require_production_permission():
     class CandidateHA:
         def control_state(self, _key, _entity):
