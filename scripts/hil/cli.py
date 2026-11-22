@@ -2947,7 +2947,8 @@ def execute(args: argparse.Namespace) -> int:
             print("Restoration:", test_plan["restoration_plan"])
             if getattr(args, "onboarding", False):
                 print(
-                    "Attained evidence-backed tier: unqualified until independent review."
+                    "Acquisition is not qualification; reviewed assurance and tier are "
+                    "computed only after explicit offline review."
                 )
                 if (
                     input("Type RUN after reviewing the plan to continue: ").strip()
@@ -3183,8 +3184,8 @@ def _onboard_export(
         return 2
 
     print(
-        "TEST GATE: PASS (eligible for independent evidence review; "
-        "not a hardware qualification)."
+        "TEST GATE: PASS (eligible for explicit operator attestation or separate "
+        "independent evidence review; not a hardware qualification)."
     )
     report_path = write_report(output_dir)
     report_path = report_path.resolve()
@@ -3199,7 +3200,10 @@ def _onboard_export(
     print(excerpt)
     if len(report_text) > len(excerpt):
         print("[report excerpt truncated]")
-    print("Attained evidence-backed tier: unqualified until independent review.")
+    print(
+        "The verified ZIP is an acquisition snapshot, not a qualification. "
+        "Review and tier evaluation happen after explicit import."
+    )
     if not (output_dir / "session.json").is_file():
         print("No valid private run is available for export.")
         return 2
@@ -3278,6 +3282,22 @@ def _review_resume_command(matrix_path: Path, run_id: str, tier: str = "bronze")
     if tier != "bronze":
         command += " --tier " + _shell_quote(tier)
     return command
+
+
+def _print_offline_review_resume(
+    matrix_path: Path,
+    run_id: str,
+    *,
+    requested_tier: str,
+    pending_tier: str,
+) -> None:
+    """Print the ordered commands needed to finish an imported review offline."""
+    tiers = [pending_tier]
+    if pending_tier == "bronze" and requested_tier in {"silver", "gold"}:
+        tiers.append(requested_tier)
+    print("To continue the offline review, run these commands in order:")
+    for tier in tiers:
+        print("  " + _review_resume_command(matrix_path, run_id, tier))
 
 
 def _verified_review_stage_paths(
@@ -3450,6 +3470,20 @@ def _isolated_run_tier(
     matrix: dict[str, Any], *, revision_id: str, run_id: str, firmware: str, route: str
 ) -> str:
     """Evaluate one reviewed run without letting older scope evidence fill gaps."""
+    item = _isolated_run_summary(
+        matrix,
+        revision_id=revision_id,
+        run_id=run_id,
+        firmware=firmware,
+        route=route,
+    )
+    return item.get("tier", "unqualified") if item is not None else "unqualified"
+
+
+def _isolated_run_summary(
+    matrix: dict[str, Any], *, revision_id: str, run_id: str, firmware: str, route: str
+) -> dict[str, Any] | None:
+    """Return the evaluated exact scope with every other run removed."""
     isolated = json.loads(json.dumps(matrix))
     for revision in isolated.get("revisions", []):
         if isinstance(revision, dict):
@@ -3463,13 +3497,13 @@ def _isolated_run_tier(
     result = evaluate_tiers(isolated)
     return next(
         (
-            item.get("tier", "unqualified")
+            item
             for item in result.get("tiers", [])
             if item.get("scope", {}).get("revision_id") == revision_id
             and item.get("scope", {}).get("firmware") == firmware
             and item.get("scope", {}).get("observed_route") == route
         ),
-        "unqualified",
+        None,
     )
 
 
@@ -3501,7 +3535,7 @@ def _onboard_import_review(
     importer._print_preview(proposal)
     try:
         accepted = input(
-            "Import this reviewed evidence? [y/N]: "
+            "Import this verified acquisition evidence? [y/N]: "
         ).strip().casefold() in {"y", "yes"}
         if not accepted:
             print("Import declined; no repository files were changed.")
@@ -3528,25 +3562,50 @@ def _onboard_import_review(
         return False
 
     run_id = proposal["run_id"]
-    print(
-        "An independent reviewer must be available. The HIL operator's own run "
-        "does not count as an independent review."
-    )
     try:
-        reviewer_available = (
-            input(
-                "Hand the terminal to a different reviewer, then type REVIEWER READY: "
-            ).strip()
-            == "REVIEWER READY"
-        )
+        print("Choose how this imported run will be reviewed:")
+        print("  [1] Operator attestation by the person who performed the run")
+        print("  [2] Independent review by a different person")
+        choice = input("Review route (default: leave inconclusive): ").strip()
+        expected_assurance = {
+            "1": "operator_attested",
+            "2": "independently_reviewed",
+        }.get(choice)
     except EOFError, KeyboardInterrupt:
-        reviewer_available = False
-    if not reviewer_available:
+        expected_assurance = None
+    if expected_assurance is None:
         print(
-            "Evidence remains imported as inconclusive; no PR commands were generated."
+            "Evidence remains imported and unqualified; no PR commands were generated."
         )
-        print("Later, run: " + _review_resume_command(matrix_path, run_id))
+        _print_offline_review_resume(
+            matrix_path,
+            run_id,
+            requested_tier=requested_tier,
+            pending_tier="bronze",
+        )
         return False
+    if expected_assurance == "independently_reviewed":
+        try:
+            reviewer_available = (
+                input(
+                    "Hand the terminal to a different reviewer, then type REVIEWER READY: "
+                ).strip()
+                == "REVIEWER READY"
+            )
+        except EOFError, KeyboardInterrupt:
+            reviewer_available = False
+        if not reviewer_available:
+            print(
+                "Evidence remains imported and unqualified; no PR commands were generated."
+            )
+            _print_offline_review_resume(
+                matrix_path,
+                run_id,
+                requested_tier=requested_tier,
+                pending_tier="bronze",
+            )
+            return False
+    pending_tier = "bronze"
     try:
         from .review_wizard import interactive_review
 
@@ -3554,22 +3613,32 @@ def _onboard_import_review(
         if requested_tier in {"silver", "gold"}:
             review_tiers.append(requested_tier)
         for review_tier in review_tiers:
+            pending_tier = review_tier
             if (
                 interactive_review(
                     matrix_path,
                     run_id=run_id,
                     repo_root=repo_root,
+                    expected_assurance=expected_assurance,
                     **({} if review_tier == "bronze" else {"tier": review_tier}),
                 )
                 != 0
             ):
-                print("To continue the offline review later, run:")
-                print("  " + _review_resume_command(matrix_path, run_id, review_tier))
+                _print_offline_review_resume(
+                    matrix_path,
+                    run_id,
+                    requested_tier=requested_tier,
+                    pending_tier=review_tier,
+                )
                 return False
     except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
-        print("Independent review did not complete:", ex)
-        print("To continue the offline review later, run:")
-        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        print("Explicit review did not complete:", ex)
+        _print_offline_review_resume(
+            matrix_path,
+            run_id,
+            requested_tier=requested_tier,
+            pending_tier=pending_tier,
+        )
         return False
 
     try:
@@ -3605,31 +3674,69 @@ def _onboard_import_review(
         None,
     )
     tier_rank = {"unqualified": 0, "bronze": 1, "silver": 2, "gold": 3, "platinum": 4}
-    if selected is None or tier_rank.get(selected.get("tier"), 0) < tier_rank.get(
-        requested_tier, 99
-    ):
-        print(
-            f"Requested {requested_tier.title()} tier was not attained; no PR commands generated."
-        )
-        if selected is not None:
-            for reason in selected.get("unmet_requirements", []):
-                print("  -", reason)
-        print("After addressing the missing evidence, review this imported run with:")
-        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
-        return False
-    # The scope evaluator can retain results from older runs. A new onboarding
-    # handoff must qualify from this exact acquisition and its own review.
-    isolated_tier = _isolated_run_tier(
+    isolated_summary = _isolated_run_summary(
         matrix,
         revision_id=proposal["revision_id"],
         firmware=proposal["firmware_version"],
         route=proposal["route"],
         run_id=run_id,
     )
+    assurance_by_tier = (
+        isolated_summary.get("assurance", {}) if isolated_summary else {}
+    )
+    attained_tier = (
+        isolated_summary.get("tier", "unqualified")
+        if isolated_summary
+        else "unqualified"
+    )
+    attained_assurance = (
+        assurance_by_tier.get(attained_tier)
+        if isinstance(assurance_by_tier, dict)
+        else None
+    )
+    requested_assurance = (
+        assurance_by_tier.get(requested_tier)
+        if isinstance(assurance_by_tier, dict)
+        else None
+    )
+    print(
+        "POST-REVIEW QUALIFICATION: "
+        f"attained {attained_tier}; "
+        f"assurance {attained_assurance or 'unknown'}; "
+        f"scope {proposal['revision_id']} / {proposal['firmware_version']} / {proposal['route']}"
+    )
+    print(
+        "  Review basis: schema-v3 matrix evaluation isolated to imported run "
+        f"{run_id}; requested {requested_tier} assurance "
+        f"{requested_assurance or 'unknown'}."
+    )
+    if isolated_summary is not None:
+        for reason in isolated_summary.get("unmet_requirements", []):
+            print("  Missing condition:", reason)
+    if (
+        selected is None
+        or isolated_summary is None
+        or requested_assurance != expected_assurance
+        or tier_rank.get(isolated_summary.get("tier"), 0)
+        < tier_rank.get(requested_tier, 99)
+    ):
+        print(
+            f"Requested {requested_tier.title()} with {expected_assurance} assurance was not attained by this run; no PR commands generated."
+        )
+        if isolated_summary is not None:
+            for reason in isolated_summary.get("unmet_requirements", []):
+                print("  -", reason)
+        print("After addressing the missing evidence, review this imported run with:")
+        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        return False
+    # The scope evaluator can retain results from older runs. A new onboarding
+    # handoff must qualify from this exact acquisition and its own review.
+    isolated_tier = isolated_summary.get("tier", "unqualified")
     if tier_rank.get(isolated_tier, 0) < tier_rank.get(requested_tier, 99):
         print(
-            f"This imported run alone reaches {isolated_tier.title()}, below the "
-            f"requested {requested_tier.title()} tier; earlier scope evidence "
+            f"This imported run alone reaches {isolated_tier.title()} with "
+            f"{attained_assurance or 'unknown'} assurance, below the requested "
+            f"{requested_tier.title()} / {expected_assurance} result; earlier scope evidence "
             "cannot complete it. No PR commands generated."
         )
         return False
@@ -3643,10 +3750,10 @@ def _onboard_import_review(
     )
     if stage_paths is None:
         print(
-            f"This imported run lacks complete, independently applied {requested_tier.title()} "
+            f"This imported run lacks complete, applied {requested_tier.title()} "
             "review evidence or verified public artifacts; no PR commands were generated."
         )
-        print("After completing the independent review, run:")
+        print("To resume the offline review, run:")
         print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
         return False
     from scripts.pr_body import render_pr_body
@@ -3763,18 +3870,21 @@ def _onboard_import_review(
         if isinstance(selected_run, dict)
         else {}
     )
-    independently_reviewed_claims = all(
+    reviewed_claims_match_assurance = all(
         isinstance(reviewed_claims.get(claim), dict)
         and reviewed_claims[claim].get("status") == "pass"
+        and isinstance(reviewed_claims[claim].get("physical_review"), dict)
         and reviewed_claims[claim].get("physical_review", {}).get("outcome")
         == "confirmed_pass"
+        and reviewed_claims[claim].get("physical_review", {}).get("assurance")
+        == expected_assurance
         for claim in ("identity", "protocol_probe", "fresh_telemetry")
     )
     if not (
         protocol_behavior_verified
         and fresh_samples_verified
         and physical_observation == "plausible"
-        and independently_reviewed_claims
+        and reviewed_claims_match_assurance
     ):
         print(
             "Verified public Bronze behavior or applied review claims are incomplete; "
@@ -3783,13 +3893,17 @@ def _onboard_import_review(
         return False
 
     # Scope evaluation can be higher because of older runs. State only the
-    # highest tier independently attained by this acquisition and reviewed in
-    # this onboarding request.
+    # highest tier attained by this acquisition under the selected assurance.
     attained_tier = min(
         (isolated_tier, requested_tier),
         key=lambda tier: tier_rank.get(tier, 0),
     ).title()
-    title = f"test(hil): add reviewed {model} {attained_tier} evidence"
+    assurance_label = (
+        "operator-attested"
+        if expected_assurance == "operator_attested"
+        else "independently reviewed"
+    )
+    title = f"test(hil): add {assurance_label} {model} {attained_tier} evidence"
     current_run_prefix = (
         PurePosixPath("tests/hil/fixtures") / proposal["revision_id"] / "runs" / run_id
     ).as_posix() + "/"
@@ -3849,7 +3963,7 @@ def _onboard_import_review(
     validation_text = (
         f"The imported public archive passed integrity and schema checks. The exact "
         f"run's Bronze identity, protocol, and freshness claims and {attained_tier} "
-        "review evidence were independently reviewed and applied. The resulting "
+        f"review evidence were {assurance_label} and applied. The resulting "
         "matrix passed schema-v3 validation and the tier evaluator both in scope "
         "and with this run isolated, so earlier evidence cannot complete this run."
     )
@@ -3857,7 +3971,7 @@ def _onboard_import_review(
         "This PR adds privacy-filtered qualification evidence only. It changes no "
         "protocol implementation, writable flags, BLE timing, or connection behavior. "
         + (
-            "The acquisition performed independently reviewed control transitions "
+            f"The acquisition performed {assurance_label} control transitions "
             f"({', '.join(reviewed_controls) or 'none'}) and scenarios "
             f"({', '.join(reviewed_scenarios) or 'none'}); reviewed evidence includes "
             f"restoration records and physical absences ({', '.join(reviewed_absences) or 'none'})."
@@ -3875,12 +3989,12 @@ def _onboard_import_review(
         "recorded event sequence; it does not establish that the decoded notification "
         "was causally caused by that request. Two fresh telemetry samples and a "
         "plausible operator observation are present, and the identity, protocol, and "
-        "freshness claims were independently reviewed and applied. Telemetry sample "
+        f"freshness claims were {assurance_label} and applied. Telemetry sample "
         f"interval: {sample_interval}. "
         + (
-            f"Independently reviewed controls: {', '.join(reviewed_controls) or 'none'}. "
-            f"Independently reviewed scenarios: {', '.join(reviewed_scenarios) or 'none'}. "
-            f"Independently reviewed physical absences: {', '.join(reviewed_absences) or 'none'}. "
+            f"{assurance_label.title()} controls: {', '.join(reviewed_controls) or 'none'}. "
+            f"{assurance_label.title()} scenarios: {', '.join(reviewed_scenarios) or 'none'}. "
+            f"{assurance_label.title()} physical absences: {', '.join(reviewed_absences) or 'none'}. "
             f"The validated handoff stages all {len(stage_paths) - 1} exact public "
             "and review evidence files needed to validate the complete matrix."
             if requested_tier in {"silver", "gold"}
@@ -3903,17 +4017,18 @@ def _onboard_import_review(
     body_data = {
         "title": title,
         "issue": (
+            "#350 (solo-operator onboarding and reports); #349 (assurance contract); "
             "#227 (qualification plan); #328 (Bronze reviewer); #329 "
             "(higher-tier reviewer); #330 (onboard orchestration)"
         ),
         "summary": (
-            f"Add independently reviewed {attained_tier} qualification evidence for run "
+            f"Add {assurance_label} {attained_tier} qualification evidence for run "
             f"{run_id} on {model}, "
             f"hardware {hardware}, firmware {firmware}, on the observed {route} "
-            "route. The linked public evidence paths substantiate the hardware and "
+            f"route with `{expected_assurance}` assurance. The linked public evidence paths substantiate the hardware and "
             "revision checklist item for this exact scope. The related qualification "
-            "and reviewer issues are linked; a duplicate issue/PR search has not been "
-            "automatically performed, so that checklist item remains unchecked. "
+            "and reviewer issues are linked; check for duplicate issues and PRs before "
+            "submitting this generated hardware-evidence PR. "
             "No new production write authorization is requested or granted; "
             f"scope-specific reviewed control evidence is included for {', '.join(reviewed_controls) or 'no controls'}. "
             "Release tooling owns "
@@ -3941,7 +4056,8 @@ def _onboard_import_review(
         print("Unable to generate the complete PR body:", ex)
         return False
     print(
-        f"REVIEWED TIER: {attained_tier} ({model} / {hardware} / {firmware} / {route})"
+        f"REVIEWED TIER: {attained_tier}; ASSURANCE: {expected_assurance} "
+        f"({model} / {hardware} / {firmware} / {route})"
     )
     print("READY FOR QUALIFICATION PR. Inspect the staged diff and body first.")
     print("Local PR body:", body_path)

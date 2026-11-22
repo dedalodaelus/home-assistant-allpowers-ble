@@ -3235,6 +3235,10 @@ def _render_report(
     event_count: int,
     capture_count: int,
     route_summary: str,
+    tier_execution: dict[str, Any] | None = None,
+    tier_artifacts: dict[str, Any] | None = None,
+    bronze_read_only: dict[str, Any] | None = None,
+    capture_stats: list[dict[str, Any]] | None = None,
 ) -> bytes:
     env_data = environment.get("data", {})
     ha_facts = env_data.get("home_assistant", {})
@@ -3336,6 +3340,158 @@ def _render_report(
         if step_lines
         else "No correlated scenario steps were recorded."
     )
+    guided_text = ""
+    if isinstance(tier_execution, dict):
+        artifact_values = (
+            tier_artifacts.get("artifacts", [])
+            if isinstance(tier_artifacts, dict)
+            else []
+        )
+        artifacts_by_id = {
+            item.get("artifact_id"): item.get("content")
+            for item in artifact_values
+            if isinstance(item, dict)
+            and isinstance(item.get("artifact_id"), str)
+            and isinstance(item.get("content"), dict)
+        }
+        guided_lines = []
+        steps = tier_execution.get("steps", [])
+        if isinstance(steps, list):
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_id = step.get("step_id")
+                outcome = step.get("outcome")
+                if not isinstance(step_id, str) or not isinstance(outcome, str):
+                    continue
+                details = []
+                references = step.get("machine_evidence", [])
+                if isinstance(references, list):
+                    for reference in references:
+                        if not isinstance(reference, dict):
+                            continue
+                        artifact = artifacts_by_id.get(reference.get("artifact_id"))
+                        if not isinstance(artifact, dict):
+                            continue
+                        if isinstance(artifact.get("outcome"), str):
+                            details.append(f"artifact outcome `{artifact['outcome']}`")
+                        for key in (
+                            "physical_change_outcome",
+                            "physical_restore_outcome",
+                            "final_restore_outcome",
+                        ):
+                            if isinstance(artifact.get(key), str):
+                                details.append(
+                                    f"{key.replace('_', ' ')} `{artifact[key]}`"
+                                )
+                        cycles = artifact.get("output_cycles")
+                        if isinstance(cycles, list):
+                            for index, cycle in enumerate(cycles[:2], start=1):
+                                if not isinstance(cycle, dict):
+                                    continue
+                                initial = cycle.get("initial_state")
+                                target = cycle.get("target_state")
+                                change = cycle.get("physical_change_outcome")
+                                restore = cycle.get("physical_restore_outcome")
+                                if (
+                                    isinstance(initial, str)
+                                    and initial in {"on", "off"}
+                                    and isinstance(target, str)
+                                    and target in {"on", "off"}
+                                    and isinstance(change, str)
+                                    and change
+                                    in {
+                                        "correct",
+                                        "incorrect",
+                                        "unable_to_observe",
+                                    }
+                                    and isinstance(restore, str)
+                                    and restore
+                                    in {
+                                        "correct",
+                                        "incorrect",
+                                        "unable_to_observe",
+                                    }
+                                ):
+                                    details.append(
+                                        f"output cycle {index} ({initial} to {target}): "
+                                        f"physical change `{change}`; "
+                                        f"physical restoration `{restore}`"
+                                    )
+                if step_id in {
+                    "read_only_probe",
+                    "physical_plausibility_observation",
+                } and isinstance(bronze_read_only, dict):
+                    observation = bronze_read_only.get("physical_observation")
+                    if isinstance(observation, str):
+                        details.append(
+                            f"operator-reported physical plausibility `{observation}`"
+                        )
+                    if bronze_read_only.get("fresh_verified_samples") is True:
+                        details.append("fresh verified telemetry samples present")
+                    elif bronze_read_only.get("fresh_verified_samples") is False:
+                        details.append("fresh verified telemetry samples missing")
+                    if bronze_read_only.get("protocol_probe") in {
+                        "verified",
+                        "inconclusive",
+                    }:
+                        details.append(
+                            f"read-only protocol probe `{bronze_read_only['protocol_probe']}`"
+                        )
+                guided_lines.append(
+                    f"- `{step_id}`: **{outcome}**"
+                    + (
+                        "; " + "; ".join(details)
+                        if details
+                        else "; supporting details unavailable"
+                    )
+                )
+        guided_steps = "\n".join(guided_lines) or "No guided tier steps were recorded."
+        requested_tier = tier_execution.get("requested_tier", "unavailable")
+        execution_tier = tier_execution.get("execution_tier", requested_tier)
+        requested_route = session_data.get("route", {}).get("requested", "unavailable")
+        build_match = integration_facts.get("build_match", {}).get(
+            "value", "unverified"
+        )
+        scenario_note = (
+            "No correlated scenario steps were recorded; guided tier steps above are a separate acquisition record."
+            if not scenarios.get("steps")
+            else "Correlated scenario steps and guided tier steps are separate evidence records."
+        )
+        safe_captures = capture_stats if isinstance(capture_stats, list) else []
+        complete_captures = sum(row.get("complete") is True for row in safe_captures)
+        dropped_events = sum(
+            row.get("dropped_events", 0)
+            for row in safe_captures
+            if type(row.get("dropped_events", 0)) is int
+        )
+        dropped_frames = sum(
+            row.get("dropped_frames", 0)
+            for row in safe_captures
+            if type(row.get("dropped_frames", 0)) is int
+        )
+        guided_text = (
+            "## Guided tier acquisition\n\n"
+            + f"- Requested tier: `{requested_tier}`; executed tier: `{execution_tier}`\n"
+            + f"- Requested BLE route: `{requested_route}`; observed route: `{route_summary}`\n"
+            + f"- Installed build identity: `{build_match}`\n"
+            + f"- Capture summary: {complete_captures}/{len(safe_captures)} complete; {dropped_events} dropped events; {dropped_frames} dropped frames.\n"
+            + "- Acquisition status: pre-review snapshot; hardware qualification pending.\n\n"
+            + guided_steps
+            + "\n\n"
+            + scenario_note
+            + "\n\n"
+        )
+    report_status = (
+        "Acquisition status: pre-review evidence snapshot; hardware qualification pending."
+        if isinstance(tier_execution, dict)
+        else "Qualification: **inconclusive**. This report summarizes collected software evidence and does not qualify hardware or prove RF behavior."
+    )
+    gatt_summary = (
+        f"GATT evidence: {event_count} allowlisted events across {capture_count} captures; observed route `{route_summary}`."
+        if isinstance(tier_execution, dict)
+        else f"GATT evidence: {event_count} allowlisted events across {capture_count} captures."
+    )
     report = (
         "# HIL evidence report\n\n"
         + f"Run: `{run_id}`\n\n"
@@ -3344,7 +3500,8 @@ def _render_report(
             if scenarios.get("scenario_id")
             else ""
         )
-        + "Qualification: **inconclusive**. This report summarizes collected software evidence and does not qualify hardware or prove RF behavior.\n\n"
+        + report_status
+        + "\n\n"
         + "## Environment\n\n"
         + f"- Home Assistant: {ha_facts.get('version', {}).get('value', 'unavailable')}\n"
         + f"- Integration manifest version: {integration_facts.get('installed_manifest_version', {}).get('value', 'unavailable')} (installed build identity {integration_facts.get('build_match', {}).get('value', 'unverified')})\n"
@@ -3352,9 +3509,10 @@ def _render_report(
         + f"- Device: {model}; hardware {hardware}; firmware {firmware}\n"
         + f"- Observed GATT route: {route_summary}\n\n"
         + read_only_text
+        + guided_text
         + "## Scenario results\n\n"
         + steps_text
-        + f"\n\nGATT evidence: {event_count} allowlisted events across {capture_count} captures.\n\n"
+        + f"\n\n{gatt_summary}\n\n"
         + "## Limitations\n\n- Event payloads and frame bytes are omitted by policy.\n- Missing or uncorrelated observations remain inconclusive.\n- Review `hil-evidence.zip` locally before attaching it manually to an issue or PR.\n"
     )
     return report.encode()
@@ -3384,6 +3542,16 @@ def write_report(run_path: Path) -> Path:
         event_count,
         meta["capture_count"],
         route_summary,
+        _load_public_json(files["tier-execution.json"])
+        if "tier-execution.json" in files
+        else None,
+        _load_public_json(files["tier-artifacts.json"])
+        if "tier-artifacts.json" in files
+        else None,
+        _load_public_json(files["tier-bronze-read-only.json"])
+        if "tier-bronze-read-only.json" in files
+        else None,
+        meta["capture_stats"],
     )
     _atomic_write(meta["public_dir"] / "report.md", report)
     all_files = {**files, "report.md": report}
@@ -4957,6 +5125,19 @@ def verify_public_archive(
             if captures["by_capture"]
             else "unverified"
         ),
+        _load_public_json(data["tier-execution.json"])
+        if "tier-execution.json" in data
+        and b"## Guided tier acquisition" in data["report.md"]
+        else None,
+        _load_public_json(data["tier-artifacts.json"])
+        if "tier-artifacts.json" in data
+        and b"## Guided tier acquisition" in data["report.md"]
+        else None,
+        _load_public_json(data["tier-bronze-read-only.json"])
+        if "tier-bronze-read-only.json" in data
+        and b"## Guided tier acquisition" in data["report.md"]
+        else None,
+        captures["by_capture"],
     )
     if data["report.md"] != expected_report:
         raise HAAPIError("HIL report does not match public evidence")

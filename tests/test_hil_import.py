@@ -456,6 +456,22 @@ def _review_answers(*, reviewer: str, inspected: bool, apply: bool) -> list[str]
     return answers
 
 
+def _operator_review_answers(*, reviewer: str, apply: bool) -> list[str]:
+    answers = [reviewer, "yes"]
+    for _ in range(3):
+        answers.extend(("pass", "yes"))
+    answers.append("APPLY REVIEW" if apply else "cancel")
+    return answers
+
+
+def _selected_independent_review_answers(*, reviewer: str, apply: bool) -> list[str]:
+    answers = [reviewer, "yes", "yes"]
+    for _ in range(3):
+        answers.extend(("pass", "yes"))
+    answers.append("APPLY REVIEW" if apply else "cancel")
+    return answers
+
+
 def test_v2_migration_preserves_runs_as_unqualified_history() -> None:
     source_run = {"run_id": "old", "qualification_status": "pass"}
     migrated = migrate_v2_to_v3(
@@ -482,6 +498,8 @@ def _captured_archive(
     bronze_protocol_outcome: str = "pass",
     bronze_write_completion: str = "write_ok",
     stale_rest_fallback: bool = False,
+    scenario_progress: bool = True,
+    guided_bronze_execution: bool = False,
     started_at: str | None = None,
 ) -> Path:
     environment = {
@@ -523,13 +541,14 @@ def _captured_archive(
             "capabilities": {"read_telemetry": True},
         }
     private = write_run(path, f"run-{run_id}", environment, session)
-    write_scenario_progress(
-        private,
-        run_id,
-        "read_only_snapshot",
-        "a" * 64,
-        [{"step_id": "route_evidence", "outcome": "pass"}],
-    )
+    if scenario_progress:
+        write_scenario_progress(
+            private,
+            run_id,
+            "read_only_snapshot",
+            "a" * 64,
+            [{"step_id": "route_evidence", "outcome": "pass"}],
+        )
     stamp = (
         datetime.now(UTC).isoformat()
         if bronze_reviewable
@@ -617,7 +636,8 @@ def _captured_archive(
             ],
         }
         if bronze_reviewable:
-            sequence_offset = int(stale_rest_fallback)
+            capture_bound_probe = stale_rest_fallback or guided_bronze_execution
+            sequence_offset = int(capture_bound_probe)
             status_frame = {
                 **common,
                 "seq": 2 + sequence_offset,
@@ -659,7 +679,7 @@ def _captured_archive(
                 "output_power": 0,
                 "remaining_time": 0,
             }
-            if stale_rest_fallback:
+            if capture_bound_probe:
                 decoded_event["status_measurement"] = status_measurement
             trace["events"] = [
                 route_event,
@@ -674,7 +694,7 @@ def _captured_archive(
                             "capture_id": trace["capture_id"],
                         }
                     ]
-                    if stale_rest_fallback
+                    if capture_bound_probe
                     else []
                 ),
                 {**status_frame, "direction": "write"},
@@ -698,7 +718,7 @@ def _captured_archive(
                             "observed_route": "unverified",
                         }
                     ]
-                    if stale_rest_fallback
+                    if capture_bound_probe
                     else []
                 ),
             ]
@@ -726,7 +746,7 @@ def _captured_archive(
                 "sampled_at_utc": (
                     (
                         sample_time - timedelta(seconds=1)
-                        if stale_rest_fallback
+                        if capture_bound_probe
                         else sample_time
                     ).isoformat()
                 ),
@@ -745,7 +765,7 @@ def _captured_archive(
                 "sampled_at_utc": (
                     (
                         sample_time + timedelta(seconds=1)
-                        if stale_rest_fallback
+                        if capture_bound_probe
                         else sample_time
                     ).isoformat()
                 ),
@@ -770,7 +790,7 @@ def _captured_archive(
                     "capture_stopped_seq": 7,
                     "status_measurement": status_measurement,
                 }
-                if stale_rest_fallback
+                if capture_bound_probe
                 else None
             )
             (private / "tier-bronze-read-only.json").write_text(
@@ -806,6 +826,52 @@ def _captured_archive(
                 ),
                 encoding="utf-8",
             )
+            if guided_bronze_execution:
+                bronze_path = private / "tier-bronze-read-only.json"
+                bronze_digest = hashlib.sha256(bronze_path.read_bytes()).hexdigest()
+                bronze_artifact = json.loads(bronze_path.read_text(encoding="utf-8"))
+                bronze_outcome = (
+                    "pass"
+                    if (
+                        bronze_protocol_outcome == "pass"
+                        and bronze_write_completion == "write_ok"
+                        and "StatusData" in bronze_decoded_packet_types
+                        and bronze_artifact.get("fresh_verified_samples") is True
+                        and bronze_artifact.get("physical_observation") == "plausible"
+                    )
+                    else "inconclusive"
+                )
+                (private / "tier-execution.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "run_id": run_id,
+                            "requested_tier": "bronze",
+                            "execution_tier": "bronze",
+                            "review_state": "pending",
+                            "attained_tier": None,
+                            "steps": [
+                                {
+                                    "step_id": step_id,
+                                    "outcome": bronze_outcome,
+                                    "machine_evidence": [
+                                        {
+                                            "path": bronze_path.name,
+                                            "sha256": bronze_digest,
+                                        }
+                                    ],
+                                    "human_review": "pending",
+                                }
+                                for step_id in (
+                                    "read_only_probe",
+                                    "physical_plausibility_observation",
+                                )
+                            ],
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
@@ -5277,7 +5343,7 @@ def test_multi_run_legacy_bronze_reviews_can_be_reattested_sequentially(
     assert evaluate_tiers(after_second)["tiers"]
 
 
-def test_onboard_import_review_stages_the_complete_reviewed_run(
+def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from scripts import validate_hil_qualification
@@ -5311,19 +5377,46 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         bronze_reviewable=True,
         bronze_decoded_packet_types=("StatusData",),
         bronze_protocol_outcome="pass",
-        stale_rest_fallback=True,
+        stale_rest_fallback=False,
+        scenario_progress=False,
+        guided_bronze_execution=True,
     )
+    archive_before_review = archive.read_bytes()
+    from scripts.hil.evidence import verify_public_archive
+
+    _manifest, archive_members, _digest = verify_public_archive(
+        archive, include_contents=True
+    )
+    assert "scenarios.json" not in archive_members
+    public_bronze = json.loads(archive_members["tier-bronze-read-only.json"])
+    assert public_bronze["fresh_verified_samples"] is True
+    assert public_bronze["protocol_probe"] == "verified"
+    assert public_bronze["status_freshness"] is not None
+    assert all(
+        sample["telemetry"]["battery"]["sample_age_seconds"] <= 60
+        for sample in public_bronze["samples"]
+    )
+    archived_report = archive_members["report.md"].decode("utf-8")
+    assert "`read_only_probe`: **pass**" in archived_report
+    assert "`physical_plausibility_observation`: **pass**" in archived_report
+    assert "fresh verified telemetry samples present" in archived_report
+    assert "read-only protocol probe `verified`" in archived_report
+    assert "No correlated scenario steps were recorded" in archived_report
     answers = iter(
         [
             "yes",
             "APPLY IMPORT",
-            "REVIEWER READY",
-            *_review_answers(
-                reviewer="independent reviewer", inspected=True, apply=True
-            ),
+            "1",
+            *_operator_review_answers(reviewer="HIL operator", apply=True),
         ]
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    prompts: list[str] = []
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
 
     assert (
         cli._onboard_import_review(
@@ -5335,6 +5428,9 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         )
         is True
     )
+    verify_public_archive(archive)
+    assert archive.read_bytes() == archive_before_review
+    assert "Import this verified acquisition evidence? [y/N]: " in prompts
     output = capsys.readouterr().out
     generated_body = (output_dir / "pr.md").read_text(encoding="utf-8")
     assert "hardware-evidence checklist item is not applicable" not in generated_body
@@ -5358,9 +5454,19 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         in generated_body
     )
     assert (
-        "identity, protocol, and freshness claims were independently reviewed and applied"
+        "identity, protocol, and freshness claims were operator-attested and applied"
         in generated_body
     )
+    assert "operator_attested" in generated_body
+    assert "REVIEWED TIER: Bronze; ASSURANCE: operator_attested" in output
+    assert (
+        "POST-REVIEW QUALIFICATION: attained bronze; assurance operator_attested"
+        in output
+    )
+    assert (
+        "Review basis: schema-v3 matrix evaluation isolated to imported run" in output
+    )
+    assert "independently reviewed" not in generated_body
     assert "Telemetry sample interval:" in generated_body
     assert "Telemetry sample interval: 2 seconds" in generated_body
     assert "Observation duration:" not in generated_body
@@ -5434,14 +5540,253 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
     assert "HIL qualification validation passed" in direct_validation.stdout
 
 
+def test_onboard_without_independent_reviewer_leaves_offline_resume_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(["yes", "APPLY IMPORT", "2", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        "bronze",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    assert "An independent reviewer must be available" not in output
+    assert "To continue the offline review, run these commands in order:" in output
+    assert "python -m scripts.hil review --matrix " in output
+    assert "--run-id archive-" in output
+    assert "--interactive" in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+@pytest.mark.parametrize("review_choice", ["declined", "reviewer_unavailable"])
+def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+    review_choice: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = (
+        ["yes", "APPLY IMPORT", ""]
+        if review_choice == "declined"
+        else ["yes", "APPLY IMPORT", "2", ""]
+    )
+    responses = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        tier,
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    assert "To continue the offline review, run these commands in order:" in output
+    assert bronze_command in output
+    assert tier_command in output
+    assert output.index(bronze_command) < output.index(tier_command)
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli, review_wizard
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(["yes", "APPLY IMPORT", "1"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    def interrupt_review(*_args: Any, **_kwargs: Any) -> int:
+        raise EOFError("review interrupted")
+
+    monkeypatch.setattr(review_wizard, "interactive_review", interrupt_review)
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        tier,
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    assert "Explicit review did not complete: review interrupted" in output
+    assert "To continue the offline review, run these commands in order:" in output
+    assert bronze_command in output
+    assert tier_command in output
+    assert output.index(bronze_command) < output.index(tier_command)
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+def test_onboard_higher_tier_exception_resumes_only_pending_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli, review_wizard
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(
+        [
+            "yes",
+            "APPLY IMPORT",
+            "1",
+            *_operator_review_answers(reviewer="HIL operator", apply=True),
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    review_bronze = review_wizard.interactive_review
+
+    def interrupt_silver(*args: Any, **kwargs: Any) -> int:
+        if kwargs.get("tier") == "silver":
+            raise EOFError("Silver review interrupted")
+        return review_bronze(*args, **kwargs)
+
+    monkeypatch.setattr(review_wizard, "interactive_review", interrupt_silver)
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        "silver",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    silver_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], "silver"
+    )
+    assert "Explicit review did not complete: Silver review interrupted" in output
+    assert "To continue the offline review, run these commands in order:" in output
+    commands = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("python -m scripts.hil review ")
+    ]
+    assert commands == [silver_command]
+    assert bronze_command != commands[0]
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
 def _onboard_review_answers(tier: str, *, reviewer: str) -> list[str]:
     count = {"silver": 24, "gold": 36}[tier]
     return [
         "yes",
         "APPLY IMPORT",
-        "REVIEWER READY",
-        *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
         "2",
+        "REVIEWER READY",
+        *_selected_independent_review_answers(reviewer="Bronze reviewer", apply=True),
         reviewer,
         "yes",
         *("yes" for _ in range(count - 1)),
@@ -5515,7 +5860,7 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
     generated_body = (tmp_path / "operator-run" / "pr.md").read_text(encoding="utf-8")
     expected_tier = tier.title()
     assert f"REVIEWED TIER: {expected_tier}" in output
-    assert f"add reviewed R600 {expected_tier} evidence" in output
+    assert f"add independently reviewed R600 {expected_tier} evidence" in output
     assert expected_run_id in generated_body
     if prior_gold:
         assert "add reviewed R600 Gold evidence" not in output
@@ -5631,8 +5976,11 @@ def test_inconclusive_silver_review_does_not_generate_handoff(
         [
             "yes",
             "APPLY IMPORT",
+            "2",
             "REVIEWER READY",
-            *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
+            *_selected_independent_review_answers(
+                reviewer="Bronze reviewer", apply=True
+            ),
             "Silver reviewer",
             "yes",
             *("no" for _ in range(23)),
@@ -5712,12 +6060,12 @@ def test_prior_scope_bronze_does_not_unlock_unreviewed_imported_run(
         [
             "yes",
             "APPLY IMPORT",
+            "2",
             "REVIEWER READY",
-            *_review_answers(
-                reviewer="second reviewer",
-                inspected=False,
-                apply=review_end == "inconclusive",
-            ),
+            "second reviewer",
+            "no",
+            "yes",
+            "APPLY REVIEW" if review_end == "inconclusive" else "cancel",
         ]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(second_answers))

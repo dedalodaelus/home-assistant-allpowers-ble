@@ -45,7 +45,11 @@ Contributors can start a guided HIL session with `python -m scripts.hil onboard`
 The wizard stops before export when required results, route, build, or evidence
 are missing. A successful run remains unqualified until physical observations
 are reviewed with explicit operator-attested or independently-reviewed
-provenance; see the [HIL CLI guide](docs/hil-cli.md#contributor-quickstart).
+provenance. The guided handoff offers self-attestation by the operator or a
+separate independent reviewer; a second person is not required for
+operator-attestation. The ZIP remains a pre-review evidence snapshot, and
+neither route changes runtime write authorization. See the
+[HIL CLI guide](docs/hil-cli.md#contributor-quickstart).
 
 ## Requirements & installation
 
