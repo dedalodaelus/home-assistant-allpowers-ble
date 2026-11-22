@@ -713,9 +713,7 @@ def _check_physical_review(
         parsed = None
     digest_manifest = _evidence_digests(item.get("evidence"))
     legacy_unknown_assurance = (
-        allow_legacy_unknown_assurance
-        and "assurance" not in review
-        and "reviewer_independent_from_operator" not in review
+        allow_legacy_unknown_assurance and "assurance" not in review
     )
     if (
         review.get("outcome") != expected
@@ -728,6 +726,11 @@ def _check_physical_review(
         )
         or (
             "reviewer_independent_from_operator" in review
+            and type(review.get("reviewer_independent_from_operator")) is not bool
+        )
+        or (
+            not legacy_unknown_assurance
+            and "reviewer_independent_from_operator" in review
             and review.get("reviewer_independent_from_operator")
             is not (review.get("assurance") == "independently_reviewed")
         )
@@ -749,6 +752,8 @@ def _valid_reviewed_absence(
     revision_id: str,
     revision_model: str,
     hardware_revision: str,
+    *,
+    allow_legacy_unknown_assurance: bool = False,
 ) -> bool:
     reviewer = item.get("reviewed_by")
     reviewed_at = item.get("reviewed_at")
@@ -757,16 +762,28 @@ def _valid_reviewed_absence(
     except AttributeError, ValueError:
         return False
     assurance = item.get("assurance")
+    legacy_unknown_assurance = (
+        allow_legacy_unknown_assurance and "assurance" not in item
+    )
     if (
         not isinstance(reviewer, str)
         or not reviewer.strip()
         or parsed.tzinfo is None
-        or assurance not in {"operator_attested", "independently_reviewed"}
+        or (
+            assurance not in {"operator_attested", "independently_reviewed"}
+            and not legacy_unknown_assurance
+        )
     ):
         return False
     evidence = item.get("evidence")
     digest_manifest = _evidence_digests(evidence)
-    if digest_manifest is None or item.get("evidence_sha256") != digest_manifest:
+    if (
+        digest_manifest is None
+        or (
+            "evidence_sha256" in item and item.get("evidence_sha256") != digest_manifest
+        )
+        or ("evidence_sha256" not in item and not legacy_unknown_assurance)
+    ):
         return False
     if not str(run.get("run_id", "")).startswith("archive-"):
         return True
@@ -810,7 +827,11 @@ def _valid_reviewed_absence(
         and proof.get("physical_absence_confirmed") is True
         and proof.get("safe_disable_confirmed") is True
         and proof.get("reviewed_by") == reviewer
-        and proof.get("assurance") == assurance
+        and (
+            proof.get("assurance") == assurance
+            if not legacy_unknown_assurance
+            else "assurance" not in proof
+        )
         and proof.get("source_step_id")
         == {
             "ac_output": "ac_output_cycle",
@@ -870,6 +891,7 @@ def _check_result_map(
     strict_keys: set[str] | None = None,
     tier_evidence: bool = False,
     require_final_restoration: bool = False,
+    allow_legacy_tier_review: bool = False,
 ) -> None:
     if not isinstance(results, dict):
         _error(errors, f"{context} must be an object")
@@ -891,7 +913,13 @@ def _check_result_map(
             or (require_pass and capability and status == "not_applicable"),
         )
         if status in {"pass", "fail"}:
-            _check_physical_review(item, status, item_context, errors)
+            _check_physical_review(
+                item,
+                status,
+                item_context,
+                errors,
+                allow_legacy_unknown_assurance=allow_legacy_tier_review,
+            )
         if status == "not_applicable" and not (
             isinstance(item.get("rationale"), str) and item["rationale"].strip()
         ):
@@ -914,6 +942,7 @@ def _check_result_map(
                     errors,
                     scope=item_scope,
                     require_final_restoration=require_final_restoration,
+                    allow_legacy_tier_review=allow_legacy_tier_review,
                 )
             elif capability:
                 _check_feature_restoration(
@@ -1067,6 +1096,7 @@ def _validate_run(
     feature_scope: str | None = None,
     check_archive_provenance: bool = True,
     allow_legacy_bronze_review: bool = False,
+    allow_legacy_tier_review: bool = False,
 ) -> str | None:
     if not isinstance(run, dict):
         _error(errors, f"{context} must be an object")
@@ -1209,6 +1239,7 @@ def _validate_run(
         build_fingerprint=build_fingerprint,
         strict_keys=set() if feature_scope is not None else None,
         tier_evidence=isinstance(run.get("bronze_evidence"), dict),
+        allow_legacy_tier_review=allow_legacy_tier_review,
     )
     _check_result_map(
         run.get("write_capabilities"),
@@ -1227,6 +1258,7 @@ def _validate_run(
         strict_keys={feature_scope} if feature_scope is not None else None,
         tier_evidence=isinstance(run.get("bronze_evidence"), dict),
         require_final_restoration=archive_backed,
+        allow_legacy_tier_review=allow_legacy_tier_review,
     )
     if qualification == "pass":
         result_maps = (run.get("scenarios"), run.get("write_capabilities"))
@@ -1266,7 +1298,13 @@ def _validate_run(
                     required=True,
                 )
                 if not _valid_reviewed_absence(
-                    item, feature, run, revision_id, revision_model, hardware_revision
+                    item,
+                    feature,
+                    run,
+                    revision_id,
+                    revision_model,
+                    hardware_revision,
+                    allow_legacy_unknown_assurance=allow_legacy_tier_review,
                 ):
                     _error(
                         errors,
@@ -2047,6 +2085,7 @@ def _check_output_transitions(
     *,
     scope: dict[str, Any],
     require_final_restoration: bool,
+    allow_legacy_tier_review: bool = False,
 ) -> None:
     review = item.get("physical_review")
     transitions = review.get("output_transitions") if isinstance(review, dict) else None
@@ -2127,7 +2166,7 @@ def _check_output_transitions(
     if states != {"on", "off"}:
         _error(errors, f"{context} requires both on and off transition evidence")
     if require_final_restoration and not _valid_final_output_restoration(
-        item, feature, scope
+        item, feature, scope, allow_legacy_tier_review=allow_legacy_tier_review
     ):
         _error(
             errors,
@@ -2136,7 +2175,11 @@ def _check_output_transitions(
 
 
 def _valid_final_output_restoration(
-    item: dict[str, Any], feature: str, scope: dict[str, Any]
+    item: dict[str, Any],
+    feature: str,
+    scope: dict[str, Any],
+    *,
+    allow_legacy_tier_review: bool = False,
 ) -> bool:
     """Require persisted proof of the separate final output restoration action."""
     review = item.get("physical_review")
@@ -2152,24 +2195,54 @@ def _valid_final_output_restoration(
         "source_step_id",
         "requested_state",
     }
+    legacy_final = (
+        allow_legacy_tier_review
+        and isinstance(final, dict)
+        and "assurance" not in final
+        and "assurance" not in review
+        and frozenset(final)
+        in {
+            frozenset({"state", "capture_evidence", "frame_evidence", "confirmed"}),
+            frozenset(
+                {
+                    "state",
+                    "capture_evidence",
+                    "frame_evidence",
+                    "confirmed",
+                    "reviewer_independent_from_operator",
+                }
+            ),
+        }
+        and (
+            "reviewer_independent_from_operator" not in final
+            or type(final.get("reviewer_independent_from_operator")) is bool
+        )
+    )
+    current_final = isinstance(final, dict) and set(final) == {
+        "state",
+        "capture_evidence",
+        "frame_evidence",
+        "confirmed",
+        "reviewer_independent_from_operator",
+        "assurance",
+    }
     if (
         not isinstance(final, dict)
-        or set(final)
-        != {
-            "state",
-            "capture_evidence",
-            "frame_evidence",
-            "confirmed",
-            "reviewer_independent_from_operator",
-            "assurance",
-        }
+        or not (current_final or legacy_final)
         or final.get("state") not in {"on", "off"}
         or final.get("confirmed") is not True
-        or final.get("assurance") not in {"operator_attested", "independently_reviewed"}
-        or final.get("reviewer_independent_from_operator")
-        is not (final.get("assurance") == "independently_reviewed")
+        or (
+            not legacy_final
+            and final.get("assurance")
+            not in {"operator_attested", "independently_reviewed"}
+        )
+        or (
+            not legacy_final
+            and final.get("reviewer_independent_from_operator")
+            is not (final.get("assurance") == "independently_reviewed")
+        )
         or not isinstance(review, dict)
-        or review.get("assurance") != final.get("assurance")
+        or (not legacy_final and review.get("assurance") != final.get("assurance"))
         or not isinstance(review.get("reviewed_by"), str)
         or not review["reviewed_by"].strip()
         or not isinstance(final.get("capture_evidence"), str)
@@ -2530,6 +2603,7 @@ def validate_matrix(
     feature_scope: str | None = None,
     check_archive_provenance: bool = True,
     allow_legacy_bronze_review: bool = False,
+    allow_legacy_tier_review: bool = False,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     summaries: list[str] = []
@@ -2594,6 +2668,7 @@ def validate_matrix(
                 protocol_profile_supported=protocol_profile_supported,
                 check_archive_provenance=check_archive_provenance,
                 allow_legacy_bronze_review=allow_legacy_bronze_review,
+                allow_legacy_tier_review=allow_legacy_tier_review,
             )
             if run_id is not None:
                 if run_id in seen_runs:

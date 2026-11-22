@@ -207,6 +207,7 @@ def _load_run(
     root: Path,
     *,
     allow_legacy_bronze_review: bool = False,
+    allow_legacy_tier_review: bool = False,
 ) -> tuple[dict, dict]:
     matrix_path = matrix_path.absolute()
     _reject_symlink_components(matrix_path, root)
@@ -223,6 +224,7 @@ def _load_run(
         require_pass=False,
         max_age_days=None,
         allow_legacy_bronze_review=allow_legacy_bronze_review,
+        allow_legacy_tier_review=allow_legacy_tier_review,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -281,6 +283,7 @@ def interactive_review(
         run_id,
         root,
         allow_legacy_bronze_review=tier == "bronze",
+        allow_legacy_tier_review=tier in {"silver", "gold"},
     )
     members = _verified_members(run, root)
     if tier != "bronze":

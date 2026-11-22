@@ -3137,6 +3137,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     from scripts.hil.tiers import evaluate_tiers
 
     archive = _standard_tier_suite_archive(tmp_path / "standard")
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
     matrix_path = _matrix(tmp_path)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
     assert (
@@ -3218,6 +3219,82 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
             capture = tmp_path / transition["restoration_capture"]
             rows = [json.loads(line) for line in capture.read_text().splitlines()]
             assert all(row["source_action_index"] != 3 for row in rows)
+
+    # Recreate an already-applied pre-assurance Silver review, retaining its
+    # schema-v1 audit's affirmative independence declaration as history only.
+    legacy = json.loads(json.dumps(matrix))
+    legacy_run = legacy["revisions"][0]["runs"][0]
+    historical_evidence = set(legacy_run["evidence"])
+    silver_history = next(
+        item for item in legacy_run["review_history"] if item.get("tier") == "silver"
+    )
+    legacy_independent_review = {
+        key: silver_history[key]
+        for key in ("reviewed_by", "reviewed_at", "archive_sha256")
+    }
+    silver_history.pop("assurance")
+    silver_history["reviewer_independent_from_operator"] = True
+    silver_audits = list(
+        (tmp_path / "hil-results" / "tier-reviews").glob(f"{run_id}-silver-*.json")
+    )
+    assert len(silver_audits) == 1
+    legacy_audit = json.loads(silver_audits[0].read_text(encoding="utf-8"))
+    assert legacy_audit["schema_version"] == 2
+    assert legacy_audit["reviewer_independent_from_operator"] is True
+    legacy_audit["schema_version"] = 1
+    legacy_audit.pop("assurance")
+    silver_audits[0].write_text(json.dumps(legacy_audit, indent=2) + "\n")
+    for result in [
+        legacy_run["scenarios"]["reconnect_failover"],
+        *(
+            legacy_run["write_capabilities"][feature]
+            for feature in ("ac_output", "dc_output", "light_output")
+        ),
+    ]:
+        physical_review = result["physical_review"]
+        physical_review.pop("assurance")
+        physical_review["reviewer_independent_from_operator"] = True
+        final = physical_review.get("final_restoration")
+        if final is not None:
+            final.pop("assurance")
+    legacy_bytes = (json.dumps(legacy, indent=2, ensure_ascii=False) + "\n").encode()
+    matrix_path.write_bytes(legacy_bytes)
+    legacy_errors, _ = validate_hil_qualification.validate_matrix(
+        legacy, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any(
+        "physical_review must record valid assurance" in e for e in legacy_errors
+    )
+    assert evaluate_tiers(legacy)["tiers"][0]["tier"] == "bronze"
+
+    answer_review(["1", "Silver operator", *("yes" for _ in range(23)), "APPLY REVIEW"])
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    legacy = json.loads(matrix_path.read_text(encoding="utf-8"))
+    strict_errors, _ = validate_hil_qualification.validate_matrix(
+        legacy, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert strict_errors == []
+    reattested_run = legacy["revisions"][0]["runs"][0]
+    migrated_history = reattested_run["review_history"]
+    assert any(
+        item.get("reviewer_independent_from_operator") is True
+        and all(
+            item.get(key) == value for key, value in legacy_independent_review.items()
+        )
+        for item in migrated_history
+    )
+    assert historical_evidence.issubset(reattested_run["evidence"])
+    assert json.loads(silver_audits[0].read_text(encoding="utf-8")) == legacy_audit
+    assert reattested_run["archive_sha256"] == archive_sha256
+    legacy_silver = evaluate_tiers(legacy)["tiers"][0]
+    assert legacy_silver["tier"] == "silver"
+    assert legacy_silver["assurance"]["silver"] == "mixed"
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
 
     # Gold repeats the independent output review and additionally reviews all
     # four settings cycles before dry-run and apply.

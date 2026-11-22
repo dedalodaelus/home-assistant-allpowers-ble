@@ -1303,6 +1303,7 @@ def review_imported_tier_run(
         require_pass=False,
         max_age_days=None,
         allow_legacy_bronze_review=True,
+        allow_legacy_tier_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))

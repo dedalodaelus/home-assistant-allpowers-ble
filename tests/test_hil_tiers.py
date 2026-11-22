@@ -947,6 +947,38 @@ def test_gold_assurance_includes_operator_attested_feature_contract_exclusion(
     assert any("car_charger" in item for item in tier["exclusions"])
 
 
+def test_legacy_reviewed_absence_is_loadable_only_for_explicit_tier_rereview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    run = matrix["revisions"][0]["runs"][0]
+    absence = run["feature_presence"]["light_output"]
+    absence.pop("assurance")
+    absence.pop("evidence_sha256")
+    matrix_path = tmp_path / "matrix.json"
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any(
+        "absent feature light_output requires reviewed evidence" in error
+        for error in strict_errors
+    )
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+
+    legacy_review_errors, _ = validator.validate_matrix(
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_tier_review=True,
+    )
+    assert legacy_review_errors == []
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+
+
 def test_free_form_exclusion_boolean_cannot_omit_unknown_feature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
