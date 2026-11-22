@@ -50,6 +50,69 @@ def test_onboard_parser_declares_interactive_command():
     assert not hasattr(args, "token")
 
 
+def test_review_parser_accepts_archive_for_post_review_handoff(tmp_path):
+    archive = tmp_path / "hil-evidence.zip"
+    args = cli.make_parser().parse_args(
+        [
+            "review",
+            "--run-id",
+            "archive-" + "a" * 64,
+            "--interactive",
+            "--archive",
+            str(archive),
+        ]
+    )
+    assert args.archive == archive
+
+
+@pytest.mark.parametrize(("review_result", "expected_result"), [(0, 0), (2, 2)])
+def test_review_resume_hands_off_only_after_applied_review(
+    monkeypatch, tmp_path, review_result, expected_result
+):
+    from scripts.hil import review_wizard
+
+    archive = tmp_path / "existing.zip"
+    matrix = tmp_path / "qualification_matrix.json"
+    monkeypatch.setattr(cli, "_matrix_repo_root", lambda _path: tmp_path)
+    monkeypatch.setattr(cli, "_review_evidence_paths", lambda *_args: ["evidence"])
+    monkeypatch.setattr(cli, "_review_checkout_safe", lambda *_args: True)
+    monkeypatch.setattr(
+        review_wizard,
+        "interactive_review",
+        lambda *_args, **_kwargs: review_result,
+    )
+    handoffs = []
+    monkeypatch.setattr(
+        cli,
+        "_onboard_import_review",
+        lambda *args, **kwargs: handoffs.append((args, kwargs)) or True,
+    )
+    args = cli.make_parser().parse_args(
+        [
+            "review",
+            "--matrix",
+            str(matrix),
+            "--run-id",
+            "archive-" + "a" * 64,
+            "--interactive",
+            "--archive",
+            str(archive),
+        ]
+    )
+
+    assert cli.execute(args) == expected_result
+    if review_result == 0:
+        assert len(handoffs) == 1
+        assert handoffs[0][0][:3] == (
+            archive,
+            tmp_path / "hil-results" / "pr-handoff" / args.run_id,
+            "bronze",
+        )
+        assert handoffs[0][1]["review_completed"] is True
+    else:
+        assert handoffs == []
+
+
 def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
     parent = tmp_path / "parent" / "private"
     child = tmp_path / "tier_0123456789abcdef" / "private"
@@ -511,6 +574,8 @@ def test_onboard_acquisition_does_not_require_clean_topic_branch(
     assert output_root.exists()
     output = capsys.readouterr().out
     assert "Repository import and PR handoff require a clean topic branch" in output
+    assert "Before acquisition" in output
+    assert "worktree add -b" in output
     assert not any(call[0] == "service" for call in fake.calls)
 
 

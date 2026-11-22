@@ -6012,6 +6012,22 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         "does not qualify output writes or other routes, firmware, or hardware revisions"
         in generated_body
     )
+    imported_matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    imported_run_id = imported_matrix["revisions"][0]["runs"][0]["run_id"]
+    resumed_handoff_dir = repo_root / "hil-results" / "pr-handoff" / imported_run_id
+    assert cli._onboard_import_review(
+        archive,
+        resumed_handoff_dir,
+        "bronze",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+        review_completed=True,
+    )
+    resumed_output = capsys.readouterr().out
+    assert "REVIEWED TIER: Bronze; ASSURANCE: operator_attested" in resumed_output
+    assert "READY FOR QUALIFICATION PR" in resumed_output
+    assert (resumed_handoff_dir / "pr.md").is_file()
+
     add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
     stage_paths = shlex.split(add_line)[2:]
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
@@ -6093,6 +6109,12 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
         ignore=shutil.ignore_patterns("__pycache__"),
     )
     shutil.copyfile(source_root / ".gitignore", repo_root / ".gitignore")
+    template_dir = repo_root / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        source_root / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
 
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     matrix_path = _matrix(repo_root / "tests" / "hil")
@@ -6212,6 +6234,12 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     assert cli.main(review_command[3:]) == 0
+    review_handoff_output = capsys.readouterr().out
+    assert "READY FOR QUALIFICATION PR" in review_handoff_output
+    assert "Exact allowlisted Git/gh commands:" in review_handoff_output
+    assert (
+        worktree / "hil-results" / "pr-handoff" / current_run["run_id"] / "pr.md"
+    ).is_file()
 
     reviewed_matrix = json.loads(imported_matrix.read_text(encoding="utf-8"))
     from scripts.hil.cli import _isolated_run_summary
@@ -6348,8 +6376,12 @@ def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
-    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    bronze_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], archive_path=archive
+    )
+    tier_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], tier, archive_path=archive
+    )
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
     assert tier_command in output
@@ -6407,8 +6439,12 @@ def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
-    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    bronze_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], archive_path=archive
+    )
+    tier_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], tier, archive_path=archive
+    )
     assert "Explicit review did not complete: review interrupted" in output
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
@@ -6475,9 +6511,11 @@ def test_onboard_higher_tier_exception_resumes_only_pending_tier(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    bronze_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], archive_path=archive
+    )
     silver_command = cli._review_resume_command(
-        matrix_path, proposal["run_id"], "silver"
+        matrix_path, proposal["run_id"], "silver", archive_path=archive
     )
     assert "Explicit review did not complete: Silver review interrupted" in output
     assert "To continue the offline review, run these commands in order:" in output

@@ -82,6 +82,12 @@ onboarding verifies route evidence from the connected backend.
 
 ## 3. Run the guided acquisition
 
+Before the physical run, `onboard` explains that importing evidence and
+preparing a PR require a clean topic branch and prints a safe worktree command
+from `origin/devel`. You can prepare that worktree first, or continue acquisition
+and export from the current checkout; acquisition writes private run data and
+does not change tracked repository files.
+
 From the repository root with `.venv-hil` active, start the same interactive
 entry point on all supported platforms:
 
@@ -114,14 +120,19 @@ qualification matrix to invent results. The tier evaluator reports the attained
 tier and remaining requirements from reviewed evidence.
 
 If review is interrupted after import, resume offline using the exact command
-printed by `onboard`. The general form for Bronze is:
+printed by `onboard`. It includes the original public ZIP path so a completed
+review can validate the same acquisition and continue to the PR handoff. The
+general form for Bronze is:
 
 ```console
-python -m scripts.hil review --run-id archive-... --interactive
+python -m scripts.hil review --run-id archive-... --interactive --archive /path/to/hil-evidence.zip
 ```
 
 For a pending higher-tier review, use the same command with `--tier silver` or
-`--tier gold` as applicable. Review provenance is explicit: operator attestation
+`--tier gold` as applicable. After an applied review reaches the requested tier,
+the CLI validates the exact run, writes the scoped PR body under
+`hil-results/pr-handoff/`, and prints the same allowlisted Git/`gh` handoff used
+by `onboard`. It does not commit, push, or open the PR. Review provenance is explicit: operator attestation
 records the operator's own inspection; independent review requires a different
 person to inspect the evidence. The name alone does not prove independence.
 

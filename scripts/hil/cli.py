@@ -157,6 +157,11 @@ def make_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)
     review_parser.add_argument(
+        "--archive",
+        type=Path,
+        help="Previously imported public ZIP, used to prepare the reviewed PR handoff",
+    )
+    review_parser.add_argument(
         "--tier",
         choices=("bronze", "silver", "gold", "platinum"),
         default="bronze",
@@ -2843,14 +2848,30 @@ def execute(args: argparse.Namespace) -> int:
                 return 2
 
             if args.tier == "bronze":
-                return interactive_review(
+                result = interactive_review(
                     args.matrix, run_id=args.run_id, repo_root=repo_root
                 )
-            return interactive_review(
-                args.matrix,
-                run_id=args.run_id,
-                tier=args.tier,
-                repo_root=repo_root,
+            else:
+                result = interactive_review(
+                    args.matrix,
+                    run_id=args.run_id,
+                    tier=args.tier,
+                    repo_root=repo_root,
+                )
+            if result != 0 or args.archive is None:
+                return result
+            handoff_dir = repo_root / "hil-results" / "pr-handoff" / args.run_id
+            return (
+                0
+                if _onboard_import_review(
+                    args.archive,
+                    handoff_dir,
+                    args.tier,
+                    repo_root=repo_root,
+                    matrix_path=args.matrix,
+                    review_completed=True,
+                )
+                else 2
             )
         if args.tier != "bronze":
             raise HAAPIError("--tier applies only to --interactive review")
@@ -3118,7 +3139,31 @@ def execute(args: argparse.Namespace) -> int:
             )
             return 2
         print(
-            "Acquisition writes private evidence under the output directory. "
+            "Before acquisition: importing evidence and preparing a PR require a "
+            "clean topic branch. You can prepare a separate worktree now:"
+        )
+        repo_root = Path(__file__).resolve().parents[2]
+        topic_worktree = repo_root.parent / f"{repo_root.name}-hil"
+        print("  git fetch origin devel")
+        print(
+            "  "
+            + _shell_join(
+                [
+                    "git",
+                    "-C",
+                    repo_root,
+                    "worktree",
+                    "add",
+                    "-b",
+                    "hil/device-route-evidence",
+                    topic_worktree,
+                    "origin/devel",
+                ]
+            )
+        )
+        print(
+            "You can also acquire and export here without switching branches or "
+            "changing tracked files; the archive can be imported in that worktree. "
             "Repository import and PR handoff require a clean topic branch."
         )
         args.tier = requested_tier
@@ -3771,18 +3816,31 @@ def _print_import_resume_commands(
         )
     )
     matrix = Path(matrix)
-    print("  " + _review_resume_command(matrix, run_id))
+    print("  " + _review_resume_command(matrix, run_id, archive_path=archive_path))
     if requested_tier in {"silver", "gold"}:
-        print("  " + _review_resume_command(matrix, run_id, requested_tier))
+        print(
+            "  "
+            + _review_resume_command(
+                matrix, run_id, requested_tier, archive_path=archive_path
+            )
+        )
 
 
-def _review_resume_command(matrix_path: Path, run_id: str, tier: str = "bronze") -> str:
+def _review_resume_command(
+    matrix_path: Path,
+    run_id: str,
+    tier: str = "bronze",
+    *,
+    archive_path: Path | None = None,
+) -> str:
     command = (
         "python -m scripts.hil review --matrix "
         f"{_shell_quote(matrix_path)} --run-id {_shell_quote(run_id)} --interactive"
     )
     if tier != "bronze":
         command += " --tier " + _shell_quote(tier)
+    if archive_path is not None:
+        command += " --archive " + _shell_quote(archive_path.resolve())
     return command
 
 
@@ -3792,6 +3850,7 @@ def _print_offline_review_resume(
     *,
     requested_tier: str,
     pending_tier: str,
+    archive_path: Path | None = None,
 ) -> None:
     """Print the ordered commands needed to finish an imported review offline."""
     tiers = [pending_tier]
@@ -3799,7 +3858,12 @@ def _print_offline_review_resume(
         tiers.append(requested_tier)
     print("To continue the offline review, run these commands in order:")
     for tier in tiers:
-        print("  " + _review_resume_command(matrix_path, run_id, tier))
+        print(
+            "  "
+            + _review_resume_command(
+                matrix_path, run_id, tier, archive_path=archive_path
+            )
+        )
 
 
 def _verified_review_stage_paths(
@@ -4017,6 +4081,7 @@ def _onboard_import_review(
     *,
     repo_root: Path | None = None,
     matrix_path: Path | None = None,
+    review_completed: bool = False,
 ) -> bool:
     """Import reviewed public evidence, invoke the requested review, and hand off."""
     if requested_tier == "platinum":
@@ -4027,7 +4092,9 @@ def _onboard_import_review(
     from . import importer
 
     repo_root = (repo_root or Path(__file__).resolve().parents[2]).resolve()
-    matrix_path = matrix_path or (repo_root / "tests/hil/qualification_matrix.json")
+    matrix_path = (
+        matrix_path or (repo_root / "tests/hil/qualification_matrix.json")
+    ).resolve()
     try:
         proposal = importer._build_proposal(
             archive_path, matrix_path, repo_root=repo_root
@@ -4035,87 +4102,100 @@ def _onboard_import_review(
     except HAAPIError as ex:
         print("Import preview failed; no repository files were changed:", ex)
         return False
-    importer._print_preview(proposal)
-    try:
-        accepted = input(
-            "Import this verified acquisition evidence? [y/N]: "
-        ).strip().casefold() in {"y", "yes"}
-        if not accepted:
-            print("Import declined; no repository files were changed.")
+    if review_completed:
+        if not proposal.get("existing_run"):
+            print("The supplied archive does not match an already imported run.")
             return False
-        branch = _current_feature_branch(repo_root)
-        if branch is None:
-            print("Cannot import safely from this checkout.")
-            _print_import_resume_commands(
-                archive_path,
-                proposal,
-                repo_root=repo_root,
-                matrix_path=matrix_path,
-                requested_tier=requested_tier,
+        try:
+            matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+            run = next(
+                item
+                for revision in matrix["revisions"]
+                if revision.get("id") == proposal["revision_id"]
+                for item in revision.get("runs", [])
+                if item.get("run_id") == proposal["run_id"]
+            )
+            assurance_values = {
+                run["bronze_evidence"][claim]["physical_review"]["assurance"]
+                for claim in ("identity", "protocol_probe", "fresh_telemetry")
+            }
+            expected_assurance = assurance_values.pop()
+            if assurance_values or expected_assurance not in {
+                "operator_attested",
+                "independently_reviewed",
+            }:
+                raise ValueError("inconsistent review assurance")
+        except (OSError, ValueError, KeyError, TypeError, StopIteration) as ex:
+            print(
+                "Applied review provenance is unavailable; no PR handoff generated:", ex
             )
             return False
-        if (
-            input("Type APPLY IMPORT to write these exact files: ").strip()
-            != "APPLY IMPORT"
-        ):
+    else:
+        importer._print_preview(proposal)
+        expected_assurance = None
+    run_id = proposal["run_id"]
+    if not review_completed:
+        try:
+            accepted = input(
+                "Import this verified acquisition evidence? [y/N]: "
+            ).strip().casefold() in {"y", "yes"}
+            if not accepted:
+                print("Import declined; no repository files were changed.")
+                return False
+            branch = _current_feature_branch(repo_root)
+            if branch is None:
+                print("Cannot import safely from this checkout.")
+                _print_import_resume_commands(
+                    archive_path,
+                    proposal,
+                    repo_root=repo_root,
+                    matrix_path=matrix_path,
+                    requested_tier=requested_tier,
+                )
+                return False
+            if (
+                input("Type APPLY IMPORT to write these exact files: ").strip()
+                != "APPLY IMPORT"
+            ):
+                print("Import cancelled; no repository files were changed.")
+                return False
+        except EOFError, KeyboardInterrupt:
             print("Import cancelled; no repository files were changed.")
             return False
-    except EOFError, KeyboardInterrupt:
-        print("Import cancelled; no repository files were changed.")
-        return False
-    try:
-        importer._apply_proposal(proposal)
-    except HAAPIError as ex:
-        print("Import failed safely:", ex)
-        return False
-
-    run_id = proposal["run_id"]
-    imported_paths = _review_evidence_paths(matrix_path, run_id)
-    if imported_paths is None:
-        print("Imported path scope is invalid; no review was started.")
-        return False
-    if not _review_checkout_safe(repo_root, matrix_path, imported_paths):
-        print("Cannot continue review safely because the checkout changed.")
-        _print_offline_review_resume(
-            matrix_path,
-            run_id,
-            requested_tier=requested_tier,
-            pending_tier="bronze",
-        )
-        return False
-    try:
-        print("Choose how this imported run will be reviewed:")
-        print("  [1] Operator attestation by the person who performed the run")
-        print("  [2] Independent review by a different person")
-        choice = input("Review route (default: leave inconclusive): ").strip()
-        expected_assurance = {
-            "1": "operator_attested",
-            "2": "independently_reviewed",
-        }.get(choice)
-    except EOFError, KeyboardInterrupt:
-        expected_assurance = None
-    if expected_assurance is None:
-        print(
-            "Evidence remains imported and unqualified; no PR commands were generated."
-        )
-        _print_offline_review_resume(
-            matrix_path,
-            run_id,
-            requested_tier=requested_tier,
-            pending_tier="bronze",
-        )
-        return False
-    if expected_assurance == "independently_reviewed":
         try:
-            reviewer_available = (
-                input(
-                    "Hand the terminal to a different reviewer, then type REVIEWER READY: "
-                ).strip()
-                == "REVIEWER READY"
+            importer._apply_proposal(proposal)
+        except HAAPIError as ex:
+            print("Import failed safely:", ex)
+            return False
+
+        run_id = proposal["run_id"]
+    if not review_completed:
+        imported_paths = _review_evidence_paths(matrix_path, run_id)
+        if imported_paths is None:
+            print("Imported path scope is invalid; no review was started.")
+            return False
+        if not _review_checkout_safe(repo_root, matrix_path, imported_paths):
+            print("Cannot continue review safely because the checkout changed.")
+            _print_offline_review_resume(
+                matrix_path,
+                run_id,
+                requested_tier=requested_tier,
+                pending_tier="bronze",
+                archive_path=archive_path,
             )
+            return False
+        try:
+            print("Choose how this imported run will be reviewed:")
+            print("  [1] Operator attestation by the person who performed the run")
+            print("  [2] Independent review by a different person")
+            choice = input("Review route (default: leave inconclusive): ").strip()
+            expected_assurance = {
+                "1": "operator_attested",
+                "2": "independently_reviewed",
+            }.get(choice)
         except EOFError, KeyboardInterrupt:
-            reviewer_available = False
-        if not reviewer_available:
+            expected_assurance = None
+        if expected_assurance is None:
             print(
                 "Evidence remains imported and unqualified; no PR commands were generated."
             )
@@ -4124,43 +4204,68 @@ def _onboard_import_review(
                 run_id,
                 requested_tier=requested_tier,
                 pending_tier="bronze",
+                archive_path=archive_path,
             )
             return False
-    pending_tier = "bronze"
-    try:
-        from .review_wizard import interactive_review
-
-        review_tiers = ["bronze"]
-        if requested_tier in {"silver", "gold"}:
-            review_tiers.append(requested_tier)
-        for review_tier in review_tiers:
-            pending_tier = review_tier
-            if (
-                interactive_review(
-                    matrix_path,
-                    run_id=run_id,
-                    repo_root=repo_root,
-                    expected_assurance=expected_assurance,
-                    **({} if review_tier == "bronze" else {"tier": review_tier}),
+        if expected_assurance == "independently_reviewed":
+            try:
+                reviewer_available = (
+                    input(
+                        "Hand the terminal to a different reviewer, then type REVIEWER READY: "
+                    ).strip()
+                    == "REVIEWER READY"
                 )
-                != 0
-            ):
+            except EOFError, KeyboardInterrupt:
+                reviewer_available = False
+            if not reviewer_available:
+                print(
+                    "Evidence remains imported and unqualified; no PR commands were generated."
+                )
                 _print_offline_review_resume(
                     matrix_path,
                     run_id,
                     requested_tier=requested_tier,
-                    pending_tier=review_tier,
+                    pending_tier="bronze",
+                    archive_path=archive_path,
                 )
                 return False
-    except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
-        print("Explicit review did not complete:", ex)
-        _print_offline_review_resume(
-            matrix_path,
-            run_id,
-            requested_tier=requested_tier,
-            pending_tier=pending_tier,
-        )
-        return False
+        pending_tier = "bronze"
+        try:
+            from .review_wizard import interactive_review
+
+            review_tiers = ["bronze"]
+            if requested_tier in {"silver", "gold"}:
+                review_tiers.append(requested_tier)
+            for review_tier in review_tiers:
+                pending_tier = review_tier
+                if (
+                    interactive_review(
+                        matrix_path,
+                        run_id=run_id,
+                        repo_root=repo_root,
+                        expected_assurance=expected_assurance,
+                        **({} if review_tier == "bronze" else {"tier": review_tier}),
+                    )
+                    != 0
+                ):
+                    _print_offline_review_resume(
+                        matrix_path,
+                        run_id,
+                        requested_tier=requested_tier,
+                        pending_tier=review_tier,
+                        archive_path=archive_path,
+                    )
+                    return False
+        except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
+            print("Explicit review did not complete:", ex)
+            _print_offline_review_resume(
+                matrix_path,
+                run_id,
+                requested_tier=requested_tier,
+                pending_tier=pending_tier,
+                archive_path=archive_path,
+            )
+            return False
 
     imported_paths = _review_evidence_paths(matrix_path, run_id)
     if imported_paths is None or not _review_checkout_safe(
@@ -4172,6 +4277,20 @@ def _onboard_import_review(
         print(
             "Review evidence remains applied to its run; inspect the scoped Git status."
         )
+        print("  git status --short")
+        return False
+    try:
+        branch = subprocess.run(
+            ["git", "-C", str(repo_root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        ).stdout.strip()
+    except OSError, subprocess.SubprocessError:
+        branch = ""
+    if branch in {"", "devel", "main"}:
+        print("Cannot prepare a PR handoff from this checkout.")
         print("  git status --short")
         return False
 
@@ -4261,7 +4380,12 @@ def _onboard_import_review(
             for reason in isolated_summary.get("unmet_requirements", []):
                 print("  -", reason)
         print("After addressing the missing evidence, review this imported run with:")
-        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        print(
+            "  "
+            + _review_resume_command(
+                matrix_path, run_id, requested_tier, archive_path=archive_path
+            )
+        )
         return False
     # The scope evaluator can retain results from older runs. A new onboarding
     # handoff must qualify from this exact acquisition and its own review.
@@ -4288,7 +4412,12 @@ def _onboard_import_review(
             "review evidence or verified public artifacts; no PR commands were generated."
         )
         print("To resume the offline review, run:")
-        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        print(
+            "  "
+            + _review_resume_command(
+                matrix_path, run_id, requested_tier, archive_path=archive_path
+            )
+        )
         return False
     from scripts.pr_body import render_pr_body
 
@@ -4579,6 +4708,7 @@ def _onboard_import_review(
     }
     body_path = output_dir / "pr.md"
     try:
+        body_path.parent.mkdir(parents=True, exist_ok=True)
         body_path.write_text(
             render_pr_body(
                 (repo_root / ".github/PULL_REQUEST_TEMPLATE.md").read_text(
