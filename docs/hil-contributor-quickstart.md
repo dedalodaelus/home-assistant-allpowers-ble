@@ -3,7 +3,7 @@
 | Tier | Purpose and physical evidence |
 |---|---|
 | **Bronze** | Reviewed, read-only telemetry and physical observations for the exact station and observed route. |
-| **Silver** | Bronze plus physically verified on/off and safe restoration for each applicable basic output. |
+| **Silver** | Bronze plus a physically observed and reviewed reconnect, and on/off with safe restoration for each applicable basic output. |
 | **Gold** | Silver plus physically verified declared settings/functions and applicable recovery behavior, including restoration. |
 | **Platinum** | Gold plus a verified, uninterrupted 24-hour soak. Optional; it is not a next-release target, and the current public handoff cannot qualify it. |
 
@@ -90,9 +90,10 @@ python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
 ```
 
 The wizard selects the station and asks whether Bronze, Silver, or Gold evidence
-is requested. Silver and Gold use this same command: Silver adds real on/off and
-restoration checks for applicable outputs; Gold adds declared setting/function
-and recovery checks. Remain present, disconnect critical loads, and separately
+is requested. Silver and Gold use this same command: Silver adds a physically
+observed and reviewed reconnect, plus real on/off and restoration checks for
+applicable outputs; Gold adds declared setting/function and recovery checks.
+Remain present, disconnect critical loads, and separately
 authorize every state change and restoration. The wizard cannot turn missing,
 unsafe, or failed results into PASS.
 
