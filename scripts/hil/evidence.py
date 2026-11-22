@@ -4273,7 +4273,8 @@ def verify_public_archive(
                                 )
                             )
                             or (
-                                set(runtime) == extended_runtime_fields
+                                set(runtime)
+                                in (extended_runtime_fields, identity_runtime_fields)
                                 and (
                                     runtime.get("schema_version") != 2
                                     or runtime.get("available") is not True
@@ -4310,8 +4311,12 @@ def verify_public_archive(
                                     or runtime.get("model") not in KNOWN_MODELS
                                     or safe_version(runtime.get("hardware_revision"))
                                     != runtime.get("hardware_revision")
+                                    or safe_version(runtime.get("hardware_revision"))
+                                    is None
                                     or safe_version(runtime.get("firmware_revision"))
                                     != runtime.get("firmware_revision")
+                                    or safe_version(runtime.get("firmware_revision"))
+                                    is None
                                 )
                             )
                         ):

@@ -2944,6 +2944,41 @@ def test_reviewed_safe_disabled_car_charger_is_excluded_unverified(
     )
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("verified", "Invalid public runtime capabilities"),
+        ("features", "Invalid public runtime capabilities"),
+        ("hardware_revision", "Invalid public runtime capabilities"),
+    ],
+)
+def test_public_verifier_rejects_invalid_identity_runtime_schema(
+    tmp_path: Path, mutation: str, expected_error: str
+) -> None:
+    archive = _guided_setting_review_archive(
+        tmp_path / "source", safe_disabled_car_charger=True
+    )
+    with zipfile.ZipFile(archive) as source:
+        public_session = json.loads(source.read("public/session.json"))
+    runtime = public_session["data"]["runtime_capabilities"]
+    if mutation == "verified":
+        runtime["verified"] = "yes"
+    elif mutation == "features":
+        runtime["features"]["car_charger"]["unexpected"] = True
+    else:
+        runtime["hardware_revision"] = None
+    rewritten = _rewrite_capture_archive(
+        archive,
+        tmp_path / f"invalid-identity-runtime-{mutation}.zip",
+        capture_updates={},
+        member_updates={
+            "session.json": (json.dumps(public_session, sort_keys=True) + "\n").encode()
+        },
+    )
+    with pytest.raises(HAAPIError, match=expected_error):
+        verify_public_archive(rewritten)
+
+
 def test_safe_disabled_car_charger_public_export_review_and_gold_are_end_to_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
