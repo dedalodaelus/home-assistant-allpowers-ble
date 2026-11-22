@@ -3220,8 +3220,9 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
             rows = [json.loads(line) for line in capture.read_text().splitlines()]
             assert all(row["source_action_index"] != 3 for row in rows)
 
-    # Recreate an already-applied pre-assurance Silver review, retaining its
-    # schema-v1 audit's affirmative independence declaration as history only.
+    # Recreate the complete pre-#359 state: applied Bronze and Silver reviews
+    # both lack assurance, with their schema-v1 independence declarations kept
+    # only as untrusted historical fields.
     legacy = json.loads(json.dumps(matrix))
     legacy_run = legacy["revisions"][0]["runs"][0]
     historical_evidence = set(legacy_run["evidence"])
@@ -3257,6 +3258,54 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
         final = physical_review.get("final_restoration")
         if final is not None:
             final.pop("assurance")
+            final["reviewer_independent_from_operator"] = True
+    old_silver_evidence = {
+        category: values
+        for category, values in {
+            "scenarios": {
+                "reconnect_failover": json.loads(
+                    json.dumps(legacy_run["scenarios"]["reconnect_failover"])
+                )
+            },
+            "write_capabilities": {
+                feature: json.loads(
+                    json.dumps(legacy_run["write_capabilities"][feature])
+                )
+                for feature in ("ac_output", "dc_output", "light_output")
+            },
+            "feature_presence": {
+                feature: json.loads(json.dumps(item))
+                for feature, item in legacy_run["feature_presence"].items()
+                if item.get("status") in {"present", "absent"}
+                and "assurance" not in item
+            },
+        }.items()
+        if values
+    }
+    old_bronze_evidence = {}
+    for claim, result in legacy_run["bronze_evidence"].items():
+        physical_review = result["physical_review"]
+        old_bronze_evidence[claim] = json.loads(json.dumps(physical_review))
+        physical_review.pop("assurance")
+        physical_review.pop("evidence_sha256")
+        physical_review["reviewer_independent_from_operator"] = True
+        old_bronze_evidence[claim]["reviewer_independent_from_operator"] = True
+    bronze_history = next(
+        item for item in legacy_run["review_history"] if item.get("tier") == "bronze"
+    )
+    bronze_history.pop("assurance")
+    bronze_history["reviewer_independent_from_operator"] = True
+    bronze_audits = list(
+        (tmp_path / "hil-results" / "bronze-reviews").glob(f"{run_id}-*.json")
+    )
+    assert len(bronze_audits) == 1
+    old_bronze_audit_bytes = bronze_audits[0].read_bytes()
+    old_bronze_audit = json.loads(old_bronze_audit_bytes)
+    old_bronze_audit["schema_version"] = 1
+    old_bronze_audit.pop("assurance")
+    old_bronze_audit["reviewer_independent_from_operator"] = True
+    bronze_audits[0].write_text(json.dumps(old_bronze_audit, indent=2) + "\n")
+    old_bronze_audit_bytes = bronze_audits[0].read_bytes()
     legacy_bytes = (json.dumps(legacy, indent=2, ensure_ascii=False) + "\n").encode()
     matrix_path.write_bytes(legacy_bytes)
     legacy_errors, _ = validate_hil_qualification.validate_matrix(
@@ -3265,7 +3314,50 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert any(
         "physical_review must record valid assurance" in e for e in legacy_errors
     )
-    assert evaluate_tiers(legacy)["tiers"][0]["tier"] == "bronze"
+    assert evaluate_tiers(legacy)["tiers"][0]["tier"] == "unqualified"
+
+    answer_review(
+        [
+            "1",
+            "Silver operator",
+            "yes",
+            *(item for _ in range(3) for item in ("pass", "yes")),
+            "APPLY REVIEW",
+        ]
+    )
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+    after_bronze = json.loads(matrix_path.read_text(encoding="utf-8"))
+    strict_errors, _ = validate_hil_qualification.validate_matrix(
+        after_bronze, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert strict_errors == []
+    bronze_run = after_bronze["revisions"][0]["runs"][0]
+    assert evaluate_tiers(after_bronze)["tiers"][0]["tier"] == "bronze"
+    assert (
+        evaluate_tiers(after_bronze)["tiers"][0]["assurance"]["bronze"]
+        == "operator_attested"
+    )
+    migration_record = next(
+        item
+        for item in bronze_run["review_history"]
+        if item.get("legacy_tier_evidence")
+    )
+    assert migration_record["assurance"] == "unknown"
+    assert migration_record["legacy_tier_evidence"] == old_silver_evidence
+    assert all(
+        item["status"] == "inconclusive"
+        for item in bronze_run["write_capabilities"].values()
+    )
+    assert {item["status"] for item in bronze_run["scenarios"].values()} == {
+        "inconclusive"
+    }
+    assert historical_evidence.issubset(bronze_run["evidence"])
+    assert bronze_audits[0].read_bytes() == old_bronze_audit_bytes
 
     answer_review(["1", "Silver operator", *("yes" for _ in range(23)), "APPLY REVIEW"])
     assert (
@@ -3288,12 +3380,26 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
         )
         for item in migrated_history
     )
+    bronze_legacy_history = next(
+        item
+        for item in migrated_history
+        if item.get("tier") == "bronze" and item.get("assurance") == "unknown"
+    )
+    assert bronze_legacy_history["legacy_physical_reviews"] == {
+        claim: {
+            key: value
+            for key, value in physical_review.items()
+            if key not in {"assurance", "evidence_sha256"}
+        }
+        for claim, physical_review in old_bronze_evidence.items()
+    }
     assert historical_evidence.issubset(reattested_run["evidence"])
     assert json.loads(silver_audits[0].read_text(encoding="utf-8")) == legacy_audit
+    assert bronze_audits[0].read_bytes() == old_bronze_audit_bytes
     assert reattested_run["archive_sha256"] == archive_sha256
     legacy_silver = evaluate_tiers(legacy)["tiers"][0]
     assert legacy_silver["tier"] == "silver"
-    assert legacy_silver["assurance"]["silver"] == "mixed"
+    assert legacy_silver["assurance"]["silver"] == "operator_attested"
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
 
     # Gold repeats the independent output review and additionally reviews all
@@ -3347,9 +3453,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
         )
     }
     assert run["archive_sha256"] == archive_sha256
-    assert evaluate_tiers(matrix)["tiers"][0]["assurance"]["gold"] == (
-        "independently_reviewed"
-    )
+    assert evaluate_tiers(matrix)["tiers"][0]["assurance"]["gold"] == ("mixed")
     assert (
         import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
         == 0
@@ -3364,7 +3468,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
     reimported_tier = evaluate_tiers(reimported)["tiers"][0]
     assert reimported_tier["tier"] == "gold"
-    assert reimported_tier["assurance"]["gold"] == "independently_reviewed"
+    assert reimported_tier["assurance"]["gold"] == "mixed"
 
     # An older qualified run may keep the scope's tier, but cannot qualify a
     # newly imported run with no reviewed Bronze, control, or scenario results.

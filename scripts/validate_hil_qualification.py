@@ -737,7 +737,11 @@ def _check_physical_review(
         or parsed is None
         or parsed.tzinfo is None
         or digest_manifest is None
-        or review.get("evidence_sha256") != digest_manifest
+        or (
+            "evidence_sha256" in review
+            and review.get("evidence_sha256") != digest_manifest
+        )
+        or ("evidence_sha256" not in review and not legacy_unknown_assurance)
     ):
         _error(
             errors,

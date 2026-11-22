@@ -921,6 +921,60 @@ def _evidence_digests(
     return result
 
 
+def _suspend_legacy_tier_evidence(run: dict[str, Any]) -> dict[str, Any]:
+    """Move unassured pre-v3 Silver evidence out of active qualification maps."""
+    archived: dict[str, Any] = {
+        "scenarios": {},
+        "write_capabilities": {},
+        "feature_presence": {},
+    }
+    for category in ("scenarios", "write_capabilities"):
+        results = run.get(category)
+        if not isinstance(results, dict):
+            continue
+        for name, item in list(results.items()):
+            review = item.get("physical_review") if isinstance(item, dict) else None
+            if (
+                isinstance(item, dict)
+                and item.get("status") in {"pass", "fail"}
+                and isinstance(review, dict)
+                and "assurance" not in review
+            ):
+                archived[category][name] = json.loads(json.dumps(item))
+                results[name] = {
+                    "status": "inconclusive",
+                    "evidence": [],
+                    "rationale": "Legacy physical review is retained in review history pending explicit re-attestation.",
+                }
+    presence = run.get("feature_presence")
+    capabilities = run.get("write_capabilities")
+    if isinstance(presence, dict):
+        for feature, item in list(presence.items()):
+            if (
+                not isinstance(item, dict)
+                or item.get("status") not in {"present", "absent"}
+                or "assurance" in item
+            ):
+                continue
+            archived["feature_presence"][feature] = json.loads(json.dumps(item))
+            presence[feature] = {"status": "unknown", "evidence": []}
+            if isinstance(capabilities, dict):
+                capability = capabilities.get(feature)
+                if (
+                    isinstance(capability, dict)
+                    and capability.get("status") == "not_applicable"
+                ):
+                    archived["write_capabilities"].setdefault(
+                        feature, json.loads(json.dumps(capability))
+                    )
+                    capabilities[feature] = {
+                        "status": "inconclusive",
+                        "evidence": [],
+                        "rationale": "Legacy physical absence review is retained in review history pending explicit re-attestation.",
+                    }
+    return {category: values for category, values in archived.items() if values}
+
+
 def review_imported_run(
     matrix_path: Path,
     *,
@@ -947,6 +1001,7 @@ def review_imported_run(
         require_pass=False,
         max_age_days=None,
         allow_legacy_bronze_review=True,
+        allow_legacy_tier_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -970,6 +1025,7 @@ def review_imported_run(
     updated["authorization_context"] = "read_only"
     updated["authorization_context_source"] = "verified_read_only_session"
     updated["qualification_status"] = "pending"
+    legacy_tier_evidence = _suspend_legacy_tier_evidence(updated)
     previous_bronze = updated.get("bronze_evidence")
     if not isinstance(previous_bronze, dict):
         previous_bronze = {}
@@ -1217,6 +1273,18 @@ def review_imported_run(
         }
     )
     updated["review_history"] = history
+    if legacy_tier_evidence:
+        history.append(
+            {
+                "tier": "silver",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": run["captured_at"],
+                "assurance": "unknown",
+                "legacy_tier_evidence": legacy_tier_evidence,
+                "archive_sha256": run["archive_sha256"],
+            }
+        )
+        updated["review_history"] = history
     from .tiers import evaluate_tiers
 
     summary = {
@@ -1252,7 +1320,6 @@ def review_imported_run(
             matrix_path=matrix_path,
             require_pass=False,
             max_age_days=None,
-            allow_legacy_bronze_review=True,
         )
         if errors:
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))

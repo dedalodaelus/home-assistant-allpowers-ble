@@ -282,8 +282,8 @@ def interactive_review(
         matrix_path,
         run_id,
         root,
-        allow_legacy_bronze_review=tier == "bronze",
-        allow_legacy_tier_review=tier in {"silver", "gold"},
+        allow_legacy_bronze_review=tier in {"bronze", "silver", "gold"},
+        allow_legacy_tier_review=tier in {"bronze", "silver", "gold"},
     )
     members = _verified_members(run, root)
     if tier != "bronze":
