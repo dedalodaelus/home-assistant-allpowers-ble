@@ -310,10 +310,14 @@ def _scenario_controls(
         if entity_id is None:
             observed = {"available": False, "state": None, "options": []}
         else:
-            try:
-                observed = api.control_state(key, entity_id)
-            except HAAPIError:
+            control_state = getattr(api, "control_state", None)
+            if not callable(control_state):
                 observed = {"available": False, "state": None, "options": []}
+            else:
+                try:
+                    observed = control_state(key, entity_id)
+                except HAAPIError:
+                    observed = {"available": False, "state": None, "options": []}
         facts = capabilities or {}
         capability_flags = facts.get("capabilities", {})
         feature_facts = facts.get("features", {})
@@ -760,6 +764,7 @@ def _execute_tier_suite(
     from .settings import _execute_settings_suite
 
     services = _suite_services()
+    runtime_controls = _scenario_controls(api, device, capabilities)
     features = (
         capabilities.get("features", {}) if isinstance(capabilities, dict) else {}
     )
@@ -1380,6 +1385,49 @@ def _execute_tier_suite(
                     "evidence_run": recovery_evidence_run,
                 }
             )
+            continue
+        if planned.get("action") == "exclude":
+            capability_flags = (
+                capabilities.get("capabilities", {})
+                if isinstance(capabilities, dict)
+                else {}
+            )
+            control = runtime_controls.get("car_charger")
+            facts = (
+                features.get("car_charger", {}) if isinstance(features, dict) else {}
+            )
+            if (
+                step_id == "car_charger_reversal"
+                and planned.get("eligibility") == "review_required"
+                and isinstance(capability_flags, dict)
+                and capability_flags.get("car_charger_enabled") is False
+                and isinstance(control, dict)
+                and control.get("available") is False
+                and isinstance(facts, dict)
+                and facts.get("physical_presence") == "unknown"
+            ):
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "pending_review",
+                        "reason": "optional control is safely disabled; pending explicit reviewed exclusion",
+                        "safe_disable_proof": {
+                            "runtime_option_enabled": False,
+                            "normal_control_available": False,
+                        },
+                        "machine_evidence_sha256": [],
+                        "machine_evidence": [],
+                    }
+                )
+            else:
+                execution["steps"].append(
+                    {
+                        "step_id": step_id,
+                        "outcome": "blocked",
+                        "reason": "optional-control exclusion proof is unavailable",
+                    }
+                )
+                overall = 2
             continue
         if step_id in {"basic_reconnect", "guarded_recovery"}:
             scenario_id = "recovery_reconnect"

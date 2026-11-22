@@ -571,10 +571,17 @@ timeout behavior are software regression gates run by repository CI through
 `run --suite transaction-safety --simulate`; they are not Gold hardware
 scenarios and their synthetic traces never count as device evidence. The tier
 report names this offline regression gate, but does not claim it passed; CI
-must pass it independently. An optional
-advanced feature can be excluded only through a reviewed revision-level
-`feature_contract` artifact that documents it as unavailable and safely
-disabled. Unknown inventory and free-form exclusion flags do not qualify.
+must pass it independently. An optional advanced feature can be excluded only
+through a reviewed revision-level `feature_contract` artifact. For the R600
+`car_charger` option, the guided Gold plan offers that review only when the
+verified runtime option is OFF and the normal Home Assistant control is
+unavailable. The import/review evidence binds both facts to the acquired run;
+the operator must explicitly confirm the exclusion and its limits. An accepted
+exclusion is reported as **excluded/unverified**, never as tested or physically
+absent. It does not establish that the 12 V socket is independently switched
+from the USB/DC group. Unknown inventory, an enabled option, a still-available
+control, and free-form exclusion flags do not qualify. Mandatory basic outputs,
+settings and recovery checks remain required.
 
 Platinum adds only a reviewed `soak_24h` evidence artifact containing one
 continuous, uninterrupted 86,400-second segment, at least 289 fresh telemetry

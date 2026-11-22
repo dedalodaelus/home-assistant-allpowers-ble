@@ -873,6 +873,7 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
             "preflight",
             "telemetry",
             "runtime_capabilities",
+            "controls",
             "test_plan",
             "started_at",
         ):
@@ -963,6 +964,15 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                     else None,
                     "capabilities": capabilities,
                 }
+            elif key == "controls" and isinstance(value, dict):
+                car_charger = value.get("car_charger")
+                if (
+                    isinstance(car_charger, dict)
+                    and type(car_charger.get("available")) is bool
+                ):
+                    result["data"][key] = {
+                        "car_charger": {"available": car_charger["available"]}
+                    }
             elif key == "test_plan" and isinstance(value, dict):
                 projected = _public_tier_plan(value)
                 if projected is not None:
@@ -1022,6 +1032,7 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
         "tier requires a basic output PASS; all declared outputs are absent",
         "no present, production-authorized or reviewed candidate output is available",
         "operator physical-inventory preflight permits acquisition only; independent review is still required",
+        "optional control is disabled by policy and its normal HA control is unavailable; explicit review is required",
     }
     safe_step_ids = {
         "read_only_probe",
@@ -1099,7 +1110,13 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
             not isinstance(step.get("id"), str)
             or step["id"] not in safe_step_ids
             or step.get("eligibility")
-            not in {"eligible", "blocked", "not_applicable", "pending_authorization"}
+            not in {
+                "eligible",
+                "blocked",
+                "not_applicable",
+                "pending_authorization",
+                "review_required",
+            }
             or step.get("outcome") != "pending"
             or step.get("human_review") != "pending"
             or not isinstance(step.get("reasons"), list)
@@ -1111,6 +1128,23 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
             return None
         inventory_status = step.get("inventory_preflight")
         feature = step.get("feature")
+        exclusion_step = step.get("action") == "exclude"
+        if step.get("eligibility") == "review_required" or exclusion_step:
+            if not (
+                step.get("id") == "car_charger_reversal"
+                and feature == "car_charger"
+                and step.get("physical_presence") == "unknown"
+                and step.get("eligibility") == "review_required"
+                and exclusion_step
+                and step.get("safe_disable_proof")
+                == {
+                    "runtime_option_enabled": False,
+                    "normal_control_available": False,
+                }
+                and "optional control is disabled by policy and its normal HA control is unavailable; explicit review is required"
+                in step.get("reasons", [])
+            ):
+                return None
         if inventory_present and inventory_status is None and feature != "output":
             return None
         if (
@@ -1161,12 +1195,32 @@ def _public_tier_plan(value: dict[str, Any]) -> dict[str, Any] | None:
                 }
                 else "unknown",
                 "eligibility": step["eligibility"],
+                "action": step.get("action")
+                if step.get("action")
+                in {"read_only", "manual", "write", "not_applicable", "exclude"}
+                else "unknown",
                 "physical_presence": step.get("physical_presence")
                 if step.get("physical_presence") in {"present", "absent", "unknown"}
                 else "unknown",
                 "outcome": step["outcome"],
                 "reasons": step["reasons"],
                 "human_review": step["human_review"],
+                **(
+                    {
+                        "safe_disable_proof": {
+                            "runtime_option_enabled": False,
+                            "normal_control_available": False,
+                        }
+                    }
+                    if step.get("id") == "car_charger_reversal"
+                    and step.get("action") == "exclude"
+                    and step.get("safe_disable_proof")
+                    == {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    }
+                    else {}
+                ),
                 **(
                     {"inventory_preflight": inventory_status}
                     if inventory_present and inventory_status is not None
@@ -3977,6 +4031,7 @@ def verify_public_archive(
                         "preflight",
                         "telemetry",
                         "runtime_capabilities",
+                        "controls",
                         "test_plan",
                         "started_at",
                         "device",
@@ -4136,6 +4191,17 @@ def verify_public_archive(
                             )
                         ):
                             raise HAAPIError("Invalid public runtime capabilities")
+                    if "controls" in public_session:
+                        controls = public_session["controls"]
+                        if (
+                            not isinstance(controls, dict)
+                            or set(controls) != {"car_charger"}
+                            or not isinstance(controls["car_charger"], dict)
+                            or set(controls["car_charger"]) != {"available"}
+                            or type(controls["car_charger"].get("available"))
+                            is not bool
+                        ):
+                            raise HAAPIError("Invalid public control availability")
                     if (
                         "test_plan" in public_session
                         and _public_tier_plan(public_session["test_plan"])
@@ -4368,12 +4434,28 @@ def verify_public_archive(
                             "authorization_context_source",
                             "machine_evidence_sha256",
                             "machine_evidence",
+                            "reason",
+                            "safe_disable_proof",
                         }
                         or row.get("step_id") not in TIER_STEP_IDS
                         or row.get("outcome")
                         not in OUTCOMES
                         | {"blocked", "pending_review", "shared_evidence"}
                         or row.get("human_review") not in {None, "pending", "reviewed"}
+                        or (
+                            "safe_disable_proof" in row
+                            and (
+                                row.get("step_id") != "car_charger_reversal"
+                                or row.get("outcome") != "pending_review"
+                                or row.get("reason")
+                                != "optional control is safely disabled; pending explicit reviewed exclusion"
+                                or row.get("safe_disable_proof")
+                                != {
+                                    "runtime_option_enabled": False,
+                                    "normal_control_available": False,
+                                }
+                            )
+                        )
                         or (
                             row.get("authorization_context") is not None
                             and (

@@ -120,6 +120,18 @@ def build_tier_plan(
                 status = "blocked"
             reasons.append("connected GATT route has not been verified")
         original = control.get("state")
+        safely_disabled = bool(
+            feature == "car_charger"
+            and capability_flags.get("car_charger_enabled") is False
+            and control.get("available") is False
+            and facts.get("physical_presence") == "unknown"
+        )
+        if safely_disabled:
+            status = "review_required"
+            action = "exclude"
+            reasons.append(
+                "optional control is disabled by policy and its normal HA control is unavailable; explicit review is required"
+            )
         steps.append(
             {
                 "id": step_id,
@@ -146,6 +158,14 @@ def build_tier_plan(
                 "reasons": sorted(set(reasons)),
                 "required_evidence": evidence,
                 "human_review": "pending",
+                "safe_disable_proof": (
+                    {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    }
+                    if safely_disabled
+                    else None
+                ),
             }
         )
 

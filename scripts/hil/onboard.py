@@ -686,6 +686,54 @@ def assess_run_gate(
             )
             continue
         step_id = planned["id"]
+        if planned.get("action") == "exclude":
+            capabilities = session.get("runtime_capabilities")
+            capability_flags = (
+                capabilities.get("capabilities")
+                if isinstance(capabilities, dict)
+                else None
+            )
+            controls = session.get("controls")
+            control = (
+                controls.get("car_charger") if isinstance(controls, dict) else None
+            )
+            feature_facts = (
+                capabilities.get("features", {}).get("car_charger")
+                if isinstance(capabilities, dict)
+                and isinstance(capabilities.get("features"), dict)
+                else None
+            )
+            proof = planned.get("safe_disable_proof")
+            rows = by_id.get(step_id, [])
+            substantiated = (
+                step_id == "car_charger_reversal"
+                and planned.get("feature") == "car_charger"
+                and planned.get("eligibility") == "review_required"
+                and isinstance(proof, dict)
+                and proof.get("runtime_option_enabled") is False
+                and proof.get("normal_control_available") is False
+                and isinstance(capability_flags, dict)
+                and capability_flags.get("car_charger_enabled") is False
+                and isinstance(control, dict)
+                and control.get("available") is False
+                and isinstance(feature_facts, dict)
+                and feature_facts.get("physical_presence") == "unknown"
+                and len(rows) == 1
+                and rows[0].get("outcome") == "pending_review"
+                and rows[0].get("reason")
+                == "optional control is safely disabled; pending explicit reviewed exclusion"
+                and rows[0].get("safe_disable_proof") == proof
+            )
+            if not substantiated:
+                blockers.append(
+                    _finding(
+                        step_id,
+                        "invalid_exclusion",
+                        "optional-control exclusion lacks verified disabled-option and unavailable-control evidence",
+                        execution_path,
+                    )
+                )
+            continue
         if (
             planned.get("eligibility") == "not_applicable"
             or planned.get("action") == "not_applicable"
