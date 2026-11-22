@@ -4545,8 +4545,11 @@ def test_legacy_bronze_review_without_assurance_stays_inconclusive(
     assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "unqualified"
 
 
+@pytest.mark.parametrize("review_surface", ["backend", "interactive"])
 def test_existing_legacy_bronze_pass_can_be_reattested_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    review_surface: str,
 ) -> None:
     from scripts import validate_hil_qualification
     from scripts.hil.review import review_imported_run
@@ -4617,34 +4620,68 @@ def test_existing_legacy_bronze_pass_can_be_reattested_offline(
     )
     assert evaluate_tiers(legacy)["tiers"][0]["tier"] == "unqualified"
 
-    operator_review = tmp_path / "operator-reattestation.json"
-    operator_review.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "assurance": "operator_attested",
-                "archive_sha256": legacy_run["archive_sha256"],
-                "run_id": legacy_run["run_id"],
-                "reviewed_by": "original HIL operator",
-                "reviewed_at": datetime.now(UTC).isoformat(),
-                "claims": {
-                    claim: "pass"
-                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert (
-        review_imported_run(
-            matrix_path,
-            run_id=legacy_run["run_id"],
-            review_file=operator_review,
-            apply=True,
-            repo_root=tmp_path,
+    if review_surface == "backend":
+        operator_review = tmp_path / "operator-reattestation.json"
+        operator_review.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "assurance": "operator_attested",
+                    "archive_sha256": legacy_run["archive_sha256"],
+                    "run_id": legacy_run["run_id"],
+                    "reviewed_by": "original HIL operator",
+                    "reviewed_at": datetime.now(UTC).isoformat(),
+                    "claims": {
+                        claim: "pass"
+                        for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
-        == 0
-    )
+        assert (
+            review_imported_run(
+                matrix_path,
+                run_id=legacy_run["run_id"],
+                review_file=operator_review,
+                apply=True,
+                repo_root=tmp_path,
+            )
+            == 0
+        )
+    else:
+        from scripts.hil.review_wizard import interactive_review
+
+        class TTY:
+            @staticmethod
+            def isatty() -> bool:
+                return True
+
+        answers = iter(
+            [
+                "1",
+                "original HIL operator",
+                "yes",
+                "pass",
+                "yes",
+                "pass",
+                "yes",
+                "pass",
+                "yes",
+                "APPLY REVIEW",
+            ]
+        )
+        monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+        assert (
+            interactive_review(
+                matrix_path,
+                run_id=legacy_run["run_id"],
+                tier="bronze",
+                repo_root=tmp_path,
+            )
+            == 0
+        )
 
     reviewed = json.loads(matrix_path.read_text())
     reviewed_run = reviewed["revisions"][0]["runs"][0]

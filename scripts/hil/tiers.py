@@ -969,6 +969,14 @@ def _tier_for_scope(
         _result(_latest_run(runs, "scenarios", scenario) or {}, "scenarios", scenario)
         for scenario in GOLD_SCENARIOS
     )
+    feature_contracts = revision.get("feature_contract")
+    gold_reviews.extend(
+        feature_contracts[feature]
+        for feature in ALL_FEATURES[3:]
+        if feature_presence[feature] == "unknown"
+        and _contract_excluded(revision, feature)
+        and isinstance(feature_contracts, dict)
+    )
     gold_assurance = _assurance_label(gold_reviews)
 
     soak = _latest_outcome(runs, "scenarios", "soak_24h")

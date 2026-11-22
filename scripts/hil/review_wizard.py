@@ -201,7 +201,13 @@ def _has_trace_operation(
     )
 
 
-def _load_run(matrix_path: Path, run_id: str, root: Path) -> tuple[dict, dict]:
+def _load_run(
+    matrix_path: Path,
+    run_id: str,
+    root: Path,
+    *,
+    allow_legacy_bronze_review: bool = False,
+) -> tuple[dict, dict]:
     matrix_path = matrix_path.absolute()
     _reject_symlink_components(matrix_path, root)
     try:
@@ -212,7 +218,11 @@ def _load_run(matrix_path: Path, run_id: str, root: Path) -> tuple[dict, dict]:
     if not isinstance(matrix, dict) or matrix.get("schema_version") != 3:
         raise HAAPIError("Qualification matrix must use schema v3")
     errors, _ = validation.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_bronze_review=allow_legacy_bronze_review,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -266,7 +276,12 @@ def interactive_review(
     root = (repo_root or Path(__file__).resolve().parents[2]).absolute()
     if not sys.stdin.isatty():
         raise HAAPIError("Interactive review requires a TTY")
-    revision, run = _load_run(matrix_path, run_id, root)
+    revision, run = _load_run(
+        matrix_path,
+        run_id,
+        root,
+        allow_legacy_bronze_review=tier == "bronze",
+    )
     members = _verified_members(run, root)
     if tier != "bronze":
         return _interactive_higher_tier_review(

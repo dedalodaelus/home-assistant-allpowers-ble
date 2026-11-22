@@ -880,7 +880,12 @@ def test_gold_rejects_restoration_without_bound_physical_capture(
 
 
 def _exclude_feature_contract(
-    matrix: dict[str, Any], root: Path, feature: str, *, safe: bool = True
+    matrix: dict[str, Any],
+    root: Path,
+    feature: str,
+    *,
+    safe: bool = True,
+    assurance: str = "independently_reviewed",
 ) -> None:
     revision = matrix["revisions"][0]
     rationale = (
@@ -900,6 +905,9 @@ def _exclude_feature_contract(
         },
     )
     contract = _reviewed(root, "pass", [evidence])
+    contract["physical_review"]["assurance"] = assurance
+    if assurance == "operator_attested":
+        contract["physical_review"]["reviewed_by"] = "device operator"
     contract.update(
         status="excluded",
         safely_disabled=safe,
@@ -922,6 +930,21 @@ def test_gold_accepts_only_reviewed_revision_contract_exclusions(
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
     assert any("car_charger" in item for item in result["tiers"][0]["exclusions"])
+
+
+def test_gold_assurance_includes_operator_attested_feature_contract_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    _exclude_feature_contract(
+        matrix, tmp_path, "car_charger", assurance="operator_attested"
+    )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors == []
+    tier = result["tiers"][0]
+    assert tier["tier"] == "gold"
+    assert tier["assurance"]["gold"] == "mixed"
+    assert any("car_charger" in item for item in tier["exclusions"])
 
 
 def test_free_form_exclusion_boolean_cannot_omit_unknown_feature(
