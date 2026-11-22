@@ -1083,8 +1083,12 @@ def review_imported_run(
     members = _verified_members(run, root)
     files: dict[Path, bytes] = {}
     updated = json.loads(json.dumps(run))
-    updated["authorization_context"] = "read_only"
-    updated["authorization_context_source"] = "verified_read_only_session"
+    if not (
+        updated.get("authorization_context") == "production"
+        and updated.get("authorization_context_source") == "reviewed_production_session"
+    ):
+        updated["authorization_context"] = "read_only"
+        updated["authorization_context_source"] = "verified_read_only_session"
     updated["qualification_status"] = "pending"
     legacy_tier_evidence = _suspend_legacy_tier_evidence(updated)
     previous_bronze = updated.get("bronze_evidence")

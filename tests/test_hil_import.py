@@ -3653,6 +3653,98 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert "ac_output" not in regressed["qualified_features"]
 
 
+def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _standard_tier_suite_archive(tmp_path / "standard")
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text(encoding="utf-8"))["revisions"][0][
+        "runs"
+    ][0]["run_id"]
+    _tty(monkeypatch)
+
+    def answer_review(responses: list[str]) -> None:
+        iterator = iter(responses)
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(iterator))
+
+    answer_review(
+        [
+            "1",
+            "Bronze operator",
+            "yes",
+            *(item for _ in range(3) for item in ("pass", "yes")),
+            "APPLY REVIEW",
+        ]
+    )
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+
+    answer_review(["1", "Silver operator", *("yes" for _ in range(23)), "APPLY REVIEW"])
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
+        )
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["authorization_context"] == "production"
+    assert run["authorization_context_source"] == "reviewed_production_session"
+    silver_state = {
+        key: json.loads(json.dumps(run[key]))
+        for key in ("feature_presence", "scenarios", "write_capabilities")
+    }
+    silver_audits = list(
+        (tmp_path / "hil-results" / "tier-reviews").glob(f"{run_id}-silver-*.json")
+    )
+    assert len(silver_audits) == 1
+    silver_audit_bytes = silver_audits[0].read_bytes()
+
+    answer_review(
+        _review_answers(
+            reviewer="Independent Bronze reviewer", inspected=True, apply=True
+        )
+    )
+    assert (
+        interactive_review(
+            matrix_path, run_id=run_id, tier="bronze", repo_root=tmp_path
+        )
+        == 0
+    )
+    capsys.readouterr()
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    run = reviewed["revisions"][0]["runs"][0]
+    assert run["authorization_context"] == "production"
+    assert run["authorization_context_source"] == "reviewed_production_session"
+    assert {key: run[key] for key in silver_state} == silver_state
+    assert silver_audits[0].read_bytes() == silver_audit_bytes
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == archive_sha256
+    tier = evaluate_tiers(reviewed)["tiers"][0]
+    assert tier["tier"] == "silver"
+    assert tier["assurance"]["bronze"] == "independently_reviewed"
+    assert tier["assurance"]["silver"] == "mixed"
+
+
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
