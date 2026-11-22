@@ -438,6 +438,23 @@ def _matrix(path: Path) -> Path:
     return result
 
 
+def _commit_checkout(repo_root: Path) -> None:
+    """Make test checkouts clean before exercising tracked evidence writes."""
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.name", "Test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo_root), "add", "--all"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "commit", "-m", "test: initialize checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
 def _tty(monkeypatch: pytest.MonkeyPatch) -> None:
     class TTY:
         @staticmethod
@@ -5364,6 +5381,7 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         repo_root / "scripts",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -5552,6 +5570,7 @@ def test_onboard_without_independent_reviewer_leaves_offline_resume_path(
     repo_root.mkdir()
     matrix_path = _matrix(repo_root / "tests" / "hil")
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -5604,6 +5623,7 @@ def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
     repo_root.mkdir()
     matrix_path = _matrix(repo_root / "tests" / "hil")
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -5662,6 +5682,7 @@ def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
     repo_root.mkdir()
     matrix_path = _matrix(repo_root / "tests" / "hil")
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -5719,6 +5740,7 @@ def test_onboard_higher_tier_exception_resumes_only_pending_tier(
     repo_root.mkdir()
     matrix_path = _matrix(repo_root / "tests" / "hil")
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -5815,12 +5837,16 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
         Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
         template_target,
     )
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".gitignore", repo_root / ".gitignore"
+    )
     subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
     shutil.copytree(
         Path(__file__).resolve().parents[1] / "scripts",
         repo_root / "scripts",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -6018,6 +6044,8 @@ def test_prior_scope_bronze_does_not_unlock_unreviewed_imported_run(
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    _commit_checkout(repo_root)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
     _tty(monkeypatch)
@@ -6043,6 +6071,7 @@ def test_prior_scope_bronze_does_not_unlock_unreviewed_imported_run(
     assert (
         interactive_review(matrix_path, run_id=first_run_id, repo_root=repo_root) == 0
     )
+    _commit_checkout(repo_root)
 
     second_archive = _captured_archive(
         tmp_path / "second-source",
@@ -6114,6 +6143,8 @@ def test_interactive_review_cancel_keeps_matrix_unchanged(
         bronze_reviewable=True,
     )
     matrix_path = _matrix(tmp_path)
+    subprocess.run(["git", "init", "-b", "feat/test", str(tmp_path)], check=True)
+    _commit_checkout(tmp_path)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
     import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
     run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
@@ -6457,6 +6488,8 @@ def test_interactive_review_interruption_never_applies(
         bronze_reviewable=True,
     )
     matrix_path = _matrix(tmp_path)
+    subprocess.run(["git", "init", "-b", "feat/test", str(tmp_path)], check=True)
+    _commit_checkout(tmp_path)
     monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
     import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
     run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]

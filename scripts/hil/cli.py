@@ -22,6 +22,7 @@ from typing import Any, Callable
 from .api import HAAPIError, HAClient
 from .capabilities import feature_write_authorized
 from .evidence import export_archive, write_report
+from . import importer
 from .importer import DEFAULT_MATRIX, import_archive
 from .discovery import Device, choose_device, find_devices
 from .environment import (
@@ -2559,6 +2560,27 @@ def execute(args: argparse.Namespace) -> int:
         args.scenario_id = None
         args.allow_keepalive_disabled = False
     if args.command == "import":
+        if args.apply:
+            repo_root = _matrix_repo_root(args.matrix)
+            try:
+                proposal = importer._build_proposal(
+                    args.archive, args.matrix, repo_root=repo_root
+                )
+            except HAAPIError as ex:
+                print("Import preview failed; no repository files were changed:", ex)
+                return 2
+            importer._print_preview(proposal)
+            if _current_feature_branch(repo_root) is None:
+                print("Cannot apply import safely from this checkout.")
+                _print_import_resume_commands(
+                    args.archive,
+                    proposal,
+                    repo_root=repo_root,
+                    matrix_path=args.matrix,
+                )
+                return 2
+            importer._apply_proposal(proposal)
+            return 0
         return import_archive(args.archive, matrix_path=args.matrix, apply=args.apply)
     if args.command == "review":
         if args.interactive:
@@ -2569,12 +2591,31 @@ def execute(args: argparse.Namespace) -> int:
                 )
             from .review_wizard import interactive_review
 
+            repo_root = _matrix_repo_root(args.matrix)
+            run_evidence = _review_evidence_paths(args.matrix, args.run_id)
+            if run_evidence is None or not _review_checkout_safe(
+                repo_root, args.matrix, run_evidence
+            ):
+                print("Cannot apply review safely from this checkout.")
+                print("  git status --short")
+                return 2
+
             if args.tier == "bronze":
                 return interactive_review(args.matrix, run_id=args.run_id)
             return interactive_review(args.matrix, run_id=args.run_id, tier=args.tier)
         if args.tier != "bronze":
             raise HAAPIError("--tier applies only to --interactive review")
         from .review import review_imported_run
+
+        if args.apply:
+            repo_root = _matrix_repo_root(args.matrix)
+            run_evidence = _review_evidence_paths(args.matrix, args.run_id)
+            if run_evidence is None or not _review_checkout_safe(
+                repo_root, args.matrix, run_evidence
+            ):
+                print("Cannot apply review safely from this checkout.")
+                print("  git status --short")
+                return 2
 
         return review_imported_run(
             args.matrix,
@@ -2827,16 +2868,10 @@ def execute(args: argparse.Namespace) -> int:
                 "verify a scoped, continuous 24-hour soak. No HIL run was started."
             )
             return 2
-        repo_root = Path(__file__).resolve().parents[2]
-        if _current_feature_branch(repo_root) is None:
-            print(
-                "Cannot start the qualification workflow: select a clean "
-                "feature branch before running HIL. No tests were started."
-            )
-            print("  git fetch origin")
-            print("  git switch -c feat/hil-qualification origin/devel")
-            print("  git status --short")
-            return 2
+        print(
+            "Acquisition writes private evidence under the output directory. "
+            "Repository import and PR handoff require a clean topic branch."
+        )
         args.tier = requested_tier
     if resume_state is not None:
         fingerprint = _device_fingerprint(
@@ -3274,6 +3309,165 @@ def _current_feature_branch(repo_root: Path) -> str | None:
     return branch
 
 
+def _review_checkout_safe(
+    repo_root: Path, matrix_path: Path, evidence_paths: list[Any]
+) -> bool:
+    """Allow review writes only on a topic branch without unrelated changes."""
+    try:
+        allowed = {matrix_path.resolve().relative_to(repo_root.resolve()).as_posix()}
+        if any(not isinstance(path, str) for path in evidence_paths):
+            return False
+        allowed.update(evidence_paths)
+        branch = subprocess.run(
+            ["git", "-C", str(repo_root), "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        ).stdout.strip()
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "-z",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=3,
+        ).stdout
+    except OSError, subprocess.SubprocessError, ValueError:
+        return False
+    if branch in {"", "devel", "main"}:
+        return False
+    changed_paths = {
+        item[3:].decode("utf-8", errors="surrogateescape")
+        for item in status.split(b"\0")
+        if item
+    }
+    return changed_paths <= allowed
+
+
+def _matrix_repo_root(matrix_path: Path) -> Path:
+    """Resolve the repository root that owns the selected HIL matrix."""
+    matrix = matrix_path.resolve()
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(matrix.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3,
+        ).stdout.strip()
+    except OSError, subprocess.SubprocessError:
+        root = ""
+    if root:
+        return Path(root)
+    return Path(__file__).resolve().parents[2]
+
+
+def _review_evidence_paths(matrix_path: Path, run_id: str) -> list[Any] | None:
+    """Load matrix-referenced public paths after finding one target run."""
+    try:
+        matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    except OSError, UnicodeError, json.JSONDecodeError:
+        return None
+    return _matrix_evidence_paths(matrix, run_id)
+
+
+def _matrix_evidence_paths(matrix: Any, run_id: str) -> list[Any] | None:
+    """Return all referenced public evidence after confirming one target run."""
+    if not isinstance(matrix, dict) or not isinstance(matrix.get("revisions"), list):
+        return None
+    runs = [
+        run
+        for revision in matrix["revisions"]
+        if isinstance(revision, dict)
+        for run in revision.get("runs", [])
+        if isinstance(run, dict)
+    ]
+    if sum(run.get("run_id") == run_id for run in runs) != 1:
+        return None
+    paths: list[Any] = []
+    for run in runs:
+        evidence = run.get("evidence")
+        if not isinstance(evidence, list):
+            return None
+        paths.extend(evidence)
+        for section in (
+            "bronze_evidence",
+            "write_capabilities",
+            "scenarios",
+            "feature_presence",
+        ):
+            rows = run.get(section)
+            if not isinstance(rows, dict):
+                continue
+            for record in rows.values():
+                references = (
+                    record.get("evidence") if isinstance(record, dict) else None
+                )
+                if references is not None:
+                    if not isinstance(references, list):
+                        return None
+                    paths.extend(references)
+    return paths
+
+
+def _print_import_resume_commands(
+    archive_path: Path,
+    proposal: dict[str, Any],
+    *,
+    repo_root: Path,
+    matrix_path: Path,
+    requested_tier: str = "bronze",
+) -> None:
+    """Print safe, exact offline commands to continue an exported acquisition."""
+    run_id = proposal["run_id"]
+    archive_path = archive_path.resolve()
+    suffix = run_id.removeprefix("archive-")[-8:]
+    branch = f"feat/hil-evidence-{suffix}"
+    worktree = repo_root.parent / f"{repo_root.name}-hil-{suffix}"
+    matrix = matrix_path.resolve()
+    print("The evidence ZIP is preserved; no tracked repository files were changed.")
+    print("Continue in a clean worktree created from origin/devel:")
+    print(
+        "  "
+        + _shell_join(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree,
+                "origin/devel",
+            ]
+        )
+    )
+    print("  cd " + _shell_quote(worktree))
+    print(
+        "  "
+        + _shell_join(
+            ["python", "-m", "scripts.hil", "import", archive_path, "--dry-run"]
+        )
+    )
+    print(
+        "  "
+        + _shell_join(
+            ["python", "-m", "scripts.hil", "import", archive_path, "--apply"]
+        )
+    )
+    print("  " + _review_resume_command(matrix, run_id))
+    if requested_tier in {"silver", "gold"}:
+        print("  " + _review_resume_command(matrix, run_id, requested_tier))
+
+
 def _review_resume_command(matrix_path: Path, run_id: str, tier: str = "bronze") -> str:
     command = (
         "python -m scripts.hil review --matrix "
@@ -3542,9 +3736,14 @@ def _onboard_import_review(
             return False
         branch = _current_feature_branch(repo_root)
         if branch is None:
-            print("Cannot import safely: select a clean feature branch based on devel.")
-            print("  git status --short")
-            print("  git switch -c feat/hil-evidence origin/devel")
+            print("Cannot import safely from this checkout.")
+            _print_import_resume_commands(
+                archive_path,
+                proposal,
+                repo_root=repo_root,
+                matrix_path=matrix_path,
+                requested_tier=requested_tier,
+            )
             return False
         if (
             input("Type APPLY IMPORT to write these exact files: ").strip()
@@ -3562,6 +3761,19 @@ def _onboard_import_review(
         return False
 
     run_id = proposal["run_id"]
+    imported_paths = _matrix_evidence_paths(proposal.get("matrix"), run_id)
+    if imported_paths is None:
+        print("Imported path scope is invalid; no review was started.")
+        return False
+    if not _review_checkout_safe(repo_root, matrix_path, imported_paths):
+        print("Cannot continue review safely because the checkout changed.")
+        _print_offline_review_resume(
+            matrix_path,
+            run_id,
+            requested_tier=requested_tier,
+            pending_tier="bronze",
+        )
+        return False
     try:
         print("Choose how this imported run will be reviewed:")
         print("  [1] Operator attestation by the person who performed the run")
