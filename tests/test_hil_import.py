@@ -5767,8 +5767,13 @@ def test_onboard_higher_tier_exception_resumes_only_pending_tier(
     )
     assert "Explicit review did not complete: Silver review interrupted" in output
     assert "To continue the offline review, run these commands in order:" in output
-    assert silver_command in output
-    assert bronze_command not in output.splitlines()
+    commands = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("python -m scripts.hil review ")
+    ]
+    assert commands == [silver_command]
+    assert bronze_command != commands[0]
     assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output
     assert not (output_dir / "pr.md").exists()
