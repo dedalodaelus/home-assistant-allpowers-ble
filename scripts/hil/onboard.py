@@ -703,6 +703,8 @@ def assess_run_gate(
                 and isinstance(capabilities.get("features"), dict)
                 else None
             )
+            from .guided import capability_identity_matches_session
+
             proof = planned.get("safe_disable_proof")
             rows = by_id.get(step_id, [])
             substantiated = (
@@ -722,6 +724,7 @@ def assess_run_gate(
                 and capabilities.get("pending_transaction") is False
                 and type(capabilities.get("session_generation")) is int
                 and capabilities["session_generation"] >= 1
+                and capability_identity_matches_session(capabilities, session)
                 and capability_flags.get("car_charger_enabled") is False
                 and isinstance(control, dict)
                 and control.get("available") is False

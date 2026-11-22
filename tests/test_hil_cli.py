@@ -8416,10 +8416,12 @@ def test_car_charger_exclusion_rechecks_and_persists_live_state(
         config_entry_id="private-entry",
     )
 
-    def snapshot(*, enabled):
+    def snapshot(*, enabled, firmware="1.1"):
         return {
             "schema_version": 2,
             "model": "R600",
+            "hardware_revision": "0.3",
+            "firmware_revision": firmware,
             "profile": "r600-hw-0.3",
             "verified": True,
             "identity_conflicted": False,
@@ -8464,6 +8466,23 @@ def test_car_charger_exclusion_rechecks_and_persists_live_state(
             "run_id": run_id,
             "runtime_capabilities": initial_capabilities,
             "controls": initial_controls,
+            "device": {
+                "model": {
+                    "value": "R600",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+                "hardware_version": {
+                    "value": "0.3",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+                "firmware_version": {
+                    "value": "1.1",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+            },
             "test_plan": plan,
         },
     )
@@ -8553,6 +8572,162 @@ def test_car_charger_exclusion_rechecks_and_persists_live_state(
     assert saved_exclusion["action"] == "write"
     assert saved_exclusion["safe_disable_proof"] is None
     assert api_fake.writes == []
+
+
+def test_car_charger_exclusion_blocks_changed_runtime_identity(
+    tmp_path, allpowers_registry
+):
+    from argparse import Namespace
+
+    from scripts.hil.guided import build_tier_plan
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.1",
+        state_entities={},
+        entry_state="loaded",
+        control_entities={"car_charger": "switch.car_charger"},
+        config_entry_id="private-entry",
+    )
+    capabilities = {
+        "schema_version": 2,
+        "model": "R600",
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+        "profile": "r600-hw-0.3",
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "pending_transaction": False,
+        "session_generation": 2,
+        "capabilities": {"car_charger_enabled": False},
+        "features": {
+            "car_charger": {"physical_presence": "unknown", "runtime_ready": True}
+        },
+    }
+    controls = {
+        "car_charger": {
+            "available": False,
+            "state": None,
+            "options": [],
+            "availability_verified": True,
+            "eligible": False,
+            "candidate_eligible": False,
+        }
+    }
+    plan = build_tier_plan(
+        "gold", capabilities, controls, observed_route="active_proxy"
+    )
+    exclusion = next(
+        step for step in plan["steps"] if step["id"] == "car_charger_reversal"
+    )
+    root = storage.write_run(
+        tmp_path,
+        "changed-identity-run",
+        {},
+        {
+            "run_id": "changed-identity-run",
+            "runtime_capabilities": capabilities,
+            "controls": controls,
+            "device": {
+                "model": {
+                    "value": "R600",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+                "hardware_version": {
+                    "value": "0.3",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+                "firmware_version": {
+                    "value": "1.1",
+                    "verified": True,
+                    "source": "ha_device_registry",
+                },
+            },
+            "test_plan": plan,
+        },
+    )
+
+    class ChangedFirmware:
+        writes = []
+
+        @staticmethod
+        def discovery():
+            return (
+                [
+                    {
+                        "device_id": "private-device",
+                        "platform": "allpowers_ble",
+                        "entity_id": "switch.car_charger",
+                        "unique_id": "private_car_charger",
+                        "config_entry_id": "private-entry",
+                        "disabled_by": None,
+                    }
+                ],
+                [
+                    {
+                        "id": "private-device",
+                        "config_entry_id": "private-entry",
+                        "identifiers": [["allpowers_ble", "private-id"]],
+                        "model": "R600",
+                    }
+                ],
+                None,
+                [
+                    {
+                        "entry_id": "private-entry",
+                        "domain": "allpowers_ble",
+                        "state": "loaded",
+                    }
+                ],
+            )
+
+        @staticmethod
+        def hil_capabilities(_entry_id):
+            return {**capabilities, "firmware_revision": "9.9"}
+
+        @staticmethod
+        def control_state(_key, _entity_id):
+            return {"available": False, "state": None, "options": []}
+
+        def call_control(self, *args, **kwargs):
+            self.writes.append((args, kwargs))
+            pytest.fail("exclusion identity mismatch must never write")
+
+    fake = ChangedFirmware()
+    result = cli._execute_tier_suite(
+        fake,
+        Namespace(route="active_proxy", output_root=tmp_path, non_interactive=True),
+        device,
+        {},
+        root,
+        "changed-identity-run",
+        {**plan, "steps": [exclusion]},
+        capabilities,
+    )
+    execution = json.loads((root / "tier-execution.json").read_text())
+    saved = json.loads((root / "session.json").read_text())
+    step = next(
+        item
+        for item in saved["test_plan"]["steps"]
+        if item["id"] == "car_charger_reversal"
+    )
+    assert result == 2
+    assert execution["steps"][0]["outcome"] == "blocked"
+    assert execution["steps"][0]["reason"] == (
+        "optional-control exclusion proof is unavailable"
+    )
+    assert step["action"] == "write"
+    assert step["eligibility"] == "blocked"
+    assert step["safe_disable_proof"] is None
+    assert saved["runtime_capabilities"]["firmware_revision"] == "9.9"
+    assert fake.writes == []
 
 
 def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypatch):

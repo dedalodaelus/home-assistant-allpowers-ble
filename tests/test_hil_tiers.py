@@ -902,6 +902,9 @@ def _exclude_feature_contract(
             "data": {
                 "runtime_capabilities": {
                     "schema_version": 2,
+                    "model": "R600",
+                    "hardware_revision": revision["hardware_version"],
+                    "firmware_revision": run["firmware_version"],
                     "verified": True,
                     "identity_conflicted": False,
                     "connected": True,
@@ -916,6 +919,23 @@ def _exclude_feature_contract(
                         }
                     },
                 },
+                "device": {
+                    "model": {
+                        "value": "R600",
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                    "hardware_version": {
+                        "value": revision["hardware_version"],
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                    "firmware_version": {
+                        "value": run["firmware_version"],
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                },
                 "controls": {
                     "car_charger": {
                         "available": False,
@@ -923,6 +943,11 @@ def _exclude_feature_contract(
                     }
                 },
                 "test_plan": {
+                    "device": {
+                        "model": "R600",
+                        "hardware_revision": revision["hardware_version"],
+                        "firmware_revision": run["firmware_version"],
+                    },
                     "steps": [
                         {
                             "id": "car_charger_reversal",
@@ -934,7 +959,7 @@ def _exclude_feature_contract(
                                 "normal_control_available": False,
                             },
                         }
-                    ]
+                    ],
                 },
             }
         },

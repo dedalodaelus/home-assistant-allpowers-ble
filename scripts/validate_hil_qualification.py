@@ -1677,6 +1677,8 @@ def _check_bronze_evidence(
 def _check_feature_contract(
     revision: dict[str, Any], context: str, errors: list[str]
 ) -> None:
+    from scripts.hil.guided import capability_identity_matches_session
+
     contracts = revision.get("feature_contract")
     if contracts is None:
         return
@@ -1830,6 +1832,7 @@ def _check_feature_contract(
             or runtime.get("pending_transaction") is not False
             or type(runtime.get("session_generation")) is not int
             or runtime["session_generation"] < 1
+            or not capability_identity_matches_session(runtime, data)
             or not isinstance(car_control, dict)
             or not isinstance(feature_facts, dict)
             or feature_facts.get("runtime_ready") is not True

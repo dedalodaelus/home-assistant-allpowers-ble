@@ -997,6 +997,22 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                             },
                         }
                     )
+                    model = value.get("model")
+                    hardware_revision = safe_version(value.get("hardware_revision"))
+                    firmware_revision = safe_version(value.get("firmware_revision"))
+                    if (
+                        safe_model(model) == model
+                        and model in KNOWN_MODELS
+                        and hardware_revision is not None
+                        and firmware_revision is not None
+                    ):
+                        public_runtime.update(
+                            {
+                                "model": model,
+                                "hardware_revision": hardware_revision,
+                                "firmware_revision": firmware_revision,
+                            }
+                        )
                 result["data"][key] = public_runtime
             elif key == "controls" and isinstance(value, dict):
                 car_charger = value.get("car_charger")
@@ -4215,6 +4231,11 @@ def verify_public_archive(
                             "session_generation",
                             "features",
                         }
+                        identity_runtime_fields = extended_runtime_fields | {
+                            "model",
+                            "hardware_revision",
+                            "firmware_revision",
+                        }
                         optional_bools = {
                             "connected",
                             "status_fresh",
@@ -4224,7 +4245,11 @@ def verify_public_archive(
                         if (
                             not isinstance(runtime, dict)
                             or set(runtime)
-                            not in (runtime_fields, extended_runtime_fields)
+                            not in (
+                                runtime_fields,
+                                extended_runtime_fields,
+                                identity_runtime_fields,
+                            )
                             or type(runtime.get("available")) is not bool
                             or any(
                                 runtime.get(name) is not None
@@ -4275,6 +4300,18 @@ def verify_public_archive(
                                         )
                                     )
                                     is not bool
+                                )
+                            )
+                            or (
+                                set(runtime) == identity_runtime_fields
+                                and (
+                                    safe_model(runtime.get("model"))
+                                    != runtime.get("model")
+                                    or runtime.get("model") not in KNOWN_MODELS
+                                    or safe_version(runtime.get("hardware_revision"))
+                                    != runtime.get("hardware_revision")
+                                    or safe_version(runtime.get("firmware_revision"))
+                                    != runtime.get("firmware_revision")
                                 )
                             )
                         ):
@@ -4329,6 +4366,41 @@ def verify_public_archive(
                             )
                         ):
                             raise HAAPIError("Unsafe public device values")
+                    runtime = public_session.get("runtime_capabilities", {})
+                    identity_fields = {
+                        "model",
+                        "hardware_revision",
+                        "firmware_revision",
+                    }
+                    if isinstance(runtime, dict) and identity_fields <= set(runtime):
+                        plan = public_session.get("test_plan", {})
+                        plan_device = (
+                            plan.get("device") if isinstance(plan, dict) else None
+                        )
+                        scope_links = (
+                            isinstance(plan_device, dict)
+                            and isinstance(device, dict)
+                            and device.get("model", {}).get("verified") is True
+                            and device.get("hardware_version", {}).get("verified")
+                            is True
+                            and device.get("firmware_version", {}).get("verified")
+                            is True
+                            and plan_device.get("model") == runtime.get("model")
+                            and plan_device.get("hardware_revision")
+                            == runtime.get("hardware_revision")
+                            and plan_device.get("firmware_revision")
+                            == runtime.get("firmware_revision")
+                            and device.get("model", {}).get("value")
+                            == runtime.get("model")
+                            and device.get("hardware_version", {}).get("value")
+                            == runtime.get("hardware_revision")
+                            and device.get("firmware_version", {}).get("value")
+                            == runtime.get("firmware_revision")
+                        )
+                        if not scope_links:
+                            raise HAAPIError(
+                                "Public runtime identity does not match the run scope"
+                            )
             elif name == "scenarios.json":
                 if (
                     set(value)

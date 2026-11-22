@@ -1540,8 +1540,30 @@ def _execute_tier_suite(
             facts = (
                 features.get("car_charger", {}) if isinstance(features, dict) else {}
             )
+            from .guided import capability_identity_matches_session
+
+            try:
+                saved_session = json.loads(
+                    (output_dir / "session.json").read_text(encoding="utf-8")
+                )
+            except OSError, UnicodeError, ValueError:
+                saved_session = None
+            identity_matches = capability_identity_matches_session(
+                current_capabilities, saved_session, selected_device=device
+            )
+            if not identity_matches:
+                current_step = {
+                    **current_step,
+                    "action": "write",
+                    "eligibility": "blocked",
+                    "safe_disable_proof": None,
+                    "reasons": [
+                        "verified capability identity differs from the selected run scope"
+                    ],
+                }
             refreshed_exclusion = bool(
-                current_step.get("action") == "exclude"
+                identity_matches
+                and current_step.get("action") == "exclude"
                 and current_step.get("eligibility") == "review_required"
                 and current_step.get("safe_disable_proof")
                 == {

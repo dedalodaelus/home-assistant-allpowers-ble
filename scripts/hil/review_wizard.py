@@ -532,6 +532,8 @@ def _interactive_higher_tier_review(
             ]
             runtime = session_data.get("runtime_capabilities", {})
             runtime = runtime if isinstance(runtime, dict) else {}
+            from .guided import capability_identity_matches_session
+
             runtime_options = runtime.get("capabilities", {})
             runtime_options = (
                 runtime_options if isinstance(runtime_options, dict) else {}
@@ -581,6 +583,7 @@ def _interactive_higher_tier_review(
                     and runtime.get("pending_transaction") is False
                     and type(runtime.get("session_generation")) is int
                     and runtime["session_generation"] >= 1
+                    and capability_identity_matches_session(runtime, session_data)
                     and car_charger_facts.get("physical_presence") == "unknown"
                     and car_charger_facts.get("runtime_ready") is True
                     and car_charger_control.get("available") is False

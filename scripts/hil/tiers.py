@@ -326,6 +326,8 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
         return False
     data = session.get("data", {}) if isinstance(session, dict) else {}
     runtime = data.get("runtime_capabilities", {}) if isinstance(data, dict) else {}
+    from .guided import capability_identity_matches_session
+
     flags = runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
     runtime_features = runtime.get("features", {}) if isinstance(runtime, dict) else {}
     facts = (
@@ -368,6 +370,7 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
         and runtime.get("pending_transaction") is False
         and type(runtime.get("session_generation")) is int
         and runtime["session_generation"] >= 1
+        and capability_identity_matches_session(runtime, data)
         and isinstance(facts, dict)
         and facts.get("runtime_ready") is True
         and car_control.get("available") is False

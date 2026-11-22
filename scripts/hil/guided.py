@@ -10,6 +10,48 @@ _SETTINGS = ("eco_mode", "work_mode", "eco_timeout", "car_charger")
 _CONTROL = {"light_output": "light"}
 
 
+def capability_identity_matches_session(
+    capabilities: Any,
+    session: Any,
+    *,
+    selected_device: Any | None = None,
+) -> bool:
+    """Require capability, selected device, saved session and plan to share scope."""
+    if not isinstance(capabilities, dict) or not isinstance(session, dict):
+        return False
+    session_device = session.get("device")
+    plan = session.get("test_plan")
+    plan_device = plan.get("device") if isinstance(plan, dict) else None
+    if not isinstance(session_device, dict) or not isinstance(plan_device, dict):
+        return False
+    values = {
+        "model": ("model", "model"),
+        "hardware_revision": ("hardware_version", "hardware_revision"),
+        "firmware_revision": ("firmware_version", "firmware_revision"),
+    }
+    for capability_key, (session_key, plan_key) in values.items():
+        capability_value = capabilities.get(capability_key)
+        session_record = session_device.get(session_key)
+        if (
+            not isinstance(capability_value, str)
+            or not isinstance(session_record, dict)
+            or session_record.get("value") != capability_value
+            or session_record.get("verified") is not True
+            or session_record.get("source") != "ha_device_registry"
+            or plan_device.get(plan_key) != capability_value
+        ):
+            return False
+        if selected_device is not None:
+            selected_value = {
+                "model": getattr(selected_device, "model", None),
+                "hardware_revision": getattr(selected_device, "hardware", None),
+                "firmware_revision": getattr(selected_device, "firmware", None),
+            }[capability_key]
+            if selected_value != capability_value:
+                return False
+    return True
+
+
 def build_tier_plan(
     tier: str,
     capabilities: dict[str, Any] | None,

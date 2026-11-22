@@ -442,6 +442,9 @@ def _guided_setting_review_archive(
             schema_version=2,
             verified=True,
             identity_conflicted=False,
+            model="R600",
+            hardware_revision="0.3",
+            firmware_revision="1.1",
             connected=True,
             settings_fresh=True,
             pending_transaction=False,
@@ -3138,6 +3141,14 @@ def test_safe_disabled_car_charger_public_export_review_and_gold_are_end_to_end(
         "availability_verified": True,
     }
     assert public_session["runtime_capabilities"]["settings_fresh"] is True
+    assert {
+        key: public_session["runtime_capabilities"][key]
+        for key in ("model", "hardware_revision", "firmware_revision")
+    } == {
+        "model": "R600",
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+    }
     assert public_session["runtime_capabilities"]["features"]["car_charger"] == {
         "physical_presence": "unknown",
         "runtime_ready": True,

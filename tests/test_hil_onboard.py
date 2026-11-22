@@ -262,6 +262,9 @@ def test_gold_disabled_optional_control_is_pending_review_not_na(tmp_path):
         schema_version=2,
         verified=True,
         identity_conflicted=False,
+        model="R600",
+        hardware_revision="0.3",
+        firmware_revision="1.1",
         connected=True,
         settings_fresh=True,
         pending_transaction=False,
@@ -274,6 +277,8 @@ def test_gold_disabled_optional_control_is_pending_review_not_na(tmp_path):
     session["controls"] = {
         "car_charger": {"available": False, "availability_verified": True}
     }
+    for field in ("model", "hardware_version", "firmware_version"):
+        session["device"][field]["source"] = "ha_device_registry"
     session["test_plan"]["steps"].append(
         {
             "id": "car_charger_reversal",

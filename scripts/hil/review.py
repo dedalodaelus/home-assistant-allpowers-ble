@@ -1990,6 +1990,8 @@ def review_imported_tier_run(
 
     valid_exclusions: list[dict[str, Any]] = []
     if tier == "gold" and exclusion_decisions:
+        from .guided import capability_identity_matches_session
+
         runtime = session_data.get("runtime_capabilities", {})
         runtime = runtime if isinstance(runtime, dict) else {}
         runtime_flags = runtime.get("capabilities", {})
@@ -2027,6 +2029,7 @@ def review_imported_tier_run(
             or runtime.get("pending_transaction") is not False
             or type(runtime.get("session_generation")) is not int
             or runtime["session_generation"] < 1
+            or not capability_identity_matches_session(runtime, session_data)
             or car_charger_control.get("available") is not False
             or car_charger_control.get("availability_verified") is not True
             or not isinstance(planned, dict)
