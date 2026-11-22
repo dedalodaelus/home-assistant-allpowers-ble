@@ -33,21 +33,10 @@ Set `HA_HIL_TOKEN` in the process environment first, or omit `--non-interactive`
 
 ### Contributor quickstart
 
-From the prepared checkout and activated `.venv-hil`, the wizard asks for a Home Assistant origin and securely prompts for a missing token:
-
-Linux/macOS:
-
-```bash
-source .venv-hil/bin/activate
-python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
-```
-
-Windows PowerShell:
-
-```powershell
-.\.venv-hil\Scripts\Activate.ps1
-python -m scripts.hil onboard --ha-url https://home-assistant.example:8123
-```
+Start with the [HIL evidence contributor quickstart](hil-contributor-quickstart.md)
+for the concise, cross-platform path from a current Git checkout through
+onboarding, offline review, and a privacy-safe PR handoff. This guide remains the
+reference for advanced and diagnostic workflows.
 
 `onboard` does not start or resume a Platinum soak. To run a standalone
 read-only 24-hour soak, use `run --suite soak-24h`; if it is interrupted, resume

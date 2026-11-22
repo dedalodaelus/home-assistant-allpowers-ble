@@ -38,6 +38,9 @@ repository's safety and validation checklist.
 ## Before opening a change
 
 - Search existing issues and pull requests.
+- For the short, Git-based path from HIL onboarding through reviewed Bronze,
+  Silver, or Gold evidence and a `devel` PR, start with the
+  [HIL evidence contributor quickstart](docs/hil-contributor-quickstart.md).
 - For an initial, read-only compatibility observation, use the
   [compatibility report form](https://github.com/dedalodaelus/home-assistant-allpowers-ble/issues/new?template=compatibility_report.yml)
   and report model, hardware revision, firmware, observed route (or `unknown`),
