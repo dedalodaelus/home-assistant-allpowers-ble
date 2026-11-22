@@ -3519,7 +3519,7 @@ def _onboard_import_review(
     importer._print_preview(proposal)
     try:
         accepted = input(
-            "Import this reviewed evidence? [y/N]: "
+            "Import this verified acquisition evidence? [y/N]: "
         ).strip().casefold() in {"y", "yes"}
         if not accepted:
             print("Import declined; no repository files were changed.")

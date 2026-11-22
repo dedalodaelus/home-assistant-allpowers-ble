@@ -3384,6 +3384,40 @@ def _render_report(
                                 details.append(
                                     f"{key.replace('_', ' ')} `{artifact[key]}`"
                                 )
+                        cycles = artifact.get("output_cycles")
+                        if isinstance(cycles, list):
+                            for index, cycle in enumerate(cycles[:2], start=1):
+                                if not isinstance(cycle, dict):
+                                    continue
+                                initial = cycle.get("initial_state")
+                                target = cycle.get("target_state")
+                                change = cycle.get("physical_change_outcome")
+                                restore = cycle.get("physical_restore_outcome")
+                                if (
+                                    isinstance(initial, str)
+                                    and initial in {"on", "off"}
+                                    and isinstance(target, str)
+                                    and target in {"on", "off"}
+                                    and isinstance(change, str)
+                                    and change
+                                    in {
+                                        "correct",
+                                        "incorrect",
+                                        "unable_to_observe",
+                                    }
+                                    and isinstance(restore, str)
+                                    and restore
+                                    in {
+                                        "correct",
+                                        "incorrect",
+                                        "unable_to_observe",
+                                    }
+                                ):
+                                    details.append(
+                                        f"output cycle {index} ({initial} to {target}): "
+                                        f"physical change `{change}`; "
+                                        f"physical restoration `{restore}`"
+                                    )
                 if step_id in {
                     "read_only_probe",
                     "physical_plausibility_observation",

@@ -498,6 +498,8 @@ def _captured_archive(
     bronze_protocol_outcome: str = "pass",
     bronze_write_completion: str = "write_ok",
     stale_rest_fallback: bool = False,
+    scenario_progress: bool = True,
+    guided_bronze_execution: bool = False,
     started_at: str | None = None,
 ) -> Path:
     environment = {
@@ -539,13 +541,14 @@ def _captured_archive(
             "capabilities": {"read_telemetry": True},
         }
     private = write_run(path, f"run-{run_id}", environment, session)
-    write_scenario_progress(
-        private,
-        run_id,
-        "read_only_snapshot",
-        "a" * 64,
-        [{"step_id": "route_evidence", "outcome": "pass"}],
-    )
+    if scenario_progress:
+        write_scenario_progress(
+            private,
+            run_id,
+            "read_only_snapshot",
+            "a" * 64,
+            [{"step_id": "route_evidence", "outcome": "pass"}],
+        )
     stamp = (
         datetime.now(UTC).isoformat()
         if bronze_reviewable
@@ -633,7 +636,8 @@ def _captured_archive(
             ],
         }
         if bronze_reviewable:
-            sequence_offset = int(stale_rest_fallback)
+            capture_bound_probe = stale_rest_fallback or guided_bronze_execution
+            sequence_offset = int(capture_bound_probe)
             status_frame = {
                 **common,
                 "seq": 2 + sequence_offset,
@@ -675,7 +679,7 @@ def _captured_archive(
                 "output_power": 0,
                 "remaining_time": 0,
             }
-            if stale_rest_fallback:
+            if capture_bound_probe:
                 decoded_event["status_measurement"] = status_measurement
             trace["events"] = [
                 route_event,
@@ -690,7 +694,7 @@ def _captured_archive(
                             "capture_id": trace["capture_id"],
                         }
                     ]
-                    if stale_rest_fallback
+                    if capture_bound_probe
                     else []
                 ),
                 {**status_frame, "direction": "write"},
@@ -714,7 +718,7 @@ def _captured_archive(
                             "observed_route": "unverified",
                         }
                     ]
-                    if stale_rest_fallback
+                    if capture_bound_probe
                     else []
                 ),
             ]
@@ -742,7 +746,7 @@ def _captured_archive(
                 "sampled_at_utc": (
                     (
                         sample_time - timedelta(seconds=1)
-                        if stale_rest_fallback
+                        if capture_bound_probe
                         else sample_time
                     ).isoformat()
                 ),
@@ -761,7 +765,7 @@ def _captured_archive(
                 "sampled_at_utc": (
                     (
                         sample_time + timedelta(seconds=1)
-                        if stale_rest_fallback
+                        if capture_bound_probe
                         else sample_time
                     ).isoformat()
                 ),
@@ -786,7 +790,7 @@ def _captured_archive(
                     "capture_stopped_seq": 7,
                     "status_measurement": status_measurement,
                 }
-                if stale_rest_fallback
+                if capture_bound_probe
                 else None
             )
             (private / "tier-bronze-read-only.json").write_text(
@@ -822,6 +826,52 @@ def _captured_archive(
                 ),
                 encoding="utf-8",
             )
+            if guided_bronze_execution:
+                bronze_path = private / "tier-bronze-read-only.json"
+                bronze_digest = hashlib.sha256(bronze_path.read_bytes()).hexdigest()
+                bronze_artifact = json.loads(bronze_path.read_text(encoding="utf-8"))
+                bronze_outcome = (
+                    "pass"
+                    if (
+                        bronze_protocol_outcome == "pass"
+                        and bronze_write_completion == "write_ok"
+                        and "StatusData" in bronze_decoded_packet_types
+                        and bronze_artifact.get("fresh_verified_samples") is True
+                        and bronze_artifact.get("physical_observation") == "plausible"
+                    )
+                    else "inconclusive"
+                )
+                (private / "tier-execution.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "run_id": run_id,
+                            "requested_tier": "bronze",
+                            "execution_tier": "bronze",
+                            "review_state": "pending",
+                            "attained_tier": None,
+                            "steps": [
+                                {
+                                    "step_id": step_id,
+                                    "outcome": bronze_outcome,
+                                    "machine_evidence": [
+                                        {
+                                            "path": bronze_path.name,
+                                            "sha256": bronze_digest,
+                                        }
+                                    ],
+                                    "human_review": "pending",
+                                }
+                                for step_id in (
+                                    "read_only_probe",
+                                    "physical_plausibility_observation",
+                                )
+                            ],
+                        },
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
     return export_archive(path / f"run-{run_id}", confirmed=True)
 
 
@@ -5327,9 +5377,31 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         bronze_reviewable=True,
         bronze_decoded_packet_types=("StatusData",),
         bronze_protocol_outcome="pass",
-        stale_rest_fallback=True,
+        stale_rest_fallback=False,
+        scenario_progress=False,
+        guided_bronze_execution=True,
     )
     archive_before_review = archive.read_bytes()
+    from scripts.hil.evidence import verify_public_archive
+
+    _manifest, archive_members, _digest = verify_public_archive(
+        archive, include_contents=True
+    )
+    assert "scenarios.json" not in archive_members
+    public_bronze = json.loads(archive_members["tier-bronze-read-only.json"])
+    assert public_bronze["fresh_verified_samples"] is True
+    assert public_bronze["protocol_probe"] == "verified"
+    assert public_bronze["status_freshness"] is not None
+    assert all(
+        sample["telemetry"]["battery"]["sample_age_seconds"] <= 60
+        for sample in public_bronze["samples"]
+    )
+    archived_report = archive_members["report.md"].decode("utf-8")
+    assert "`read_only_probe`: **pass**" in archived_report
+    assert "`physical_plausibility_observation`: **pass**" in archived_report
+    assert "fresh verified telemetry samples present" in archived_report
+    assert "read-only protocol probe `verified`" in archived_report
+    assert "No correlated scenario steps were recorded" in archived_report
     answers = iter(
         [
             "yes",
@@ -5338,7 +5410,13 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
             *_operator_review_answers(reviewer="HIL operator", apply=True),
         ]
     )
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    prompts: list[str] = []
+
+    def answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
 
     assert (
         cli._onboard_import_review(
@@ -5350,10 +5428,9 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         )
         is True
     )
-    from scripts.hil.evidence import verify_public_archive
-
     verify_public_archive(archive)
     assert archive.read_bytes() == archive_before_review
+    assert "Import this verified acquisition evidence? [y/N]: " in prompts
     output = capsys.readouterr().out
     generated_body = (output_dir / "pr.md").read_text(encoding="utf-8")
     assert "hardware-evidence checklist item is not applicable" not in generated_body

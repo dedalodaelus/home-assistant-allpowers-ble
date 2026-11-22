@@ -71,7 +71,7 @@ def test_report_rejects_symlinked_source_files(tmp_path: Path) -> None:
     assert not (run / "public").exists()
 
 
-def test_guided_bronze_report_separates_acquisition_from_scenarios(
+def test_inconclusive_guided_bronze_report_has_no_false_pass(
     tmp_path: Path,
 ) -> None:
     import hashlib
@@ -122,8 +122,8 @@ def test_guided_bronze_report_separates_acquisition_from_scenarios(
                 "machine_evidence": [evidence],
             }
             for step_id, outcome in (
-                ("read_only_probe", "pass"),
-                ("physical_plausibility_observation", "pass"),
+                ("read_only_probe", "inconclusive"),
+                ("physical_plausibility_observation", "inconclusive"),
             )
         ],
     }
@@ -136,8 +136,10 @@ def test_guided_bronze_report_separates_acquisition_from_scenarios(
     assert "Acquisition status: pre-review evidence snapshot" in report
     assert "Qualification: **inconclusive**" not in report
     assert "Requested tier: `bronze`; executed tier: `bronze`" in report
-    assert "`read_only_probe`: **pass**" in report
-    assert "`physical_plausibility_observation`: **pass**" in report
+    assert "`read_only_probe`: **inconclusive**" in report
+    assert "`physical_plausibility_observation`: **inconclusive**" in report
+    assert "`read_only_probe`: **pass**" not in report
+    assert "`physical_plausibility_observation`: **pass**" not in report
     assert "operator-reported physical plausibility `plausible`" in report
     assert "fresh verified telemetry samples missing" in report
     assert (
@@ -148,3 +150,72 @@ def test_guided_bronze_report_separates_acquisition_from_scenarios(
     _manifest, members, _digest = verify_public_archive(archive, include_contents=True)
     assert members["report.md"].decode("utf-8") == report
     assert "qualification pending" in members["report.md"].decode("utf-8")
+
+
+def test_guided_output_report_exposes_each_cycle_physical_outcome() -> None:
+    from scripts.hil.evidence import _render_report
+
+    report = _render_report(
+        "0123456789abcdef",
+        {"data": {}},
+        {"data": {}},
+        {"steps": []},
+        0,
+        0,
+        "local_adapter",
+        tier_execution={
+            "requested_tier": "silver",
+            "execution_tier": "silver",
+            "steps": [
+                {
+                    "step_id": "ac_output_cycle",
+                    "outcome": "inconclusive",
+                    "machine_evidence": [{"artifact_id": "output-cycle"}],
+                }
+            ],
+        },
+        tier_artifacts={
+            "artifacts": [
+                {
+                    "artifact_id": "output-cycle",
+                    "content": {
+                        "output_cycles": [
+                            {
+                                "initial_state": "off",
+                                "target_state": "on",
+                                "physical_change_outcome": "correct",
+                                "physical_restore_outcome": "correct",
+                                "private_note": "must not appear",
+                            },
+                            {
+                                "initial_state": "on",
+                                "target_state": "off",
+                                "physical_change_outcome": "unable_to_observe",
+                                "physical_restore_outcome": "incorrect",
+                            },
+                            {
+                                "initial_state": "off",
+                                "target_state": "on",
+                                "physical_change_outcome": "correct",
+                                "physical_restore_outcome": "correct",
+                            },
+                        ],
+                        "final_restore_outcome": "incorrect",
+                    },
+                }
+            ]
+        },
+    ).decode("utf-8")
+
+    assert (
+        "output cycle 1 (off to on): physical change `correct`; "
+        "physical restoration `correct`"
+    ) in report
+    assert (
+        "output cycle 2 (on to off): physical change `unable_to_observe`; "
+        "physical restoration `incorrect`"
+    ) in report
+    assert "final restore outcome `incorrect`" in report
+    assert "private_note" not in report
+    assert "must not appear" not in report
+    assert "output cycle 3" not in report
