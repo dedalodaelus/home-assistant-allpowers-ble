@@ -126,6 +126,24 @@ person to inspect the evidence. The name alone does not prove independence.
 
 ## 5. Inspect the allowlist and open the PR
 
+The isolated `.venv-hil` contains only the HIL CLI dependencies. Before this
+handoff, prepare the repository development environment described in
+[`CONTRIBUTING.md#development-setup`](../CONTRIBUTING.md#development-setup),
+including `requirements_test.txt` and `pre-commit install`; also install
+`requirements_hil.txt` in that environment for the printed HIL Python commands.
+Keep `.venv-hil` as the lightweight acquisition environment. Install the
+[GitHub CLI](https://cli.github.com/) and run `gh auth login` before opening the
+PR; the handoff reports when `gh` or its authentication is missing.
+
+For Windows PowerShell, the development environment setup is:
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements_test.txt -r requirements_hil.txt
+pre-commit install
+```
+
 After the exact requested tier is validated, `onboard` generates a
 template-compliant PR body and prints exact Git and GitHub CLI commands for the
 matrix and verified public evidence files in that run. Inspect each named public
@@ -133,6 +151,13 @@ file and review `git status --short`, the generated body, and the staged diff.
 Use only those printed allowlisted paths; never add private `hil-results/`, raw
 captures, secrets, or the original ZIP. Keep the PR base at `devel` and link the
 relevant issue. The wizard does not commit, push, or open a PR automatically.
+
+The printed push command assumes `origin` is writable. For a fork, point
+`origin` at your fork or adapt the printed push command to your fork remote.
+Use `--head USER:branch` in the printed `gh pr create` command, replacing both
+values with your GitHub username and branch. Keep the target repository and
+base branch set to this upstream repository and `devel`; see
+[the fork instructions in CONTRIBUTING](../CONTRIBUTING.md#first-time-contributors-start-here).
 
 The handoff prints signed commit and verification commands. Agents must run
 them as printed, as required by [`AGENTS.md`](../AGENTS.md). Human contributors
