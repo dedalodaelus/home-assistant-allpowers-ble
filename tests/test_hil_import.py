@@ -5579,9 +5579,197 @@ def test_onboard_without_independent_reviewer_leaves_offline_resume_path(
 
     output = capsys.readouterr().out
     assert "An independent reviewer must be available" not in output
-    assert "Later, run: python -m scripts.hil review" in output
+    assert "To continue the offline review, run these commands in order:" in output
+    assert "python -m scripts.hil review --matrix " in output
     assert "--run-id archive-" in output
     assert "--interactive" in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+@pytest.mark.parametrize("review_choice", ["declined", "reviewer_unavailable"])
+def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+    review_choice: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = (
+        ["yes", "APPLY IMPORT", ""]
+        if review_choice == "declined"
+        else ["yes", "APPLY IMPORT", "2", ""]
+    )
+    responses = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(responses))
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        tier,
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    assert "To continue the offline review, run these commands in order:" in output
+    assert bronze_command in output
+    assert tier_command in output
+    assert output.index(bronze_command) < output.index(tier_command)
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tier: str,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli, review_wizard
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(["yes", "APPLY IMPORT", "1"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    def interrupt_review(*_args: Any, **_kwargs: Any) -> int:
+        raise EOFError("review interrupted")
+
+    monkeypatch.setattr(review_wizard, "interactive_review", interrupt_review)
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        tier,
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    assert "Explicit review did not complete: review interrupted" in output
+    assert "To continue the offline review, run these commands in order:" in output
+    assert bronze_command in output
+    assert tier_command in output
+    assert output.index(bronze_command) < output.index(tier_command)
+    assert "READY FOR QUALIFICATION PR" not in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
+def test_onboard_higher_tier_exception_resumes_only_pending_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli, review_wizard
+    from scripts.hil.importer import _build_proposal
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    proposal = _build_proposal(archive, matrix_path, repo_root=repo_root)
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(
+        [
+            "yes",
+            "APPLY IMPORT",
+            "1",
+            *_operator_review_answers(reviewer="HIL operator", apply=True),
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    review_bronze = review_wizard.interactive_review
+
+    def interrupt_silver(*args: Any, **kwargs: Any) -> int:
+        if kwargs.get("tier") == "silver":
+            raise EOFError("Silver review interrupted")
+        return review_bronze(*args, **kwargs)
+
+    monkeypatch.setattr(review_wizard, "interactive_review", interrupt_silver)
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        "silver",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    silver_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], "silver"
+    )
+    assert "Explicit review did not complete: Silver review interrupted" in output
+    assert "To continue the offline review, run these commands in order:" in output
+    assert silver_command in output
+    assert bronze_command not in output.splitlines()
+    assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output
     assert not (output_dir / "pr.md").exists()
 

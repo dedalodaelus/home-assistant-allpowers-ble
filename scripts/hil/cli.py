@@ -3284,6 +3284,22 @@ def _review_resume_command(matrix_path: Path, run_id: str, tier: str = "bronze")
     return command
 
 
+def _print_offline_review_resume(
+    matrix_path: Path,
+    run_id: str,
+    *,
+    requested_tier: str,
+    pending_tier: str,
+) -> None:
+    """Print the ordered commands needed to finish an imported review offline."""
+    tiers = [pending_tier]
+    if pending_tier == "bronze" and requested_tier in {"silver", "gold"}:
+        tiers.append(requested_tier)
+    print("To continue the offline review, run these commands in order:")
+    for tier in tiers:
+        print("  " + _review_resume_command(matrix_path, run_id, tier))
+
+
 def _verified_review_stage_paths(
     matrix: dict[str, Any],
     matrix_path: Path,
@@ -3561,7 +3577,12 @@ def _onboard_import_review(
         print(
             "Evidence remains imported and unqualified; no PR commands were generated."
         )
-        print("Later, run: " + _review_resume_command(matrix_path, run_id))
+        _print_offline_review_resume(
+            matrix_path,
+            run_id,
+            requested_tier=requested_tier,
+            pending_tier="bronze",
+        )
         return False
     if expected_assurance == "independently_reviewed":
         try:
@@ -3577,8 +3598,14 @@ def _onboard_import_review(
             print(
                 "Evidence remains imported and unqualified; no PR commands were generated."
             )
-            print("Later, run: " + _review_resume_command(matrix_path, run_id))
+            _print_offline_review_resume(
+                matrix_path,
+                run_id,
+                requested_tier=requested_tier,
+                pending_tier="bronze",
+            )
             return False
+    pending_tier = "bronze"
     try:
         from .review_wizard import interactive_review
 
@@ -3586,6 +3613,7 @@ def _onboard_import_review(
         if requested_tier in {"silver", "gold"}:
             review_tiers.append(requested_tier)
         for review_tier in review_tiers:
+            pending_tier = review_tier
             if (
                 interactive_review(
                     matrix_path,
@@ -3596,13 +3624,21 @@ def _onboard_import_review(
                 )
                 != 0
             ):
-                print("To continue the offline review later, run:")
-                print("  " + _review_resume_command(matrix_path, run_id, review_tier))
+                _print_offline_review_resume(
+                    matrix_path,
+                    run_id,
+                    requested_tier=requested_tier,
+                    pending_tier=review_tier,
+                )
                 return False
     except (HAAPIError, EOFError, KeyboardInterrupt) as ex:
         print("Explicit review did not complete:", ex)
-        print("To continue the offline review later, run:")
-        print("  " + _review_resume_command(matrix_path, run_id, requested_tier))
+        _print_offline_review_resume(
+            matrix_path,
+            run_id,
+            requested_tier=requested_tier,
+            pending_tier=pending_tier,
+        )
         return False
 
     try:
