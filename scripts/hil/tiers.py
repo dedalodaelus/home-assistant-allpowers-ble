@@ -327,6 +327,12 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
     data = session.get("data", {}) if isinstance(session, dict) else {}
     runtime = data.get("runtime_capabilities", {}) if isinstance(data, dict) else {}
     flags = runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
+    runtime_features = runtime.get("features", {}) if isinstance(runtime, dict) else {}
+    facts = (
+        runtime_features.get("car_charger", {})
+        if isinstance(runtime_features, dict)
+        else {}
+    )
     controls = data.get("controls", {}) if isinstance(data, dict) else {}
     car_control = controls.get("car_charger", {}) if isinstance(controls, dict) else {}
     plan = data.get("test_plan", {}) if isinstance(data, dict) else {}
@@ -353,12 +359,25 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
         and artifact.get("runtime_option_enabled") is False
         and artifact.get("normal_control_available") is False
         and flags.get("car_charger_enabled") is False
+        and runtime.get("schema_version") == 2
+        and runtime.get("available", True) is True
+        and runtime.get("verified") is True
+        and runtime.get("identity_conflicted") is False
+        and runtime.get("connected") is True
+        and runtime.get("settings_fresh") is True
+        and runtime.get("pending_transaction") is False
+        and type(runtime.get("session_generation")) is int
+        and runtime["session_generation"] >= 1
+        and isinstance(facts, dict)
+        and facts.get("runtime_ready") is True
         and car_control.get("available") is False
+        and car_control.get("availability_verified") is True
         and hashlib.sha256(execution_content).hexdigest()
         == artifact["source_execution_sha256"]
         and isinstance(planned, dict)
         and planned.get("action") == "exclude"
         and planned.get("eligibility") == "review_required"
+        and planned.get("physical_presence") == "unknown"
         and planned.get("safe_disable_proof")
         == {
             "runtime_option_enabled": False,
@@ -368,6 +387,11 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
         and executed.get("outcome") == "pending_review"
         and executed.get("reason")
         == "optional control is safely disabled; pending explicit reviewed exclusion"
+        and executed.get("safe_disable_proof")
+        == {
+            "runtime_option_enabled": False,
+            "normal_control_available": False,
+        }
     )
 
 

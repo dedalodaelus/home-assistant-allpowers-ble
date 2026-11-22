@@ -8289,7 +8289,50 @@ def test_scenario_control_eligibility_requires_fresh_authoritative_capabilities(
     assert result["ac_output"]["eligible"] is True
     assert result["eco_mode"]["eligible"] is False
     assert result["car_charger"]["eligible"] is False
+    assert result["car_charger"]["availability_verified"] is True
     assert result["dc_output"]["available"] is False
+
+
+def test_scenario_control_read_failure_is_not_verified_unavailability():
+    from scripts.hil.guided import build_tier_plan
+
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        control_entities={"car_charger": "switch.car_charger"},
+    )
+
+    class FailedControlRead:
+        @staticmethod
+        def control_state(_key, _entity_id):
+            raise api.HAAPIError("Home Assistant read failed")
+
+    capabilities = {
+        "schema_version": 2,
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "pending_transaction": False,
+        "session_generation": 1,
+        "capabilities": {"car_charger_enabled": False},
+        "features": {"car_charger": {"physical_presence": "unknown"}},
+    }
+
+    result = cli._scenario_controls(FailedControlRead(), device, capabilities)
+
+    assert result["car_charger"]["available"] is False
+    assert result["car_charger"]["availability_verified"] is False
+    plan = build_tier_plan("gold", capabilities, result, observed_route="active_proxy")
+    exclusion = next(
+        step for step in plan["steps"] if step["id"] == "car_charger_reversal"
+    )
+    assert exclusion["action"] == "write"
+    assert exclusion["eligibility"] == "blocked"
 
 
 def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypatch):

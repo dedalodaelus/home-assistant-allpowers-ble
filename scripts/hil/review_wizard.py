@@ -531,8 +531,16 @@ def _interactive_higher_tier_review(
                 in step.get("reasons", [])
             ]
             runtime = session_data.get("runtime_capabilities", {})
+            runtime = runtime if isinstance(runtime, dict) else {}
+            runtime_options = runtime.get("capabilities", {})
             runtime_options = (
-                runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
+                runtime_options if isinstance(runtime_options, dict) else {}
+            )
+            runtime_features = runtime.get("features", {})
+            car_charger_facts = (
+                runtime_features.get("car_charger", {})
+                if isinstance(runtime_features, dict)
+                else {}
             )
             controls = session_data.get("controls", {})
             car_charger_control = (
@@ -557,13 +565,26 @@ def _interactive_higher_tier_review(
                     and plan_step.get("feature") == "car_charger"
                     and plan_step.get("action") == "exclude"
                     and plan_step.get("eligibility") == "review_required"
+                    and plan_step.get("physical_presence") == "unknown"
                     and plan_step.get("safe_disable_proof")
                     == {
                         "runtime_option_enabled": False,
                         "normal_control_available": False,
                     }
                     and runtime_options.get("car_charger_enabled") is False
+                    and runtime.get("schema_version") == 2
+                    and runtime.get("available", True) is True
+                    and runtime.get("verified") is True
+                    and runtime.get("identity_conflicted") is False
+                    and runtime.get("connected") is True
+                    and runtime.get("settings_fresh") is True
+                    and runtime.get("pending_transaction") is False
+                    and type(runtime.get("session_generation")) is int
+                    and runtime["session_generation"] >= 1
+                    and car_charger_facts.get("physical_presence") == "unknown"
+                    and car_charger_facts.get("runtime_ready") is True
                     and car_charger_control.get("available") is False
+                    and car_charger_control.get("availability_verified") is True
                     and isinstance(execution_step, dict)
                     and execution_step.get("outcome") == "pending_review"
                     and execution_step.get("reason")
@@ -944,7 +965,12 @@ def _interactive_higher_tier_review(
     absence_decisions = []
     exclusion_decisions = []
     assurance = "unknown"
-    if reviewable or reconnect_candidate is not None or absence_candidates:
+    if (
+        reviewable
+        or reconnect_candidate is not None
+        or absence_candidates
+        or exclusion_candidates
+    ):
         if expected_assurance is None:
             print("Assurance: [1] operator_attested  [2] independently_reviewed")
             assurance = {

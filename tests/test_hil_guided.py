@@ -25,6 +25,7 @@ def _capabilities(profile_id: str) -> dict[str, Any]:
         for feature, declaration in profile.features.items()
     }
     return {
+        "schema_version": 2,
         "model": profile.model,
         "profile": profile.profile,
         "hardware_revision": profile.hardware_revision,
@@ -35,6 +36,7 @@ def _capabilities(profile_id: str) -> dict[str, Any]:
         "status_fresh": True,
         "settings_fresh": True,
         "pending_transaction": False,
+        "session_generation": 1,
         "capabilities": {
             "read_telemetry": True,
             "write_output_controls": profile_id == "r600-hw-0.3",
@@ -133,6 +135,7 @@ def test_gold_only_plans_car_charger_exclusion_with_verified_safe_disable() -> N
     capabilities["capabilities"]["car_charger_enabled"] = False
     controls = _controls("r600-hw-0.3")
     controls["car_charger"]["available"] = False
+    controls["car_charger"]["availability_verified"] = True
 
     plan = build_tier_plan(
         "gold",
@@ -156,6 +159,7 @@ def test_gold_does_not_exclude_enabled_or_available_car_charger() -> None:
     capabilities["capabilities"]["car_charger_enabled"] = True
     controls = _controls("r600-hw-0.3")
     controls["car_charger"]["available"] = False
+    controls["car_charger"]["availability_verified"] = True
 
     plan = build_tier_plan(
         "gold",
@@ -165,6 +169,28 @@ def test_gold_does_not_exclude_enabled_or_available_car_charger() -> None:
     )
     assert _steps(plan)["car_charger_reversal"]["action"] == "write"
     assert _steps(plan)["car_charger_reversal"]["eligibility"] == "blocked"
+
+
+def test_gold_does_not_exclude_car_charger_without_verified_control_availability() -> (
+    None
+):
+    capabilities = _capabilities("r600-hw-0.3")
+    capabilities["capabilities"]["car_charger_enabled"] = False
+    controls = _controls("r600-hw-0.3")
+    controls["car_charger"]["available"] = False
+    controls["car_charger"]["availability_verified"] = False
+
+    plan = build_tier_plan(
+        "gold",
+        capabilities,
+        controls,
+        observed_route="active_proxy",
+    )
+
+    exclusion = _steps(plan)["car_charger_reversal"]
+    assert exclusion["action"] == "write"
+    assert exclusion["eligibility"] == "blocked"
+    assert exclusion["safe_disable_proof"] is None
 
 
 def test_verified_r600_inventory_preflight_unlocks_acquisition_without_qualification() -> (

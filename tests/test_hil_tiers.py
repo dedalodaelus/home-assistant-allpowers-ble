@@ -901,9 +901,27 @@ def _exclude_feature_contract(
         {
             "data": {
                 "runtime_capabilities": {
-                    "capabilities": {"car_charger_enabled": False}
+                    "schema_version": 2,
+                    "verified": True,
+                    "identity_conflicted": False,
+                    "connected": True,
+                    "settings_fresh": True,
+                    "pending_transaction": False,
+                    "session_generation": 1,
+                    "capabilities": {"car_charger_enabled": False},
+                    "features": {
+                        "car_charger": {
+                            "physical_presence": "unknown",
+                            "runtime_ready": True,
+                        }
+                    },
                 },
-                "controls": {"car_charger": {"available": False}},
+                "controls": {
+                    "car_charger": {
+                        "available": False,
+                        "availability_verified": True,
+                    }
+                },
                 "test_plan": {
                     "steps": [
                         {
@@ -932,6 +950,10 @@ def _exclude_feature_contract(
                     "step_id": "car_charger_reversal",
                     "outcome": "pending_review",
                     "reason": "optional control is safely disabled; pending explicit reviewed exclusion",
+                    "safe_disable_proof": {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    },
                 }
             ]
         },

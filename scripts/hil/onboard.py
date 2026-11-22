@@ -713,10 +713,21 @@ def assess_run_gate(
                 and proof.get("runtime_option_enabled") is False
                 and proof.get("normal_control_available") is False
                 and isinstance(capability_flags, dict)
+                and capabilities.get("schema_version") == 2
+                and capabilities.get("available", True) is True
+                and capabilities.get("verified") is True
+                and capabilities.get("identity_conflicted") is False
+                and capabilities.get("connected") is True
+                and capabilities.get("settings_fresh") is True
+                and capabilities.get("pending_transaction") is False
+                and type(capabilities.get("session_generation")) is int
+                and capabilities["session_generation"] >= 1
                 and capability_flags.get("car_charger_enabled") is False
                 and isinstance(control, dict)
                 and control.get("available") is False
+                and control.get("availability_verified") is True
                 and isinstance(feature_facts, dict)
+                and feature_facts.get("runtime_ready") is True
                 and feature_facts.get("physical_presence") == "unknown"
                 and len(rows) == 1
                 and rows[0].get("outcome") == "pending_review"

@@ -1779,6 +1779,14 @@ def _check_feature_contract(
         data = session.get("data", {}) if isinstance(session, dict) else {}
         runtime = data.get("runtime_capabilities", {}) if isinstance(data, dict) else {}
         flags = runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
+        runtime_features = (
+            runtime.get("features", {}) if isinstance(runtime, dict) else {}
+        )
+        feature_facts = (
+            runtime_features.get("car_charger", {})
+            if isinstance(runtime_features, dict)
+            else {}
+        )
         controls = data.get("controls", {}) if isinstance(data, dict) else {}
         car_control = (
             controls.get("car_charger", {}) if isinstance(controls, dict) else {}
@@ -1813,7 +1821,20 @@ def _check_feature_contract(
             or hashlib.sha256(execution_bytes).hexdigest()
             != artifact["source_execution_sha256"]
             or flags.get("car_charger_enabled") is not False
+            or runtime.get("schema_version") != 2
+            or runtime.get("available", True) is not True
+            or runtime.get("verified") is not True
+            or runtime.get("identity_conflicted") is not False
+            or runtime.get("connected") is not True
+            or runtime.get("settings_fresh") is not True
+            or runtime.get("pending_transaction") is not False
+            or type(runtime.get("session_generation")) is not int
+            or runtime["session_generation"] < 1
+            or not isinstance(car_control, dict)
+            or not isinstance(feature_facts, dict)
+            or feature_facts.get("runtime_ready") is not True
             or car_control.get("available") is not False
+            or car_control.get("availability_verified") is not True
             or not isinstance(plan_step, dict)
             or plan_step.get("action") != "exclude"
             or plan_step.get("eligibility") != "review_required"
@@ -1822,6 +1843,11 @@ def _check_feature_contract(
             or execution_step.get("outcome") != "pending_review"
             or execution_step.get("reason")
             != "optional control is safely disabled; pending explicit reviewed exclusion"
+            or execution_step.get("safe_disable_proof")
+            != {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            }
             or plan_step.get("safe_disable_proof")
             != {
                 "runtime_option_enabled": False,

@@ -948,7 +948,7 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                     if available
                     else {}
                 )
-                result["data"][key] = {
+                public_runtime = {
                     "available": available,
                     "connected": value.get("connected")
                     if available and type(value.get("connected")) is bool
@@ -964,15 +964,52 @@ def _safe_versioned(source: dict[str, Any], name: str) -> dict[str, Any]:
                     else None,
                     "capabilities": capabilities,
                 }
+                source_features = value.get("features")
+                car_charger_facts = (
+                    source_features.get("car_charger")
+                    if isinstance(source_features, dict)
+                    else None
+                )
+                if (
+                    available
+                    and value.get("schema_version") == 2
+                    and type(value.get("identity_conflicted")) is bool
+                    and type(value.get("session_generation")) is int
+                    and value["session_generation"] >= 1
+                    and isinstance(car_charger_facts, dict)
+                    and type(car_charger_facts.get("runtime_ready")) is bool
+                    and car_charger_facts.get("physical_presence")
+                    in {"present", "absent", "unknown"}
+                ):
+                    public_runtime.update(
+                        {
+                            "schema_version": 2,
+                            "verified": True,
+                            "identity_conflicted": value["identity_conflicted"],
+                            "session_generation": value["session_generation"],
+                            "features": {
+                                "car_charger": {
+                                    "physical_presence": car_charger_facts[
+                                        "physical_presence"
+                                    ],
+                                    "runtime_ready": car_charger_facts["runtime_ready"],
+                                }
+                            },
+                        }
+                    )
+                result["data"][key] = public_runtime
             elif key == "controls" and isinstance(value, dict):
                 car_charger = value.get("car_charger")
                 if (
                     isinstance(car_charger, dict)
                     and type(car_charger.get("available")) is bool
                 ):
-                    result["data"][key] = {
-                        "car_charger": {"available": car_charger["available"]}
-                    }
+                    public_control = {"available": car_charger["available"]}
+                    if type(car_charger.get("availability_verified")) is bool:
+                        public_control["availability_verified"] = car_charger[
+                            "availability_verified"
+                        ]
+                    result["data"][key] = {"car_charger": public_control}
             elif key == "test_plan" and isinstance(value, dict):
                 projected = _public_tier_plan(value)
                 if projected is not None:
@@ -2606,6 +2643,19 @@ def build_public(run_path: Path) -> tuple[Path, dict[str, bytes], dict[str, Any]
                 raise HAAPIError("Invalid guided step authorization provenance")
             if step.get("human_review") in {"pending", "reviewed"}:
                 public_step["human_review"] = step["human_review"]
+            exclusion_reason = "optional control is safely disabled; pending explicit reviewed exclusion"
+            exclusion_proof = {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            }
+            if (
+                step["step_id"] == "car_charger_reversal"
+                and step["outcome"] == "pending_review"
+                and step.get("reason") == exclusion_reason
+                and step.get("safe_disable_proof") == exclusion_proof
+            ):
+                public_step["reason"] = exclusion_reason
+                public_step["safe_disable_proof"] = exclusion_proof
             public_steps.append(public_step)
         files["tier-artifacts.json"] = (
             json.dumps(
@@ -4158,6 +4208,13 @@ def verify_public_archive(
                             "pending_transaction",
                             "capabilities",
                         }
+                        extended_runtime_fields = runtime_fields | {
+                            "schema_version",
+                            "verified",
+                            "identity_conflicted",
+                            "session_generation",
+                            "features",
+                        }
                         optional_bools = {
                             "connected",
                             "status_fresh",
@@ -4166,7 +4223,8 @@ def verify_public_archive(
                         }
                         if (
                             not isinstance(runtime, dict)
-                            or set(runtime) != runtime_fields
+                            or set(runtime)
+                            not in (runtime_fields, extended_runtime_fields)
                             or type(runtime.get("available")) is not bool
                             or any(
                                 runtime.get(name) is not None
@@ -4189,6 +4247,36 @@ def verify_public_archive(
                                     )
                                 )
                             )
+                            or (
+                                set(runtime) == extended_runtime_fields
+                                and (
+                                    runtime.get("schema_version") != 2
+                                    or runtime.get("available") is not True
+                                    or runtime.get("verified") is not True
+                                    or type(runtime.get("identity_conflicted"))
+                                    is not bool
+                                    or type(runtime.get("session_generation"))
+                                    is not int
+                                    or runtime["session_generation"] < 1
+                                    or not isinstance(runtime.get("features"), dict)
+                                    or set(runtime["features"]) != {"car_charger"}
+                                    or not isinstance(
+                                        runtime["features"]["car_charger"], dict
+                                    )
+                                    or set(runtime["features"]["car_charger"])
+                                    != {"physical_presence", "runtime_ready"}
+                                    or runtime["features"]["car_charger"].get(
+                                        "physical_presence"
+                                    )
+                                    not in {"present", "absent", "unknown"}
+                                    or type(
+                                        runtime["features"]["car_charger"].get(
+                                            "runtime_ready"
+                                        )
+                                    )
+                                    is not bool
+                                )
+                            )
                         ):
                             raise HAAPIError("Invalid public runtime capabilities")
                     if "controls" in public_session:
@@ -4197,9 +4285,20 @@ def verify_public_archive(
                             not isinstance(controls, dict)
                             or set(controls) != {"car_charger"}
                             or not isinstance(controls["car_charger"], dict)
-                            or set(controls["car_charger"]) != {"available"}
+                            or set(controls["car_charger"])
+                            not in (
+                                {"available"},
+                                {"available", "availability_verified"},
+                            )
                             or type(controls["car_charger"].get("available"))
                             is not bool
+                            or (
+                                "availability_verified" in controls["car_charger"]
+                                and type(
+                                    controls["car_charger"]["availability_verified"]
+                                )
+                                is not bool
+                            )
                         ):
                             raise HAAPIError("Invalid public control availability")
                     if (
@@ -4444,6 +4543,20 @@ def verify_public_archive(
                         or row.get("human_review") not in {None, "pending", "reviewed"}
                         or (
                             "safe_disable_proof" in row
+                            and (
+                                row.get("step_id") != "car_charger_reversal"
+                                or row.get("outcome") != "pending_review"
+                                or row.get("reason")
+                                != "optional control is safely disabled; pending explicit reviewed exclusion"
+                                or row.get("safe_disable_proof")
+                                != {
+                                    "runtime_option_enabled": False,
+                                    "normal_control_available": False,
+                                }
+                            )
+                        )
+                        or (
+                            "reason" in row
                             and (
                                 row.get("step_id") != "car_charger_reversal"
                                 or row.get("outcome") != "pending_review"

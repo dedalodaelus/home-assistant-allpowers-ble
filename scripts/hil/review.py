@@ -1991,9 +1991,8 @@ def review_imported_tier_run(
     valid_exclusions: list[dict[str, Any]] = []
     if tier == "gold" and exclusion_decisions:
         runtime = session_data.get("runtime_capabilities", {})
-        runtime_flags = (
-            runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
-        )
+        runtime = runtime if isinstance(runtime, dict) else {}
+        runtime_flags = runtime.get("capabilities", {})
         controls = session_data.get("controls", {})
         car_charger_control = (
             controls.get("car_charger", {}) if isinstance(controls, dict) else {}
@@ -2019,10 +2018,21 @@ def review_imported_tier_run(
         )
         if (
             runtime_flags.get("car_charger_enabled") is not False
+            or runtime.get("schema_version") != 2
+            or runtime.get("available", True) is not True
+            or runtime.get("verified") is not True
+            or runtime.get("identity_conflicted") is not False
+            or runtime.get("connected") is not True
+            or runtime.get("settings_fresh") is not True
+            or runtime.get("pending_transaction") is not False
+            or type(runtime.get("session_generation")) is not int
+            or runtime["session_generation"] < 1
             or car_charger_control.get("available") is not False
+            or car_charger_control.get("availability_verified") is not True
             or not isinstance(planned, dict)
             or planned.get("action") != "exclude"
             or planned.get("eligibility") != "review_required"
+            or planned.get("physical_presence") != "unknown"
             or planned.get("safe_disable_proof")
             != {
                 "runtime_option_enabled": False,
@@ -2032,6 +2042,11 @@ def review_imported_tier_run(
             or execution_step.get("outcome") != "pending_review"
             or execution_step.get("reason")
             != "optional control is safely disabled; pending explicit reviewed exclusion"
+            or execution_step.get("safe_disable_proof")
+            != {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            }
             or source_session is None
         ):
             exclusion_decisions = []

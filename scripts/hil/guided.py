@@ -122,8 +122,18 @@ def build_tier_plan(
         original = control.get("state")
         safely_disabled = bool(
             feature == "car_charger"
+            and snapshot.get("schema_version") == 2
+            and snapshot.get("verified") is True
+            and snapshot.get("identity_conflicted") is False
+            and snapshot.get("connected") is True
+            and snapshot.get("settings_fresh") is True
+            and snapshot.get("pending_transaction") is False
+            and type(snapshot.get("session_generation")) is int
+            and snapshot["session_generation"] >= 1
             and capability_flags.get("car_charger_enabled") is False
             and control.get("available") is False
+            and control.get("availability_verified") is True
+            and facts.get("runtime_ready") is True
             and facts.get("physical_presence") == "unknown"
         )
         if safely_disabled:

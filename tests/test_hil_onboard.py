@@ -258,10 +258,22 @@ def test_gold_disabled_optional_control_is_pending_review_not_na(tmp_path):
     private, session, execution, _artifact, status_exchange = _run(tmp_path)
     session["test_plan"]["requested_tier"] = "gold"
     session["runtime_capabilities"]["capabilities"] = {"car_charger_enabled": False}
+    session["runtime_capabilities"].update(
+        schema_version=2,
+        verified=True,
+        identity_conflicted=False,
+        connected=True,
+        settings_fresh=True,
+        pending_transaction=False,
+        session_generation=1,
+    )
     session["runtime_capabilities"]["features"]["car_charger"] = {
-        "physical_presence": "unknown"
+        "physical_presence": "unknown",
+        "runtime_ready": True,
     }
-    session["controls"] = {"car_charger": {"available": False}}
+    session["controls"] = {
+        "car_charger": {"available": False, "availability_verified": True}
+    }
     session["test_plan"]["steps"].append(
         {
             "id": "car_charger_reversal",

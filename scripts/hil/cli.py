@@ -309,15 +309,19 @@ def _scenario_controls(
         entity_id = device.control_entities.get(key)
         if entity_id is None:
             observed = {"available": False, "state": None, "options": []}
+            availability_verified = True
         else:
             control_state = getattr(api, "control_state", None)
             if not callable(control_state):
                 observed = {"available": False, "state": None, "options": []}
+                availability_verified = False
             else:
                 try:
                     observed = control_state(key, entity_id)
+                    availability_verified = True
                 except HAAPIError:
                     observed = {"available": False, "state": None, "options": []}
+                    availability_verified = False
         facts = capabilities or {}
         capability_flags = facts.get("capabilities", {})
         feature_facts = facts.get("features", {})
@@ -347,6 +351,7 @@ def _scenario_controls(
             )
         result[key] = {
             **plan_observed,
+            "availability_verified": availability_verified,
             "eligible": bool(
                 facts.get("connected") is True
                 and facts.get("pending_transaction") is False
@@ -1219,6 +1224,13 @@ def _execute_tier_suite(
                 refreshed_controls = _scenario_controls(
                     api, device, refreshed_capabilities
                 )
+                capabilities = refreshed_capabilities
+                runtime_controls = refreshed_controls
+                features = (
+                    capabilities.get("features", {})
+                    if isinstance(capabilities, dict)
+                    else {}
+                )
                 requested_tier = plan["requested_tier"]
                 build_provenance = plan.get("device", {}).get("build_provenance", {})
                 inventory_preflight = (
@@ -1348,6 +1360,8 @@ def _execute_tier_suite(
                     saved_session = json.loads(session_path.read_text(encoding="utf-8"))
                     if isinstance(saved_session, dict):
                         saved_session["test_plan"] = refreshed_plan
+                        saved_session["runtime_capabilities"] = refreshed_capabilities
+                        saved_session["controls"] = refreshed_controls
                         session_path.write_text(
                             json.dumps(saved_session, indent=2, sort_keys=True) + "\n",
                             encoding="utf-8",
@@ -1399,11 +1413,22 @@ def _execute_tier_suite(
             if (
                 step_id == "car_charger_reversal"
                 and planned.get("eligibility") == "review_required"
+                and isinstance(capabilities, dict)
                 and isinstance(capability_flags, dict)
+                and capabilities.get("schema_version") == 2
+                and capabilities.get("verified") is True
+                and capabilities.get("identity_conflicted") is False
+                and capabilities.get("connected") is True
+                and capabilities.get("settings_fresh") is True
+                and capabilities.get("pending_transaction") is False
+                and type(capabilities.get("session_generation")) is int
+                and capabilities["session_generation"] >= 1
                 and capability_flags.get("car_charger_enabled") is False
                 and isinstance(control, dict)
                 and control.get("available") is False
+                and control.get("availability_verified") is True
                 and isinstance(facts, dict)
+                and facts.get("runtime_ready") is True
                 and facts.get("physical_presence") == "unknown"
             ):
                 execution["steps"].append(
