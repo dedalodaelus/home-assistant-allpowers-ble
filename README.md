@@ -41,7 +41,10 @@ model, hardware revision, firmware, and observed BLE route. They are not Home
 Assistant Integration Quality Scale ratings and do not authorize writes. See
 [compatibility and support tiers](docs/compatibility.md#write-authorization-and-hardware-support-tiers).
 
-Contributors can start a guided HIL session with `python -m scripts.hil onboard`.
+Contributors can start with the
+[HIL evidence contributor quickstart](docs/hil-contributor-quickstart.md),
+which follows `python -m scripts.hil onboard` from acquisition through reviewed
+PR handoff.
 The wizard stops before export when required results, route, build, or evidence
 are missing. A successful run remains unqualified until physical observations
 are reviewed with explicit operator-attested or independently-reviewed
@@ -49,7 +52,7 @@ provenance. The guided handoff offers self-attestation by the operator or a
 separate independent reviewer; a second person is not required for
 operator-attestation. The ZIP remains a pre-review evidence snapshot, and
 neither route changes runtime write authorization. See the
-[HIL CLI guide](docs/hil-cli.md#contributor-quickstart).
+[HIL CLI guide](docs/hil-cli.md).
 
 ## Requirements & installation
 
@@ -97,6 +100,8 @@ before enabling controls or automations.
 
 ## Documentation & support
 
+- **[HIL evidence contributor quickstart](docs/hil-contributor-quickstart.md)**
+  — collect, review, and submit route-scoped hardware evidence.
 - [Contributing and first-time contributor guide](CONTRIBUTING.md)
   · [Compare changes on GitHub (select `devel` as the base)](https://github.com/dedalodaelus/home-assistant-allpowers-ble/compare)
 - [Full user guide](docs/user-guide.md)
