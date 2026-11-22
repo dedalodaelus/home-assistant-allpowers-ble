@@ -49,10 +49,11 @@ repository's safety and validation checklist.
   and review described below and in [Adding models](docs/adding-models.md).
 - `onboard` stops before export when its requested tier, required evidence,
   connected route, installed build, or state restoration cannot be verified.
-  Bronze, Silver, and Gold acquisitions remain inconclusive until the separate
-  independent reviewers and the schema-v3 evaluator validate the exact run.
-  The HIL operator's observation is not an independent review. Platinum remains
-  blocked until the public evidence contract can verify a continuous 24-hour soak.
+  Bronze, Silver, and Gold acquisitions remain inconclusive until an explicit
+  operator attestation or separate independent review, plus the schema-v3
+  evaluator, validates the exact run. Operator attestation is not independent
+  review and does not waive physical evidence gates. Platinum remains blocked
+  until the public evidence contract can verify a continuous 24-hour soak.
 - For deterministic PR descriptions, render structured facts through
   `.github/PULL_REQUEST_TEMPLATE.md` with
   `python -m scripts.generate_pr_body --data pr-facts.json --output pr.md`.

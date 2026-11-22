@@ -46,8 +46,9 @@ escrituras. Consulta [compatibilidad y niveles de soporte](docs/compatibility.md
 Los colaboradores pueden iniciar una sesión HIL guiada con
 `python -m scripts.hil onboard`. El asistente se detiene antes de exportar si
 faltan resultados, ruta, build o evidencias requeridas. Una ejecución correcta
-sigue sin cualificar hasta que la revise una persona independiente; consulta la
-[guía de la CLI HIL](docs/hil-cli.md#contributor-quickstart).
+sigue sin cualificar hasta que se revisen las observaciones físicas con una
+procedencia explícita de autoatestación del operador o revisión independiente;
+consulta la [guía de la CLI HIL](docs/hil-cli.md#contributor-quickstart).
 
 ## Requisitos e instalación
 

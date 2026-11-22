@@ -66,6 +66,7 @@ def _reviewed(
             "outcome": "confirmed_pass" if status == "pass" else "confirmed_fail",
             "reviewed_by": "independent-reviewer",
             "reviewed_at": datetime.now(UTC).isoformat(),
+            "assurance": "independently_reviewed",
             "evidence_sha256": _digest(root, evidence),
             **review_fields,
         },
@@ -533,11 +534,19 @@ def _matrix_fixture(
                 "status": "absent",
                 "reviewed_by": "independent-reviewer",
                 "reviewed_at": stamp,
+                "assurance": "independently_reviewed",
                 "evidence": [absent],
                 "evidence_sha256": _digest(root, [absent]),
             }
             if feature == "light_output"
-            else {"status": "present"}
+            else {
+                "status": "present",
+                "reviewed_by": "independent-reviewer",
+                "reviewed_at": stamp,
+                "assurance": "independently_reviewed",
+                "evidence": [capture],
+                "evidence_sha256": _digest(root, [capture]),
+            }
         )
         for feature in validator.REQUIRED_WRITE_CAPABILITIES
     }
@@ -680,6 +689,24 @@ def test_schema_valid_reviewed_outputs_and_absent_light_earn_silver(
     assert errors == []
     assert result["tiers"][0]["tier"] == "silver"
     assert "light_output" in result["tiers"][0]["exclusions"]
+
+
+@pytest.mark.parametrize("tier", ["silver", "gold"])
+def test_tier_assurance_includes_operator_attested_absent_feature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tier: str
+):
+    matrix = _matrix_fixture(tmp_path, tier)
+    light_presence = matrix["revisions"][0]["runs"][0]["feature_presence"][
+        "light_output"
+    ]
+    light_presence["reviewed_by"] = "HIL operator"
+    light_presence["assurance"] = "operator_attested"
+
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+
+    assert errors == []
+    assert result["tiers"][0]["tier"] == tier
+    assert result["tiers"][0]["assurance"][tier] == "mixed"
 
 
 def test_v3_capture_scope_does_not_require_model_or_hardware_revision_fields(
@@ -853,7 +880,12 @@ def test_gold_rejects_restoration_without_bound_physical_capture(
 
 
 def _exclude_feature_contract(
-    matrix: dict[str, Any], root: Path, feature: str, *, safe: bool = True
+    matrix: dict[str, Any],
+    root: Path,
+    feature: str,
+    *,
+    safe: bool = True,
+    assurance: str = "independently_reviewed",
 ) -> None:
     revision = matrix["revisions"][0]
     rationale = (
@@ -873,6 +905,9 @@ def _exclude_feature_contract(
         },
     )
     contract = _reviewed(root, "pass", [evidence])
+    contract["physical_review"]["assurance"] = assurance
+    if assurance == "operator_attested":
+        contract["physical_review"]["reviewed_by"] = "device operator"
     contract.update(
         status="excluded",
         safely_disabled=safe,
@@ -895,6 +930,53 @@ def test_gold_accepts_only_reviewed_revision_contract_exclusions(
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
     assert any("car_charger" in item for item in result["tiers"][0]["exclusions"])
+
+
+def test_gold_assurance_includes_operator_attested_feature_contract_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    _exclude_feature_contract(
+        matrix, tmp_path, "car_charger", assurance="operator_attested"
+    )
+    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    assert errors == []
+    tier = result["tiers"][0]
+    assert tier["tier"] == "gold"
+    assert tier["assurance"]["gold"] == "mixed"
+    assert any("car_charger" in item for item in tier["exclusions"])
+
+
+def test_legacy_reviewed_absence_is_loadable_only_for_explicit_tier_rereview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    run = matrix["revisions"][0]["runs"][0]
+    absence = run["feature_presence"]["light_output"]
+    absence.pop("assurance")
+    absence.pop("evidence_sha256")
+    matrix_path = tmp_path / "matrix.json"
+    monkeypatch.setattr(validator, "ROOT", tmp_path)
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+    strict_errors, _ = validator.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert any(
+        "absent feature light_output requires reviewed evidence" in error
+        for error in strict_errors
+    )
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
+
+    legacy_review_errors, _ = validator.validate_matrix(
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_tier_review=True,
+    )
+    assert legacy_review_errors == []
+    assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "bronze"
 
 
 def test_free_form_exclusion_boolean_cannot_omit_unknown_feature(

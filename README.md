@@ -43,8 +43,9 @@ Assistant Integration Quality Scale ratings and do not authorize writes. See
 
 Contributors can start a guided HIL session with `python -m scripts.hil onboard`.
 The wizard stops before export when required results, route, build, or evidence
-are missing. A successful run remains unqualified until an independent reviewer
-checks it; see the [HIL CLI guide](docs/hil-cli.md#contributor-quickstart).
+are missing. A successful run remains unqualified until physical observations
+are reviewed with explicit operator-attested or independently-reviewed
+provenance; see the [HIL CLI guide](docs/hil-cli.md#contributor-quickstart).
 
 ## Requirements & installation
 

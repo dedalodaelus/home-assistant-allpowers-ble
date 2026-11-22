@@ -89,20 +89,30 @@ def _verified_members(run: dict[str, Any], root: Path) -> dict[str, bytes]:
     return members
 
 
-def _review_file(path: Path, run: dict[str, Any]) -> tuple[str, str, dict[str, str]]:
+def _review_file(
+    path: Path, run: dict[str, Any]
+) -> tuple[str, str, str, dict[str, str]]:
     value = _json(path)
+    legacy = value.get("schema_version") == 1
+    expected = {
+        "schema_version",
+        "archive_sha256",
+        "run_id",
+        "reviewed_by",
+        "reviewed_at",
+        "claims",
+    }
+    if not legacy and "assurance" in value:
+        expected.add("assurance")
     if (
-        set(value)
-        != {
-            "schema_version",
-            "archive_sha256",
-            "run_id",
-            "reviewed_by",
-            "reviewed_at",
-            "claims",
-        }
+        set(value) != expected
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or value.get("schema_version") not in {1, 2}
+        or (
+            "assurance" in value
+            and value.get("assurance")
+            not in {"operator_attested", "independently_reviewed"}
+        )
         or value.get("archive_sha256") != run.get("archive_sha256")
         or not isinstance(value.get("archive_sha256"), str)
         or re.fullmatch(r"[a-f0-9]{64}", value["archive_sha256"]) is None
@@ -131,13 +141,18 @@ def _review_file(path: Path, run: dict[str, Any]) -> tuple[str, str, dict[str, s
         or timestamp.astimezone(UTC) > datetime.now(UTC)
     ):
         raise HAAPIError("Review timestamp must be timezone-aware and current")
-    return value["reviewed_by"].strip(), timestamp.isoformat(), value["claims"]
+    return (
+        value["reviewed_by"].strip(),
+        timestamp.isoformat(),
+        value.get("assurance", "unknown"),
+        value["claims"],
+    )
 
 
 def _tier_review_file(
     path: Path, run: dict[str, Any], tier: str
 ) -> tuple[
-    str, str, bool, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+    str, str, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
 ]:
     """Validate the exact run-bound local audit created by the tier wizard."""
     value = _json(path)
@@ -152,11 +167,28 @@ def _tier_review_file(
         "transitions",
         "scenarios",
     }
+    version = value.get("schema_version")
+    assurance = value.get("assurance")
+    if assurance is None:
+        assurance = (
+            "independently_reviewed"
+            if value.get("reviewer_independent_from_operator") is True
+            else "unknown"
+        )
+    if assurance not in {"operator_attested", "independently_reviewed", "unknown"}:
+        raise HAAPIError("Tier review assurance is invalid")
+    accepted_keys = (
+        {frozenset(expected), frozenset(expected | {"absences"})}
+        if version == 1
+        else {
+            frozenset(expected | {"assurance"}),
+            frozenset(expected | {"assurance", "absences"}),
+        }
+    )
     if (
-        frozenset(value)
-        not in {frozenset(expected), frozenset(expected | {"absences"})}
+        frozenset(value) not in accepted_keys
         or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 1
+        or version not in {1, 2}
         or value.get("tier") != tier
         or value.get("archive_sha256") != run.get("archive_sha256")
         or value.get("run_id") != run.get("run_id")
@@ -164,6 +196,8 @@ def _tier_review_file(
         or re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", value["reviewed_by"].strip()) is None
         or not isinstance(value.get("reviewed_at"), str)
         or type(value.get("reviewer_independent_from_operator")) is not bool
+        or value.get("reviewer_independent_from_operator")
+        is not (assurance == "independently_reviewed")
         or not isinstance(value.get("transitions"), list)
         or len(value["transitions"]) > 32
         or not isinstance(value.get("scenarios"), list)
@@ -431,7 +465,7 @@ def _tier_review_file(
     return (
         value["reviewed_by"].strip(),
         reviewed_at.isoformat(),
-        value["reviewer_independent_from_operator"],
+        assurance,
         value["transitions"],
         value["scenarios"],
         value.get("absences", []),
@@ -887,6 +921,121 @@ def _evidence_digests(
     return result
 
 
+def _suspend_legacy_tier_evidence(run: dict[str, Any]) -> dict[str, Any]:
+    """Move unassured pre-v3 Silver evidence out of active qualification maps."""
+    archived: dict[str, Any] = {
+        "scenarios": {},
+        "write_capabilities": {},
+        "feature_presence": {},
+    }
+    for category in ("scenarios", "write_capabilities"):
+        results = run.get(category)
+        if not isinstance(results, dict):
+            continue
+        for name, item in list(results.items()):
+            review = item.get("physical_review") if isinstance(item, dict) else None
+            if (
+                isinstance(item, dict)
+                and item.get("status") in {"pass", "fail"}
+                and isinstance(review, dict)
+                and "assurance" not in review
+            ):
+                archived[category][name] = json.loads(json.dumps(item))
+                results[name] = {
+                    "status": "inconclusive",
+                    "evidence": [],
+                    "rationale": "Legacy physical review is retained in review history pending explicit re-attestation.",
+                }
+    presence = run.get("feature_presence")
+    capabilities = run.get("write_capabilities")
+    if isinstance(presence, dict):
+        for feature, item in list(presence.items()):
+            if (
+                not isinstance(item, dict)
+                or item.get("status") not in {"present", "absent"}
+                or "assurance" in item
+            ):
+                continue
+            archived["feature_presence"][feature] = json.loads(json.dumps(item))
+            presence[feature] = {"status": "unknown", "evidence": []}
+            if isinstance(capabilities, dict):
+                capability = capabilities.get(feature)
+                if (
+                    isinstance(capability, dict)
+                    and capability.get("status") == "not_applicable"
+                ):
+                    archived["write_capabilities"].setdefault(
+                        feature, json.loads(json.dumps(capability))
+                    )
+                    capabilities[feature] = {
+                        "status": "inconclusive",
+                        "evidence": [],
+                        "rationale": "Legacy physical absence review is retained in review history pending explicit re-attestation.",
+                    }
+    return {category: values for category, values in archived.items() if values}
+
+
+def _suspend_legacy_bronze_evidence(run: dict[str, Any]) -> dict[str, Any]:
+    """Move unassured Bronze PASS records out of another run's active proof."""
+    records = run.get("bronze_evidence")
+    if not isinstance(records, dict):
+        return {}
+    archived = {}
+    for claim, item in list(records.items()):
+        review = item.get("physical_review") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("status") != "pass"
+            or not isinstance(review, dict)
+            or "assurance" in review
+        ):
+            continue
+        archived[claim] = json.loads(json.dumps(item))
+        records[claim] = {
+            "status": "inconclusive",
+            "evidence": [],
+            "rationale": "Legacy Bronze review is retained in review history pending explicit re-attestation.",
+        }
+    return archived
+
+
+def _record_suspended_legacy_reviews(
+    run: dict[str, Any], *, bronze: dict[str, Any], tier: dict[str, Any]
+) -> None:
+    """Append unknown-provenance snapshots for evidence suspended in a run."""
+    if not bronze and not tier:
+        return
+    history = run.get("review_history")
+    if not isinstance(history, list):
+        history = []
+    archive_sha256 = run.get("archive_sha256")
+    reviewed_at = run.get("captured_at")
+    if bronze:
+        history.append(
+            {
+                "tier": "bronze",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": reviewed_at,
+                "assurance": "unknown",
+                "legacy_bronze_evidence": bronze,
+                "archive_sha256": archive_sha256,
+            }
+        )
+    if tier:
+        history.append(
+            {
+                "tier": "silver",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": reviewed_at,
+                "assurance": "unknown",
+                "legacy_tier_evidence": tier,
+                "archive_sha256": archive_sha256,
+            }
+        )
+    run["review_history"] = history
+    run["qualification_status"] = "pending"
+
+
 def review_imported_run(
     matrix_path: Path,
     *,
@@ -908,7 +1057,12 @@ def review_imported_run(
     if not isinstance(matrix, dict) or matrix.get("schema_version") != 3:
         raise HAAPIError("Qualification matrix must use schema v3")
     errors, _ = validation.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_bronze_review=True,
+        allow_legacy_tier_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -925,18 +1079,35 @@ def review_imported_run(
     if found is None or not run_id.startswith("archive-"):
         raise HAAPIError("Imported archive run was not found")
     revision, run = found
-    reviewer, reviewed_at, decisions = _review_file(review_file, run)
+    reviewer, reviewed_at, assurance, decisions = _review_file(review_file, run)
     members = _verified_members(run, root)
     files: dict[Path, bytes] = {}
     updated = json.loads(json.dumps(run))
-    updated["authorization_context"] = "read_only"
-    updated["authorization_context_source"] = "verified_read_only_session"
+    if not (
+        updated.get("authorization_context") == "production"
+        and updated.get("authorization_context_source") == "reviewed_production_session"
+    ):
+        updated["authorization_context"] = "read_only"
+        updated["authorization_context_source"] = "verified_read_only_session"
     updated["qualification_status"] = "pending"
-    updated["bronze_evidence"] = {}
+    legacy_tier_evidence = _suspend_legacy_tier_evidence(updated)
+    previous_bronze = updated.get("bronze_evidence")
+    if not isinstance(previous_bronze, dict):
+        previous_bronze = {}
+    legacy_physical_reviews = {
+        claim: json.loads(json.dumps(item["physical_review"]))
+        for claim, item in previous_bronze.items()
+        if isinstance(item, dict)
+        and item.get("status") == "pass"
+        and isinstance(item.get("physical_review"), dict)
+        and item["physical_review"].get("assurance")
+        not in {"operator_attested", "independently_reviewed"}
+    }
+    updated["bronze_evidence"] = dict(previous_bronze)
     run_rel = Path("tests/hil/fixtures") / revision["id"] / "runs" / run_id
     for claim in CLAIMS:
         supported, evidence, _checks = _claim_support(claim, revision, run, members)
-        passed = decisions[claim] == "pass" and supported
+        passed = decisions[claim] == "pass" and supported and assurance != "unknown"
         item: dict[str, Any] = {"status": "inconclusive", "evidence": []}
         if passed:
             if claim == "protocol_probe":
@@ -1075,6 +1246,7 @@ def review_imported_run(
                     "outcome": "confirmed_pass",
                     "reviewed_by": reviewer,
                     "reviewed_at": reviewed_at,
+                    "assurance": assurance,
                 },
             }
             if claim == "protocol_probe":
@@ -1083,7 +1255,21 @@ def review_imported_run(
             item["rationale"] = (
                 "Review declined or imported machine evidence did not satisfy the Bronze claim contract."
             )
-        updated["bronze_evidence"][claim] = item
+        previous_claim = previous_bronze.get(claim)
+        previous_review = (
+            previous_claim.get("physical_review")
+            if isinstance(previous_claim, dict)
+            else None
+        )
+        previous_pass_is_attested = (
+            isinstance(previous_claim, dict)
+            and previous_claim.get("status") == "pass"
+            and isinstance(previous_review, dict)
+            and previous_review.get("assurance")
+            in {"operator_attested", "independently_reviewed"}
+        )
+        if passed or not previous_pass_is_attested:
+            updated["bronze_evidence"][claim] = item
         if passed:
             for relative in evidence:
                 if relative not in updated["evidence"]:
@@ -1093,29 +1279,104 @@ def review_imported_run(
             item["physical_review"]["evidence_sha256"] = _evidence_digests(
                 item["evidence"], files, root
             )
-    new_revision = json.loads(json.dumps(revision))
-    new_revision["runs"] = [
-        updated if item.get("run_id") == run_id else item for item in revision["runs"]
-    ]
-    proposed = dict(matrix)
+    proposed = json.loads(json.dumps(matrix))
+    for proposed_revision in proposed.get("revisions", []):
+        if not isinstance(proposed_revision, dict):
+            continue
+        proposed_runs = proposed_revision.get("runs")
+        if not isinstance(proposed_runs, list):
+            continue
+        for index, candidate in enumerate(proposed_runs):
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("run_id") == run_id:
+                proposed_runs[index] = updated
+                continue
+            if not str(candidate.get("run_id", "")).startswith("archive-"):
+                continue
+            suspended_bronze = _suspend_legacy_bronze_evidence(candidate)
+            suspended_tier = _suspend_legacy_tier_evidence(candidate)
+            _record_suspended_legacy_reviews(
+                candidate, bronze=suspended_bronze, tier=suspended_tier
+            )
     proposed["generated_at"] = datetime.now(UTC).date().isoformat()
-    proposed["revisions"] = [
-        new_revision if item is revision else item for item in matrix["revisions"]
-    ]
     statuses = {
         claim: item["status"] for claim, item in updated["bronze_evidence"].items()
     }
+    history = updated.get("review_history")
+    if not isinstance(history, list):
+        history = []
+    if legacy_physical_reviews:
+        legacy_reviewers = {
+            item.get("reviewed_by")
+            for item in legacy_physical_reviews.values()
+            if isinstance(item.get("reviewed_by"), str)
+        }
+        legacy_reviewed_ats = {
+            item.get("reviewed_at")
+            for item in legacy_physical_reviews.values()
+            if isinstance(item.get("reviewed_at"), str)
+        }
+        history.append(
+            {
+                "tier": "bronze",
+                "reviewed_by": (
+                    next(iter(legacy_reviewers))
+                    if len(legacy_reviewers) == 1
+                    else "legacy review history"
+                ),
+                "reviewed_at": (
+                    next(iter(legacy_reviewed_ats))
+                    if len(legacy_reviewed_ats) == 1
+                    else run["captured_at"]
+                ),
+                "assurance": "unknown",
+                "claims": {
+                    claim: previous_bronze.get(claim, {}).get("status", "unknown")
+                    for claim in CLAIMS
+                },
+                "legacy_physical_reviews": legacy_physical_reviews,
+                "archive_sha256": run["archive_sha256"],
+            }
+        )
+    history.append(
+        {
+            "tier": "bronze",
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+            "assurance": assurance,
+            "claims": dict(decisions),
+            "archive_sha256": run["archive_sha256"],
+        }
+    )
+    updated["review_history"] = history
+    if legacy_tier_evidence:
+        history.append(
+            {
+                "tier": "silver",
+                "reviewed_by": "legacy review history",
+                "reviewed_at": run["captured_at"],
+                "assurance": "unknown",
+                "legacy_tier_evidence": legacy_tier_evidence,
+                "archive_sha256": run["archive_sha256"],
+            }
+        )
+        updated["review_history"] = history
     from .tiers import evaluate_tiers
 
     summary = {
         "run_id": run_id,
         "reviewed_by": reviewer,
+        "assurance": assurance,
         "bronze_claims": statuses,
         "applied": apply,
     }
     if not apply:
         current_tier_result = evaluate_tiers(matrix)
         summary["current_attained_tier"] = _attained_tier(
+            current_tier_result, revision, run
+        )
+        summary["current_attained_assurance"] = _attained_assurance(
             current_tier_result, revision, run
         )
         print(json.dumps(summary, sort_keys=True, indent=2))
@@ -1132,12 +1393,16 @@ def review_imported_run(
             _atomic_write(path, content)
             created.append(path)
         errors, _ = validation.validate_matrix(
-            proposed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+            proposed,
+            matrix_path=matrix_path,
+            require_pass=False,
+            max_age_days=None,
         )
         if errors:
             raise HAAPIError("Reviewed matrix failed validation: " + "; ".join(errors))
         tier_result = evaluate_tiers(proposed)
         summary["attained_tier"] = _attained_tier(tier_result, revision, run)
+        summary["attained_assurance"] = _attained_assurance(tier_result, revision, run)
         if matrix_path.is_symlink() or matrix_path.read_bytes() != before:
             raise HAAPIError("Qualification matrix changed during review")
         _atomic_write(
@@ -1177,7 +1442,12 @@ def review_imported_tier_run(
     if not isinstance(matrix, dict) or matrix.get("schema_version") != 3:
         raise HAAPIError("Qualification matrix must use schema v3")
     errors, _ = validation.validate_matrix(
-        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+        matrix,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+        allow_legacy_bronze_review=True,
+        allow_legacy_tier_review=True,
     )
     if errors:
         raise HAAPIError("Qualification matrix validation failed: " + "; ".join(errors))
@@ -1205,15 +1475,14 @@ def review_imported_tier_run(
     (
         reviewer,
         reviewed_at,
-        reviewer_independent_from_operator,
+        assurance,
         decisions,
         scenario_decisions,
         absence_decisions,
     ) = _tier_review_file(review_file, run, tier)
-    if not reviewer_independent_from_operator:
+    if assurance == "unknown":
         print(
-            "The reviewer did not confirm independence from the HIL operator; "
-            "no qualification result can be applied."
+            "This legacy review has no recorded assurance; no qualification result can be applied."
         )
         return 2
     members = _verified_members(run, root)
@@ -1412,8 +1681,8 @@ def review_imported_tier_run(
 
     if not accepted_cycles and not reviewed_scenarios and not reviewed_absences:
         print(
-            "No supported production-authorized physical result was independently "
-            "confirmed; the qualification matrix remains unchanged."
+            "No supported production-authorized physical result was confirmed under "
+            "the selected assurance; the qualification matrix remains unchanged."
         )
         return 2
 
@@ -1426,6 +1695,19 @@ def review_imported_tier_run(
             claim: {"status": "inconclusive", "evidence": []} for claim in CLAIMS
         }
     updated["qualification_status"] = "pending"
+    history = updated.get("review_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "tier": tier,
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+            "assurance": assurance,
+            "archive_sha256": run["archive_sha256"],
+        }
+    )
+    updated["review_history"] = history
     applied_capabilities: list[str] = []
     applied_scenarios: list[str] = []
     review_tag = Path(review_file).name.removesuffix(".json")
@@ -1464,6 +1746,12 @@ def review_imported_tier_run(
         updated["feature_presence"][feature] = {
             "status": "present",
             "evidence": presence_evidence.get(feature, common_evidence),
+            "reviewed_by": reviewer,
+            "reviewed_at": reviewed_at,
+            "assurance": assurance,
+            "evidence_sha256": _evidence_digests(
+                presence_evidence.get(feature, common_evidence), files, root
+            ),
         }
         if tier == "gold" and feature not in {"ac_output", "dc_output", "light_output"}:
             if len(cycles) != 1:
@@ -1495,6 +1783,7 @@ def review_imported_tier_run(
                     "outcome": "confirmed_pass",
                     "reviewed_by": reviewer,
                     "reviewed_at": reviewed_at,
+                    "assurance": assurance,
                     "restoration_evidence": path,
                     "restoration_capture": restoration_capture,
                 },
@@ -1579,14 +1868,18 @@ def review_imported_tier_run(
                 "outcome": "confirmed_pass",
                 "reviewed_by": reviewer,
                 "reviewed_at": reviewed_at,
-                "reviewer_independent_from_operator": True,
+                "assurance": assurance,
+                "reviewer_independent_from_operator": assurance
+                == "independently_reviewed",
                 "output_transitions": transitions,
                 "final_restoration": {
                     "state": final_state,
                     "capture_evidence": final_capture,
                     "frame_evidence": final_reference,
                     "confirmed": True,
-                    "reviewer_independent_from_operator": True,
+                    "reviewer_independent_from_operator": assurance
+                    == "independently_reviewed",
+                    "assurance": assurance,
                 },
             },
         }
@@ -1621,6 +1914,7 @@ def review_imported_tier_run(
                 "outcome": "confirmed_pass",
                 "reviewed_by": reviewer,
                 "reviewed_at": reviewed_at,
+                "assurance": assurance,
             },
         }
         result["physical_review"]["evidence_sha256"] = _evidence_digests(
@@ -1641,6 +1935,7 @@ def review_imported_tier_run(
             "safe_disable_confirmed": True,
             "reviewed_by": reviewer,
             "reviewed_at": reviewed_at,
+            "assurance": assurance,
         }
         files[root / path] = (
             json.dumps(artifact, sort_keys=True, indent=2) + "\n"
@@ -1655,12 +1950,13 @@ def review_imported_tier_run(
             "evidence": evidence,
             "reviewed_by": reviewer,
             "reviewed_at": reviewed_at,
+            "assurance": assurance,
             "evidence_sha256": _evidence_digests(evidence, files, root),
         }
         updated["write_capabilities"][feature] = {
             "status": "not_applicable",
             "evidence": evidence,
-            "rationale": "independently reviewed physical absence and safe disable",
+            "rationale": "reviewed physical absence and safe disable",
         }
         applied_capabilities.append(f"{feature}: absent")
 
@@ -1706,6 +2002,7 @@ def review_imported_tier_run(
         "reviewed_capabilities": applied_capabilities,
         "reviewed_scenarios": applied_scenarios,
         "attained_tier": _attained_tier(tier_result, revision, updated),
+        "attained_assurance": _attained_assurance(tier_result, revision, updated),
         "applied": apply,
     }
     if not apply:
@@ -1724,7 +2021,11 @@ def review_imported_tier_run(
             _atomic_write(path, content)
             created.append(path)
         errors, _ = validation.validate_matrix(
-            proposed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+            proposed,
+            matrix_path=matrix_path,
+            require_pass=False,
+            max_age_days=None,
+            allow_legacy_bronze_review=True,
         )
         if errors:
             raise HAAPIError(
@@ -1757,4 +2058,20 @@ def _attained_tier(
             and item.get("scope", {}).get("observed_route") == run.get("route")
         ),
         "unqualified",
+    )
+
+
+def _attained_assurance(
+    tier_result: dict[str, Any], revision: dict[str, Any], run: dict[str, Any]
+) -> str:
+    tier = _attained_tier(tier_result, revision, run)
+    return next(
+        (
+            item.get("assurance", {}).get(tier, "unknown")
+            for item in tier_result.get("tiers", [])
+            if item.get("scope", {}).get("revision_id") == revision.get("id")
+            and item.get("scope", {}).get("firmware") == run.get("firmware_version")
+            and item.get("scope", {}).get("observed_route") == run.get("route")
+        ),
+        "unknown",
     )

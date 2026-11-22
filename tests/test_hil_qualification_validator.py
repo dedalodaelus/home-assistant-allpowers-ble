@@ -170,6 +170,7 @@ def _result(
             "outcome": "confirmed_pass" if status == "pass" else "confirmed_fail",
             "reviewed_by": "independent-reviewer",
             "reviewed_at": captured_at.isoformat(),
+            "assurance": "independently_reviewed",
             "evidence_sha256": _digest_manifest(tmp_path, evidence_paths),
         },
     }
@@ -530,6 +531,7 @@ def _qualified_run(
                     {
                         "reviewed_by": "physical-review",
                         "reviewed_at": captured_at.isoformat(),
+                        "assurance": "independently_reviewed",
                         "evidence_sha256": _digest_manifest(
                             tmp_path,
                             [f"tests/hil/fixtures/{run_id}-absence.md"],
@@ -985,7 +987,7 @@ def test_feature_scope_rejects_unverified_provenance_and_crossed_capture_binding
     unreviewed = _qualified_run(tmp_path, "active_proxy", "unreviewed-pass", now)
     unreviewed["write_capabilities"]["ac_output"].pop("physical_review")
     assert any(
-        "requires an independent physical_review" in error
+        "requires a physical_review record with assurance" in error
         for error in errors_for(unreviewed)
     )
 
@@ -1005,7 +1007,8 @@ def test_default_validation_rejects_unreviewed_pass(
     )
 
     assert any(
-        "ac_output requires an independent physical_review" in error for error in errors
+        "ac_output requires a physical_review record with assurance" in error
+        for error in errors
     )
 
 
@@ -1028,7 +1031,8 @@ def test_default_validation_rejects_unreviewed_fail(
     )
 
     assert any(
-        "ac_output requires an independent physical_review" in error for error in errors
+        "ac_output requires a physical_review record with assurance" in error
+        for error in errors
     )
 
 
@@ -1065,7 +1069,8 @@ def test_default_validation_rejects_reviewed_fail_without_evidence(
         for error in errors
     )
     assert any(
-        "write capability ac_output physical_review must independently confirm" in error
+        "write capability ac_output physical_review must record valid assurance"
+        in error
         for error in errors
     )
 
@@ -1125,7 +1130,7 @@ def test_physical_review_binds_every_evidence_file(
     )
 
     assert any(
-        "physical_review must independently confirm" in error for error in errors
+        "physical_review must record valid assurance" in error for error in errors
     )
 
 

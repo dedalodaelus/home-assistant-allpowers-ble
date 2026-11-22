@@ -10,8 +10,8 @@ model and exact hardware revision; each run records firmware, observed BLE
 route, run and session IDs, timestamp, verified build fingerprints, evidence,
 and authorization provenance. `feature_presence` records `present`, `absent`,
 or `unknown` separately from each write capability's outcome. Every declared
-physical PASS requires a reviewer record, including during default structural
-validation. PASS/FAIL review records and reviewed absence bind a deterministic
+physical PASS requires a schema-validated review record with explicit assurance,
+including during default structural validation. PASS/FAIL review records and reviewed absence bind a deterministic
 `evidence_sha256` mapping from every referenced evidence path to its SHA-256.
 An absent feature requires a reviewer and physical evidence; it does not require
 a GATT operation for a control that is not present.
@@ -39,8 +39,9 @@ other features, routes, revisions, and firmware do not block it. A requested
 later reviewed FAIL supersedes an earlier PASS for the same feature/scope.
 Experimental HIL authorization and unknown provenance cannot qualify production
 results. PASS evidence must bind route, firmware, run, session, timestamp, and
-verified build fingerprint, and carry an independent physical-review record
-whose digest manifest matches every referenced evidence file. Malformed JSONL
+verified build fingerprint, and carry an explicit `operator_attested` or
+`independently_reviewed` assurance record whose digest manifest matches every
+referenced evidence file. Malformed JSONL
 capture lines invalidate strict qualification. A ZIP import remains inconclusive.
 The no-scope `--require-pass` command remains the broader release gate.
 
@@ -148,22 +149,26 @@ they do not by themselves qualify a physical scenario or write capability.
 
 The `report` and `export` commands described in [hil-cli.md](hil-cli.md) produce
 a local, privacy-filtered ZIP. An imported ZIP becomes an `inconclusive` run
-record until separately reviewed physical evidence supports each result. A
+record until a physical evidence review supports each result. A
 software step marked `pass`, a complete GATT API capture, or a verified route
 must not be used to mark a physical qualification result `pass`.
 
 Use `python -m scripts.hil review --run-id archive-... --interactive` for the
-offline Bronze review wizard. The reviewer must independently inspect real
-device evidence; wizard answers are not cryptographic attestation. It displays
+offline Bronze review wizard. Choose `operator_attested` to attest observations
+made by the HIL operator, or `independently_reviewed` to declare that the
+reviewer is a different person who inspected the evidence. The wizard never
+infers independence from a name; neither choice is cryptographic attestation.
+Each physical observation must be confirmed explicitly, and objective evidence
+gates still apply. It displays
 the verified imported scope and available public evidence, defaults claims to
 inconclusive, and permits PASS only when the strict evidence contract supports
-the claim. The schema-v1 audit copy is saved under the git-ignored
+the claim. The schema-v2 audit copy is saved under the git-ignored
 `hil-results/bronze-reviews/` directory. The wizard runs the existing reviewer
 in dry-run mode first and requires the exact `APPLY REVIEW` confirmation before
 updating the matrix. Its tier report is computed by the existing tier
 evaluator. Use `--tier silver` or `--tier gold` with `--interactive` for the
-offline higher-tier review. It separately records physical change,
-restoration, production-authorization, and reviewer-independence decisions, then
+offline higher-tier review. It separately records assurance, physical change,
+restoration, production-authorization, and applicable independence decisions, then
 dry-runs generated schema-v3 records through the validator and evaluator before
 the exact `APPLY REVIEW` confirmation. Generated capture rows omit raw frame
 bytes and bind each decision to the imported trace digest, validated frame digest and
@@ -171,7 +176,13 @@ sequence, hashed transaction identity and exact write/submission/confirmation
 sequence numbers, source step, action phase, route, and session generation.
 Raw transaction IDs and frame bytes are omitted. Incomplete or mismatched proof
 remains inconclusive, and experimental HIL writes cannot qualify a production
-capability. Silver requires reviewed on and off transitions with safe
+capability. Bronze schema-v1 review files without captured assurance stay
+unknown and cannot qualify. Legacy higher-tier schema-v1 records with a recorded
+positive independence declaration remain independent; missing or negative
+declarations stay unknown. The imported ZIP and its verified members remain unchanged.
+Re-attestation appends review provenance to the run while retaining earlier
+review records. The tier output reports assurance separately for Bronze,
+Silver, and Gold. Silver requires reviewed on and off transitions with safe
 restoration; Gold adds declared setting and restoration evidence. The offline
 importer blocks Platinum because its public archive does
 not preserve the scope-bound, uninterrupted 86,400-second soak. The legacy

@@ -117,7 +117,24 @@ def _latest_run(
     )[0]
 
 
-def _presence(runs: list[dict[str, Any]], feature: str) -> str:
+def _assurance_label(items: list[dict[str, Any]]) -> str:
+    labels = set()
+    for item in items:
+        review = item.get("physical_review")
+        assurance = (
+            review.get("assurance")
+            if isinstance(review, dict)
+            else item.get("assurance")
+        )
+        if assurance not in {"operator_attested", "independently_reviewed"}:
+            return "unknown"
+        labels.add(assurance)
+    if len(labels) == 1:
+        return next(iter(labels))
+    return "mixed" if labels else "unknown"
+
+
+def _presence_item(runs: list[dict[str, Any]], feature: str) -> dict[str, Any]:
     entries = []
     for run in runs:
         presence = run.get("feature_presence")
@@ -129,14 +146,44 @@ def _presence(runs: list[dict[str, Any]], feature: str) -> str:
         }:
             entries.append((_stamp(run), item["status"], item))
     if not entries:
-        return "unknown"
-    _, status, item = max(
+        return {}
+    _, _, item = max(
         entries,
         key=lambda entry: (
             entry[0],
             {"present": 0, "absent": 1, "unknown": 2}[entry[1]],
         ),
     )
+    return item
+
+
+def _presence(runs: list[dict[str, Any]], feature: str) -> str:
+    entries = []
+    for run in runs:
+        presence = run.get("feature_presence")
+        item = presence.get(feature) if isinstance(presence, dict) else None
+        if isinstance(item, dict) and item.get("status") in {
+            "present",
+            "absent",
+            "unknown",
+        }:
+            entries.append((_stamp(run), item["status"], item, run))
+    if not entries:
+        return "unknown"
+    _, status, item, run = max(
+        entries,
+        key=lambda entry: (
+            entry[0],
+            {"present": 0, "absent": 1, "unknown": 2}[entry[1]],
+        ),
+    )
+    if status == "present" and hil_validation._archive_backed_run(run):
+        if (
+            item.get("assurance") not in {"operator_attested", "independently_reviewed"}
+            or not isinstance(item.get("reviewed_by"), str)
+            or not item["reviewed_by"].strip()
+        ):
+            return "unknown"
     if status == "absent":
         try:
             reviewed = datetime.fromisoformat(
@@ -149,6 +196,8 @@ def _presence(runs: list[dict[str, Any]], feature: str) -> str:
         actual_digests = hil_validation._evidence_digests(evidence)
         if (
             not item.get("reviewed_by")
+            or item.get("assurance")
+            not in {"operator_attested", "independently_reviewed"}
             or reviewed.tzinfo is None
             or not isinstance(evidence, list)
             or not evidence
@@ -363,6 +412,12 @@ def _review_record(item: dict[str, Any], outcome: str) -> bool:
     return bool(
         isinstance(review.get("reviewed_by"), str)
         and review["reviewed_by"].strip()
+        and review.get("assurance") in {"operator_attested", "independently_reviewed"}
+        and (
+            "reviewer_independent_from_operator" not in review
+            or review.get("reviewer_independent_from_operator")
+            is (review.get("assurance") == "independently_reviewed")
+        )
         and reviewed_at.tzinfo is not None
         and actual_digests is not None
         and review.get("evidence_sha256") == actual_digests
@@ -421,8 +476,8 @@ def _bronze_proof(
         ):
             return None
         return {**artifact, "evidence": item["evidence"]}
-    # An independently reviewed assertion cannot substitute for a real active
-    # protocol probe. Require the existing route/session/build-bound GATT row.
+    # A human attestation cannot substitute for a real active protocol probe.
+    # Require the existing route/session/build-bound GATT row.
     capture = item.get("capture_evidence")
     if capture not in item["evidence"] or not hil_validation._has_bound_bronze_probe(
         [capture],
@@ -696,17 +751,17 @@ def _tier_for_scope(
     links: set[str] = set()
     qualified: list[str] = []
     exclusions: list[str] = []
+    bronze_reviews: list[dict[str, Any]] = []
 
     bronze = True
     for requirement in ("identity", "protocol_probe", "fresh_telemetry"):
-        proof = next(
-            (
-                _bronze_proof(run, revision, requirement)
-                for run in sorted(runs, key=_stamp, reverse=True)
-                if _bronze_proof(run, revision, requirement)
-            ),
-            {},
-        )
+        proof: dict[str, Any] = {}
+        for candidate in sorted(runs, key=_stamp, reverse=True):
+            candidate_proof = _bronze_proof(candidate, revision, requirement)
+            if candidate_proof:
+                proof = candidate_proof
+                bronze_reviews.append(_proof(candidate, requirement))
+                break
         if not proof:
             bronze = False
             reasons.append(f"Bronze requires reviewed {requirement} evidence")
@@ -757,7 +812,10 @@ def _tier_for_scope(
             qualified,
             exclusions,
             feature_presence,
+            assurance={"bronze": "unknown", "silver": "unknown", "gold": "unknown"},
         )
+
+    bronze_assurance = _assurance_label(bronze_reviews)
 
     reconnect_run = _latest_run(runs, "scenarios", "reconnect_failover") or {}
     reconnect = _result(reconnect_run, "scenarios", "reconnect_failover")
@@ -815,7 +873,28 @@ def _tier_for_scope(
             qualified,
             exclusions,
             feature_presence,
+            assurance={
+                "bronze": bronze_assurance,
+                "silver": "unknown",
+                "gold": "unknown",
+            },
         )
+
+    silver_reviews = [*bronze_reviews, reconnect]
+    silver_reviews.extend(
+        _presence_item(runs, feature)
+        for feature in BASIC_OUTPUTS
+        if feature_presence[feature] in {"present", "absent"}
+    )
+    silver_reviews.extend(
+        latest_features[feature]
+        for feature in BASIC_OUTPUTS
+        if feature_presence[feature] == "present"
+        and _feature_pass(
+            latest_features[feature], latest_feature_runs[feature], revision, feature
+        )
+    )
+    silver_assurance = _assurance_label(silver_reviews)
 
     gold = True
     for feature in ALL_FEATURES:
@@ -866,7 +945,39 @@ def _tier_for_scope(
             qualified,
             exclusions,
             feature_presence,
+            assurance={
+                "bronze": bronze_assurance,
+                "silver": silver_assurance,
+                "gold": "unknown",
+            },
         )
+
+    gold_reviews = list(silver_reviews)
+    gold_reviews.extend(
+        _presence_item(runs, feature)
+        for feature in ALL_FEATURES
+        if feature_presence[feature] in {"present", "absent"}
+    )
+    gold_reviews.extend(
+        latest_features[feature]
+        for feature in ALL_FEATURES
+        if _feature_pass(
+            latest_features[feature], latest_feature_runs[feature], revision, feature
+        )
+    )
+    gold_reviews.extend(
+        _result(_latest_run(runs, "scenarios", scenario) or {}, "scenarios", scenario)
+        for scenario in GOLD_SCENARIOS
+    )
+    feature_contracts = revision.get("feature_contract")
+    gold_reviews.extend(
+        feature_contracts[feature]
+        for feature in ALL_FEATURES[3:]
+        if feature_presence[feature] == "unknown"
+        and _contract_excluded(revision, feature)
+        and isinstance(feature_contracts, dict)
+    )
+    gold_assurance = _assurance_label(gold_reviews)
 
     soak = _latest_outcome(runs, "scenarios", "soak_24h")
     soak_run = _latest_run(runs, "scenarios", "soak_24h") or {}
@@ -874,8 +985,10 @@ def _tier_for_scope(
     if platinum:
         links.update(item for item in soak.get("evidence", []) if isinstance(item, str))
         tier = "platinum"
+        platinum_assurance = _assurance_label([*gold_reviews, soak])
     else:
         tier = "gold"
+        platinum_assurance = "unknown"
         reasons.append(
             "Platinum requires a reviewed, uninterrupted 86,400-second soak with no resume"
         )
@@ -889,6 +1002,12 @@ def _tier_for_scope(
         qualified,
         exclusions,
         feature_presence,
+        assurance={
+            "bronze": bronze_assurance,
+            "silver": silver_assurance,
+            "gold": gold_assurance,
+            "platinum": platinum_assurance,
+        },
     )
 
 
@@ -902,6 +1021,7 @@ def _report(
     qualified: list[str],
     exclusions: list[str],
     presence: dict[str, str],
+    assurance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "tier": tier,
@@ -916,6 +1036,13 @@ def _report(
         "qualified_features": sorted(set(qualified)),
         "exclusions": sorted(set(exclusions)),
         "feature_presence": presence,
+        "assurance": assurance
+        or {
+            "bronze": "unknown",
+            "silver": "unknown",
+            "gold": "unknown",
+            "platinum": "unknown",
+        },
         "offline_regression_gate": OFFLINE_REGRESSION_GATE,
         "unmet_requirements": sorted(set(reasons)) if tier != "platinum" else [],
     }
