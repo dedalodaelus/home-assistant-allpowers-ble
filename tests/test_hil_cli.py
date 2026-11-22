@@ -458,24 +458,42 @@ def test_onboard_dispatches_existing_silver_and_gold_tier_plan(
     assert required_steps <= received["steps"]
 
 
-def test_onboard_requires_clean_topic_branch_before_run(
+def test_onboard_acquisition_does_not_require_clean_topic_branch(
     monkeypatch, tmp_path, allpowers_registry, capsys
 ):
     fake = FakeHA(allpowers_registry)
     monkeypatch.setattr(cli, "HAClient", lambda *args, **kwargs: fake)
-    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: None)
+    monkeypatch.setattr(
+        cli,
+        "_current_feature_branch",
+        lambda _root: pytest.fail(
+            "acquisition must not require repository eligibility"
+        ),
+    )
     prompts = []
 
     def answer(prompt):
         prompts.append(prompt)
         if prompt == "Desired tier: ":
             return "1"
+        if prompt == "Type RUN after reviewing the plan to continue: ":
+            return "RUN"
+        if prompt == "Review and create a privacy-safe evidence ZIP now? [y/N]: ":
+            return "yes"
+        if (
+            prompt
+            == "Type EXPORT after reviewing the ZIP contents to create it locally: "
+        ):
+            return "EXPORT"
         pytest.fail(f"onboarding prompted beyond branch preflight: {prompt}")
 
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(builtins, "input", answer)
     monkeypatch.setenv("HA_HIL_TOKEN", "PRIVATE_TOKEN")
-    output_root = tmp_path / "onboard-wrong-branch"
+    monkeypatch.setattr(cli, "assess_run_gate", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_onboard_import_review", lambda *_args: True)
+    monkeypatch.setattr(cli, "_execute_tier_suite", lambda *_args: 0)
+    output_root = tmp_path / "onboard-no-branch-gate"
 
     result = cli.main(
         [
@@ -487,14 +505,309 @@ def test_onboard_requires_clean_topic_branch_before_run(
         ]
     )
 
-    assert result == 2
-    assert prompts == ["Desired tier: "]
-    assert not output_root.exists()
+    assert result == 0
+    assert "Desired tier: " in prompts
+    assert "Type RUN after reviewing the plan to continue: " in prompts
+    assert output_root.exists()
     output = capsys.readouterr().out
-    assert "clean feature branch" in output
-    assert "No tests were started" in output
-    assert "git switch -c feat/hil-qualification origin/devel" in output
+    assert "Repository import and PR handoff require a clean topic branch" in output
     assert not any(call[0] == "service" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("branch", "dirty_path", "expected"),
+    [
+        ("devel", None, None),
+        ("main", None, None),
+        ("feat/test", None, "feat/test"),
+        ("feat/test", "unrelated.txt", None),
+        ("feat/test", "tests/hil/qualification_matrix.json", None),
+    ],
+)
+def test_import_branch_eligibility_uses_real_git_state(
+    tmp_path, branch, dirty_path, expected
+):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", branch, str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    if dirty_path is not None:
+        changed = repo / dirty_path
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("uncommitted evidence change\n", encoding="utf-8")
+
+    assert cli._current_feature_branch(repo) == expected
+
+
+def test_unsafe_onboard_import_prints_offline_resume_without_writing(
+    monkeypatch, tmp_path, capsys
+):
+    from scripts.hil import importer
+
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    archive = tmp_path / "private results" / "hil-evidence.zip"
+    archive.parent.mkdir()
+    archive.write_bytes(b"public archive")
+    original_archive = archive.read_bytes()
+    matrix = repo / "tests/hil/qualification_matrix.json"
+    proposal = {"run_id": "archive-" + "a" * 64}
+    monkeypatch.setattr(importer, "_build_proposal", lambda *_args, **_kwargs: proposal)
+    monkeypatch.setattr(importer, "_print_preview", lambda _proposal: None)
+    monkeypatch.setattr(
+        importer,
+        "_apply_proposal",
+        lambda _proposal: pytest.fail("unsafe checkout must not receive import writes"),
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "yes")
+
+    assert not cli._onboard_import_review(
+        archive,
+        tmp_path / "run",
+        "silver",
+        repo_root=repo,
+        matrix_path=matrix,
+    )
+
+    output = capsys.readouterr().out
+    assert "The evidence ZIP is preserved" in output
+    assert "worktree add -b feat/hil-evidence-aaaaaaaa" in output
+    assert "python -m scripts.hil import" in output
+    assert "--dry-run" in output and "--apply" in output
+    assert "--run-id archive-" + "a" * 64 in output
+    assert "--tier silver" in output
+    assert archive.read_bytes() == original_archive
+
+
+def test_standalone_import_apply_requires_safe_topic_branch(
+    monkeypatch, tmp_path, capsys
+):
+    from scripts.hil import importer
+
+    archive = tmp_path / "evidence.zip"
+    archive.write_bytes(b"public archive")
+    proposal = {"run_id": "archive-" + "b" * 64}
+    monkeypatch.setattr(importer, "_build_proposal", lambda *_args, **_kwargs: proposal)
+    monkeypatch.setattr(importer, "_print_preview", lambda _proposal: None)
+    monkeypatch.setattr(
+        importer,
+        "_apply_proposal",
+        lambda _proposal: pytest.fail("unsafe checkout must not receive import writes"),
+    )
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: None)
+
+    assert cli.main(["import", str(archive), "--apply"]) == 2
+
+    output = capsys.readouterr().out
+    assert "Cannot apply import safely from this checkout" in output
+    assert "worktree add -b feat/hil-evidence-bbbbbbbb" in output
+    assert "--dry-run" in output and "--apply" in output
+    assert archive.exists()
+
+
+def test_standalone_review_apply_requires_safe_topic_branch(monkeypatch, capsys):
+    from scripts.hil import review
+
+    monkeypatch.setattr(cli, "_review_evidence_paths", lambda *_args: ["evidence.json"])
+    monkeypatch.setattr(cli, "_review_checkout_safe", lambda *_args: False)
+    monkeypatch.setattr(
+        review,
+        "review_imported_run",
+        lambda *_args, **_kwargs: pytest.fail("unsafe checkout must not apply review"),
+    )
+
+    assert (
+        cli.main(
+            [
+                "review",
+                "--run-id",
+                "archive-" + "c" * 64,
+                "--review-file",
+                "review.json",
+                "--apply",
+            ]
+        )
+        == 2
+    )
+    assert "Cannot apply review safely from this checkout" in capsys.readouterr().out
+
+
+def test_review_checkout_allows_only_scoped_hil_changes(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    matrix = repo / "tests/hil/qualification_matrix.json"
+    evidence = repo / "tests/hil/fixtures/r600/runs/archive-a/report.md"
+    unrelated = repo / "notes.txt"
+    for path in (matrix, evidence, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize review checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "-c", "feat/review"], check=True)
+
+    assert cli._review_checkout_safe(
+        repo, matrix, ["tests/hil/fixtures/r600/runs/archive-a/report.md"]
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "devel"], check=True)
+    assert not cli._review_checkout_safe(
+        repo, matrix, ["tests/hil/fixtures/r600/runs/archive-a/report.md"]
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "feat/review"], check=True)
+    unrelated.write_text("unrelated edit\n", encoding="utf-8")
+    assert not cli._review_checkout_safe(
+        repo, matrix, ["tests/hil/fixtures/r600/runs/archive-a/report.md"]
+    )
+    unrelated.write_text("base\n", encoding="utf-8")
+    matrix.write_text("reviewed matrix\n", encoding="utf-8")
+    evidence.write_text("verified evidence\n", encoding="utf-8")
+    assert cli._review_checkout_safe(
+        repo, matrix, ["tests/hil/fixtures/r600/runs/archive-a/report.md"]
+    )
+
+
+def test_review_checkout_only_allows_target_run_evidence(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    matrix_path = repo / "tests/hil/qualification_matrix.json"
+    target_run = "archive-" + "a" * 64
+    older_run = "archive-" + "b" * 64
+    target_evidence = "tests/hil/fixtures/r600-hw03/runs/" + target_run + "/report.md"
+    target_claim = "tests/hil/fixtures/r600-hw03/runs/" + target_run + "/claim.json"
+    older_evidence = "tests/hil/fixtures/r600-hw03/runs/" + older_run + "/report.md"
+    matrix_path.parent.mkdir(parents=True)
+    matrix = {
+        "schema_version": 3,
+        "revisions": [
+            {
+                "id": "r600-hw03",
+                "runs": [
+                    {
+                        "run_id": older_run,
+                        "evidence": [older_evidence],
+                    },
+                    {
+                        "run_id": target_run,
+                        "evidence": [target_evidence],
+                        "bronze_evidence": {"identity": {"evidence": [target_claim]}},
+                    },
+                ],
+            }
+        ],
+    }
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    for relative in (target_evidence, target_claim, older_evidence):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize review checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "-c", "feat/review"], check=True)
+
+    allowed = cli._review_evidence_paths(matrix_path, target_run)
+    assert allowed == [target_evidence, target_claim]
+    (repo / target_evidence).write_text("target evidence changed\n", encoding="utf-8")
+    matrix_path.write_text(json.dumps(matrix) + "\n", encoding="utf-8")
+    assert cli._review_checkout_safe(repo, matrix_path, allowed)
+
+    (repo / target_evidence).write_text("base\n", encoding="utf-8")
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    (repo / older_evidence).write_text("older evidence changed\n", encoding="utf-8")
+    assert not cli._review_checkout_safe(repo, matrix_path, allowed)
+
+    matrix["revisions"][0]["runs"][1]["evidence"] = ["operator-notes.txt"]
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    assert cli._review_evidence_paths(matrix_path, target_run) is None
+
+
+def test_review_checkout_rejects_staged_rename_from_unrelated_path(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    matrix = repo / "tests/hil/qualification_matrix.json"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text("{}\n", encoding="utf-8")
+    target_relative = "tests/hil/fixtures/r600/runs/a/report.md"
+    unrelated_source = repo / f"ab/{target_relative}"
+    unrelated_source.parent.mkdir(parents=True)
+    unrelated_source.write_text("unrelated tracked content\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize rename checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "-c", "feat/review"], check=True)
+    (repo / target_relative).parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "mv",
+            str(unrelated_source),
+            str(repo / target_relative),
+        ],
+        check=True,
+    )
+    rename_status = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--cached", "--name-status"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert rename_status.startswith("R")
+
+    assert not cli._review_checkout_safe(repo, matrix, [target_relative])
 
 
 def test_candidate_control_preflight_does_not_require_production_permission():
