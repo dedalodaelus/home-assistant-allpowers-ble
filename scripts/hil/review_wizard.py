@@ -474,6 +474,7 @@ def _interactive_higher_tier_review(
     }
     steps = execution.get("steps", []) if isinstance(execution, dict) else []
     absence_candidates = []
+    exclusion_candidates = []
     inventory_preflight: dict[str, Any] = {}
     try:
         session = json.loads(members["session.json"])
@@ -529,6 +530,70 @@ def _interactive_higher_tier_review(
                 and "runtime profile substantiates physical absence"
                 in step.get("reasons", [])
             ]
+            runtime = session_data.get("runtime_capabilities", {})
+            runtime = runtime if isinstance(runtime, dict) else {}
+            from .guided import capability_identity_matches_session
+
+            runtime_options = runtime.get("capabilities", {})
+            runtime_options = (
+                runtime_options if isinstance(runtime_options, dict) else {}
+            )
+            runtime_features = runtime.get("features", {})
+            car_charger_facts = (
+                runtime_features.get("car_charger", {})
+                if isinstance(runtime_features, dict)
+                else {}
+            )
+            controls = session_data.get("controls", {})
+            car_charger_control = (
+                controls.get("car_charger", {}) if isinstance(controls, dict) else {}
+            )
+            plan_steps = test_plan.get("steps", [])
+            execution_by_step = {
+                item.get("step_id"): item
+                for item in steps
+                if isinstance(item, dict) and isinstance(item.get("step_id"), str)
+            }
+            for plan_step in plan_steps:
+                execution_step = (
+                    execution_by_step.get(plan_step.get("id"))
+                    if isinstance(plan_step, dict)
+                    else None
+                )
+                if (
+                    tier == "gold"
+                    and isinstance(plan_step, dict)
+                    and plan_step.get("id") == "car_charger_reversal"
+                    and plan_step.get("feature") == "car_charger"
+                    and plan_step.get("action") == "exclude"
+                    and plan_step.get("eligibility") == "review_required"
+                    and plan_step.get("physical_presence") == "unknown"
+                    and plan_step.get("safe_disable_proof")
+                    == {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    }
+                    and runtime_options.get("car_charger_enabled") is False
+                    and runtime.get("schema_version") == 2
+                    and runtime.get("available", True) is True
+                    and runtime.get("verified") is True
+                    and runtime.get("identity_conflicted") is False
+                    and runtime.get("connected") is True
+                    and runtime.get("settings_fresh") is True
+                    and runtime.get("pending_transaction") is False
+                    and type(runtime.get("session_generation")) is int
+                    and runtime["session_generation"] >= 1
+                    and capability_identity_matches_session(runtime, session_data)
+                    and car_charger_facts.get("physical_presence") == "unknown"
+                    and car_charger_facts.get("runtime_ready") is True
+                    and car_charger_control.get("available") is False
+                    and car_charger_control.get("availability_verified") is True
+                    and isinstance(execution_step, dict)
+                    and execution_step.get("outcome") == "pending_review"
+                    and execution_step.get("reason")
+                    == "optional control is safely disabled; pending explicit reviewed exclusion"
+                ):
+                    exclusion_candidates.append(plan_step)
     except KeyError, TypeError, ValueError, UnicodeError:
         absence_candidates = []
     execution_by_step = {
@@ -901,8 +966,14 @@ def _interactive_higher_tier_review(
     decisions = []
     scenario_decisions = []
     absence_decisions = []
+    exclusion_decisions = []
     assurance = "unknown"
-    if reviewable or reconnect_candidate is not None or absence_candidates:
+    if (
+        reviewable
+        or reconnect_candidate is not None
+        or absence_candidates
+        or exclusion_candidates
+    ):
         if expected_assurance is None:
             print("Assurance: [1] operator_attested  [2] independently_reviewed")
             assurance = {
@@ -1091,6 +1162,27 @@ def _interactive_higher_tier_review(
                     "safe_disable_confirmed": safe_disable_confirmed,
                 }
             )
+        for candidate in exclusion_candidates:
+            print(
+                "car_charger is not physically absent: the verified runtime option is "
+                "OFF and its normal Home Assistant control is unavailable. It will be "
+                "reported excluded/unverified, not physically tested or supported."
+            )
+            scope_confirmed = (
+                input(
+                    "  Confirm this optional feature exclusion and its limits? [no/yes] (default no): "
+                )
+                .strip()
+                .lower()
+                == "yes"
+            )
+            exclusion_decisions.append(
+                {
+                    "feature": "car_charger",
+                    "source_step_id": candidate["id"],
+                    "scope_confirmed": scope_confirmed,
+                }
+            )
         audit_dir = repo_root / "hil-results" / "tier-reviews"
         _reject_symlink_components(audit_dir, repo_root)
         audit_dir.mkdir(parents=True, exist_ok=True)
@@ -1098,7 +1190,7 @@ def _interactive_higher_tier_review(
         audit_path = audit_dir / f"{run['run_id']}-{tier}-{stamp}.json"
         _reject_symlink_components(audit_path, repo_root)
         audit = {
-            "schema_version": 2,
+            "schema_version": 3 if exclusion_candidates else 2,
             "tier": tier,
             "archive_sha256": run["archive_sha256"],
             "run_id": run["run_id"],
@@ -1109,6 +1201,7 @@ def _interactive_higher_tier_review(
             "transitions": decisions,
             "scenarios": scenario_decisions,
             "absences": absence_decisions,
+            "exclusions": exclusion_decisions,
         }
         try:
             with audit_path.open("x", encoding="utf-8") as stream:

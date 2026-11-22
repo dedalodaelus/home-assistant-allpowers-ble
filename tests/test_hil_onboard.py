@@ -254,6 +254,86 @@ def test_complete_bronze_run_is_eligible_for_review(tmp_path):
     )
 
 
+def test_gold_disabled_optional_control_is_pending_review_not_na(tmp_path):
+    private, session, execution, _artifact, status_exchange = _run(tmp_path)
+    session["test_plan"]["requested_tier"] = "gold"
+    session["runtime_capabilities"]["capabilities"] = {"car_charger_enabled": False}
+    session["runtime_capabilities"].update(
+        schema_version=2,
+        verified=True,
+        identity_conflicted=False,
+        model="R600",
+        hardware_revision="0.3",
+        firmware_revision="1.1",
+        connected=True,
+        settings_fresh=True,
+        pending_transaction=False,
+        session_generation=1,
+    )
+    session["runtime_capabilities"]["features"]["car_charger"] = {
+        "physical_presence": "unknown",
+        "runtime_ready": True,
+    }
+    session["controls"] = {
+        "car_charger": {"available": False, "availability_verified": True}
+    }
+    for field in ("model", "hardware_version", "firmware_version"):
+        session["device"][field]["source"] = "ha_device_registry"
+    session["test_plan"]["steps"].append(
+        {
+            "id": "car_charger_reversal",
+            "feature": "car_charger",
+            "action": "exclude",
+            "eligibility": "review_required",
+            "safe_disable_proof": {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            },
+            "reasons": [
+                "optional control is disabled by policy and its normal HA control is unavailable; explicit review is required"
+            ],
+        }
+    )
+    execution["steps"].append(
+        {
+            "step_id": "car_charger_reversal",
+            "outcome": "pending_review",
+            "reason": "optional control is safely disabled; pending explicit reviewed exclusion",
+            "safe_disable_proof": {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            },
+        }
+    )
+    _save(private, session, execution)
+
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="gold",
+        status_exchange=status_exchange,
+    )
+    assert not any(item["step_id"] == "car_charger_reversal" for item in blockers)
+    row = next(
+        item for item in execution["steps"] if item["step_id"] == "car_charger_reversal"
+    )
+    assert row["outcome"] == "pending_review"
+
+    session["runtime_capabilities"]["capabilities"]["car_charger_enabled"] = True
+    _save(private, session, execution)
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="gold",
+        status_exchange=status_exchange,
+    )
+    assert any(
+        item["step_id"] == "car_charger_reversal"
+        and item["outcome"] == "invalid_exclusion"
+        for item in blockers
+    )
+
+
 def _silver_gate_run(tmp_path, *, absent_feature=None, claimed_presence="absent"):
     private, session, execution, artifact, status_exchange = _run(tmp_path)
     tier_steps = [

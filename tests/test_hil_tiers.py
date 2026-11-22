@@ -595,6 +595,8 @@ def _validate_and_evaluate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     matrix: dict[str, Any],
+    *,
+    check_archive_provenance: bool = True,
 ) -> tuple[list[str], dict[str, Any]]:
     monkeypatch.setattr(validator, "ROOT", tmp_path)
     matrix_path = tmp_path / "matrix.json"
@@ -604,6 +606,7 @@ def _validate_and_evaluate(
         matrix_path=matrix_path,
         require_pass=False,
         max_age_days=None,
+        check_archive_provenance=check_archive_provenance,
     )
     return errors, evaluate_tiers(matrix)
 
@@ -888,9 +891,106 @@ def _exclude_feature_contract(
     assurance: str = "independently_reviewed",
 ) -> None:
     revision = matrix["revisions"][0]
+    run = revision["runs"][0]
     rationale = (
         "This optional control is documented as unavailable and safely disabled."
     )
+    session = _write_json(
+        root,
+        f"{run['run_id']}-session",
+        {
+            "data": {
+                "runtime_capabilities": {
+                    "schema_version": 2,
+                    "model": "R600",
+                    "hardware_revision": revision["hardware_version"],
+                    "firmware_revision": run["firmware_version"],
+                    "verified": True,
+                    "identity_conflicted": False,
+                    "connected": True,
+                    "settings_fresh": True,
+                    "pending_transaction": False,
+                    "session_generation": 1,
+                    "capabilities": {"car_charger_enabled": False},
+                    "features": {
+                        "car_charger": {
+                            "physical_presence": "unknown",
+                            "runtime_ready": True,
+                        }
+                    },
+                },
+                "device": {
+                    "model": {
+                        "value": "R600",
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                    "hardware_version": {
+                        "value": revision["hardware_version"],
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                    "firmware_version": {
+                        "value": run["firmware_version"],
+                        "verified": True,
+                        "source": "ha_device_registry",
+                    },
+                },
+                "controls": {
+                    "car_charger": {
+                        "available": False,
+                        "availability_verified": True,
+                    }
+                },
+                "test_plan": {
+                    "device": {
+                        "model": "R600",
+                        "hardware_revision": revision["hardware_version"],
+                        "firmware_revision": run["firmware_version"],
+                    },
+                    "steps": [
+                        {
+                            "id": "car_charger_reversal",
+                            "action": "exclude",
+                            "eligibility": "review_required",
+                            "physical_presence": "unknown",
+                            "safe_disable_proof": {
+                                "runtime_option_enabled": False,
+                                "normal_control_available": False,
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    )
+    run["evidence"].append(session)
+    source_session_sha256 = _digest(root, [session])[session]
+    execution = _write_json(
+        root,
+        f"{run['run_id']}-tier-execution",
+        {
+            "steps": [
+                {
+                    "step_id": "car_charger_reversal",
+                    "outcome": "pending_review",
+                    "reason": "optional control is safely disabled; pending explicit reviewed exclusion",
+                    "safe_disable_proof": {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    },
+                }
+            ]
+        },
+    )
+    run["evidence"].append(execution)
+    source_execution_sha256 = _digest(root, [execution])[execution]
+    manifest = _write_json(
+        root,
+        f"{run['run_id']}-manifest",
+        {"run_id": "source-tier-run"},
+    )
+    run["evidence"].append(manifest)
     evidence = _write_json(
         root,
         f"contract-{feature}",
@@ -902,9 +1002,19 @@ def _exclude_feature_contract(
             "feature": feature,
             "safely_disabled": safe,
             "rationale": rationale,
+            "runtime_option_enabled": False,
+            "normal_control_available": False,
+            "source_run_id": run["run_id"],
+            "source_archive_sha256": None,
+            "source_session": session,
+            "source_session_sha256": source_session_sha256,
+            "source_execution": execution,
+            "source_execution_sha256": source_execution_sha256,
         },
     )
     contract = _reviewed(root, "pass", [evidence])
+    contract["evidence"] = [evidence]
+    contract["physical_review"]["evidence_sha256"] = _digest(root, contract["evidence"])
     contract["physical_review"]["assurance"] = assurance
     if assurance == "operator_attested":
         contract["physical_review"]["reviewed_by"] = "device operator"
@@ -926,7 +1036,9 @@ def test_gold_accepts_only_reviewed_revision_contract_exclusions(
 ):
     matrix = _matrix_fixture(tmp_path, "gold")
     _exclude_feature_contract(matrix, tmp_path, "car_charger")
-    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    errors, result = _validate_and_evaluate(
+        monkeypatch, tmp_path, matrix, check_archive_provenance=False
+    )
     assert errors == []
     assert result["tiers"][0]["tier"] == "gold"
     assert any("car_charger" in item for item in result["tiers"][0]["exclusions"])
@@ -939,12 +1051,36 @@ def test_gold_assurance_includes_operator_attested_feature_contract_exclusion(
     _exclude_feature_contract(
         matrix, tmp_path, "car_charger", assurance="operator_attested"
     )
-    errors, result = _validate_and_evaluate(monkeypatch, tmp_path, matrix)
+    errors, result = _validate_and_evaluate(
+        monkeypatch, tmp_path, matrix, check_archive_provenance=False
+    )
     assert errors == []
     tier = result["tiers"][0]
     assert tier["tier"] == "gold"
     assert tier["assurance"]["gold"] == "mixed"
     assert any("car_charger" in item for item in tier["exclusions"])
+
+
+def test_gold_rejects_feature_contract_when_safe_disable_source_digest_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    matrix = _matrix_fixture(tmp_path, "gold")
+    _exclude_feature_contract(matrix, tmp_path, "car_charger")
+    artifact_path = (
+        tmp_path
+        / matrix["revisions"][0]["feature_contract"]["car_charger"]["evidence"][0]
+    )
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    source_path = tmp_path / artifact["source_session"]
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    source["data"]["controls"]["car_charger"]["available"] = True
+    source_path.write_text(json.dumps(source), encoding="utf-8")
+
+    errors, result = _validate_and_evaluate(
+        monkeypatch, tmp_path, matrix, check_archive_provenance=False
+    )
+    assert any("feature_contract" in error for error in errors)
+    assert result["tiers"][0]["tier"] == "silver"
 
 
 def test_legacy_reviewed_absence_is_loadable_only_for_explicit_tier_rereview(

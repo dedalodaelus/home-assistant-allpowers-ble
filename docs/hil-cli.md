@@ -270,6 +270,14 @@ observations. Platinum is blocked in offline
 review because the public archive does not preserve the required scope-bound,
 continuous 24-hour soak evidence.
 
+For Gold, an R600 `car_charger` step can be offered as a reviewable exclusion
+only when the acquired session proves `car_charger_enabled` is false and the
+normal Home Assistant control is unavailable. The reviewer must explicitly
+confirm the scope. The matrix and tier output label the feature
+`excluded/unverified`; this does not assert physical absence, test the setting,
+or establish independent switching of the 12 V socket. An enabled option or an
+available control keeps the normal Gold setting test mandatory.
+
 After a fully reviewed and validated Bronze import, `onboard` writes a concrete
 `pr.md` beside the private run record and prints shell-quoted commands that stage
 only the qualification matrix and the target run's verified public and review

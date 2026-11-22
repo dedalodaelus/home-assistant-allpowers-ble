@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
@@ -274,7 +275,7 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
     if len(item.get("evidence", [])) != 1 or not _review_record(item, "confirmed_pass"):
         return False
     artifact = _read_artifact(item["evidence"][0])
-    return bool(
+    valid = bool(
         artifact
         and artifact.get("artifact_type") == "feature_contract"
         and artifact.get("revision_id") == revision.get("id")
@@ -283,6 +284,117 @@ def _contract_excluded(revision: dict[str, Any], feature: str) -> bool:
         and artifact.get("feature") == feature
         and artifact.get("safely_disabled") is True
         and artifact.get("rationale") == item["rationale"]
+    )
+    if not valid or artifact is None:
+        return False
+    source_run = next(
+        (
+            run
+            for run in revision.get("runs", [])
+            if isinstance(run, dict)
+            and run.get("run_id") == artifact.get("source_run_id")
+            and (
+                run.get("archive_sha256") == artifact.get("source_archive_sha256")
+                or (
+                    not str(run.get("run_id", "")).startswith("archive-")
+                    and artifact.get("source_archive_sha256") is None
+                )
+            )
+        ),
+        None,
+    )
+    session_path = artifact.get("source_session")
+    execution_path = artifact.get("source_execution")
+    if (
+        source_run is None
+        or not isinstance(session_path, str)
+        or session_path not in source_run.get("evidence", [])
+        or not isinstance(execution_path, str)
+        or execution_path not in source_run.get("evidence", [])
+        or artifact.get("runtime_option_enabled") is not False
+        or artifact.get("normal_control_available") is not False
+        or not isinstance(artifact.get("source_session_sha256"), str)
+        or not isinstance(artifact.get("source_execution_sha256"), str)
+    ):
+        return False
+    try:
+        content = (hil_validation.ROOT / session_path).read_bytes()
+        session = json.loads(content)
+        execution_content = (hil_validation.ROOT / execution_path).read_bytes()
+        execution = json.loads(execution_content)
+    except OSError, UnicodeError, ValueError:
+        return False
+    data = session.get("data", {}) if isinstance(session, dict) else {}
+    runtime = data.get("runtime_capabilities", {}) if isinstance(data, dict) else {}
+    from .guided import capability_identity_matches_session
+
+    flags = runtime.get("capabilities", {}) if isinstance(runtime, dict) else {}
+    runtime_features = runtime.get("features", {}) if isinstance(runtime, dict) else {}
+    facts = (
+        runtime_features.get("car_charger", {})
+        if isinstance(runtime_features, dict)
+        else {}
+    )
+    controls = data.get("controls", {}) if isinstance(data, dict) else {}
+    car_control = controls.get("car_charger", {}) if isinstance(controls, dict) else {}
+    plan = data.get("test_plan", {}) if isinstance(data, dict) else {}
+    plan_steps = plan.get("steps", []) if isinstance(plan, dict) else []
+    planned = next(
+        (
+            step
+            for step in plan_steps
+            if isinstance(step, dict) and step.get("id") == "car_charger_reversal"
+        ),
+        None,
+    )
+    execution_steps = execution.get("steps", []) if isinstance(execution, dict) else []
+    executed = next(
+        (
+            step
+            for step in execution_steps
+            if isinstance(step, dict) and step.get("step_id") == "car_charger_reversal"
+        ),
+        None,
+    )
+    return bool(
+        hashlib.sha256(content).hexdigest() == artifact["source_session_sha256"]
+        and artifact.get("runtime_option_enabled") is False
+        and artifact.get("normal_control_available") is False
+        and flags.get("car_charger_enabled") is False
+        and runtime.get("schema_version") == 2
+        and runtime.get("available", True) is True
+        and runtime.get("verified") is True
+        and runtime.get("identity_conflicted") is False
+        and runtime.get("connected") is True
+        and runtime.get("settings_fresh") is True
+        and runtime.get("pending_transaction") is False
+        and type(runtime.get("session_generation")) is int
+        and runtime["session_generation"] >= 1
+        and capability_identity_matches_session(runtime, data)
+        and isinstance(facts, dict)
+        and facts.get("runtime_ready") is True
+        and car_control.get("available") is False
+        and car_control.get("availability_verified") is True
+        and hashlib.sha256(execution_content).hexdigest()
+        == artifact["source_execution_sha256"]
+        and isinstance(planned, dict)
+        and planned.get("action") == "exclude"
+        and planned.get("eligibility") == "review_required"
+        and planned.get("physical_presence") == "unknown"
+        and planned.get("safe_disable_proof")
+        == {
+            "runtime_option_enabled": False,
+            "normal_control_available": False,
+        }
+        and isinstance(executed, dict)
+        and executed.get("outcome") == "pending_review"
+        and executed.get("reason")
+        == "optional control is safely disabled; pending explicit reviewed exclusion"
+        and executed.get("safe_disable_proof")
+        == {
+            "runtime_option_enabled": False,
+            "normal_control_available": False,
+        }
     )
 
 
@@ -799,7 +911,7 @@ def _tier_for_scope(
             and feature_presence[feature] == "unknown"
             and _contract_excluded(revision, feature)
         ):
-            exclusions.append(f"{feature} (documented unavailable and safely disabled)")
+            exclusions.append(f"{feature} (excluded/unverified; safely disabled)")
 
     if not bronze:
         return _report(

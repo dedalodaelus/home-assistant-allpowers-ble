@@ -204,10 +204,13 @@ def _rewrite_capture_archive(
 
 
 def _guided_setting_review_archive(
-    path: Path, *, observed_route: str = "local_adapter"
+    path: Path,
+    *,
+    observed_route: str = "local_adapter",
+    safe_disabled_car_charger: bool = False,
 ) -> Path:
     """Build a synthetic public archive with one complete settings cycle."""
-    from scripts.hil.evidence import _public_tier_artifact
+    from scripts.hil.evidence import _public_tier_artifact, _public_tier_plan
 
     source_run_id = "abcdef0123456789"
     archive = _captured_archive(
@@ -376,7 +379,8 @@ def _guided_setting_review_archive(
     )
     refs.append({"artifact_id": guide_id, "source_sha256": guide_hash})
     execution = {
-        "schema_version": 2,
+        "schema_version": 1,
+        "run_id": source_run_id,
         "requested_tier": "gold",
         "execution_tier": "gold",
         "attained_tier": None,
@@ -394,21 +398,138 @@ def _guided_setting_review_archive(
             }
         ],
     }
+    public_execution = {
+        key: value for key, value in execution.items() if key != "run_id"
+    }
+    public_execution["schema_version"] = 2
+    member_updates = {
+        "tier-execution.json": (
+            json.dumps(public_execution, sort_keys=True) + "\n"
+        ).encode(),
+        "tier-artifacts.json": (
+            json.dumps({"schema_version": 2, "artifacts": artifacts}, sort_keys=True)
+            + "\n"
+        ).encode(),
+    }
+    if safe_disabled_car_charger:
+        execution["steps"].append(
+            {
+                "step_id": "car_charger_reversal",
+                "outcome": "pending_review",
+                "reason": "optional control is safely disabled; pending explicit reviewed exclusion",
+                "safe_disable_proof": {
+                    "runtime_option_enabled": False,
+                    "normal_control_available": False,
+                },
+                "machine_evidence_sha256": [],
+                "machine_evidence": [],
+            }
+        )
+        public_execution["steps"] = execution["steps"]
+        member_updates["tier-execution.json"] = (
+            json.dumps(public_execution, sort_keys=True) + "\n"
+        ).encode()
+        _manifest, public_members, _archive_digest = verify_public_archive(
+            archive, include_contents=True
+        )
+        session = json.loads(public_members["session.json"])
+        session_data = session["data"]
+        session_data["runtime_capabilities"]["capabilities"]["car_charger_enabled"] = (
+            False
+        )
+        session_data["runtime_capabilities"].update(
+            available=True,
+            schema_version=2,
+            verified=True,
+            identity_conflicted=False,
+            model="R600",
+            hardware_revision="0.3",
+            firmware_revision="1.1",
+            connected=True,
+            settings_fresh=True,
+            pending_transaction=False,
+            session_generation=1,
+            features={
+                "car_charger": {
+                    "physical_presence": "unknown",
+                    "runtime_ready": True,
+                }
+            },
+        )
+        session_data["controls"] = {
+            "car_charger": {
+                "available": False,
+                "availability_verified": True,
+            }
+        }
+        session_data["test_plan"] = {
+            "schema_version": 1,
+            "requested_tier": "gold",
+            "execution_tier": "gold",
+            "attained_tier": None,
+            "review_state": "pending",
+            "device": {
+                "model": "R600",
+                "hardware_revision": "0.3",
+                "firmware_revision": "1.1",
+                "verified_route": "local_adapter",
+            },
+            "operator_actions_estimate": 1,
+            "restoration_plan": "Restore each changed control to its original state.",
+            "steps": [
+                {
+                    "id": "car_charger_reversal",
+                    "feature": "car_charger",
+                    "action": "exclude",
+                    "eligibility": "review_required",
+                    "physical_presence": "unknown",
+                    "outcome": "pending",
+                    "human_review": "pending",
+                    "reasons": [
+                        "optional control is disabled by policy and its normal HA control is unavailable; explicit review is required"
+                    ],
+                    "required_evidence": [],
+                    "safe_disable_proof": {
+                        "runtime_option_enabled": False,
+                        "normal_control_available": False,
+                    },
+                }
+            ],
+        }
+        session_data["test_plan"] = _public_tier_plan(session_data["test_plan"])
+        public_execution = json.loads(member_updates["tier-execution.json"])
+        public_artifacts = json.loads(member_updates["tier-artifacts.json"])
+        captures = _manifest["captures"]
+        route = (
+            captures["by_capture"][0]["route"]
+            if len({item["route"] for item in captures["by_capture"]}) == 1
+            else "mixed"
+            if captures["by_capture"]
+            else "unverified"
+        )
+        from scripts.hil.evidence import _render_report
+
+        member_updates["session.json"] = (
+            json.dumps(session, sort_keys=True) + "\n"
+        ).encode()
+        member_updates["report.md"] = _render_report(
+            session_data["run_id"],
+            json.loads(public_members["environment.json"]),
+            session,
+            json.loads(public_members["scenarios.json"]),
+            captures["events"],
+            captures["count"],
+            route,
+            public_execution,
+            public_artifacts,
+            json.loads(public_members["tier-bronze-read-only.json"]),
+            captures["by_capture"],
+        )
     return _rewrite_capture_archive(
         archive,
         path / "guided-settings.zip",
         capture_updates={},
-        member_updates={
-            "tier-execution.json": (
-                json.dumps(execution, sort_keys=True) + "\n"
-            ).encode(),
-            "tier-artifacts.json": (
-                json.dumps(
-                    {"schema_version": 2, "artifacts": artifacts}, sort_keys=True
-                )
-                + "\n"
-            ).encode(),
-        },
+        member_updates=member_updates,
     )
 
 
@@ -2793,6 +2914,397 @@ def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
     assert evaluate_tiers(matrix)["tiers"][0]["tier"] == "unqualified"
 
 
+def test_reviewed_safe_disabled_car_charger_is_excluded_unverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _guided_setting_review_archive(
+        tmp_path / "archive", safe_disabled_car_charger=True
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+
+    _tty(monkeypatch)
+    answers = iter(["1", "HIL operator", "yes", "yes", "yes", "yes", "APPLY REVIEW"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
+        == 0
+    )
+
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    contract = reviewed["revisions"][0]["feature_contract"]["car_charger"]
+    assert contract["status"] == "excluded"
+    assert contract["safely_disabled"] is True
+    assert "excluded/unverified" in contract["rationale"]
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+    tier = evaluate_tiers(reviewed)["tiers"][0]
+    assert tier["tier"] != "gold"
+    assert any(
+        "car_charger (excluded/unverified" in item for item in tier["exclusions"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("verified", "Invalid public runtime capabilities"),
+        ("features", "Invalid public runtime capabilities"),
+        ("hardware_revision", "Invalid public runtime capabilities"),
+    ],
+)
+def test_public_verifier_rejects_invalid_identity_runtime_schema(
+    tmp_path: Path, mutation: str, expected_error: str
+) -> None:
+    archive = _guided_setting_review_archive(
+        tmp_path / "source", safe_disabled_car_charger=True
+    )
+    with zipfile.ZipFile(archive) as source:
+        public_session = json.loads(source.read("public/session.json"))
+    runtime = public_session["data"]["runtime_capabilities"]
+    if mutation == "verified":
+        runtime["verified"] = "yes"
+    elif mutation == "features":
+        runtime["features"]["car_charger"]["unexpected"] = True
+    else:
+        runtime["hardware_revision"] = None
+    rewritten = _rewrite_capture_archive(
+        archive,
+        tmp_path / f"invalid-identity-runtime-{mutation}.zip",
+        capture_updates={},
+        member_updates={
+            "session.json": (json.dumps(public_session, sort_keys=True) + "\n").encode()
+        },
+    )
+    with pytest.raises(HAAPIError, match=expected_error):
+        verify_public_archive(rewritten)
+
+
+def test_safe_disabled_car_charger_public_export_review_and_gold_are_end_to_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from argparse import Namespace
+    import importlib.util
+
+    from custom_components.allpowers_ble.model_support import (
+        ModelFeature,
+        identify_model,
+        model_feature_capability,
+    )
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.discovery import Device
+    from scripts.hil.evidence import export_archive
+    from scripts.hil.guided import build_tier_plan
+    from scripts.hil.onboard import assess_run_gate
+    from scripts.hil.review_wizard import interactive_review
+
+    tier_tests_spec = importlib.util.spec_from_file_location(
+        "issue351_test_hil_tiers", Path(__file__).with_name("test_hil_tiers.py")
+    )
+    assert tier_tests_spec is not None and tier_tests_spec.loader is not None
+    tier_tests = importlib.util.module_from_spec(tier_tests_spec)
+    tier_tests_spec.loader.exec_module(tier_tests)
+    matrix_fixture = tier_tests._matrix_fixture
+
+    source_run_id = "abcdef0123456789"
+    _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        source_run_id,
+        bronze_reviewable=True,
+    )
+    run_root = tmp_path / "source" / f"run-{source_run_id}"
+    private = run_root / "private"
+    session_path = private / "session.json"
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+
+    support = identify_model("R600", hardware_version="0.3", raw_hardware_version=0x03)
+    capabilities = {
+        "schema_version": 2,
+        "model": support.model,
+        "profile": support.profile,
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+        "verified": True,
+        "identity_conflicted": False,
+        "connected": True,
+        "status_fresh": True,
+        "settings_fresh": True,
+        "pending_transaction": False,
+        "session_generation": 4,
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "car_charger_enabled": False,
+        },
+        "features": {
+            feature.value: {
+                "physical_presence": model_feature_capability(
+                    support, feature
+                ).physical_presence.value,
+                "production_authorized": model_feature_capability(
+                    support, feature
+                ).production_authorized,
+                "candidate_hil_eligible": model_feature_capability(
+                    support, feature
+                ).hil_candidate_eligible,
+                "runtime_ready": True,
+            }
+            for feature in ModelFeature
+        },
+    }
+    device = Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="1.1",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="private-entry",
+        control_entities={},
+    )
+    controls = cli._scenario_controls(object(), device, capabilities)
+    assert controls["car_charger"] == {
+        "available": False,
+        "state": None,
+        "options": [],
+        "availability_verified": True,
+        "eligible": False,
+        "candidate_eligible": False,
+    }
+    plan = build_tier_plan(
+        "gold",
+        capabilities,
+        controls,
+        observed_route="local_adapter",
+    )
+    exclusion = next(
+        step for step in plan["steps"] if step["id"] == "car_charger_reversal"
+    )
+    assert exclusion["action"] == "exclude"
+    assert exclusion["eligibility"] == "review_required"
+    session["route"] = {"requested": "local_adapter"}
+    session["runtime_capabilities"] = capabilities
+    session["controls"] = controls
+    session["test_plan"] = plan
+    session_path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
+
+    class NoWriteAPI:
+        def __init__(self) -> None:
+            self.write_calls: list[Any] = []
+
+        @staticmethod
+        def discovery() -> tuple[list[Any], list[Any], None, list[Any]]:
+            return (
+                [],
+                [
+                    {
+                        "id": "private-device",
+                        "config_entry_id": "private-entry",
+                        "identifiers": [["allpowers_ble", "private-id"]],
+                        "model": "R600",
+                    }
+                ],
+                None,
+                [
+                    {
+                        "entry_id": "private-entry",
+                        "domain": "allpowers_ble",
+                        "state": "loaded",
+                    }
+                ],
+            )
+
+        @staticmethod
+        def hil_capabilities(_entry_id: str) -> dict[str, Any]:
+            return capabilities
+
+        def call_control(self, *args: Any, **kwargs: Any) -> None:
+            self.write_calls.append((args, kwargs))
+            raise AssertionError("an exclusion must not issue a control write")
+
+        def websocket(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("an exclusion must not start a GATT trace")
+
+    api_fake = NoWriteAPI()
+    focused_plan = {**plan, "steps": [exclusion]}
+    assert (
+        cli._execute_tier_suite(
+            api_fake,
+            Namespace(route="local_adapter", output_root=private, non_interactive=True),
+            device,
+            {},
+            private,
+            source_run_id,
+            focused_plan,
+            capabilities,
+        )
+        == 0
+    )
+    assert api_fake.write_calls == []
+    blockers = assess_run_gate(
+        private,
+        run_result=0,
+        requested_tier="gold",
+    )
+    assert not any(item["outcome"] == "invalid_exclusion" for item in blockers)
+
+    archive = export_archive(run_root, confirmed=True)
+    _manifest, public, _archive_sha = verify_public_archive(
+        archive, include_contents=True
+    )
+    public_execution = json.loads(public["tier-execution.json"])
+    public_exclusion = next(
+        row
+        for row in public_execution["steps"]
+        if row["step_id"] == "car_charger_reversal"
+    )
+    assert public_exclusion["reason"] == (
+        "optional control is safely disabled; pending explicit reviewed exclusion"
+    )
+    assert public_exclusion["safe_disable_proof"] == {
+        "runtime_option_enabled": False,
+        "normal_control_available": False,
+    }
+    public_session = json.loads(public["session.json"])["data"]
+    assert public_session["controls"]["car_charger"] == {
+        "available": False,
+        "availability_verified": True,
+    }
+    assert public_session["runtime_capabilities"]["settings_fresh"] is True
+    assert {
+        key: public_session["runtime_capabilities"][key]
+        for key in ("model", "hardware_revision", "firmware_revision")
+    } == {
+        "model": "R600",
+        "hardware_revision": "0.3",
+        "firmware_revision": "1.1",
+    }
+    assert public_session["runtime_capabilities"]["features"]["car_charger"] == {
+        "physical_presence": "unknown",
+        "runtime_ready": True,
+    }
+
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    imported = json.loads(matrix_path.read_text(encoding="utf-8"))
+    imported_run = imported["revisions"][0]["runs"][0]
+    _tty(monkeypatch)
+    answers = iter(["1", "HIL reviewer", "yes", "APPLY REVIEW"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    assert (
+        interactive_review(
+            matrix_path,
+            run_id=imported_run["run_id"],
+            tier="gold",
+            repo_root=tmp_path,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    reviewed_import = json.loads(matrix_path.read_text(encoding="utf-8"))
+    exclusion_contract = reviewed_import["revisions"][0]["feature_contract"]
+
+    # Supply independently validated Gold evidence for the mandatory features;
+    # this imported run contributes only the reviewed optional-control exclusion.
+    gold = matrix_fixture(tmp_path, "gold", run_id="other-gold-run")
+    gold_revision = gold["revisions"][0]
+    gold_revision["runs"][0]["feature_presence"]["car_charger"] = {"status": "unknown"}
+    gold_revision["runs"][0]["write_capabilities"]["car_charger"] = {
+        "status": "pending",
+        "evidence": [],
+    }
+    gold_revision["feature_contract"] = exclusion_contract
+    gold_revision["runs"].extend(reviewed_import["revisions"][0]["runs"])
+    combined = {**gold, "revisions": [gold_revision]}
+    matrix_path.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
+    errors, _ = validate_hil_qualification.validate_matrix(
+        combined,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert errors == []
+    tier = __import__("scripts.hil.tiers", fromlist=["evaluate_tiers"]).evaluate_tiers(
+        combined
+    )["tiers"][0]
+    assert tier["tier"] == "gold"
+    assert "car_charger (excluded/unverified; safely disabled)" in tier["exclusions"]
+
+    # Any regression in the independent Gold requirements still downgrades the
+    # same reviewed matrix, despite the valid car_charger exclusion contract.
+    for failure in ("output", "setting", "reconnect", "restoration"):
+        changed = json.loads(json.dumps(combined))
+        mandatory_run = next(
+            run
+            for run in changed["revisions"][0]["runs"]
+            if run["run_id"] == "other-gold-run"
+        )
+        if failure == "output":
+            mandatory_run["write_capabilities"]["ac_output"]["status"] = "pending"
+        elif failure == "setting":
+            mandatory_run["write_capabilities"]["eco_mode"]["status"] = "pending"
+        elif failure == "reconnect":
+            mandatory_run["scenarios"]["reconnect_failover"]["status"] = "pending"
+        else:
+            mandatory_run["write_capabilities"]["ac_output"]["physical_review"][
+                "output_transitions"
+            ] = []
+        assert (
+            __import__("scripts.hil.tiers", fromlist=["evaluate_tiers"]).evaluate_tiers(
+                changed
+            )["tiers"][0]["tier"]
+            != "gold"
+        )
+
+    source_session_path = tmp_path / exclusion_contract["car_charger"]["evidence"][0]
+    feature_contract_artifact = json.loads(source_session_path.read_text())
+    source_path = tmp_path / feature_contract_artifact["source_session"]
+    original_source = source_path.read_bytes()
+    altered_session = json.loads(original_source)
+    altered_session["data"]["controls"]["car_charger"]["availability_verified"] = False
+    source_path.write_text(json.dumps(altered_session), encoding="utf-8")
+    tampered_errors, _ = validate_hil_qualification.validate_matrix(
+        combined,
+        matrix_path=matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert any("feature_contract" in error for error in tampered_errors)
+    assert (
+        __import__("scripts.hil.tiers", fromlist=["evaluate_tiers"]).evaluate_tiers(
+            combined
+        )["tiers"][0]["tier"]
+        != "gold"
+    )
+    source_path.write_bytes(original_source)
+
+
 def test_inventory_preflight_survives_public_archive_and_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3327,6 +3839,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert legacy_audit["reviewer_independent_from_operator"] is True
     legacy_audit["schema_version"] = 1
     legacy_audit.pop("assurance")
+    legacy_audit.pop("exclusions", None)
     silver_audits[0].write_text(json.dumps(legacy_audit, indent=2) + "\n")
     for result in [
         legacy_run["scenarios"]["reconnect_failover"],

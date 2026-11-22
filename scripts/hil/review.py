@@ -152,7 +152,13 @@ def _review_file(
 def _tier_review_file(
     path: Path, run: dict[str, Any], tier: str
 ) -> tuple[
-    str, str, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]
+    str,
+    str,
+    str,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     """Validate the exact run-bound local audit created by the tier wizard."""
     value = _json(path)
@@ -183,12 +189,13 @@ def _tier_review_file(
         else {
             frozenset(expected | {"assurance"}),
             frozenset(expected | {"assurance", "absences"}),
+            frozenset(expected | {"assurance", "absences", "exclusions"}),
         }
     )
     if (
         frozenset(value) not in accepted_keys
         or type(value.get("schema_version")) is not int
-        or version not in {1, 2}
+        or version not in {1, 2, 3}
         or value.get("tier") != tier
         or value.get("archive_sha256") != run.get("archive_sha256")
         or value.get("run_id") != run.get("run_id")
@@ -204,6 +211,8 @@ def _tier_review_file(
         or len(value["scenarios"]) > 8
         or not isinstance(value.get("absences", []), list)
         or len(value.get("absences", [])) > 7
+        or not isinstance(value.get("exclusions", []), list)
+        or len(value.get("exclusions", [])) > 7
     ):
         raise HAAPIError("Tier review file does not match this imported run")
     try:
@@ -458,6 +467,16 @@ def _tier_review_file(
             or type(item.get("safe_disable_confirmed")) is not bool
         ):
             raise HAAPIError("Tier review absence decision is malformed")
+    exclusion_keys = {"feature", "source_step_id", "scope_confirmed"}
+    for item in value.get("exclusions", []):
+        if (
+            not isinstance(item, dict)
+            or set(item) != exclusion_keys
+            or item.get("feature") != "car_charger"
+            or item.get("source_step_id") != "car_charger_reversal"
+            or type(item.get("scope_confirmed")) is not bool
+        ):
+            raise HAAPIError("Tier review optional exclusion decision is malformed")
     if len({item["scenario"] for item in value["scenarios"]}) != len(
         value["scenarios"]
     ):
@@ -469,6 +488,7 @@ def _tier_review_file(
         value["transitions"],
         value["scenarios"],
         value.get("absences", []),
+        value.get("exclusions", []),
     )
 
 
@@ -1479,6 +1499,7 @@ def review_imported_tier_run(
         decisions,
         scenario_decisions,
         absence_decisions,
+        exclusion_decisions,
     ) = _tier_review_file(review_file, run, tier)
     if assurance == "unknown":
         print(
@@ -1526,6 +1547,7 @@ def review_imported_tier_run(
         ):
             reviewed_scenarios.append(reconnect_candidate)
     absence_plan: dict[str, str] = {}
+    session_data: dict[str, Any] = {}
     try:
         session = json.loads(members["session.json"])
         session_data = session.get("data", {})
@@ -1562,6 +1584,7 @@ def review_imported_tier_run(
         and decision.get("safe_disable_confirmed") is True
     ]
     updated = json.loads(json.dumps(run))
+    new_revision = json.loads(json.dumps(revision))
     files: dict[Path, bytes] = {}
     run_rel = Path("tests/hil/fixtures") / revision["id"] / "runs" / run_id
     source_bundle = next(
@@ -1679,7 +1702,12 @@ def review_imported_tier_run(
             if reference not in presence_evidence.get(feature, [])
         )
 
-    if not accepted_cycles and not reviewed_scenarios and not reviewed_absences:
+    if (
+        not accepted_cycles
+        and not reviewed_scenarios
+        and not reviewed_absences
+        and not any(item.get("scope_confirmed") is True for item in exclusion_decisions)
+    ):
         print(
             "No supported production-authorized physical result was confirmed under "
             "the selected assurance; the qualification matrix remains unchanged."
@@ -1960,6 +1988,128 @@ def review_imported_tier_run(
         }
         applied_capabilities.append(f"{feature}: absent")
 
+    valid_exclusions: list[dict[str, Any]] = []
+    if tier == "gold" and exclusion_decisions:
+        from .guided import capability_identity_matches_session
+
+        runtime = session_data.get("runtime_capabilities", {})
+        runtime = runtime if isinstance(runtime, dict) else {}
+        runtime_flags = runtime.get("capabilities", {})
+        controls = session_data.get("controls", {})
+        car_charger_control = (
+            controls.get("car_charger", {}) if isinstance(controls, dict) else {}
+        )
+        test_plan = session_data.get("test_plan", {})
+        plan_steps = test_plan.get("steps", []) if isinstance(test_plan, dict) else []
+        planned = next(
+            (
+                item
+                for item in plan_steps
+                if isinstance(item, dict) and item.get("id") == "car_charger_reversal"
+            ),
+            None,
+        )
+        execution_step = execution_steps.get("car_charger_reversal")
+        source_session = next(
+            (
+                path
+                for path in run.get("evidence", [])
+                if isinstance(path, str) and Path(path).name == "session.json"
+            ),
+            None,
+        )
+        if (
+            runtime_flags.get("car_charger_enabled") is not False
+            or runtime.get("schema_version") != 2
+            or runtime.get("available", True) is not True
+            or runtime.get("verified") is not True
+            or runtime.get("identity_conflicted") is not False
+            or runtime.get("connected") is not True
+            or runtime.get("settings_fresh") is not True
+            or runtime.get("pending_transaction") is not False
+            or type(runtime.get("session_generation")) is not int
+            or runtime["session_generation"] < 1
+            or not capability_identity_matches_session(runtime, session_data)
+            or car_charger_control.get("available") is not False
+            or car_charger_control.get("availability_verified") is not True
+            or not isinstance(planned, dict)
+            or planned.get("action") != "exclude"
+            or planned.get("eligibility") != "review_required"
+            or planned.get("physical_presence") != "unknown"
+            or planned.get("safe_disable_proof")
+            != {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            }
+            or not isinstance(execution_step, dict)
+            or execution_step.get("outcome") != "pending_review"
+            or execution_step.get("reason")
+            != "optional control is safely disabled; pending explicit reviewed exclusion"
+            or execution_step.get("safe_disable_proof")
+            != {
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+            }
+            or source_session is None
+        ):
+            exclusion_decisions = []
+        for decision in exclusion_decisions:
+            if decision.get("scope_confirmed") is True:
+                valid_exclusions.append(decision)
+        if valid_exclusions:
+            source_session, source_session_path = _evidence(run, root, "session.json")
+            content = source_session_path.read_bytes()
+            source_sha256 = hashlib.sha256(content).hexdigest()
+            source_execution_path = root / source_execution
+            source_execution_content = source_execution_path.read_bytes()
+            rationale = (
+                "car_charger is excluded/unverified because the runtime option is OFF "
+                "and the normal Home Assistant control is unavailable; physical "
+                "independence of the 12 V socket is not established."
+            )
+            path = (run_rel / "feature-contract-car_charger.json").as_posix()
+            artifact = {
+                "artifact_type": "feature_contract",
+                "revision_id": revision["id"],
+                "model": revision["model"],
+                "hardware_revision": revision["hardware_version"],
+                "feature": "car_charger",
+                "safely_disabled": True,
+                "runtime_option_enabled": False,
+                "normal_control_available": False,
+                "source_run_id": run["run_id"],
+                "source_archive_sha256": run["archive_sha256"],
+                "source_session": source_session,
+                "source_session_sha256": source_sha256,
+                "source_execution": source_execution,
+                "source_execution_sha256": hashlib.sha256(
+                    source_execution_content
+                ).hexdigest(),
+                "rationale": rationale,
+            }
+            files[root / path] = (
+                json.dumps(artifact, sort_keys=True, indent=2) + "\n"
+            ).encode()
+            evidence = [path]
+            contract: dict[str, Any] = {
+                "status": "excluded",
+                "safely_disabled": True,
+                "rationale": rationale,
+                "evidence": evidence,
+                "physical_review": {
+                    "outcome": "confirmed_pass",
+                    "reviewed_by": reviewer,
+                    "reviewed_at": reviewed_at,
+                    "assurance": assurance,
+                    "reviewer_independent_from_operator": assurance
+                    == "independently_reviewed",
+                    "evidence_sha256": _evidence_digests(evidence, files, root),
+                },
+            }
+            feature_contracts = new_revision.setdefault("feature_contract", {})
+            feature_contracts["car_charger"] = contract
+            applied_capabilities.append("car_charger: excluded/unverified")
+
     if applied_capabilities:
         updated["authorization_context"] = "production"
         updated["authorization_context_source"] = "reviewed_production_session"
@@ -1976,7 +2126,6 @@ def review_imported_tier_run(
             for path in item.get("evidence", []):
                 if path not in updated["evidence"]:
                     updated["evidence"].append(path)
-    new_revision = json.loads(json.dumps(revision))
     new_revision["runs"] = [
         updated if item.get("run_id") == run_id else item for item in revision["runs"]
     ]
