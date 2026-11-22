@@ -48,7 +48,10 @@ Los colaboradores pueden iniciar una sesión HIL guiada con
 faltan resultados, ruta, build o evidencias requeridas. Una ejecución correcta
 sigue sin cualificar hasta que se revisen las observaciones físicas con una
 procedencia explícita de autoatestación del operador o revisión independiente;
-consulta la [guía de la CLI HIL](docs/hil-cli.md#contributor-quickstart).
+el flujo ofrece ambas rutas y no exige una segunda persona para la
+autoatestación. El ZIP conserva una instantánea de evidencias previa a la
+revisión y ninguna ruta cambia la autorización de escritura en tiempo de
+ejecución. Consulta la [guía de la CLI HIL](docs/hil-cli.md#contributor-quickstart).
 
 ## Requisitos e instalación
 

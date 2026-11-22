@@ -101,7 +101,7 @@ Assistant entities remain unchanged. See
 [hardware support tiers](compatibility.md#write-authorization-and-hardware-support-tiers).
 
 - `onboard`: from this prepared checkout, start the interactive Bronze, Silver, or Gold contributor flow. It asks for the HA origin when `HA_HIL_URL` is unset, obtains a missing token with hidden input, selects an integration-owned station, and checks that the checkout is a clean feature branch before it offers the `RUN` prompt. It displays known identity/build/route facts and the applicable plan. The operator must explicitly consent to each state change and restoration and use the existing server-side HIL grant. At the end, the operator can review a privacy-safe ZIP and explicitly create it locally; nothing is uploaded. Ctrl+C or declining a prompt stops the flow. The wizard never changes HA or BLE configuration.
-- `onboard` validates the completed run before any export prompt. A failed runner, blocked required step, missing or corrupt artifact, unverified route/build, unsafe restoration, or executed-tier downgrade stops with the failed step and safe diagnostic commands. A pending minimum-output requirement remains for the tier evaluator; it does not turn valid acquisition into PASS. A passing run displays the generated public report, requires explicit export and import confirmations, then performs offline review. The guided handoff asks a different reviewer to type `REVIEWER READY`; this supports the independent-review path. For single-operator attestation or offline resumption of an already imported ZIP, use `python -m scripts.hil review --run-id archive-... --interactive` directly and explicitly choose `operator_attested`. This records first-party physical observations, not an independent review or a waiver of any evidence gate. Each path retains its dry-run and apply confirmation. Platinum is rejected before HIL starts because continuous 24-hour evidence cannot yet be validated by the public contract.
+- `onboard` validates the completed run before any export prompt. A failed runner, blocked required step, missing or corrupt artifact, unverified route/build, unsafe restoration, or executed-tier downgrade stops with the failed step and safe diagnostic commands. A pending minimum-output requirement remains for the tier evaluator; it does not turn valid acquisition into PASS. A passing run displays the deterministic pre-review report, requires explicit export and import confirmations, then offers operator attestation or handoff to a different independent reviewer. The operator route uses the #349 assurance contract and does not require a second person. If review is declined or interrupted, the imported run stays inconclusive and the CLI prints its offline `review --run-id archive-... --interactive` resume command; no BLE acquisition, re-import, or ZIP rewrite is needed. The archive report remains the hashed pre-review snapshot. After review, the CLI prints a separate tier, assurance, exact-scope, and missing-conditions summary and generates a scoped PR body. Neither assurance route changes runtime write authorization. Platinum is rejected before HIL starts because continuous 24-hour evidence cannot yet be validated by the public contract.
 - `run --tier silver|gold`: run the standard guided acquisition plan without the Bronze-only onboarding handoff. After the read-only connected preflight, an unknown physical inventory stays blocked until the operator inspects the exact model/revision and types `PRESENT` for an individually production-authorized, available feature. This inventory response is recorded as an operator inspection gate; it does not alter model permissions, authorize a write, or qualify physical presence. A profile-declared absence, an unverified identity, an unavailable control, or noninteractive execution cannot be overridden. Each production action and its restoration still needs separate consent and the existing runtime safeguards. Export the resulting run offline for independent review.
 - `doctor`: authenticate, verify HA Core version, read the integration manifest and registries, and independently check each selected station's integration-entry state, BLE-connected diagnostic state and (if enabled) status telemetry freshness. No filesystem output. Readiness is **ready**, **incomplete** (observed disconnection/staleness or unloaded entry) or **inconclusive** (missing/disabled/unreadable diagnostic). Only all three `ready` checks yield exit 0; incomplete/inconclusive yield exit 2 without claiming the physical hardware is faulty. `binary_sensor.telemetry_available` is disabled by default; enable this diagnostic entity in HA if you need a conclusive freshness check. Registry discovery and `run` remain available even if optional entry-state or sensor data are missing.
 - `review --interactive`: offline review accepts an explicit `operator_attested` or `independently_reviewed` assurance for Bronze, Silver, or Gold. Both require inspected real-device evidence and each applicable physical confirmation. The independent path records an explicit reviewer/operator distinction declaration; names alone never imply independence. Schema-v1 Bronze reviews and legacy higher-tier records without an affirmative independence declaration remain unknown and cannot qualify.
@@ -210,8 +210,8 @@ Imported consent, software PASS labels, synthetic captures, or hashes without
 their verified child artifacts cannot create a qualification PASS.
 
 For imported Bronze archives, use the offline interactive reviewer to inspect
-the verified public evidence and record an independent physical review. The
-reviewer must inspect real-device evidence; wizard answers are not
+the verified public evidence and record operator attestation or an independent
+physical review. The reviewer must inspect real-device evidence; wizard answers are not
 cryptographic attestation. The command displays the observed route and archive
 binding, defaults every claim to inconclusive, and does not offer PASS when the
 objective evidence contract is incomplete:
@@ -243,9 +243,9 @@ python -m scripts.hil review \
 The reviewer shows the imported trace, decoded target state, route, session
 generation, exact frame digest, and hashed transaction reference with its write,
 submission, and confirmation sequence numbers. It asks separately whether the
-change, restoration, and production authorization were independently verified.
-The public archive does not identify its HIL operator; the reviewer must
-explicitly confirm they did not collect the run.
+change, restoration, and production authorization were physically verified.
+For `independently_reviewed`, the reviewer must also explicitly confirm they
+did not collect the run; operator attestation makes no such claim.
 Answers default to no. The dry run constructs schema-v3 records and validates them
 against the imported evidence graph and the existing tier evaluator. Type
 `APPLY REVIEW` only after inspecting the proposed result. Missing, cross-scope,
@@ -256,7 +256,7 @@ declared setting changes and restorations. For output runs, it separately asks
 the reviewer to confirm the final fourth action returned the device to its
 original safe state; the action's frame and transaction are included in the
 review evidence. The earlier operator inventory preflight is displayed as
-acquisition eligibility context only and never substitutes for these independent
+acquisition eligibility context only and never substitutes for these physical
 observations. Platinum is blocked in offline
 review because the public archive does not preserve the required scope-bound,
 continuous 24-hour soak evidence.

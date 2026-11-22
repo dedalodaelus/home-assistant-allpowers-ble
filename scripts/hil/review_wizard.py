@@ -273,11 +273,18 @@ def interactive_review(
     run_id: str,
     tier: str = "bronze",
     repo_root: Path | None = None,
+    expected_assurance: str | None = None,
 ) -> int:
-    """Collect independent decisions, dry-run them, then optionally apply."""
+    """Collect offline physical review decisions, dry-run them, then apply on consent."""
     root = (repo_root or Path(__file__).resolve().parents[2]).absolute()
     if not sys.stdin.isatty():
         raise HAAPIError("Interactive review requires a TTY")
+    if expected_assurance not in {
+        None,
+        "operator_attested",
+        "independently_reviewed",
+    }:
+        raise HAAPIError("Unsupported expected review assurance")
     revision, run = _load_run(
         matrix_path,
         run_id,
@@ -294,6 +301,7 @@ def interactive_review(
             members=members,
             repo_root=root,
             matrix_path=matrix_path,
+            expected_assurance=expected_assurance,
         )
     print(
         "Offline physical evidence attestation (this is not cryptographic attestation)."
@@ -313,14 +321,18 @@ def interactive_review(
         path for path in run.get("evidence", []) if isinstance(path, str)
     ):
         print(f"  {relative}")
-    print("Assurance: [1] operator_attested  [2] independently_reviewed")
-    mode = input("Choose assurance (default: inconclusive): ").strip().lower()
-    assurance = {
-        "1": "operator_attested",
-        "operator_attested": "operator_attested",
-        "2": "independently_reviewed",
-        "independently_reviewed": "independently_reviewed",
-    }.get(mode, "unknown")
+    if expected_assurance is None:
+        print("Assurance: [1] operator_attested  [2] independently_reviewed")
+        mode = input("Choose assurance (default: inconclusive): ").strip().lower()
+        assurance = {
+            "1": "operator_attested",
+            "operator_attested": "operator_attested",
+            "2": "independently_reviewed",
+            "independently_reviewed": "independently_reviewed",
+        }.get(mode, "unknown")
+    else:
+        assurance = expected_assurance
+        print(f"Assurance selected by onboarding: {assurance}")
     reviewer = input("Person attesting (public identifier): ").strip()
     if re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", reviewer) is None:
         raise HAAPIError(
@@ -416,12 +428,16 @@ def _interactive_higher_tier_review(
     members: dict[str, bytes],
     repo_root: Path,
     matrix_path: Path | None = None,
+    expected_assurance: str | None = None,
 ) -> int:
     """Explain which imported proof is reviewable without promoting unsupported data."""
     if tier not in {"silver", "gold", "platinum"}:
         raise HAAPIError("Unsupported review tier")
     revision = revision or {}
-    print(f"Independent {tier.title()} review")
+    print(
+        f"{expected_assurance.replace('_', ' ').title() if expected_assurance else 'Offline'} "
+        f"{tier.title()} evidence review"
+    )
     print(
         "Model / hardware revision: "
         f"{revision.get('model', 'unknown')} / "
@@ -887,13 +903,19 @@ def _interactive_higher_tier_review(
     absence_decisions = []
     assurance = "unknown"
     if reviewable or reconnect_candidate is not None or absence_candidates:
-        print("Assurance: [1] operator_attested  [2] independently_reviewed")
-        assurance = {
-            "1": "operator_attested",
-            "operator_attested": "operator_attested",
-            "2": "independently_reviewed",
-            "independently_reviewed": "independently_reviewed",
-        }.get(input("Choose assurance (default unknown): ").strip().lower(), "unknown")
+        if expected_assurance is None:
+            print("Assurance: [1] operator_attested  [2] independently_reviewed")
+            assurance = {
+                "1": "operator_attested",
+                "operator_attested": "operator_attested",
+                "2": "independently_reviewed",
+                "independently_reviewed": "independently_reviewed",
+            }.get(
+                input("Choose assurance (default unknown): ").strip().lower(), "unknown"
+            )
+        else:
+            assurance = expected_assurance
+            print(f"Assurance selected by onboarding: {assurance}")
         candidate = input("Person attesting (public identifier): ").strip()
         if re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", candidate):
             reviewed_by = candidate

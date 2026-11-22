@@ -456,6 +456,22 @@ def _review_answers(*, reviewer: str, inspected: bool, apply: bool) -> list[str]
     return answers
 
 
+def _operator_review_answers(*, reviewer: str, apply: bool) -> list[str]:
+    answers = [reviewer, "yes"]
+    for _ in range(3):
+        answers.extend(("pass", "yes"))
+    answers.append("APPLY REVIEW" if apply else "cancel")
+    return answers
+
+
+def _selected_independent_review_answers(*, reviewer: str, apply: bool) -> list[str]:
+    answers = [reviewer, "yes", "yes"]
+    for _ in range(3):
+        answers.extend(("pass", "yes"))
+    answers.append("APPLY REVIEW" if apply else "cancel")
+    return answers
+
+
 def test_v2_migration_preserves_runs_as_unqualified_history() -> None:
     source_run = {"run_id": "old", "qualification_status": "pass"}
     migrated = migrate_v2_to_v3(
@@ -5277,7 +5293,7 @@ def test_multi_run_legacy_bronze_reviews_can_be_reattested_sequentially(
     assert evaluate_tiers(after_second)["tiers"]
 
 
-def test_onboard_import_review_stages_the_complete_reviewed_run(
+def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from scripts import validate_hil_qualification
@@ -5313,14 +5329,13 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         bronze_protocol_outcome="pass",
         stale_rest_fallback=True,
     )
+    archive_before_review = archive.read_bytes()
     answers = iter(
         [
             "yes",
             "APPLY IMPORT",
-            "REVIEWER READY",
-            *_review_answers(
-                reviewer="independent reviewer", inspected=True, apply=True
-            ),
+            "1",
+            *_operator_review_answers(reviewer="HIL operator", apply=True),
         ]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
@@ -5335,6 +5350,10 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         )
         is True
     )
+    from scripts.hil.evidence import verify_public_archive
+
+    verify_public_archive(archive)
+    assert archive.read_bytes() == archive_before_review
     output = capsys.readouterr().out
     generated_body = (output_dir / "pr.md").read_text(encoding="utf-8")
     assert "hardware-evidence checklist item is not applicable" not in generated_body
@@ -5358,9 +5377,19 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
         in generated_body
     )
     assert (
-        "identity, protocol, and freshness claims were independently reviewed and applied"
+        "identity, protocol, and freshness claims were operator-attested and applied"
         in generated_body
     )
+    assert "operator_attested" in generated_body
+    assert "REVIEWED TIER: Bronze; ASSURANCE: operator_attested" in output
+    assert (
+        "POST-REVIEW QUALIFICATION: attained bronze; assurance operator_attested"
+        in output
+    )
+    assert (
+        "Review basis: schema-v3 matrix evaluation isolated to imported run" in output
+    )
+    assert "independently reviewed" not in generated_body
     assert "Telemetry sample interval:" in generated_body
     assert "Telemetry sample interval: 2 seconds" in generated_body
     assert "Observation duration:" not in generated_body
@@ -5434,14 +5463,60 @@ def test_onboard_import_review_stages_the_complete_reviewed_run(
     assert "HIL qualification validation passed" in direct_validation.stdout
 
 
+def test_onboard_without_independent_reviewer_leaves_offline_resume_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+
+    repo_root = tmp_path / "checkout"
+    repo_root.mkdir()
+    matrix_path = _matrix(repo_root / "tests" / "hil")
+    subprocess.run(["git", "init", "-b", "feat/test", str(repo_root)], check=True)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    monkeypatch.setattr(cli, "_current_feature_branch", lambda _root: "feat/test")
+    _tty(monkeypatch)
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    output_dir = tmp_path / "operator-run"
+    output_dir.mkdir()
+    answers = iter(["yes", "APPLY IMPORT", "2", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert not cli._onboard_import_review(
+        archive,
+        output_dir,
+        "bronze",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+    )
+
+    output = capsys.readouterr().out
+    assert "An independent reviewer must be available" not in output
+    assert "Later, run: python -m scripts.hil review" in output
+    assert "--run-id archive-" in output
+    assert "--interactive" in output
+    assert "git add " not in output
+    assert not (output_dir / "pr.md").exists()
+
+
 def _onboard_review_answers(tier: str, *, reviewer: str) -> list[str]:
     count = {"silver": 24, "gold": 36}[tier]
     return [
         "yes",
         "APPLY IMPORT",
-        "REVIEWER READY",
-        *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
         "2",
+        "REVIEWER READY",
+        *_selected_independent_review_answers(reviewer="Bronze reviewer", apply=True),
         reviewer,
         "yes",
         *("yes" for _ in range(count - 1)),
@@ -5515,7 +5590,7 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
     generated_body = (tmp_path / "operator-run" / "pr.md").read_text(encoding="utf-8")
     expected_tier = tier.title()
     assert f"REVIEWED TIER: {expected_tier}" in output
-    assert f"add reviewed R600 {expected_tier} evidence" in output
+    assert f"add independently reviewed R600 {expected_tier} evidence" in output
     assert expected_run_id in generated_body
     if prior_gold:
         assert "add reviewed R600 Gold evidence" not in output
@@ -5631,8 +5706,11 @@ def test_inconclusive_silver_review_does_not_generate_handoff(
         [
             "yes",
             "APPLY IMPORT",
+            "2",
             "REVIEWER READY",
-            *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
+            *_selected_independent_review_answers(
+                reviewer="Bronze reviewer", apply=True
+            ),
             "Silver reviewer",
             "yes",
             *("no" for _ in range(23)),
@@ -5712,12 +5790,12 @@ def test_prior_scope_bronze_does_not_unlock_unreviewed_imported_run(
         [
             "yes",
             "APPLY IMPORT",
+            "2",
             "REVIEWER READY",
-            *_review_answers(
-                reviewer="second reviewer",
-                inspected=False,
-                apply=review_end == "inconclusive",
-            ),
+            "second reviewer",
+            "no",
+            "yes",
+            "APPLY REVIEW" if review_end == "inconclusive" else "cancel",
         ]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(second_answers))

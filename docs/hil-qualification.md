@@ -153,6 +153,14 @@ record until a physical evidence review supports each result. A
 software step marked `pass`, a complete GATT API capture, or a verified route
 must not be used to mark a physical qualification result `pass`.
 
+For guided tier acquisitions, the deterministic pre-review report lists the
+requested and executed tier, guided step outcomes, verified allowlisted physical
+observations, and route/build context even when there are no correlated scenario
+steps. Its archived report is a pre-review snapshot and is never rewritten by
+review. After review, `onboard` prints the tier and assurance computed from the
+validated matrix for that exact run and scope, including unmet conditions. This
+summary does not change runtime write authorization.
+
 Use `python -m scripts.hil review --run-id archive-... --interactive` for the
 offline Bronze review wizard. Choose `operator_attested` to attest observations
 made by the HIL operator, or `independently_reviewed` to declare that the

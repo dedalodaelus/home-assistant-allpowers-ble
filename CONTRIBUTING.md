@@ -51,9 +51,14 @@ repository's safety and validation checklist.
   connected route, installed build, or state restoration cannot be verified.
   Bronze, Silver, and Gold acquisitions remain inconclusive until an explicit
   operator attestation or separate independent review, plus the schema-v3
-  evaluator, validates the exact run. Operator attestation is not independent
-  review and does not waive physical evidence gates. Platinum remains blocked
-  until the public evidence contract can verify a continuous 24-hour soak.
+  evaluator, validates the exact run. The guided handoff offers both review
+  routes; operator attestation does not require a second person, is not
+  independent review, and does not waive physical evidence gates. If review is
+  declined or interrupted after import, resume offline with the printed
+  `python -m scripts.hil review --run-id archive-... --interactive` command.
+  The ZIP report remains a pre-review snapshot; qualification and assurance are
+  reported separately from the validated matrix. Platinum remains blocked until
+  the public evidence contract can verify a continuous 24-hour soak.
 - For deterministic PR descriptions, render structured facts through
   `.github/PULL_REQUEST_TEMPLATE.md` with
   `python -m scripts.generate_pr_body --data pr-facts.json --output pr.md`.
