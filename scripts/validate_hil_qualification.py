@@ -698,7 +698,7 @@ def _check_physical_review(
 ) -> None:
     review = item.get("physical_review")
     if not isinstance(review, dict):
-        _error(errors, f"{context} requires an independent physical_review record")
+        _error(errors, f"{context} requires a physical_review record with assurance")
         return
     expected = "confirmed_pass" if status == "pass" else "confirmed_fail"
     reviewed_at = review.get("reviewed_at")
@@ -711,6 +711,13 @@ def _check_physical_review(
         review.get("outcome") != expected
         or not isinstance(review.get("reviewed_by"), str)
         or not review["reviewed_by"].strip()
+        or review.get("assurance")
+        not in {"operator_attested", "independently_reviewed"}
+        or (
+            "reviewer_independent_from_operator" in review
+            and review.get("reviewer_independent_from_operator")
+            is not (review.get("assurance") == "independently_reviewed")
+        )
         or parsed is None
         or parsed.tzinfo is None
         or digest_manifest is None
@@ -718,7 +725,7 @@ def _check_physical_review(
     ):
         _error(
             errors,
-            f"{context} physical_review must independently confirm the result and bind its evidence digest",
+            f"{context} physical_review must record valid assurance, confirm the result, and bind its evidence digest",
         )
 
 
@@ -736,7 +743,13 @@ def _valid_reviewed_absence(
         parsed = datetime.fromisoformat(reviewed_at.replace("Z", "+00:00"))
     except AttributeError, ValueError:
         return False
-    if not isinstance(reviewer, str) or not reviewer.strip() or parsed.tzinfo is None:
+    assurance = item.get("assurance")
+    if (
+        not isinstance(reviewer, str)
+        or not reviewer.strip()
+        or parsed.tzinfo is None
+        or assurance not in {"operator_attested", "independently_reviewed"}
+    ):
         return False
     evidence = item.get("evidence")
     digest_manifest = _evidence_digests(evidence)
@@ -784,6 +797,7 @@ def _valid_reviewed_absence(
         and proof.get("physical_absence_confirmed") is True
         and proof.get("safe_disable_confirmed") is True
         and proof.get("reviewed_by") == reviewer
+        and proof.get("assurance") == assurance
         and proof.get("source_step_id")
         == {
             "ac_output": "ac_output_cycle",
@@ -2119,11 +2133,15 @@ def _valid_final_output_restoration(
             "frame_evidence",
             "confirmed",
             "reviewer_independent_from_operator",
+            "assurance",
         }
         or final.get("state") not in {"on", "off"}
         or final.get("confirmed") is not True
-        or final.get("reviewer_independent_from_operator") is not True
+        or final.get("assurance") not in {"operator_attested", "independently_reviewed"}
+        or final.get("reviewer_independent_from_operator")
+        is not (final.get("assurance") == "independently_reviewed")
         or not isinstance(review, dict)
+        or review.get("assurance") != final.get("assurance")
         or not isinstance(review.get("reviewed_by"), str)
         or not review["reviewed_by"].strip()
         or not isinstance(final.get("capture_evidence"), str)

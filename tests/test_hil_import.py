@@ -448,7 +448,7 @@ def _tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _review_answers(*, reviewer: str, inspected: bool, apply: bool) -> list[str]:
-    answers = [reviewer, "yes" if inspected else "no"]
+    answers = ["2", reviewer, "yes" if inspected else "no", "yes"]
     if inspected:
         for _ in range(3):
             answers.extend(("pass", "yes"))
@@ -1443,7 +1443,8 @@ def test_bronze_review_stays_inconclusive_without_successful_status_write(
     review_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "assurance": "independently_reviewed",
                 "archive_sha256": imported["archive_sha256"],
                 "run_id": imported["run_id"],
                 "reviewed_by": "independent reviewer",
@@ -2676,7 +2677,7 @@ def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
     imported_run = matrix["revisions"][0]["runs"][0]
 
     _tty(monkeypatch)
-    answers = iter(["independent reviewer", "yes", "yes", "yes", "yes", "APPLY REVIEW"])
+    answers = iter(["1", "HIL operator", "yes", "yes", "yes", "APPLY REVIEW"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     assert (
@@ -2697,7 +2698,8 @@ def test_import_review_and_apply_generates_scoped_gold_setting_evidence(
     capability = run["write_capabilities"]["eco_mode"]
     assert capability["status"] == "pass"
     assert capability["physical_review"]["outcome"] == "confirmed_pass"
-    assert capability["physical_review"]["reviewed_by"] == "independent reviewer"
+    assert capability["physical_review"]["reviewed_by"] == "HIL operator"
+    assert capability["physical_review"]["assurance"] == "operator_attested"
     assert run["authorization_context"] == "production"
     assert run["authorization_context_source"] == "reviewed_production_session"
     assert any("eco_mode-restoration.json" in item for item in capability["evidence"])
@@ -2919,10 +2921,8 @@ def test_inventory_preflight_survives_public_archive_and_import(
     assert "Operator physical-inventory preflight (acquisition eligibility only;" in (
         wizard_output
     )
-    assert "not independent qualification" in wizard_output
-    assert "independently inspect the actual transitions and restorations" in (
-        wizard_output
-    )
+    assert "not qualification evidence by itself" in wizard_output
+    assert "confirm the actual transitions and restorations below" in (wizard_output)
 
 
 def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
@@ -3012,7 +3012,7 @@ def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
     run_id = imported["revisions"][0]["runs"][0]["run_id"]
     _tty(monkeypatch)
     positive_answers = iter(
-        ["independent reviewer", "yes", "yes", "yes", "APPLY REVIEW"]
+        ["2", "independent reviewer", "yes", "yes", "yes", "APPLY REVIEW"]
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(positive_answers))
     assert (
@@ -3051,7 +3051,7 @@ def test_reviewed_physical_absence_applies_across_equivalent_model_aliases(
     before = independent_matrix.read_bytes()
     independent_run_id = json.loads(before)["revisions"][0]["runs"][0]["run_id"]
     _tty(monkeypatch)
-    non_independent_answers = iter(["operator", "no", "yes", "yes"])
+    non_independent_answers = iter(["1", "operator", "no", "yes", "yes"])
     monkeypatch.setattr(
         "builtins.input", lambda _prompt="": next(non_independent_answers)
     )
@@ -3165,7 +3165,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
 
     # Six output cycles each require authorization, change, and restore
     # confirmations; each output's final restoration is also confirmed.
-    answer_review(["Silver reviewer", *(["yes"] * 24), "APPLY REVIEW"])
+    answer_review(["2", "Silver reviewer", *(["yes"] * 24), "APPLY REVIEW"])
     assert (
         interactive_review(
             matrix_path, run_id=run_id, tier="silver", repo_root=tmp_path
@@ -3220,7 +3220,7 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
 
     # Gold repeats the independent output review and additionally reviews all
     # four settings cycles before dry-run and apply.
-    answer_review(["Gold reviewer", *(["yes"] * 36), "APPLY REVIEW"])
+    answer_review(["2", "Gold reviewer", *(["yes"] * 36), "APPLY REVIEW"])
     assert (
         interactive_review(matrix_path, run_id=run_id, tier="gold", repo_root=tmp_path)
         == 0
@@ -3475,6 +3475,7 @@ def test_output_review_without_final_restoration_confirmation_stays_unqualified(
     # no output may receive a Silver PASS without that independent observation.
     answers = iter(
         [
+            "2",
             "Silver reviewer",
             "yes",
             *("yes" for _ in range(18)),
@@ -3548,7 +3549,36 @@ def test_higher_tier_review_requires_reviewer_independence_confirmation(
         )
         == 2
     )
-    assert "did not confirm independence" in capsys.readouterr().out
+    assert "no recorded assurance" in capsys.readouterr().out
+    assert matrix_path.read_bytes() == before
+
+    forged = tmp_path / "hil-results" / "conflicting-assurance.json"
+    forged.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tier": "gold",
+                "archive_sha256": run["archive_sha256"],
+                "run_id": run["run_id"],
+                "reviewed_by": "operator",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "reviewer_independent_from_operator": True,
+                "assurance": "operator_attested",
+                "transitions": [],
+                "scenarios": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(HAAPIError, match="does not match this imported run"):
+        review_imported_tier_run(
+            matrix_path,
+            run_id=run["run_id"],
+            review_file=forged,
+            tier="gold",
+            apply=False,
+            repo_root=tmp_path,
+        )
     assert matrix_path.read_bytes() == before
 
 
@@ -4188,7 +4218,8 @@ def test_export_import_and_independent_bronze_review_requires_status_data(
     review_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "assurance": "independently_reviewed",
                 "archive_sha256": imported["archive_sha256"],
                 "run_id": imported["run_id"],
                 "reviewed_by": "independent reviewer",
@@ -4328,7 +4359,8 @@ def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
     review_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
+                "assurance": "independently_reviewed",
                 "archive_sha256": imported["archive_sha256"],
                 "run_id": imported["run_id"],
                 "reviewed_by": "independent reviewer",
@@ -4358,11 +4390,107 @@ def test_review_cannot_upgrade_archive_with_missing_machine_evidence(
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "reviewer", "assurance"),
+    [
+        ("2", "independent reviewer", "independently_reviewed"),
+        ("1", "HIL operator", "operator_attested"),
+    ],
+)
 def test_interactive_review_imports_reviews_and_qualifies_bronze(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    reviewer: str,
+    assurance: str,
 ) -> None:
     from scripts import validate_hil_qualification
     from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "0123456789abcdef",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+    )
+    original_archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    answers = [mode, reviewer, "yes"]
+    if assurance == "independently_reviewed":
+        answers.append("yes")
+    answers.extend(["pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"])
+    answer_iter = iter(answers)
+    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answer_iter))
+    from scripts.hil.review import review_imported_run as strict_review
+
+    backend_output: list[str] = []
+
+    def capture_backend(*args: Any, **kwargs: Any) -> int:
+        result = strict_review(*args, **kwargs)
+        backend_output.append(capsys.readouterr().out)
+        return result
+
+    monkeypatch.setattr(
+        "scripts.hil.review_wizard.review_imported_run", capture_backend
+    )
+    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+    reviewed = json.loads(matrix_path.read_text())
+    run = reviewed["revisions"][0]["runs"][0]
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == original_archive_sha256
+    assert run["review_history"][-1]["assurance"] == assurance
+    assert {claim["status"] for claim in run["bronze_evidence"].values()} == {"pass"}
+    assert {
+        claim["physical_review"]["assurance"]
+        for claim in run["bronze_evidence"].values()
+    } == {assurance}
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    tier = evaluate_tiers(reviewed)["tiers"][0]
+    assert tier["tier"] == "bronze"
+    assert tier["assurance"]["bronze"] == assurance
+    audit_files = list((tmp_path / "hil-results" / "bronze-reviews").glob("*.json"))
+    assert len(audit_files) == 1
+    audit = json.loads(audit_files[0].read_text())
+    assert set(audit) == {
+        "schema_version",
+        "archive_sha256",
+        "run_id",
+        "reviewed_by",
+        "reviewed_at",
+        "assurance",
+        "claims",
+    }
+    assert len(backend_output) == 2
+    assert '"current_attained_tier": "unqualified"' in backend_output[0]
+    assert '"attained_tier"' not in backend_output[0]
+    assert '"attained_tier": "bronze"' in backend_output[1]
+
+
+def test_legacy_bronze_review_without_assurance_stays_inconclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import review_imported_run
     from scripts.hil.tiers import evaluate_tiers
 
     archive = _captured_archive(
@@ -4380,64 +4508,41 @@ def test_interactive_review_imports_reviews_and_qualifies_bronze(
         import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
         == 0
     )
-    run_id = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]["run_id"]
-
-    class TTY:
-        @staticmethod
-        def isatty() -> bool:
-            return True
-
-    answers = iter(
-        [
-            "public reviewer",
-            "yes",
-            "pass",
-            "yes",
-            "pass",
-            "yes",
-            "pass",
-            "yes",
-            "APPLY REVIEW",
-        ]
+    run = json.loads(matrix_path.read_text())["revisions"][0]["runs"][0]
+    review_path = tmp_path / "legacy-review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "archive_sha256": run["archive_sha256"],
+                "run_id": run["run_id"],
+                "reviewed_by": "reviewer",
+                "reviewed_at": datetime.now(UTC).isoformat(),
+                "claims": {
+                    claim: "pass"
+                    for claim in ("identity", "protocol_probe", "fresh_telemetry")
+                },
+            }
+        ),
+        encoding="utf-8",
     )
-    monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
-    from scripts.hil.review import review_imported_run as strict_review
-
-    backend_output: list[str] = []
-
-    def capture_backend(*args: Any, **kwargs: Any) -> int:
-        result = strict_review(*args, **kwargs)
-        backend_output.append(capsys.readouterr().out)
-        return result
-
-    monkeypatch.setattr(
-        "scripts.hil.review_wizard.review_imported_run", capture_backend
+    assert (
+        review_imported_run(
+            matrix_path,
+            run_id=run["run_id"],
+            review_file=review_path,
+            apply=True,
+            repo_root=tmp_path,
+        )
+        == 0
     )
-    assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
     reviewed = json.loads(matrix_path.read_text())
-    run = reviewed["revisions"][0]["runs"][0]
-    assert {claim["status"] for claim in run["bronze_evidence"].values()} == {"pass"}
-    errors, _ = validate_hil_qualification.validate_matrix(
-        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
-    )
-    assert errors == []
-    assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "bronze"
-    audit_files = list((tmp_path / "hil-results" / "bronze-reviews").glob("*.json"))
-    assert len(audit_files) == 1
-    audit = json.loads(audit_files[0].read_text())
-    assert set(audit) == {
-        "schema_version",
-        "archive_sha256",
-        "run_id",
-        "reviewed_by",
-        "reviewed_at",
-        "claims",
+    result = reviewed["revisions"][0]["runs"][0]
+    assert {item["status"] for item in result["bronze_evidence"].values()} == {
+        "inconclusive"
     }
-    assert len(backend_output) == 2
-    assert '"current_attained_tier": "unqualified"' in backend_output[0]
-    assert '"attained_tier"' not in backend_output[0]
-    assert '"attained_tier": "bronze"' in backend_output[1]
+    assert result["review_history"][-1]["assurance"] == "unknown"
+    assert evaluate_tiers(reviewed)["tiers"][0]["tier"] == "unqualified"
 
 
 def test_onboard_import_review_stages_the_complete_reviewed_run(
@@ -4604,6 +4709,7 @@ def _onboard_review_answers(tier: str, *, reviewer: str) -> list[str]:
         "APPLY IMPORT",
         "REVIEWER READY",
         *_review_answers(reviewer="Bronze reviewer", inspected=True, apply=True),
+        "2",
         reviewer,
         "yes",
         *("yes" for _ in range(count - 1)),
@@ -4938,7 +5044,7 @@ def test_interactive_review_cancel_keeps_matrix_unchanged(
         def isatty() -> bool:
             return True
 
-    answers = iter(["reviewer", "no", "cancel"])
+    answers = iter(["2", "reviewer", "no", "yes", "cancel"])
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 2
@@ -5046,7 +5152,7 @@ def test_nonreviewable_interactive_archive_stays_inconclusive_after_yes(
         def isatty() -> bool:
             return True
 
-    answers = iter(["reviewer", "yes", "APPLY REVIEW"])
+    answers = iter(["2", "reviewer", "yes", "yes", "APPLY REVIEW"])
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
@@ -5101,7 +5207,19 @@ def test_interactive_review_conflicting_generated_artifact_is_atomic(
             return True
 
     answers = iter(
-        ["reviewer", "yes", "pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"]
+        [
+            "2",
+            "reviewer",
+            "yes",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ]
     )
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
@@ -5153,7 +5271,19 @@ def test_interactive_review_does_not_report_apply_before_matrix_write(
             return True
 
     answers = iter(
-        ["reviewer", "yes", "pass", "yes", "pass", "yes", "pass", "yes", "APPLY REVIEW"]
+        [
+            "2",
+            "reviewer",
+            "yes",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ]
     )
     monkeypatch.setattr("scripts.hil.review_wizard.sys.stdin", TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
@@ -5195,7 +5325,9 @@ def test_interactive_review_repeat_apply_keeps_evidence_idempotent(
     def run_wizard() -> None:
         answers = iter(
             [
+                "2",
                 "reviewer",
+                "yes",
                 "yes",
                 "pass",
                 "yes",
@@ -5255,7 +5387,9 @@ def test_interactive_review_interruption_never_applies(
         def isatty() -> bool:
             return True
 
-    answers = iter(["reviewer", "yes", "inconclusive", "inconclusive", "inconclusive"])
+    answers = iter(
+        ["2", "reviewer", "yes", "yes", "inconclusive", "inconclusive", "inconclusive"]
+    )
     interruption_reached: list[bool] = []
 
     def interrupted_input(_prompt: str = "") -> str:

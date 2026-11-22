@@ -386,6 +386,7 @@ def _build_proposal(
                 "authorization_context_source",
                 "bronze_evidence",
                 "evidence",
+                "review_history",
             }
             if any(
                 prior.get(key) != value

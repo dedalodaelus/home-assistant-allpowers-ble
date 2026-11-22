@@ -234,7 +234,7 @@ def _prompt_claim(claim: str, support: bool, failures: list[str]) -> str:
         print("  This claim is unavailable and will remain inconclusive.")
         return "inconclusive"
     answer = (
-        input("  Independent decision [inconclusive/pass] (default inconclusive): ")
+        input("  Evidence decision [inconclusive/pass] (default inconclusive): ")
         .strip()
         .lower()
     )
@@ -278,7 +278,7 @@ def interactive_review(
             matrix_path=matrix_path,
         )
     print(
-        "Offline independent physical review (a reviewer response is not cryptographic attestation)."
+        "Offline physical evidence attestation (this is not cryptographic attestation)."
     )
     print(
         f"Model / hardware / firmware: {revision.get('model')} / {revision.get('hardware_version')} / {run.get('firmware_version')}"
@@ -295,17 +295,40 @@ def interactive_review(
         path for path in run.get("evidence", []) if isinstance(path, str)
     ):
         print(f"  {relative}")
-    reviewer = input("Reviewer (public identifier): ").strip()
+    print("Assurance: [1] operator_attested  [2] independently_reviewed")
+    mode = input("Choose assurance (default: inconclusive): ").strip().lower()
+    assurance = {
+        "1": "operator_attested",
+        "operator_attested": "operator_attested",
+        "2": "independently_reviewed",
+        "independently_reviewed": "independently_reviewed",
+    }.get(mode, "unknown")
+    reviewer = input("Person attesting (public identifier): ").strip()
     if re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", reviewer) is None:
         raise HAAPIError(
             "Reviewer must be a nonempty public identifier of at most 80 characters"
         )
     inspected = (
-        input("Independently inspected real-device evidence? [no/yes] (default no): ")
+        input(
+            "Inspected the real-device evidence and can substantiate this assurance? [no/yes] (default no): "
+        )
         .strip()
         .lower()
     )
-    independent = inspected == "yes"
+    if assurance == "independently_reviewed":
+        independent = (
+            input(
+                "Explicitly declare that you are a different person from the HIL operator? [no/yes] (default no): "
+            )
+            .strip()
+            .lower()
+            == "yes"
+        )
+        if not independent:
+            assurance = "unknown"
+    else:
+        independent = False
+    can_attest = inspected == "yes" and assurance != "unknown"
     claims: dict[str, str] = {}
     for claim in CLAIMS:
         supported, evidence, checks = _claim_support(claim, revision, run, members)
@@ -322,19 +345,20 @@ def interactive_review(
         ]
         if checks.get(claim) is False:
             failures.append(_CLAIM_LABELS[claim])
-        if independent:
+        if can_attest:
             claims[claim] = _prompt_claim(claim, supported, failures)
         else:
             print(
-                "  No independent physical inspection confirmed; keeping inconclusive."
+                "  Assurance or evidence inspection was not confirmed; keeping inconclusive."
             )
             claims[claim] = "inconclusive"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "archive_sha256": run["archive_sha256"],
         "run_id": run["run_id"],
         "reviewed_by": reviewer,
         "reviewed_at": datetime.now(UTC).isoformat(),
+        "assurance": assurance,
         "claims": claims,
     }
     audit_dir = root / "hil-results" / "bronze-reviews"
@@ -495,12 +519,12 @@ def _interactive_higher_tier_review(
     if inventory_preflight:
         print(
             "Operator physical-inventory preflight (acquisition eligibility only; "
-            "not independent qualification):"
+            "not qualification evidence by itself):"
         )
         for feature in sorted(inventory_preflight):
             print(
-                f"  {feature}: operator reported physically present; independently "
-                "inspect the actual transitions and restorations below."
+                f"  {feature}: operator reported physically present; inspect and "
+                "confirm the actual transitions and restorations below."
             )
     for step in steps:
         if not isinstance(step, dict):
@@ -843,24 +867,28 @@ def _interactive_higher_tier_review(
     decisions = []
     scenario_decisions = []
     absence_decisions = []
-    reviewer_independent_from_operator = False
+    assurance = "unknown"
     if reviewable or reconnect_candidate is not None or absence_candidates:
-        print(
-            "The public archive does not identify the HIL operator. Do not review "
-            "your own run."
-        )
-        candidate = input("Independent reviewer (public identifier): ").strip()
+        print("Assurance: [1] operator_attested  [2] independently_reviewed")
+        assurance = {
+            "1": "operator_attested",
+            "operator_attested": "operator_attested",
+            "2": "independently_reviewed",
+            "independently_reviewed": "independently_reviewed",
+        }.get(input("Choose assurance (default unknown): ").strip().lower(), "unknown")
+        candidate = input("Person attesting (public identifier): ").strip()
         if re.fullmatch(r"[A-Za-z0-9_. -]{1,80}", candidate):
             reviewed_by = candidate
-            reviewer_independent_from_operator = (
-                input(
-                    "Confirm you are not the HIL operator/contributor who collected "
-                    "this run? [no/yes] (default no): "
+            if (
+                assurance == "independently_reviewed"
+                and input(
+                    "Explicitly declare that you are a different person from the HIL operator? [no/yes] (default no): "
                 )
                 .strip()
                 .lower()
-                == "yes"
-            )
+                != "yes"
+            ):
+                assurance = "unknown"
         else:
             print("Invalid reviewer identifier; all observations remain inconclusive.")
     if reviewed_by is not None:
@@ -894,7 +922,7 @@ def _interactive_higher_tier_review(
             )
             change_confirmed = (
                 input(
-                    f"  Did you independently observe {feature} change to "
+                    f"  Did you physically observe {feature} change to "
                     f"{cycle['target_state']}? [no/yes] (default no): "
                 )
                 .strip()
@@ -903,7 +931,7 @@ def _interactive_higher_tier_review(
             )
             restore_confirmed = (
                 input(
-                    f"  Did you independently observe {feature} restore to "
+                    f"  Did you physically observe {feature} restore to "
                     f"{cycle['initial_state']}? [no/yes] (default no): "
                 )
                 .strip()
@@ -949,7 +977,7 @@ def _interactive_higher_tier_review(
             )
             final_confirmed = (
                 input(
-                    "  Did you independently confirm the unit physically returned "
+                    "  Did you physically confirm the unit returned "
                     "to its original safe state after this final action? "
                     "[no/yes] (default no): "
                 )
@@ -970,7 +998,7 @@ def _interactive_higher_tier_review(
             )
             physical_action_confirmed = (
                 input(
-                    "  Did you independently confirm the route interruption and "
+                    "  Did you physically confirm the route interruption and "
                     "restoration? [no/yes] (default no): "
                 )
                 .strip()
@@ -979,7 +1007,7 @@ def _interactive_higher_tier_review(
             )
             physical_recovery_confirmed = (
                 input(
-                    "  Did you independently confirm the recovered session and "
+                    "  Did you confirm the recovered session and "
                     "fresh status telemetry? [no/yes] (default no): "
                 )
                 .strip()
@@ -1001,7 +1029,7 @@ def _interactive_higher_tier_review(
             )
             physically_absent = (
                 input(
-                    "  Did independent physical inspection confirm this control is absent? [no/yes] (default no): "
+                    "  Did physical inspection confirm this control is absent? [no/yes] (default no): "
                 )
                 .strip()
                 .lower()
@@ -1030,13 +1058,14 @@ def _interactive_higher_tier_review(
         audit_path = audit_dir / f"{run['run_id']}-{tier}-{stamp}.json"
         _reject_symlink_components(audit_path, repo_root)
         audit = {
-            "schema_version": 1,
+            "schema_version": 2,
             "tier": tier,
             "archive_sha256": run["archive_sha256"],
             "run_id": run["run_id"],
             "reviewed_by": reviewed_by,
             "reviewed_at": reviewed_at,
-            "reviewer_independent_from_operator": reviewer_independent_from_operator,
+            "reviewer_independent_from_operator": assurance == "independently_reviewed",
+            "assurance": assurance,
             "transitions": decisions,
             "scenarios": scenario_decisions,
             "absences": absence_decisions,

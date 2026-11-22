@@ -151,7 +151,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     tiers_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser = commands.add_parser(
-        "review", help="Independently review an imported HIL archive by tier"
+        "review", help="Attest physical observations for an imported HIL archive"
     )
     review_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
     review_parser.add_argument("--run-id", required=True)

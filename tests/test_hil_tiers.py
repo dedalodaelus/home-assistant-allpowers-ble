@@ -66,6 +66,7 @@ def _reviewed(
             "outcome": "confirmed_pass" if status == "pass" else "confirmed_fail",
             "reviewed_by": "independent-reviewer",
             "reviewed_at": datetime.now(UTC).isoformat(),
+            "assurance": "independently_reviewed",
             "evidence_sha256": _digest(root, evidence),
             **review_fields,
         },
@@ -533,6 +534,7 @@ def _matrix_fixture(
                 "status": "absent",
                 "reviewed_by": "independent-reviewer",
                 "reviewed_at": stamp,
+                "assurance": "independently_reviewed",
                 "evidence": [absent],
                 "evidence_sha256": _digest(root, [absent]),
             }
