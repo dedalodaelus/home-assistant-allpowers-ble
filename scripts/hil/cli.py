@@ -3350,11 +3350,23 @@ def _review_checkout_safe(
         return False
     if branch in {"", "devel", "main"}:
         return False
-    changed_paths = {
-        item[3:].decode("utf-8", errors="surrogateescape")
-        for item in status.split(b"\0")
-        if item
-    }
+    changed_paths: set[str] = set()
+    records = status.split(b"\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4 or record[2:3] != b" ":
+            return False
+        status_code = record[:2]
+        changed_paths.add(record[3:].decode("utf-8", errors="surrogateescape"))
+        if b"R" in status_code or b"C" in status_code:
+            if index >= len(records) or not records[index]:
+                return False
+            changed_paths.add(records[index].decode("utf-8", errors="surrogateescape"))
+            index += 1
     return changed_paths <= allowed
 
 

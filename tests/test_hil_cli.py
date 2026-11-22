@@ -764,6 +764,52 @@ def test_review_checkout_only_allows_target_run_evidence(tmp_path):
     assert cli._review_evidence_paths(matrix_path, target_run) is None
 
 
+def test_review_checkout_rejects_staged_rename_from_unrelated_path(tmp_path):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "devel", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    matrix = repo / "tests/hil/qualification_matrix.json"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text("{}\n", encoding="utf-8")
+    target_relative = "tests/hil/fixtures/r600/runs/a/report.md"
+    unrelated_source = repo / f"ab/{target_relative}"
+    unrelated_source.parent.mkdir(parents=True)
+    unrelated_source.write_text("unrelated tracked content\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "test: initialize rename checkout"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "-C", str(repo), "switch", "-c", "feat/review"], check=True)
+    (repo / target_relative).parent.mkdir(parents=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "mv",
+            str(unrelated_source),
+            str(repo / target_relative),
+        ],
+        check=True,
+    )
+    rename_status = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--cached", "--name-status"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert rename_status.startswith("R")
+
+    assert not cli._review_checkout_safe(repo, matrix, [target_relative])
+
+
 def test_candidate_control_preflight_does_not_require_production_permission():
     class CandidateHA:
         def control_state(self, _key, _entity):
