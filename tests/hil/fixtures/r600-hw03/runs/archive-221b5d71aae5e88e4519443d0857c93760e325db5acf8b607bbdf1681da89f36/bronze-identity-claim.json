@@ -1,0 +1,14 @@
+{
+  "artifact_type": "bronze_evidence",
+  "build_fingerprint": "2a53356b4cc0593f842fdded202f2edd1fa13cb90af5ae5b1bf36d72aef1cb22",
+  "captured_at": "2026-11-23T00:58:01+00:00",
+  "claim": "identity",
+  "firmware_version": "0.2",
+  "hardware_revision": "0.3",
+  "identity_confirmed": true,
+  "model": "ALLPOWERS R600",
+  "revision_id": "r600-hw03",
+  "route": "local_adapter",
+  "run_id": "archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36",
+  "session_id": "archive-session-5e9fea7b95470ca6eefda981c174ca0d"
+}
