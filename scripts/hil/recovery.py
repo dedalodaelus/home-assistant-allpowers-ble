@@ -238,6 +238,11 @@ def _execute_recovery_suite(
                 "Home Assistant or integration reload/upgrade",
             }
             or action_step.get("operator_confirmed") is not True
+            or action_step.get("action") == "route interruption and restoration"
+            and (
+                action_step.get("disconnect_observed") is not True
+                or action_step.get("restoration_confirmed") is not True
+            )
             or guided_reconnect_required
             and action_step.get("action") != "route interruption and restoration"
             or any(
@@ -299,11 +304,99 @@ def _execute_recovery_suite(
                 "another route does not prove recovery of the original route."
             )
             print(
-                "Confirm only after you attempted both the interruption and "
-                "restoration; verification still checks the new session, fresh "
-                "status, and route trace."
+                "First interrupt the selected route and leave it unavailable. "
+                "The runner will poll Home Assistant for an explicit disconnected "
+                "snapshot before asking you to restore it."
             )
-        if prompt("Type 1 after you have completed the selected action: ") != "1":
+            if prompt("Type 1 when the route is interrupted and remains down: ") != "1":
+                steps.append(
+                    {
+                        "step_id": "operator_action",
+                        "outcome": "skipped",
+                        "action": action,
+                        "reason": "operator did not confirm the interruption phase",
+                    }
+                )
+                checkpoint()
+                return 2
+            disconnect_deadline = (
+                services.monotonic() + scenario.steps[2]["timeout_seconds"]
+            )
+            disconnect_observed = False
+            try:
+                while services.monotonic() < disconnect_deadline:
+                    try:
+                        snapshot = api.hil_capabilities(entry_id)
+                    except HAAPIError:
+                        snapshot = None
+                    if (
+                        isinstance(snapshot, dict)
+                        and snapshot.get("connected") is False
+                    ):
+                        disconnect_observed = True
+                        break
+                    remaining = disconnect_deadline - services.monotonic()
+                    if remaining > 0:
+                        services.sleep(min(2, remaining))
+            except KeyboardInterrupt:
+                steps.append(
+                    {
+                        "step_id": "operator_action",
+                        "outcome": "inconclusive",
+                        "action": action,
+                        "operator_confirmed": False,
+                        "disconnect_observed": False,
+                        "reason": "operator interrupted the bounded outage observation",
+                    }
+                )
+                checkpoint()
+                print("Outage observation interrupted; private checkpoint saved")
+                return 2
+            if not disconnect_observed:
+                steps.append(
+                    {
+                        "step_id": "operator_action",
+                        "outcome": "inconclusive",
+                        "action": action,
+                        "operator_confirmed": False,
+                        "disconnect_observed": False,
+                        "reason": (
+                            "Home Assistant did not report an explicit disconnected "
+                            "state before the bounded interruption wait expired; "
+                            "keep the route state safe and rerun only after it is restored"
+                        ),
+                        "utc": services.datetime.now(UTC).isoformat(),
+                        "elapsed_ms": int((services.monotonic() - run_started) * 1000),
+                    }
+                )
+                checkpoint()
+                print(
+                    "Inconclusive: no explicit HA disconnected snapshot was observed; "
+                    "restore the route safely; the interruption is not qualified."
+                )
+                return 2
+            action_step = {
+                "step_id": "operator_action",
+                "outcome": "inconclusive",
+                "action": action,
+                "operator_confirmed": False,
+                "disconnect_observed": True,
+                "interruption_observed": True,
+                "observed_connected": False,
+                "utc": services.datetime.now(UTC).isoformat(),
+                "elapsed_ms": int((services.monotonic() - run_started) * 1000),
+            }
+            steps.append(action_step)
+            checkpoint()
+            if prompt("Type 1 after restoring the same BLE route: ") != "1":
+                action_step["reason"] = "operator did not confirm route restoration"
+                checkpoint()
+                return 2
+            action_step["outcome"] = "pass"
+            action_step["operator_confirmed"] = True
+            action_step["restoration_confirmed"] = True
+            checkpoint()
+        elif prompt("Type 1 after you have completed the selected action: ") != "1":
             steps.append(
                 {
                     "step_id": "operator_action",
@@ -314,14 +407,15 @@ def _execute_recovery_suite(
             )
             checkpoint()
             return 2
-        action_step: dict[str, Any] = {
-            "step_id": "operator_action",
-            "outcome": "pass",
-            "action": action,
-            "operator_confirmed": True,
-            "utc": services.datetime.now(UTC).isoformat(),
-            "elapsed_ms": int((services.monotonic() - run_started) * 1000),
-        }
+        if action != "route interruption and restoration":
+            action_step = {
+                "step_id": "operator_action",
+                "outcome": "pass",
+                "action": action,
+                "operator_confirmed": True,
+                "utc": services.datetime.now(UTC).isoformat(),
+                "elapsed_ms": int((services.monotonic() - run_started) * 1000),
+            }
         if action == "vendor-app contention":
             print(
                 "Report only what happened in the official app; no recording is requested."
@@ -335,13 +429,14 @@ def _execute_recovery_suite(
                 "2": "connected",
                 "3": "unable_or_unwilling",
             }.get(app_result, "unable_or_unwilling")
-        steps.append(action_step)
+        if action != "route interruption and restoration":
+            steps.append(action_step)
         checkpoint()
     else:
         print("Resuming observation only; no operator action will be repeated.")
 
     deadline = services.monotonic() + scenario.steps[2]["timeout_seconds"]
-    saw_disconnect = False
+    saw_disconnect = bool(action_step.get("disconnect_observed") is True)
     recovered: dict[str, Any] | None = None
     stable: dict[str, Any] | None = None
     stable_since: float | None = None
@@ -659,6 +754,15 @@ def _execute_recovery_suite(
         telemetry_matches=(
             recovered is not None
             and (not guided_reconnect_required or reconnect_confirmed)
+            and (
+                not guided_reconnect_required
+                or (
+                    saw_disconnect
+                    and observation.get("fresh_status_telemetry") is True
+                    and observation.get("connected") is True
+                    and observation.get("status_fresh") is True
+                )
+            )
         ),
         physical_outcome=physical_outcome,
         route_verified=observation["route_verified"],

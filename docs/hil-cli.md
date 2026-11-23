@@ -655,10 +655,16 @@ or an arbitrary SSH add-on. Skip if OS-level control is unavailable or unsafe.
 Turning off the station's Bluetooth tests a device-side interruption, and
 reloading HA tests an HA restart; neither proves proxy or adapter outage. A
 second scanner or proxy can take over, so a verified reconnect over another
-route does not demonstrate recovery of the route that was interrupted. After
-the operator confirms both interruption and restoration, the runner still
-checks the new session generation, fresh status, and complete route-bound
-trace. Unknown routes receive only neutral guidance and a safe skip option.
+route does not demonstrate recovery of the route that was interrupted. The
+operator confirms the interruption first and leaves the route unavailable.
+The runner polls the selected device capability until it receives an explicit
+`connected=false` snapshot; API errors, missing data, and a still-connected
+snapshot do not count. Only then does it ask the operator to restore the route.
+If the bounded wait expires first, the result is inconclusive and no reconnect
+trace is exported as a pass. After restoration confirmation, the runner checks
+a changed session generation, fresh status, a read-only status request and
+decoded `StatusData` in the complete route-bound trace, plus the physical
+outcome. Unknown routes receive only neutral guidance and a safe skip option.
 
 Missing route proof, incomplete trace, or missing recovery confirmation
 remains inconclusive. The evidence is not build-level HIL qualification.

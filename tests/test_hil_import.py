@@ -1469,7 +1469,7 @@ def _standard_tier_suite_archive(
         ),
     )
     with (
-        patch("builtins.input", side_effect=("1", "1", "1")),
+        patch("builtins.input", side_effect=("1", "1", "1", "1")),
         patch("scripts.hil.cli.sleep", return_value=None),
     ):
         assert (
