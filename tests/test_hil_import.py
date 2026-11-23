@@ -4373,6 +4373,113 @@ def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
     assert "requested Silver review evidence has mixed-assurance status" in body
 
 
+def test_partial_bronze_reviews_with_mixed_assurance_generate_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "abcdef0123456789",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+        stale_rest_fallback=False,
+        scenario_progress=False,
+        guided_bronze_execution=True,
+    )
+    matrix_path = _matrix(tmp_path / "tests" / "hil")
+    template_dir = tmp_path / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".gitignore", tmp_path / ".gitignore"
+    )
+    subprocess.run(
+        ["git", "init", "-b", "feat/mixed-bronze", str(tmp_path)], check=True
+    )
+    _commit_checkout(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    _tty(monkeypatch)
+
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+
+    partial_reviews = [
+        ["1", "Bronze operator", "yes", "pass", "yes", "", "", "APPLY REVIEW"],
+        [
+            "2",
+            "Independent reviewer",
+            "yes",
+            "yes",
+            "",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ],
+    ]
+    for answers in partial_reviews:
+        responses = iter(answers)
+        monkeypatch.setattr(
+            "builtins.input", lambda _prompt="", responses=responses: next(responses)
+        )
+        assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    run = reviewed["revisions"][0]["runs"][0]
+    assert run["bronze_evidence"]["identity"]["physical_review"]["assurance"] == (
+        "operator_attested"
+    )
+    assert run["bronze_evidence"]["protocol_probe"]["physical_review"]["assurance"] == (
+        "independently_reviewed"
+    )
+    assert run["bronze_evidence"]["fresh_telemetry"]["physical_review"][
+        "assurance"
+    ] == ("independently_reviewed")
+    tier = evaluate_tiers(reviewed)["tiers"][0]
+    assert tier["tier"] == "bronze"
+    assert tier["assurance"]["bronze"] == "mixed"
+
+    output_dir = tmp_path / "hil-results" / "pr-handoff" / run_id
+    assert cli._onboard_import_review(
+        archive,
+        output_dir,
+        "bronze",
+        repo_root=tmp_path,
+        matrix_path=matrix_path,
+        review_completed=True,
+        reviewed_run_id=run_id,
+    )
+    output = capsys.readouterr().out
+    body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "REVIEWED TIER: Bronze; ASSURANCE: mixed" in output
+    assert (
+        "identity, protocol, and freshness claims were mixed-assurance and applied"
+        in body
+    )
+    assert "independently reviewed and applied" not in body
+
+
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

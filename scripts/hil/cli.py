@@ -4150,16 +4150,15 @@ def _onboard_import_review(
                 for item in revision.get("runs", [])
                 if item.get("run_id") == proposal["run_id"]
             )
-            assurance_values = {
-                run["bronze_evidence"][claim]["physical_review"]["assurance"]
+            bronze_claim_assurances = {
+                claim: run["bronze_evidence"][claim]["physical_review"]["assurance"]
                 for claim in ("identity", "protocol_probe", "fresh_telemetry")
             }
-            bronze_assurance = assurance_values.pop()
-            if assurance_values or bronze_assurance not in {
-                "operator_attested",
-                "independently_reviewed",
-            }:
-                raise ValueError("inconsistent review assurance")
+            if any(
+                assurance not in {"operator_attested", "independently_reviewed"}
+                for assurance in bronze_claim_assurances.values()
+            ):
+                raise ValueError("invalid Bronze claim review assurance")
         except (OSError, ValueError, KeyError, TypeError, StopIteration) as ex:
             print(
                 "Applied review provenance is unavailable; no PR handoff generated:", ex
@@ -4168,7 +4167,7 @@ def _onboard_import_review(
     else:
         importer._print_preview(proposal)
         expected_assurance = None
-        bronze_assurance = None
+        bronze_claim_assurances = {}
     run_id = proposal["run_id"]
     if not review_completed:
         try:
@@ -4388,6 +4387,9 @@ def _onboard_import_review(
         if isinstance(assurance_by_tier, dict)
         else None
     )
+    bronze_assurance = (
+        assurance_by_tier.get("bronze") if isinstance(assurance_by_tier, dict) else None
+    )
     if review_completed:
         expected_assurance = requested_assurance
         if expected_assurance not in {
@@ -4396,6 +4398,12 @@ def _onboard_import_review(
             "mixed",
         }:
             expected_assurance = None
+        if bronze_assurance not in {
+            "operator_attested",
+            "independently_reviewed",
+            "mixed",
+        }:
+            bronze_assurance = None
     assurance_mismatch = (
         not review_completed and requested_assurance != expected_assurance
     )
@@ -4588,7 +4596,11 @@ def _onboard_import_review(
         and reviewed_claims[claim].get("physical_review", {}).get("outcome")
         == "confirmed_pass"
         and reviewed_claims[claim].get("physical_review", {}).get("assurance")
-        == (bronze_assurance if review_completed else expected_assurance)
+        == (
+            bronze_claim_assurances.get(claim)
+            if review_completed
+            else expected_assurance
+        )
         for claim in ("identity", "protocol_probe", "fresh_telemetry")
     )
     if not (
@@ -4617,6 +4629,7 @@ def _onboard_import_review(
     bronze_assurance_label = {
         "operator_attested": "operator-attested",
         "independently_reviewed": "independently reviewed",
+        "mixed": "mixed-assurance",
     }[bronze_assurance if review_completed else expected_assurance]
     title = f"test(hil): add {assurance_label} {model} {attained_tier} evidence"
     current_run_prefix = (
