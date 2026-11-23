@@ -4169,6 +4169,7 @@ def _onboard_import_review(
         importer._print_preview(proposal)
         expected_assurance = None
         bronze_claim_assurances = {}
+    review_audit_paths: list[str] = []
     run_id = proposal["run_id"]
     if not review_completed:
         try:
@@ -4266,6 +4267,9 @@ def _onboard_import_review(
                 )
                 return False
         pending_tier = "bronze"
+        review_audit_dir = repo_root / "hil-results" / "bronze-reviews"
+        audit_pattern = f"{run_id}-*.json"
+        audits_before = set(review_audit_dir.glob(audit_pattern))
         try:
             from .review_wizard import interactive_review
 
@@ -4303,9 +4307,42 @@ def _onboard_import_review(
             )
             return False
 
+        generated_audits = set(review_audit_dir.glob(audit_pattern)) - audits_before
+        if generated_audits:
+            if len(generated_audits) != 1:
+                print("Review generated an ambiguous set of audit artifacts.")
+                return False
+            audit_path = next(iter(generated_audits))
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                relative_audit = (
+                    audit_path.resolve().relative_to(repo_root.resolve()).as_posix()
+                )
+            except OSError, UnicodeError, ValueError, TypeError:
+                print("Review audit artifact is unavailable or outside the checkout.")
+                return False
+            if (
+                audit_path.is_symlink()
+                or not isinstance(audit, dict)
+                or audit.get("schema_version") != 2
+                or audit.get("run_id") != run_id
+                or audit.get("archive_sha256") != proposal.get("archive_digest")
+                or audit.get("assurance") != expected_assurance
+                or audit.get("claims")
+                != {
+                    "identity": "pass",
+                    "protocol_probe": "pass",
+                    "fresh_telemetry": "pass",
+                }
+                or not relative_audit.startswith("hil-results/bronze-reviews/")
+            ):
+                print("Review audit artifact does not match the applied run review.")
+                return False
+            review_audit_paths.append(relative_audit)
+
     imported_paths = _review_evidence_paths(matrix_path, run_id)
     if imported_paths is None or not _review_checkout_safe(
-        repo_root, matrix_path, imported_paths
+        repo_root, matrix_path, imported_paths + review_audit_paths
     ):
         print(
             "Cannot continue review handoff because unrelated checkout files changed."
