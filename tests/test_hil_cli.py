@@ -159,7 +159,18 @@ def test_ordered_offline_resume_only_attaches_handoff_to_final_tier(tmp_path, ca
     assert commands[1][commands[1].index("--archive") + 1] == str(archive.resolve())
 
 
-def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
+@pytest.mark.parametrize(
+    ("feature", "final_restore"),
+    [
+        ("ac_output", "yes"),
+        ("dc_output", "yes"),
+        ("light_output", "yes"),
+        ("light_output", "no"),
+    ],
+)
+def test_standard_tier_step_artifact_binds_output_actions(
+    tmp_path, feature, final_restore
+):
     parent = tmp_path / "parent" / "private"
     child = tmp_path / "tier_0123456789abcdef" / "private"
     parent.mkdir(parents=True)
@@ -224,7 +235,7 @@ def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
             )
         rows.append(
             {
-                "target": "ac_output",
+                "target": "light" if feature == "light_output" else feature,
                 "outcome": "pass",
                 "trace": trace_name,
                 "session_generation": 7,
@@ -241,18 +252,20 @@ def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
                 "pre_state": pre,
                 "expected": target,
                 "post_state": post,
-                "physical_outcome": "yes",
+                "physical_outcome": (
+                    final_restore if step_id == "ac_final_off" else "yes"
+                ),
             }
         )
     result = cli._reviewable_tier_step_artifact(
         parent_private=parent,
         child_private=child,
-        step_id="ac_output_cycle",
-        feature="ac_output",
+        step_id=f"{feature}_cycle",
+        feature=feature,
         checkpoint_rows=rows,
     )
     assert result is not None
-    assert result["outcome"] == "pass"
+    assert result["outcome"] == ("pass" if final_restore == "yes" else "inconclusive")
     assert result["initial_state"] == "off"
     assert result["target_state"] == "on"
     assert result["restored_state"] == "off"
@@ -266,9 +279,138 @@ def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
         action["trace_evidence"][0]["path"].startswith("../../tier_")
         for action in result["actions"]
     )
+    if feature == "light_output":
+        from scripts.hil.onboard import _valid_tier_step_acquisition
+
+        artifact_path = parent / "tier-light_output_cycle.json"
+        artifact_path.write_text(json.dumps(result), encoding="utf-8")
+        references = [
+            {
+                "path": artifact_path.name,
+                "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+            }
+        ]
+        assert _valid_tier_step_acquisition(
+            parent, "light_output_cycle", references
+        ) is (final_restore == "yes")
+        if final_restore == "yes":
+            from scripts.hil.onboard import assess_run_gate
+
+            plan_device = {
+                "model": "R600",
+                "hardware_revision": "0.3",
+                "firmware_revision": "0.2",
+                "build_provenance": {"build_match": "verified"},
+            }
+            plan_steps = [
+                {
+                    "id": "read_only_probe",
+                    "feature": "telemetry",
+                    "action": "read_only",
+                    "eligibility": "eligible",
+                    "required_evidence": ["fresh telemetry", "physical plausibility"],
+                },
+                {
+                    "id": "physical_plausibility_observation",
+                    "feature": "telemetry",
+                    "action": "manual",
+                    "eligibility": "eligible",
+                    "required_evidence": [
+                        "separate operator observation",
+                        "fresh telemetry context",
+                    ],
+                },
+                *[
+                    {
+                        "id": f"{name}_cycle",
+                        "feature": name,
+                        "action": "write",
+                        "eligibility": (
+                            "pending_authorization"
+                            if name == "light_output"
+                            else "blocked"
+                        ),
+                        "required_evidence": [],
+                    }
+                    for name in ("ac_output", "dc_output", "light_output")
+                ],
+                {
+                    "id": "basic_reconnect",
+                    "feature": "telemetry",
+                    "action": "manual",
+                    "eligibility": "blocked",
+                    "required_evidence": [],
+                },
+                {
+                    "id": "minimum_output_requirement",
+                    "feature": "output",
+                    "action": "requirement",
+                    "eligibility": "blocked",
+                    "required_evidence": [],
+                },
+            ]
+            scope = {
+                "model": {"value": "R600", "verified": True},
+                "hardware_version": {"value": "0.3", "verified": True},
+                "firmware_version": {"value": "0.2", "verified": True},
+            }
+            (parent / "session.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": "light-gate-run",
+                        "device": scope,
+                        "route": {"requested": "auto"},
+                        "integration_build": {"build_match": "verified"},
+                        "test_plan": {
+                            "requested_tier": "silver",
+                            "device": plan_device,
+                            "steps": plan_steps,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (parent / "environment.json").write_text(
+                json.dumps({"integration": {"build_match": "verified"}}),
+                encoding="utf-8",
+            )
+            (parent / "tier-execution.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": "light-gate-run",
+                        "requested_tier": "silver",
+                        "execution_tier": "silver",
+                        "device": {
+                            "model": "R600",
+                            "hardware_revision": "0.3",
+                            "firmware_revision": "0.2",
+                        },
+                        "requested_route": "auto",
+                        "verified_routes": ["local_adapter"],
+                        "steps": [
+                            {
+                                "step_id": "light_output_cycle",
+                                "outcome": "pass",
+                                "observed_routes": ["local_adapter"],
+                                "state_safe_to_continue": True,
+                                "machine_evidence": references,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            blockers = assess_run_gate(parent, run_result=0, requested_tier="silver")
+            assert not any(item["step_id"] == "light_output_cycle" for item in blockers)
 
 
-def test_standard_tier_step_artifact_rejects_missing_restoration_trace(tmp_path):
+@pytest.mark.parametrize("feature", ["ac_output", "light_output"])
+def test_standard_tier_step_artifact_rejects_missing_restoration_trace(
+    tmp_path, feature
+):
     parent = tmp_path / "parent" / "private"
     child = tmp_path / "tier_0123456789abcdef" / "private"
     parent.mkdir(parents=True)
@@ -287,11 +429,11 @@ def test_standard_tier_step_artifact_rejects_missing_restoration_trace(tmp_path)
     result = cli._reviewable_tier_step_artifact(
         parent_private=parent,
         child_private=child,
-        step_id="ac_output_cycle",
-        feature="ac_output",
+        step_id=f"{feature}_cycle",
+        feature=feature,
         checkpoint_rows=[
             {
-                "target": "ac_output",
+                "target": "light" if feature == "light_output" else feature,
                 "outcome": "pass",
                 "trace": "traces/ac_on",
                 "session_generation": 7,
