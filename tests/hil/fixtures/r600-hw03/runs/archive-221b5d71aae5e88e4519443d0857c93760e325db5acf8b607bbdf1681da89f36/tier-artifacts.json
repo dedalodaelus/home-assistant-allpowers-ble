@@ -1,0 +1,25 @@
+{
+  "artifacts": [
+    {
+      "artifact_id": "step-01-evidence-01",
+      "content": {
+        "actions": [],
+        "kind": "guided_step_evidence",
+        "outcome": "inconclusive",
+        "step_id": "read_only_probe"
+      },
+      "source_sha256": "417687f3e56fde34a6876ca88df77941ae598ba9aded6114eefefae45b231ef2"
+    },
+    {
+      "artifact_id": "step-02-evidence-01",
+      "content": {
+        "actions": [],
+        "kind": "guided_step_evidence",
+        "outcome": "inconclusive",
+        "step_id": "read_only_probe"
+      },
+      "source_sha256": "417687f3e56fde34a6876ca88df77941ae598ba9aded6114eefefae45b231ef2"
+    }
+  ],
+  "schema_version": 2
+}

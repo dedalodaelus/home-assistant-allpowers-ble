@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "generated_at": "2026-10-31",
+  "generated_at": "2026-11-23",
   "retention": "Store only sanitized captures and summaries. Do not include MAC addresses, serial numbers, Home Assistant IDs, or local topology.",
   "migration": {
     "from_schema_version": 2,
@@ -89,7 +89,249 @@
         }
       ],
       "legacy_v2_runs": [],
-      "runs": []
+      "runs": [
+        {
+          "run_id": "archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36",
+          "firmware_version": "0.2",
+          "route": "local_adapter",
+          "captured_at": "2026-11-23T00:58:01+00:00",
+          "tool_version": "unversioned",
+          "integration_version": "0.3.0",
+          "build_verification": "verified",
+          "installed_commit": "72610c29d9a19e8f667623af28886124eda5d47a",
+          "installed_fingerprint": "2a53356b4cc0593f842fdded202f2edd1fa13cb90af5ae5b1bf36d72aef1cb22",
+          "checkout_fingerprint": "2a53356b4cc0593f842fdded202f2edd1fa13cb90af5ae5b1bf36d72aef1cb22",
+          "build_verification_reason": null,
+          "capture_completeness": "complete",
+          "qualification_status": "pending",
+          "session_id": "archive-session-5e9fea7b95470ca6eefda981c174ca0d",
+          "build_fingerprint": "2a53356b4cc0593f842fdded202f2edd1fa13cb90af5ae5b1bf36d72aef1cb22",
+          "feature_presence": {
+            "ac_output": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "dc_output": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "light_output": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "eco_mode": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "work_mode": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "eco_timeout": {
+              "status": "unknown",
+              "evidence": []
+            },
+            "car_charger": {
+              "status": "unknown",
+              "evidence": []
+            }
+          },
+          "authorization_context": "read_only",
+          "authorization_context_source": "verified_read_only_session",
+          "evidence": [
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/environment.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/events.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/frames.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/manifest.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/report.md",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/session.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-artifacts.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-execution.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-identity-claim.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol-capture.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol_probe-claim.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-fresh_telemetry-claim.json"
+          ],
+          "scenarios": {
+            "golden_vector_replay": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "reconnect_failover": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "rapid_consecutive_writes": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "stale_timeout_recovery": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "soak_24h": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "upgrade_reload": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "vendor_app_contention": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            }
+          },
+          "write_capabilities": {
+            "ac_output": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "dc_output": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "light_output": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "eco_mode": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "work_mode": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "eco_timeout": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "car_charger": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            }
+          },
+          "archive_sha256": "2bdfe24524993ba876a6ace94a9c2b044134d00be6979476bbfeccb1ca02a16a",
+          "content_sha256": "5e9fea7b95470ca6eefda981c174ca0d338bb87d2dac691af545ae8a4e10862d",
+          "source_run_id": "eca8aba7c169b75e",
+          "reported_scenario_id": null,
+          "reported_step_ids": [],
+          "capture_summary": {
+            "by_capture": [
+              {
+                "capture_id": "capture-0001",
+                "complete": true,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "events": 9,
+                "frames": 3,
+                "route": "local_adapter"
+              }
+            ],
+            "complete": true,
+            "count": 1,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "events": 9,
+            "frames": 3
+          },
+          "bronze_evidence": {
+            "identity": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-identity-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-identity-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-23T00:58:59.195448+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json": "888399f9b950c2db3194e8d73021559d6774b77103565f0735ea1d2db060f570",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-identity-claim.json": "a56212ba751e85e601275313b5624fa672fdc6d8972a9f94c014efcf0576fad7"
+                }
+              }
+            },
+            "protocol_probe": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/events.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/frames.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol-capture.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol_probe-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol_probe-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-23T00:58:59.195448+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json": "888399f9b950c2db3194e8d73021559d6774b77103565f0735ea1d2db060f570",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/events.jsonl": "6b680b95b600b8d42684bf1344f20937393cafaed29d9dc10db9fcae52b7da17",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/frames.jsonl": "7245cbb8e9e25c6353e55ee9ff326fa630c71704c1ea250d3886446fc0207bea",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol-capture.jsonl": "6d12f4c07f79441e47dd7c3024e8e372bebb636d722cfcf6ef525868fabb570d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol_probe-claim.json": "4b9cfaeea8976428acbe9b100fa46272c33b7774ca377ea8deb74e698874fdd1"
+                }
+              },
+              "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-protocol-capture.jsonl"
+            },
+            "fresh_telemetry": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/events.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-fresh_telemetry-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-fresh_telemetry-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-23T00:58:59.195448+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/tier-bronze-read-only.json": "888399f9b950c2db3194e8d73021559d6774b77103565f0735ea1d2db060f570",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/events.jsonl": "6b680b95b600b8d42684bf1344f20937393cafaed29d9dc10db9fcae52b7da17",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-221b5d71aae5e88e4519443d0857c93760e325db5acf8b607bbdf1681da89f36/bronze-fresh_telemetry-claim.json": "ccf2c65d1a452dc82b94d5ef43a0c5faba82930c146217b52884b65d1a2153f0"
+                }
+              }
+            }
+          },
+          "review_history": [
+            {
+              "tier": "bronze",
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-23T00:58:59.195448+00:00",
+              "assurance": "operator_attested",
+              "claims": {
+                "identity": "pass",
+                "protocol_probe": "pass",
+                "fresh_telemetry": "pass"
+              },
+              "archive_sha256": "2bdfe24524993ba876a6ace94a9c2b044134d00be6979476bbfeccb1ca02a16a"
+            }
+          ]
+        }
+      ]
     },
     {
       "id": "volix-p1800-hw03",
