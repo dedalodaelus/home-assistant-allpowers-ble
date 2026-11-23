@@ -640,6 +640,26 @@ status telemetry and complete verified GATT route evidence. It reports
 `ha_recovered` when a changed session is observed and that evidence is
 complete. It captures a bounded route trace and asks for a numeric physical
 outcome where applicable.
+
+For the manual route test, the CLI displays the route verified for the active
+GATT session; it never infers it from `--route` or scanner advertisements. For
+`active_proxy`, temporarily make the connected ESPHome Bluetooth Proxy
+unavailable, restore it, and verify HA reconnects through that route. For
+`local_adapter`, physical USB removal is not required: on the Linux/BlueZ
+system that owns HA's controller, use `bluetoothctl list`, select the right
+controller, run `show`, then `power off`, wait for HA to detect disconnection,
+and `power on`. This interrupts all devices on that controller. In HA
+Container, the host usually owns it; in a VM, use the guest that owns the
+passed-through controller. Do not assume these commands are available in HA OS
+or an arbitrary SSH add-on. Skip if OS-level control is unavailable or unsafe.
+Turning off the station's Bluetooth tests a device-side interruption, and
+reloading HA tests an HA restart; neither proves proxy or adapter outage. A
+second scanner or proxy can take over, so a verified reconnect over another
+route does not demonstrate recovery of the route that was interrupted. After
+the operator confirms both interruption and restoration, the runner still
+checks the new session generation, fresh status, and complete route-bound
+trace. Unknown routes receive only neutral guidance and a safe skip option.
+
 Missing route proof, incomplete trace, or missing recovery confirmation
 remains inconclusive. The evidence is not build-level HIL qualification.
 

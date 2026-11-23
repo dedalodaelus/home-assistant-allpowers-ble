@@ -245,6 +245,18 @@ class AllpowersBLEClient:
         return self._active_session_generation
 
     @property
+    def observed_route(self) -> str:
+        """Return the route verified for the currently active GATT session."""
+        route = self._connected_route
+        if (
+            not self.is_connected
+            or route is None
+            or route[0] != self._active_session_generation
+        ):
+            return "unverified"
+        return route[1].observed_route
+
+    @property
     def session_status_notification_count(self) -> int | None:
         """Return accepted status notifications in the active GATT session."""
         if self._active_session_generation is None:

@@ -13,6 +13,48 @@ from .discovery import Device
 from .suite_runtime import SuiteServices
 from .storage import run_root
 
+_VERIFIED_ROUTES = {"local_adapter", "active_proxy"}
+
+
+def _print_reconnect_instructions(observed_route: str) -> None:
+    """Explain a safe manual interruption for the currently observed route."""
+    print("Manual BLE reconnect test (observed route: " + observed_route + ")")
+    print(
+        "Goal: interrupt HA's connection to this station, then restore the same route."
+    )
+    if observed_route == "active_proxy":
+        print(
+            "Temporarily make the connected ESPHome Bluetooth Proxy unavailable "
+            "(for example, power-cycle the proxy), restore it, and verify HA "
+            "reconnects through active_proxy. Do not turn off the station or "
+            "toggle its Bluetooth as a substitute for a proxy outage."
+        )
+    elif observed_route == "local_adapter":
+        print("Physical USB removal is not required for a local_adapter test.")
+        print(
+            "On the Linux/BlueZ system that owns HA's adapter, use "
+            "bluetoothctl list, then select <controller-address> and show. "
+            "Run power off, wait for HA to detect the disconnect, then power on."
+        )
+        print(
+            "This disrupts every device using that controller. For HA Container "
+            "it is usually the host; for a VM use the guest that owns the passed- "
+            "through controller. These commands may not be available in HA OS "
+            "or arbitrary SSH add-ons. If you cannot control the HA adapter "
+            "safely, skip."
+        )
+    else:
+        print(
+            "The connected route is not verified. Use only a route-neutral "
+            "interruption that you can safely observe and restore; do not infer "
+            "a route from --route or scanner availability. Otherwise skip."
+        )
+
+
+def _route_recovered_on_same_lane(expected_route: str, actual_route: Any) -> bool:
+    """Require a reconnect on the route verified before the manual outage."""
+    return expected_route in _VERIFIED_ROUTES and actual_route == expected_route
+
 
 def _has_status_refresh_exchange(
     trace: Any, *, session_generation: int, observed_route: str
@@ -146,11 +188,13 @@ def _execute_recovery_suite(
             print("Recovery suite blocked: no verified, connected, fresh baseline")
             return 2
         generation = baseline["session_generation"]
+        observed_route = baseline.get("observed_route", "unverified")
         steps.append(
             {
                 "step_id": "baseline",
                 "outcome": "pass",
                 "session_generation": generation,
+                "observed_route": observed_route,
                 "connected": True,
                 "status_fresh": True,
                 "utc": services.datetime.now(UTC).isoformat(),
@@ -202,6 +246,9 @@ def _execute_recovery_suite(
         ):
             raise HAAPIError("Checkpoint is not safely resumable")
         generation = baseline_step["session_generation"]
+        observed_route = baseline_step.get("observed_route", "unverified")
+        if observed_route not in {*_VERIFIED_ROUTES, "unverified"}:
+            observed_route = "unverified"
         steps.append(
             {
                 "step_id": "resume",
@@ -217,10 +264,12 @@ def _execute_recovery_suite(
     if resume_state is None:
         print("Select the manual recovery action you will perform:")
         if guided_reconnect_required:
+            _print_reconnect_instructions(observed_route)
             print("  1. Interrupt and restore the selected BLE route")
             choices = {"1": "route interruption and restoration"}
             prompt_text = "Action [1], or 0 to skip: "
         else:
+            _print_reconnect_instructions(observed_route)
             print("  1. Interrupt and restore the selected BLE route")
             print("  2. Use vendor-app contention, then close the app")
             print("  3. Reload or upgrade Home Assistant / the integration")
@@ -243,6 +292,17 @@ def _execute_recovery_suite(
             checkpoint()
             return 2
         print("The runner will not perform this action. Keep the station attended.")
+        if action == "route interruption and restoration":
+            print(
+                "This tests the Home Assistant-to-station BLE route. It does not "
+                "test a device Bluetooth toggle or an HA reload. A failover to "
+                "another route does not prove recovery of the original route."
+            )
+            print(
+                "Confirm only after you attempted both the interruption and "
+                "restoration; verification still checks the new session, fresh "
+                "status, and route trace."
+            )
         if prompt("Type 1 after you have completed the selected action: ") != "1":
             steps.append(
                 {
@@ -484,6 +544,21 @@ def _execute_recovery_suite(
                 observation["trace"] = f"traces/{trace_name}"
                 observation["route"] = trace.get("observed_route")
                 observation["trace_complete"] = trace.get("complete") is True
+                if action_step.get("action") == "route interruption and restoration":
+                    observation["route_matches_pre_action"] = (
+                        _route_recovered_on_same_lane(
+                            observed_route, trace.get("observed_route")
+                        )
+                    )
+                    if not observation["route_matches_pre_action"]:
+                        print(
+                            "Observed reconnect route:",
+                            trace.get("observed_route", "unverified"),
+                        )
+                        print(
+                            "This does not establish recovery on the route "
+                            "verified before the action."
+                        )
                 events = trace.get("events")
                 if isinstance(events, list) and any(
                     isinstance(event, dict)
@@ -569,7 +644,11 @@ def _execute_recovery_suite(
     observation["physical_outcome"] = physical_outcome
     observation["route_verified"] = bool(
         trace is not None
-        and services.route_matches_request(args.route, trace.get("observed_route"))
+        and (
+            _route_recovered_on_same_lane(observed_route, trace.get("observed_route"))
+            if action_step.get("action") == "route interruption and restoration"
+            else services.route_matches_request(args.route, trace.get("observed_route"))
+        )
     )
     reconnect_confirmed = bool(
         recovered is not None

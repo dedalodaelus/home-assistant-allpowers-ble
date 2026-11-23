@@ -7047,7 +7047,7 @@ def test_call_control_rejects_unallowlisted_actions(key, entity_id, value):
 
 
 def test_recovery_suite_only_observes_operator_action_and_new_route(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, capsys
 ):
     from types import SimpleNamespace
 
@@ -7071,6 +7071,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                 "connected": connected,
                 "status_fresh": connected,
                 "session_generation": generation,
+                "observed_route": "local_adapter",
             }
 
         def request_read_only_refresh(self, button):
@@ -7171,6 +7172,12 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
 
     assert result == 0
+    prompt_output = capsys.readouterr().out
+    assert "observed route: local_adapter" in prompt_output
+    assert "Physical USB removal is not required" in prompt_output
+    assert "wait for HA to detect the disconnect" in prompt_output
+    assert "disrupts every device using that controller" in prompt_output
+    assert "does not test a device Bluetooth toggle or an HA reload" in prompt_output
     assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
     assert api_fake.commands[1] == {
         "type": "call_service",
@@ -7219,6 +7226,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
                 "connected": True,
                 "status_fresh": True,
                 "session_generation": generation,
+                "observed_route": "active_proxy",
             }
 
         def request_read_only_refresh(self, button):
@@ -9388,6 +9396,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 4,
+        "observed_route": "active_proxy",
         "status_notification_count": 12,
         "pending_transaction": False,
         "entry_id": "private-entry",
@@ -9405,6 +9414,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
     ]
     assert normalized["model"] == "R600"
     assert normalized["session_generation"] == 4
+    assert normalized["observed_route"] == "active_proxy"
     assert normalized["status_notification_count"] == 12
     assert "entry_id" not in normalized
     assert "raw_address" not in normalized
@@ -9432,6 +9442,81 @@ def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
     )
 
     with pytest.raises(api.HAAPIError):
+        client.hil_capabilities("entry-123")
+
+
+@pytest.mark.parametrize(
+    "observed_route", ["active_proxy", "local_adapter", "unverified"]
+)
+def test_reconnect_instructions_follow_only_observed_route(capsys, observed_route):
+    from scripts.hil.recovery import _print_reconnect_instructions
+
+    _print_reconnect_instructions(observed_route)
+    output = capsys.readouterr().out
+    assert f"observed route: {observed_route}" in output
+    if observed_route == "active_proxy":
+        assert "ESPHome Bluetooth Proxy unavailable" in output
+        assert "Do not turn off the station" in output
+    elif observed_route == "local_adapter":
+        assert "Physical USB removal is not required" in output
+        assert "power off" in output and "power on" in output
+        assert "disrupts every device" in output
+    else:
+        assert "route is not verified" in output
+        assert "do not infer a route from --route" in output
+
+
+@pytest.mark.parametrize(
+    ("expected_route", "actual_route", "matches"),
+    [
+        ("active_proxy", "active_proxy", True),
+        ("active_proxy", "local_adapter", False),
+        ("local_adapter", "active_proxy", False),
+        ("unverified", "local_adapter", False),
+    ],
+)
+def test_manual_reconnect_requires_same_observed_route(
+    expected_route, actual_route, matches
+):
+    from scripts.hil.recovery import _route_recovered_on_same_lane
+
+    assert _route_recovered_on_same_lane(expected_route, actual_route) is matches
+
+
+@pytest.mark.parametrize("observed_route", [None, [], {}, "mixed", True])
+def test_capability_snapshot_rejects_malformed_observed_route(
+    monkeypatch, observed_route
+):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [
+            {
+                "schema_version": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+                "classification": "verified",
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 4,
+                "observed_route": observed_route,
+                "pending_transaction": False,
+                "capabilities": {
+                    "read_telemetry": True,
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "write_settings_keepalive": True,
+                    "car_charger_enabled": False,
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(api.HAAPIError, match="observed route"):
         client.hil_capabilities("entry-123")
 
 

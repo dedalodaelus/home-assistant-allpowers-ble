@@ -325,6 +325,7 @@ async def test_hil_capability_snapshot_is_admin_scoped_and_allowlisted(
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 7,
+        "observed_route": "local_adapter",
         "status_notification_count": 12,
         "pending_transaction": False,
         "output_states": {
