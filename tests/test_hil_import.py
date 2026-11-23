@@ -1399,6 +1399,7 @@ def _standard_tier_suite_archive(
                 "connected": not disconnected,
                 "status_fresh": not disconnected,
                 "session_generation": current_generation,
+                "observed_route": "local_adapter",
             }
 
         def request_read_only_refresh(self, button: ReadOnlyRefreshButton) -> None:

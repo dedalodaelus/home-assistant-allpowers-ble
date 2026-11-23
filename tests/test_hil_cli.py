@@ -7482,6 +7482,7 @@ def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(
                 "step_id": "baseline",
                 "outcome": "pass",
                 "session_generation": 4,
+                "observed_route": "active_proxy",
             },
             {
                 "step_id": "operator_action",

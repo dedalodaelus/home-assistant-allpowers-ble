@@ -21,6 +21,7 @@ from custom_components.allpowers_ble.client import (
 )
 from custom_components.allpowers_ble.options import ConnectionOptions
 from custom_components.allpowers_ble.protocol import StateUnavailableError
+from custom_components.allpowers_ble.route_attribution import ConnectedRoute
 
 from tests.ha_stubs import (
     FakeBleakError,
@@ -114,6 +115,27 @@ def connect_fake(client: AllpowersBLEClient) -> FakeClient:
     client._settings = settings()
     client._connected_monotonic = monotonic()
     return fake
+
+
+def test_observed_route_is_scoped_to_the_live_session() -> None:
+    client = make_client()
+    assert client.observed_route == "unverified"
+
+    connect_fake(client)
+    assert client.observed_route == "unverified"
+
+    client._connected_route = (
+        1,
+        ConnectedRoute("local_adapter", "bluez", "bluez_device_path", "hci0"),
+    )
+    assert client.observed_route == "local_adapter"
+
+    client._active_session_generation = 2
+    assert client.observed_route == "unverified"
+
+    client._active_session_generation = 1
+    client._connected = False
+    assert client.observed_route == "unverified"
 
 
 @pytest.mark.asyncio
