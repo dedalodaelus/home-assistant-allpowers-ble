@@ -9,6 +9,7 @@ import re
 import sys
 import subprocess
 import builtins
+import shlex
 from types import ModuleType
 from urllib.error import HTTPError
 import zipfile
@@ -48,6 +49,114 @@ def test_onboard_parser_declares_interactive_command():
     assert args.command == "onboard"
     assert args.ha_url == "https://ha.example"
     assert not hasattr(args, "token")
+
+
+def test_review_parser_accepts_archive_for_post_review_handoff(tmp_path):
+    archive = tmp_path / "hil-evidence.zip"
+    args = cli.make_parser().parse_args(
+        [
+            "review",
+            "--run-id",
+            "archive-" + "a" * 64,
+            "--interactive",
+            "--archive",
+            str(archive),
+        ]
+    )
+    assert args.archive == archive
+
+
+@pytest.mark.parametrize(("review_result", "expected_result"), [(0, 0), (2, 2)])
+def test_review_resume_hands_off_only_after_applied_review(
+    monkeypatch, tmp_path, review_result, expected_result
+):
+    from scripts.hil import review_wizard
+    from scripts.hil import importer
+
+    archive = tmp_path / "existing.zip"
+    matrix = tmp_path / "qualification_matrix.json"
+    monkeypatch.setattr(cli, "_matrix_repo_root", lambda _path: tmp_path)
+    monkeypatch.setattr(cli, "_review_evidence_paths", lambda *_args: ["evidence"])
+    monkeypatch.setattr(cli, "_review_checkout_safe", lambda *_args: True)
+    matrix.write_text(
+        json.dumps(
+            {
+                "revisions": [
+                    {
+                        "runs": [
+                            {
+                                "run_id": "archive-" + "a" * 64,
+                                "archive_sha256": "digest",
+                                "content_sha256": "content",
+                            }
+                        ]
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(importer, "_load_archive", lambda *_args: ({}, {}, "digest"))
+    monkeypatch.setattr(
+        importer, "_canonical_content_sha256", lambda _members: "content"
+    )
+    monkeypatch.setattr(
+        review_wizard,
+        "interactive_review",
+        lambda *_args, **_kwargs: review_result,
+    )
+    handoffs = []
+    monkeypatch.setattr(
+        cli,
+        "_onboard_import_review",
+        lambda *args, **kwargs: handoffs.append((args, kwargs)) or True,
+    )
+    args = cli.make_parser().parse_args(
+        [
+            "review",
+            "--matrix",
+            str(matrix),
+            "--run-id",
+            "archive-" + "a" * 64,
+            "--interactive",
+            "--archive",
+            str(archive),
+        ]
+    )
+
+    assert cli.execute(args) == expected_result
+    if review_result == 0:
+        assert len(handoffs) == 1
+        assert handoffs[0][0][:3] == (
+            archive,
+            tmp_path / "hil-results" / "pr-handoff" / args.run_id,
+            "bronze",
+        )
+        assert handoffs[0][1]["review_completed"] is True
+        assert handoffs[0][1]["reviewed_run_id"] == args.run_id
+    else:
+        assert handoffs == []
+
+
+def test_ordered_offline_resume_only_attaches_handoff_to_final_tier(tmp_path, capsys):
+    archive = tmp_path / "archive.zip"
+    matrix = tmp_path / "custom matrix.json"
+    cli._print_offline_review_resume(
+        matrix,
+        "archive-" + "a" * 64,
+        requested_tier="silver",
+        pending_tier="bronze",
+        archive_path=archive,
+    )
+    commands = [
+        shlex.split(line.strip())
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("python -m scripts.hil review")
+    ]
+    assert len(commands) == 2
+    assert "--archive" not in commands[0]
+    assert commands[1][commands[1].index("--tier") + 1] == "silver"
+    assert commands[1][commands[1].index("--archive") + 1] == str(archive.resolve())
 
 
 def test_standard_tier_step_artifact_binds_both_production_actions(tmp_path):
@@ -511,6 +620,8 @@ def test_onboard_acquisition_does_not_require_clean_topic_branch(
     assert output_root.exists()
     output = capsys.readouterr().out
     assert "Repository import and PR handoff require a clean topic branch" in output
+    assert "Before acquisition" in output
+    assert "worktree add -b" in output
     assert not any(call[0] == "service" for call in fake.calls)
 
 

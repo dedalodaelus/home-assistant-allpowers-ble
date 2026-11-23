@@ -4255,6 +4255,7 @@ def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from scripts import validate_hil_qualification
+    from scripts.hil import cli
     from scripts.hil.review_wizard import interactive_review
     from scripts.hil.tiers import evaluate_tiers
 
@@ -4339,6 +4340,144 @@ def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
     assert tier["tier"] == "silver"
     assert tier["assurance"]["bronze"] == "independently_reviewed"
     assert tier["assurance"]["silver"] == "mixed"
+
+    template_dir = tmp_path / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
+    subprocess.run(
+        ["git", "init", "-b", "feat/mixed-assurance", str(tmp_path)], check=True
+    )
+    _commit_checkout(tmp_path)
+    output_dir = tmp_path / "hil-results" / "pr-handoff" / run_id
+    assert cli._onboard_import_review(
+        archive,
+        output_dir,
+        "silver",
+        repo_root=tmp_path,
+        matrix_path=matrix_path,
+        review_completed=True,
+        reviewed_run_id=run_id,
+    )
+    handoff = capsys.readouterr().out
+    assert "REVIEWED TIER: Silver; ASSURANCE: mixed" in handoff
+    assert "--matrix" in handoff
+    body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "mixed-assurance Silver" in body
+    assert (
+        "Bronze identity, protocol, and freshness claims were independently reviewed"
+        in body
+    )
+    assert "requested Silver review evidence has mixed-assurance status" in body
+
+
+def test_partial_bronze_reviews_with_mixed_assurance_generate_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil import cli
+    from scripts.hil.review_wizard import interactive_review
+    from scripts.hil.tiers import evaluate_tiers
+
+    archive = _captured_archive(
+        tmp_path / "source",
+        "local_adapter",
+        "1.1",
+        "abcdef0123456789",
+        bronze_reviewable=True,
+        bronze_decoded_packet_types=("StatusData",),
+        bronze_protocol_outcome="pass",
+        stale_rest_fallback=False,
+        scenario_progress=False,
+        guided_bronze_execution=True,
+    )
+    matrix_path = _matrix(tmp_path / "tests" / "hil")
+    template_dir = tmp_path / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".gitignore", tmp_path / ".gitignore"
+    )
+    subprocess.run(
+        ["git", "init", "-b", "feat/mixed-bronze", str(tmp_path)], check=True
+    )
+    _commit_checkout(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+    _tty(monkeypatch)
+
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run_id = matrix["revisions"][0]["runs"][0]["run_id"]
+
+    partial_reviews = [
+        ["1", "Bronze operator", "yes", "pass", "yes", "", "", "APPLY REVIEW"],
+        [
+            "2",
+            "Independent reviewer",
+            "yes",
+            "yes",
+            "",
+            "pass",
+            "yes",
+            "pass",
+            "yes",
+            "APPLY REVIEW",
+        ],
+    ]
+    for answers in partial_reviews:
+        responses = iter(answers)
+        monkeypatch.setattr(
+            "builtins.input", lambda _prompt="", responses=responses: next(responses)
+        )
+        assert interactive_review(matrix_path, run_id=run_id, repo_root=tmp_path) == 0
+
+    reviewed = json.loads(matrix_path.read_text(encoding="utf-8"))
+    errors, _ = validate_hil_qualification.validate_matrix(
+        reviewed, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    run = reviewed["revisions"][0]["runs"][0]
+    assert run["bronze_evidence"]["identity"]["physical_review"]["assurance"] == (
+        "operator_attested"
+    )
+    assert run["bronze_evidence"]["protocol_probe"]["physical_review"]["assurance"] == (
+        "independently_reviewed"
+    )
+    assert run["bronze_evidence"]["fresh_telemetry"]["physical_review"][
+        "assurance"
+    ] == ("independently_reviewed")
+    tier = evaluate_tiers(reviewed)["tiers"][0]
+    assert tier["tier"] == "bronze"
+    assert tier["assurance"]["bronze"] == "mixed"
+
+    output_dir = tmp_path / "hil-results" / "pr-handoff" / run_id
+    assert cli._onboard_import_review(
+        archive,
+        output_dir,
+        "bronze",
+        repo_root=tmp_path,
+        matrix_path=matrix_path,
+        review_completed=True,
+        reviewed_run_id=run_id,
+    )
+    output = capsys.readouterr().out
+    body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "REVIEWED TIER: Bronze; ASSURANCE: mixed" in output
+    assert (
+        "identity, protocol, and freshness claims were mixed-assurance and applied"
+        in body
+    )
+    assert "independently reviewed and applied" not in body
 
 
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(
@@ -6012,6 +6151,22 @@ def test_onboard_operator_attestation_stages_the_complete_reviewed_run(
         "does not qualify output writes or other routes, firmware, or hardware revisions"
         in generated_body
     )
+    imported_matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    imported_run_id = imported_matrix["revisions"][0]["runs"][0]["run_id"]
+    resumed_handoff_dir = repo_root / "hil-results" / "pr-handoff" / imported_run_id
+    assert cli._onboard_import_review(
+        archive,
+        resumed_handoff_dir,
+        "bronze",
+        repo_root=repo_root,
+        matrix_path=matrix_path,
+        review_completed=True,
+    )
+    resumed_output = capsys.readouterr().out
+    assert "REVIEWED TIER: Bronze; ASSURANCE: operator_attested" in resumed_output
+    assert "READY FOR QUALIFICATION PR" in resumed_output
+    assert (resumed_handoff_dir / "pr.md").is_file()
+
     add_line = next(line.strip() for line in output.splitlines() if "git add " in line)
     stage_paths = shlex.split(add_line)[2:]
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
@@ -6093,6 +6248,12 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
         ignore=shutil.ignore_patterns("__pycache__"),
     )
     shutil.copyfile(source_root / ".gitignore", repo_root / ".gitignore")
+    template_dir = repo_root / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        source_root / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
 
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     matrix_path = _matrix(repo_root / "tests" / "hil")
@@ -6191,6 +6352,25 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
     older_run = next(run for run in runs if run["run_id"] == previous_run_id)
     assert archive.read_bytes() == archive_before
 
+    before_mismatched_review = imported_matrix.read_bytes()
+    assert (
+        cli.main(
+            [
+                "review",
+                "--matrix",
+                str(imported_matrix),
+                "--run-id",
+                current_run["run_id"],
+                "--interactive",
+                "--archive",
+                str(previous_archive),
+            ]
+        )
+        == 2
+    )
+    assert "does not match the reviewed run" in capsys.readouterr().out
+    assert imported_matrix.read_bytes() == before_mismatched_review
+
     review_line = next(
         line.strip()
         for line in handoff_output.splitlines()
@@ -6212,6 +6392,20 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
     )
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     assert cli.main(review_command[3:]) == 0
+    review_handoff_output = capsys.readouterr().out
+    assert "READY FOR QUALIFICATION PR" in review_handoff_output
+    assert "Exact allowlisted Git/gh commands:" in review_handoff_output
+    validation_commands = [
+        shlex.split(line.strip())
+        for line in review_handoff_output.splitlines()
+        if "validate_hil_qualification.py" in line or "scripts.hil tiers" in line
+    ]
+    assert len(validation_commands) == 2
+    for command in validation_commands:
+        assert command[command.index("--matrix") + 1] == str(imported_matrix)
+    assert (
+        worktree / "hil-results" / "pr-handoff" / current_run["run_id"] / "pr.md"
+    ).is_file()
 
     reviewed_matrix = json.loads(imported_matrix.read_text(encoding="utf-8"))
     from scripts.hil.cli import _isolated_run_summary
@@ -6349,10 +6543,14 @@ def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
 
     output = capsys.readouterr().out
     bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
-    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    tier_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], tier, archive_path=archive
+    )
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
     assert tier_command in output
+    assert "--archive" not in bronze_command
+    assert "--archive" in tier_command
     assert output.index(bronze_command) < output.index(tier_command)
     assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output
@@ -6408,11 +6606,15 @@ def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
 
     output = capsys.readouterr().out
     bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
-    tier_command = cli._review_resume_command(matrix_path, proposal["run_id"], tier)
+    tier_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], tier, archive_path=archive
+    )
     assert "Explicit review did not complete: review interrupted" in output
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
     assert tier_command in output
+    assert "--archive" not in bronze_command
+    assert "--archive" in tier_command
     assert output.index(bronze_command) < output.index(tier_command)
     assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output
@@ -6475,9 +6677,11 @@ def test_onboard_higher_tier_exception_resumes_only_pending_tier(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
+    bronze_command = cli._review_resume_command(
+        matrix_path, proposal["run_id"], archive_path=archive
+    )
     silver_command = cli._review_resume_command(
-        matrix_path, proposal["run_id"], "silver"
+        matrix_path, proposal["run_id"], "silver", archive_path=archive
     )
     assert "Explicit review did not complete: Silver review interrupted" in output
     assert "To continue the offline review, run these commands in order:" in output
