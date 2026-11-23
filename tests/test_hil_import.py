@@ -1205,7 +1205,7 @@ def _standard_tier_suite_archive(
         )
         assert transaction is not None
         return {
-            "target": feature,
+            "target": "light" if feature == "light_output" else feature,
             "outcome": "pass",
             "trace": trace_name,
             "session_generation": generation,

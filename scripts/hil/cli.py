@@ -2512,6 +2512,7 @@ def _reviewable_tier_step_artifact(
 ) -> dict[str, Any] | None:
     """Bind standard production-suite actions for offline physical review."""
     actions = []
+    scenario_target = "light" if feature == "light_output" else feature
     setting_states = {
         "eco_mode": {"on": True, "off": False},
         "car_charger": {"on": True, "off": False},
@@ -2530,7 +2531,7 @@ def _reviewable_tier_step_artifact(
         return value
 
     for row in checkpoint_rows:
-        if row.get("target") != feature or row.get("outcome") != "pass":
+        if row.get("target") != scenario_target or row.get("outcome") != "pass":
             continue
         trace_name = row.get("trace")
         if not isinstance(trace_name, str):
@@ -2608,7 +2609,7 @@ def _reviewable_tier_step_artifact(
     rows = [
         row
         for row in checkpoint_rows
-        if row.get("target") == feature and row.get("trace")
+        if row.get("target") == scenario_target and row.get("trace")
     ]
     physical = {"yes": "correct", "no": "incorrect"}
     output_feature = feature in {"ac_output", "dc_output", "light_output"}
