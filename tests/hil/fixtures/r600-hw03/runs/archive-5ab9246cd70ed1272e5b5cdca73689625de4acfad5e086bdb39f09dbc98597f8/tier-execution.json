@@ -1,0 +1,37 @@
+{
+  "attained_tier": null,
+  "qualification_status": "inconclusive",
+  "requested_tier": "bronze",
+  "review_state": "pending",
+  "schema_version": 2,
+  "steps": [
+    {
+      "human_review": "pending",
+      "machine_evidence": [
+        {
+          "artifact_id": "step-01-evidence-01",
+          "source_sha256": "1caa612ffa3c7d60c5e20956d55d515f1795b735a43763c89b07878586b2d463"
+        }
+      ],
+      "machine_evidence_sha256": [
+        "1caa612ffa3c7d60c5e20956d55d515f1795b735a43763c89b07878586b2d463"
+      ],
+      "outcome": "pass",
+      "step_id": "read_only_probe"
+    },
+    {
+      "human_review": "pending",
+      "machine_evidence": [
+        {
+          "artifact_id": "step-02-evidence-01",
+          "source_sha256": "1caa612ffa3c7d60c5e20956d55d515f1795b735a43763c89b07878586b2d463"
+        }
+      ],
+      "machine_evidence_sha256": [
+        "1caa612ffa3c7d60c5e20956d55d515f1795b735a43763c89b07878586b2d463"
+      ],
+      "outcome": "pass",
+      "step_id": "physical_plausibility_observation"
+    }
+  ]
+}
