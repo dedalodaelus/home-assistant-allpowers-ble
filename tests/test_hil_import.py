@@ -4255,6 +4255,7 @@ def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from scripts import validate_hil_qualification
+    from scripts.hil import cli
     from scripts.hil.review_wizard import interactive_review
     from scripts.hil.tiers import evaluate_tiers
 
@@ -4339,6 +4340,37 @@ def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(
     assert tier["tier"] == "silver"
     assert tier["assurance"]["bronze"] == "independently_reviewed"
     assert tier["assurance"]["silver"] == "mixed"
+
+    template_dir = tmp_path / ".github"
+    template_dir.mkdir()
+    shutil.copyfile(
+        Path(__file__).resolve().parents[1] / ".github/PULL_REQUEST_TEMPLATE.md",
+        template_dir / "PULL_REQUEST_TEMPLATE.md",
+    )
+    subprocess.run(
+        ["git", "init", "-b", "feat/mixed-assurance", str(tmp_path)], check=True
+    )
+    _commit_checkout(tmp_path)
+    output_dir = tmp_path / "hil-results" / "pr-handoff" / run_id
+    assert cli._onboard_import_review(
+        archive,
+        output_dir,
+        "silver",
+        repo_root=tmp_path,
+        matrix_path=matrix_path,
+        review_completed=True,
+        reviewed_run_id=run_id,
+    )
+    handoff = capsys.readouterr().out
+    assert "REVIEWED TIER: Silver; ASSURANCE: mixed" in handoff
+    assert "--matrix" in handoff
+    body = (output_dir / "pr.md").read_text(encoding="utf-8")
+    assert "mixed-assurance Silver" in body
+    assert (
+        "Bronze identity, protocol, and freshness claims were independently reviewed"
+        in body
+    )
+    assert "requested Silver review evidence has mixed-assurance status" in body
 
 
 def test_output_review_without_final_restoration_confirmation_stays_unqualified(
@@ -6213,6 +6245,25 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
     older_run = next(run for run in runs if run["run_id"] == previous_run_id)
     assert archive.read_bytes() == archive_before
 
+    before_mismatched_review = imported_matrix.read_bytes()
+    assert (
+        cli.main(
+            [
+                "review",
+                "--matrix",
+                str(imported_matrix),
+                "--run-id",
+                current_run["run_id"],
+                "--interactive",
+                "--archive",
+                str(previous_archive),
+            ]
+        )
+        == 2
+    )
+    assert "does not match the reviewed run" in capsys.readouterr().out
+    assert imported_matrix.read_bytes() == before_mismatched_review
+
     review_line = next(
         line.strip()
         for line in handoff_output.splitlines()
@@ -6237,6 +6288,14 @@ def test_real_worktree_resume_imports_and_reviews_in_the_new_checkout(
     review_handoff_output = capsys.readouterr().out
     assert "READY FOR QUALIFICATION PR" in review_handoff_output
     assert "Exact allowlisted Git/gh commands:" in review_handoff_output
+    validation_commands = [
+        shlex.split(line.strip())
+        for line in review_handoff_output.splitlines()
+        if "validate_hil_qualification.py" in line or "scripts.hil tiers" in line
+    ]
+    assert len(validation_commands) == 2
+    for command in validation_commands:
+        assert command[command.index("--matrix") + 1] == str(imported_matrix)
     assert (
         worktree / "hil-results" / "pr-handoff" / current_run["run_id"] / "pr.md"
     ).is_file()
@@ -6376,15 +6435,15 @@ def test_onboard_silver_gold_before_review_prints_ordered_resume_commands(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(
-        matrix_path, proposal["run_id"], archive_path=archive
-    )
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
     tier_command = cli._review_resume_command(
         matrix_path, proposal["run_id"], tier, archive_path=archive
     )
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
     assert tier_command in output
+    assert "--archive" not in bronze_command
+    assert "--archive" in tier_command
     assert output.index(bronze_command) < output.index(tier_command)
     assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output
@@ -6439,9 +6498,7 @@ def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
     )
 
     output = capsys.readouterr().out
-    bronze_command = cli._review_resume_command(
-        matrix_path, proposal["run_id"], archive_path=archive
-    )
+    bronze_command = cli._review_resume_command(matrix_path, proposal["run_id"])
     tier_command = cli._review_resume_command(
         matrix_path, proposal["run_id"], tier, archive_path=archive
     )
@@ -6449,6 +6506,8 @@ def test_onboard_silver_gold_bronze_review_exception_resumes_in_order(
     assert "To continue the offline review, run these commands in order:" in output
     assert bronze_command in output
     assert tier_command in output
+    assert "--archive" not in bronze_command
+    assert "--archive" in tier_command
     assert output.index(bronze_command) < output.index(tier_command)
     assert "READY FOR QUALIFICATION PR" not in output
     assert "git add " not in output

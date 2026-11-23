@@ -2847,6 +2847,31 @@ def execute(args: argparse.Namespace) -> int:
                 print("  git status --short")
                 return 2
 
+            if args.archive is not None:
+                from .importer import _canonical_content_sha256, _load_archive
+
+                try:
+                    _manifest, archive_members, archive_digest = _load_archive(
+                        args.archive
+                    )
+                    content_digest = _canonical_content_sha256(archive_members)
+                    matrix_data = json.loads(args.matrix.read_text(encoding="utf-8"))
+                    archive_run_ids = [
+                        run.get("run_id")
+                        for revision in matrix_data.get("revisions", [])
+                        if isinstance(revision, dict)
+                        for run in revision.get("runs", [])
+                        if isinstance(run, dict)
+                        and run.get("archive_sha256") == archive_digest
+                        and run.get("content_sha256") == content_digest
+                    ]
+                except (HAAPIError, OSError, UnicodeError, ValueError, TypeError) as ex:
+                    print("Handoff archive validation failed:", ex)
+                    return 2
+                if archive_run_ids != [args.run_id]:
+                    print("The supplied archive does not match the reviewed run.")
+                    return 2
+
             if args.tier == "bronze":
                 result = interactive_review(
                     args.matrix, run_id=args.run_id, repo_root=repo_root
@@ -2870,6 +2895,7 @@ def execute(args: argparse.Namespace) -> int:
                     repo_root=repo_root,
                     matrix_path=args.matrix,
                     review_completed=True,
+                    reviewed_run_id=args.run_id,
                 )
                 else 2
             )
@@ -3816,14 +3842,16 @@ def _print_import_resume_commands(
         )
     )
     matrix = Path(matrix)
-    print("  " + _review_resume_command(matrix, run_id, archive_path=archive_path))
     if requested_tier in {"silver", "gold"}:
+        print("  " + _review_resume_command(matrix, run_id))
         print(
             "  "
             + _review_resume_command(
                 matrix, run_id, requested_tier, archive_path=archive_path
             )
         )
+    else:
+        print("  " + _review_resume_command(matrix, run_id, archive_path=archive_path))
 
 
 def _review_resume_command(
@@ -3857,11 +3885,14 @@ def _print_offline_review_resume(
     if pending_tier == "bronze" and requested_tier in {"silver", "gold"}:
         tiers.append(requested_tier)
     print("To continue the offline review, run these commands in order:")
-    for tier in tiers:
+    for index, tier in enumerate(tiers):
         print(
             "  "
             + _review_resume_command(
-                matrix_path, run_id, tier, archive_path=archive_path
+                matrix_path,
+                run_id,
+                tier,
+                archive_path=(archive_path if index == len(tiers) - 1 else None),
             )
         )
 
@@ -4082,6 +4113,7 @@ def _onboard_import_review(
     repo_root: Path | None = None,
     matrix_path: Path | None = None,
     review_completed: bool = False,
+    reviewed_run_id: str | None = None,
 ) -> bool:
     """Import reviewed public evidence, invoke the requested review, and hand off."""
     if requested_tier == "platinum":
@@ -4103,6 +4135,9 @@ def _onboard_import_review(
         print("Import preview failed; no repository files were changed:", ex)
         return False
     if review_completed:
+        if reviewed_run_id is not None and proposal.get("run_id") != reviewed_run_id:
+            print("The supplied archive does not match the reviewed run.")
+            return False
         if not proposal.get("existing_run"):
             print("The supplied archive does not match an already imported run.")
             return False
@@ -4119,8 +4154,8 @@ def _onboard_import_review(
                 run["bronze_evidence"][claim]["physical_review"]["assurance"]
                 for claim in ("identity", "protocol_probe", "fresh_telemetry")
             }
-            expected_assurance = assurance_values.pop()
-            if assurance_values or expected_assurance not in {
+            bronze_assurance = assurance_values.pop()
+            if assurance_values or bronze_assurance not in {
                 "operator_attested",
                 "independently_reviewed",
             }:
@@ -4133,6 +4168,7 @@ def _onboard_import_review(
     else:
         importer._print_preview(proposal)
         expected_assurance = None
+        bronze_assurance = None
     run_id = proposal["run_id"]
     if not review_completed:
         try:
@@ -4352,6 +4388,17 @@ def _onboard_import_review(
         if isinstance(assurance_by_tier, dict)
         else None
     )
+    if review_completed:
+        expected_assurance = requested_assurance
+        if expected_assurance not in {
+            "operator_attested",
+            "independently_reviewed",
+            "mixed",
+        }:
+            expected_assurance = None
+    assurance_mismatch = (
+        not review_completed and requested_assurance != expected_assurance
+    )
     print(
         "POST-REVIEW QUALIFICATION: "
         f"attained {attained_tier}; "
@@ -4369,7 +4416,8 @@ def _onboard_import_review(
     if (
         selected is None
         or isolated_summary is None
-        or requested_assurance != expected_assurance
+        or expected_assurance is None
+        or assurance_mismatch
         or tier_rank.get(isolated_summary.get("tier"), 0)
         < tier_rank.get(requested_tier, 99)
     ):
@@ -4540,7 +4588,7 @@ def _onboard_import_review(
         and reviewed_claims[claim].get("physical_review", {}).get("outcome")
         == "confirmed_pass"
         and reviewed_claims[claim].get("physical_review", {}).get("assurance")
-        == expected_assurance
+        == (bronze_assurance if review_completed else expected_assurance)
         for claim in ("identity", "protocol_probe", "fresh_telemetry")
     )
     if not (
@@ -4561,11 +4609,15 @@ def _onboard_import_review(
         (isolated_tier, requested_tier),
         key=lambda tier: tier_rank.get(tier, 0),
     ).title()
-    assurance_label = (
-        "operator-attested"
-        if expected_assurance == "operator_attested"
-        else "independently reviewed"
-    )
+    assurance_label = {
+        "operator_attested": "operator-attested",
+        "independently_reviewed": "independently reviewed",
+        "mixed": "mixed-assurance",
+    }[expected_assurance]
+    bronze_assurance_label = {
+        "operator_attested": "operator-attested",
+        "independently_reviewed": "independently reviewed",
+    }[bronze_assurance if review_completed else expected_assurance]
     title = f"test(hil): add {assurance_label} {model} {attained_tier} evidence"
     current_run_prefix = (
         PurePosixPath("tests/hil/fixtures") / proposal["revision_id"] / "runs" / run_id
@@ -4625,8 +4677,9 @@ def _onboard_import_review(
     )
     validation_text = (
         f"The imported public archive passed integrity and schema checks. The exact "
-        f"run's Bronze identity, protocol, and freshness claims and {attained_tier} "
-        f"review evidence were {assurance_label} and applied. The resulting "
+        f"run's Bronze identity, protocol, and freshness claims were "
+        f"{bronze_assurance_label}; its requested {attained_tier} review evidence "
+        f"has {assurance_label} status. Both are applied. The resulting "
         "matrix passed schema-v3 validation and the tier evaluator both in scope "
         "and with this run isolated, so earlier evidence cannot complete this run."
     )
@@ -4652,7 +4705,7 @@ def _onboard_import_review(
         "recorded event sequence; it does not establish that the decoded notification "
         "was causally caused by that request. Two fresh telemetry samples and a "
         "plausible operator observation are present, and the identity, protocol, and "
-        f"freshness claims were {assurance_label} and applied. Telemetry sample "
+        f"freshness claims were {bronze_assurance_label} and applied. Telemetry sample "
         f"interval: {sample_interval}. "
         + (
             f"{assurance_label.title()} controls: {', '.join(reviewed_controls) or 'none'}. "
@@ -4748,8 +4801,21 @@ def _onboard_import_review(
             )
     print("Exact allowlisted Git/gh commands:")
     print("  git status --short")
-    print("  python scripts/validate_hil_qualification.py")
-    print("  python -m scripts.hil tiers --matrix tests/hil/qualification_matrix.json")
+    print(
+        "  "
+        + _shell_join(
+            [
+                "python",
+                "scripts/validate_hil_qualification.py",
+                "--matrix",
+                matrix_path,
+            ]
+        )
+    )
+    print(
+        "  "
+        + _shell_join(["python", "-m", "scripts.hil", "tiers", "--matrix", matrix_path])
+    )
     print("  pre-commit run --all-files")
     print("  git add " + _shell_join(stage_paths))
     print("  git diff --cached --check")
