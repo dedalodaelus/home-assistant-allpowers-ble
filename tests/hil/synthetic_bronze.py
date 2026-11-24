@@ -18,6 +18,13 @@ class SyntheticBronzeHA:
         self.calls: list[tuple[Any, ...]] = []
         self.state_changing_calls: list[tuple[Any, ...]] = []
         self.capture_id = "synthetic-capture"
+        self.entry_id = "synthetic-entry"
+        self.capture_active = False
+        self.refresh_seen = False
+        self.fetch_count = 0
+        self.fetch_snapshots: list[dict[str, Any]] = []
+        self.stop_count = 0
+        self.stop_snapshot: dict[str, Any] | None = None
         self.status_count = 8
         self.trace_utc = datetime.now(UTC).isoformat()
 
@@ -152,7 +159,10 @@ class SyntheticBronzeHA:
         }
 
     def request_read_only_refresh(self, entity_id: str) -> None:
+        assert self.capture_active, "Status refresh must run during an active capture"
+        assert not self.refresh_seen, "Bronze should request one status refresh"
         self.calls.append(("read_only_refresh", entity_id))
+        self.refresh_seen = True
         self.status_count += 1
 
     def call_control(self, *args: Any, **kwargs: Any) -> None:
@@ -178,17 +188,41 @@ class SyntheticBronzeHA:
             raise AssertionError(f"Unexpected HIL command during Bronze: {kind}")
         self.calls.append(("websocket", kind))
         if kind.endswith("/start"):
+            assert not self.capture_active, "Capture is already active"
+            assert command["entry_id"] == self.entry_id
+            assert command["scenario_id"] == "read_only_snapshot"
             self.capture_id = "synthetic-capture"
             self.started_run_id = command["run_id"]
+            self.capture_active = True
             return [
                 {"schema_version": 2, "capture_id": self.capture_id, "ttl_seconds": 10}
             ]
-        events = self._trace_events(command["run_id"] if "run_id" in command else None)
-        run_id = next(
-            row["run_id"] for row in events if row["event"] == "capture_started"
-        )
+        assert command["entry_id"] == self.entry_id, "Mismatched entry identifier"
+        assert command["capture_id"] == self.capture_id, "Mismatched capture identifier"
+        assert self.capture_active, "Fetch/stop requires an active capture"
+        if kind.endswith("/fetch"):
+            assert self.refresh_seen, "Capture must include the status refresh"
+            self.fetch_count += 1
+            snapshot = self._trace_snapshot(sealed=False)
+            assert snapshot["closed"] is False
+            assert snapshot["complete"] is False
+            assert snapshot["termination_reason"] is None
+            assert all(
+                event["event"] != "capture_stopped" for event in snapshot["events"]
+            )
+            self.fetch_snapshots.append(snapshot)
+            return [snapshot]
+
+        self.stop_count += 1
+        self.capture_active = False
+        self.stop_snapshot = self._trace_snapshot(sealed=True)
+        return [self.stop_snapshot]
+
+    def _trace_snapshot(self, *, sealed: bool) -> dict[str, Any]:
+        run_id = self.started_run_id
+        events = self._trace_events(run_id, sealed=sealed)
         frames = self._trace_frames(run_id)
-        result = {
+        return {
             "schema_version": 2,
             "run_id": run_id,
             "scenario_id": "read_only_snapshot",
@@ -210,10 +244,10 @@ class SyntheticBronzeHA:
             "capture_layer": "gatt_api_not_rf",
             "qualification_allowed": False,
             "private_raw_bytes": True,
-            "closed": True,
+            "closed": sealed,
             "expired": False,
-            "complete": True,
-            "termination_reason": "requested_stop",
+            "complete": sealed,
+            "termination_reason": "requested_stop" if sealed else None,
             "dropped_events": 0,
             "dropped_frames": 0,
             "event_count": len(events),
@@ -222,10 +256,8 @@ class SyntheticBronzeHA:
             "events": events,
             "frames": frames,
         }
-        return [result]
 
-    def _trace_events(self, _run_id: str | None) -> list[dict[str, Any]]:
-        run_id = self.started_run_id
+    def _trace_events(self, run_id: str, *, sealed: bool) -> list[dict[str, Any]]:
         now = self.trace_utc
         rows = [
             (1, "capture_started", "unverified"),
@@ -235,9 +267,10 @@ class SyntheticBronzeHA:
         ]
         if self.correlated_status:
             rows.append((5, "notification_decoded", "active_proxy"))
-        rows.append(
-            (6 if self.correlated_status else 5, "capture_stopped", "active_proxy")
-        )
+        if sealed:
+            rows.append(
+                (6 if self.correlated_status else 5, "capture_stopped", "active_proxy")
+            )
         events = []
         for seq, event, route in rows:
             record = {
@@ -274,7 +307,7 @@ class SyntheticBronzeHA:
         common = {
             "schema_version": 2,
             "seq": 3,
-            "utc": self._trace_events(run_id)[2]["utc"],
+            "utc": self._trace_events(run_id, sealed=False)[2]["utc"],
             "elapsed_ms": 30,
             "run_id": run_id,
             "scenario_id": "read_only_snapshot",

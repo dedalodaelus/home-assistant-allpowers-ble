@@ -19,8 +19,42 @@ from scripts import validate_hil_qualification
 from tests.hil.synthetic_bronze import SyntheticBronzeHA
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("entry_id", "other-entry", "Mismatched entry identifier"),
+        ("capture_id", "other-capture", "Mismatched capture identifier"),
+    ],
+)
+def test_synthetic_bronze_rejects_mismatched_capture_identifiers(
+    field: str, value: str, message: str
+) -> None:
+    fake = SyntheticBronzeHA()
+    fake.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/start",
+                "entry_id": "synthetic-entry",
+                "run_id": "synthetic-run",
+                "scenario_id": "read_only_snapshot",
+                "requested_route": "auto",
+            }
+        ]
+    )
+    command = {
+        "type": "allpowers_ble/hil/fetch",
+        "entry_id": "synthetic-entry",
+        "capture_id": "synthetic-capture",
+    }
+    command[field] = value
+    with pytest.raises(AssertionError, match=message):
+        fake.websocket([command])
+
+
 def _temporary_checkout(root: Path) -> tuple[Path, Path]:
     root.mkdir()
+    gitignore = root / ".gitignore"
+    shutil.copyfile(Path(__file__).resolve().parents[1] / ".gitignore", gitignore)
     template = root / ".github/PULL_REQUEST_TEMPLATE.md"
     template.parent.mkdir(parents=True)
     shutil.copyfile(
@@ -64,6 +98,7 @@ def _temporary_checkout(root: Path) -> tuple[Path, Path]:
             str(root),
             "add",
             ".github/PULL_REQUEST_TEMPLATE.md",
+            ".gitignore",
             "tests/hil/qualification_matrix.json",
         ],
         check=True,
@@ -170,6 +205,24 @@ def test_onboard_bronze_runs_the_real_pipeline_in_an_empty_matrix(
         row["outcome"] == ("pass" if correlated_status else "inconclusive")
         for row in execution["steps"]
     )
+    lifecycle = [
+        call[1] if call[0] == "websocket" else "refresh"
+        for call in fake.calls
+        if call[0] in {"websocket", "read_only_refresh"}
+    ]
+    assert lifecycle[0] == "allpowers_ble/hil/start"
+    assert lifecycle[1] == "refresh"
+    assert lifecycle[-1] == "allpowers_ble/hil/stop"
+    assert all(command == "allpowers_ble/hil/fetch" for command in lifecycle[2:-1])
+    assert fake.fetch_count >= 1
+    assert fake.fetch_snapshots
+    assert all(not snapshot["complete"] for snapshot in fake.fetch_snapshots)
+    assert fake.stop_count == 1
+    assert fake.stop_snapshot is not None
+    assert fake.stop_snapshot["complete"] is True
+    assert fake.stop_snapshot["termination_reason"] == "requested_stop"
+    assert fake.stop_snapshot["events"][-1]["event"] == "capture_stopped"
+    assert not fake.capture_active
 
     if correlated_status:
         assert result == 0, output
@@ -211,16 +264,6 @@ def test_onboard_bronze_runs_the_real_pipeline_in_an_empty_matrix(
         refresh_calls = [call for call in fake.calls if call[0] == "read_only_refresh"]
         assert len(refresh_calls) == 1
         assert refresh_calls[0][1].entity_id == "button.synthetic_refresh"
-        assert all(
-            call[1]
-            in {
-                "allpowers_ble/hil/start",
-                "allpowers_ble/hil/fetch",
-                "allpowers_ble/hil/stop",
-            }
-            for call in fake.calls
-            if call[0] == "websocket"
-        )
     else:
         assert result == 2
         assert matrix["revisions"][0]["runs"] == []
