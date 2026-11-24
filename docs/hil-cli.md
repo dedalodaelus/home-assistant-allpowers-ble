@@ -662,9 +662,13 @@ The runner polls the selected device capability until it receives an explicit
 snapshot do not count. Only then does it ask the operator to restore the route.
 If the bounded wait expires first, the result is inconclusive and no reconnect
 trace is exported as a pass. After restoration confirmation, the runner checks
-a changed session generation, fresh status, a read-only status request and
-decoded `StatusData` in the complete route-bound trace, plus the physical
-outcome. Unknown routes receive only neutral guidance and a safe skip option.
+a changed session generation, fresh Home Assistant status, recovery on the
+pre-action route, a complete route-bound trace, and the physical outcome. The
+guided Silver `basic_reconnect` step also submits a registry-resolved read-only
+status refresh and requires its validated GATT write and decoded `StatusData`
+in that trace. Standalone `python -m scripts.hil run --suite recovery` does not
+require that explicit traced refresh; its PASS is not Silver reconnect evidence.
+Unknown routes receive only neutral guidance and a safe skip option.
 
 Missing route proof, incomplete trace, or missing recovery confirmation
 remains inconclusive. The evidence is not build-level HIL qualification.
