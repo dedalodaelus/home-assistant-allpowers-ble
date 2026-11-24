@@ -367,6 +367,14 @@ class HAClient:
         if generation is not None and (type(generation) is not int or generation < 1):
             raise HAAPIError("Malformed HIL session generation")
         normalized["session_generation"] = generation
+        observed_route = result.get("observed_route", "unverified")
+        if not isinstance(observed_route, str) or observed_route not in {
+            "local_adapter",
+            "active_proxy",
+            "unverified",
+        }:
+            raise HAAPIError("Malformed HIL observed route")
+        normalized["observed_route"] = observed_route
         status_notification_count = result.get("status_notification_count")
         if status_notification_count is not None and (
             type(status_notification_count) is not int

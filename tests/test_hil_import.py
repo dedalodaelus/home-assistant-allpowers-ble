@@ -1016,6 +1016,8 @@ def _captured_archive(
 def _standard_tier_suite_archive(
     path: Path,
     *,
+    route: str = "local_adapter",
+    reconnect_route: str | None = None,
     run_id: str = "abcdef0123456789",
     started_at: str = "2026-11-09T12:00:00+00:00",
 ) -> Path:
@@ -1024,7 +1026,8 @@ def _standard_tier_suite_archive(
     from scripts.hil.evidence import export_archive
     from scripts.hil.runner import correlate_transaction
 
-    route = "local_adapter"
+    if reconnect_route is None:
+        reconnect_route = route
     source_root = path / "source"
     archive = _captured_archive(
         source_root,
@@ -1111,9 +1114,19 @@ def _standard_tier_suite_archive(
             "utc": stamp,
             "elapsed_ms": 0.0,
             "event": "route_observed",
-            "backend_kind": "bluez",
-            "evidence": "bluez_device_path",
-            "adapter_id": "hci0",
+            **(
+                {
+                    "backend_kind": "bluez",
+                    "evidence": "bluez_device_path",
+                    "adapter_id": "hci0",
+                }
+                if route == "local_adapter"
+                else {
+                    "backend_kind": "esphome",
+                    "evidence": "esphome_scanner_binding",
+                    "proxy_id": "synthetic-proxy-id",
+                }
+            ),
         }
         write_event = {
             **common,
@@ -1188,9 +1201,19 @@ def _standard_tier_suite_archive(
                     "utc": stamp,
                     "elapsed_ms": 0.0,
                     "observed_route": route,
-                    "backend_kind": "bluez",
-                    "evidence": "bluez_device_path",
-                    "adapter_id": "hci0",
+                    **(
+                        {
+                            "backend_kind": "bluez",
+                            "evidence": "bluez_device_path",
+                            "adapter_id": "hci0",
+                        }
+                        if route == "local_adapter"
+                        else {
+                            "backend_kind": "esphome",
+                            "evidence": "esphome_scanner_binding",
+                            "proxy_id": "synthetic-proxy-id",
+                        }
+                    ),
                 }
             ],
         }
@@ -1399,6 +1422,7 @@ def _standard_tier_suite_archive(
                 "connected": not disconnected,
                 "status_fresh": not disconnected,
                 "session_generation": current_generation,
+                "observed_route": route,
             }
 
         def request_read_only_refresh(self, button: ReadOnlyRefreshButton) -> None:
@@ -1432,8 +1456,20 @@ def _standard_tier_suite_archive(
                 )
                 self.capture.observe_route(
                     generation + 1,
-                    ConnectedRoute(
-                        "local_adapter", "bluez", "bluez_device_path", adapter_id="hci0"
+                    (
+                        ConnectedRoute(
+                            "local_adapter",
+                            "bluez",
+                            "bluez_device_path",
+                            adapter_id="hci0",
+                        )
+                        if reconnect_route == "local_adapter"
+                        else ConnectedRoute(
+                            "active_proxy",
+                            "esphome",
+                            "esphome_scanner_binding",
+                            proxy_id="synthetic-proxy-id",
+                        )
                     ),
                 )
                 return [
@@ -1468,23 +1504,21 @@ def _standard_tier_suite_archive(
         ),
     )
     with (
-        patch("builtins.input", side_effect=("1", "1", "1")),
+        patch("builtins.input", side_effect=("1", "1", "1", "1")),
         patch("scripts.hil.cli.sleep", return_value=None),
     ):
-        assert (
-            hil_cli._execute_recovery_suite(
-                api_fake,
-                argparse.Namespace(
-                    non_interactive=False,
-                    route=route,
-                    guided_reconnect_required=True,
-                ),
-                reconnect_device,
-                reconnect_private,
-                reconnect_id,
-            )
-            == 0
+        recovery_result = hil_cli._execute_recovery_suite(
+            api_fake,
+            argparse.Namespace(
+                non_interactive=False,
+                route=route,
+                guided_reconnect_required=True,
+            ),
+            reconnect_device,
+            reconnect_private,
+            reconnect_id,
         )
+    assert recovery_result == (0 if reconnect_route == route else 2)
     reconnect_checkpoint = json.loads(
         (reconnect_private / "checkpoint.json").read_text(encoding="utf-8")
     )
@@ -1493,6 +1527,21 @@ def _standard_tier_suite_archive(
         for row in reconnect_checkpoint["steps"]
         if row.get("step_id") == "recovered_session"
     )
+    if recovery_result != 0:
+        action_step = next(
+            row
+            for row in reconnect_checkpoint["steps"]
+            if row.get("step_id") == "operator_action"
+        )
+        assert action_step["disconnect_observed"] is True
+        assert action_step["operator_confirmed"] is True
+        assert recovered_step["outcome"] == "inconclusive"
+        assert recovered_step["route"] == reconnect_route
+        assert recovered_step["route_verified"] is False
+        assert recovered_step["session_generation_after"] != generation
+        assert recovered_step["fresh_status_telemetry"] is True
+        assert recovered_step["trace_complete"] is True
+        assert recovered_step["physical_outcome"] == "yes"
     reconnect_trace = recovered_step["trace"]
     reconnect_evidence = []
     for relative in ("checkpoint.json", f"{reconnect_trace}/trace.json"):
@@ -1507,7 +1556,7 @@ def _standard_tier_suite_archive(
         {
             "step_id": "basic_reconnect",
             "scenario_id": "recovery_reconnect",
-            "outcome": "pass",
+            "outcome": "pass" if recovery_result == 0 else "inconclusive",
             "observed_routes": [route],
             "human_review": "pending",
             "machine_evidence": reconnect_evidence,
@@ -4247,6 +4296,41 @@ def test_standard_tier_export_review_apply_reaches_silver_and_gold(
     assert any("on transition lacks bound observation" in error for error in errors)
     regressed = evaluate_tiers(raw_transition)["tiers"][0]
     assert "ac_output" not in regressed["qualified_features"]
+
+
+def test_route_failover_runner_export_import_cannot_offer_silver_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import validate_hil_qualification
+    from scripts.hil.review import _reconnect_review_candidate, _verified_members
+
+    archive = _standard_tier_suite_archive(
+        tmp_path / "proxy-failover",
+        route="active_proxy",
+        reconnect_route="local_adapter",
+    )
+    matrix_path = _matrix(tmp_path)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", tmp_path)
+
+    assert (
+        import_archive(archive, matrix_path=matrix_path, apply=True, repo_root=tmp_path)
+        == 0
+    )
+    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+    run = matrix["revisions"][0]["runs"][0]
+    assert run["route"] == "active_proxy"
+
+    members = _verified_members(run, tmp_path)
+    execution = json.loads(members["tier-execution.json"])
+    artifacts = json.loads(members["tier-artifacts.json"])
+    reconnect_step = next(
+        step for step in execution["steps"] if step["step_id"] == "basic_reconnect"
+    )
+
+    assert reconnect_step["outcome"] == "inconclusive"
+    assert (
+        _reconnect_review_candidate(run, reconnect_step, artifacts["artifacts"]) is None
+    )
 
 
 def test_bronze_re_review_preserves_verified_silver_authorization_and_evidence(

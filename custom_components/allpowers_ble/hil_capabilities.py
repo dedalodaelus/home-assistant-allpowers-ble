@@ -152,6 +152,7 @@ async def ws_capabilities(
         "status_fresh": bool(coordinator.status_is_fresh),
         "settings_fresh": bool(settings_fresh),
         "session_generation": generation,
+        "observed_route": getattr(runtime.client, "observed_route", "unverified"),
         "status_notification_count": status_notification_count,
         "pending_transaction": bool(runtime.client.has_pending_transaction),
         # Candidate HIL controls may intentionally have no production switch

@@ -104,6 +104,7 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
             settings_stale_timeout=600,
         ),
         active_session_generation=7,
+        observed_route="active_proxy",
         session_status_notification_count=12,
         has_pending_transaction=True,
     )
@@ -128,6 +129,7 @@ async def test_capability_endpoint_returns_only_bounded_fresh_runtime_facts() ->
     assert result["firmware_revision"] == "2.1"
     assert result["raw_firmware_revision"] == 21
     assert result["session_generation"] == 7
+    assert result["observed_route"] == "active_proxy"
     assert result["status_notification_count"] == 12
     assert result["output_states"] == {
         "ac_output": True,
@@ -172,6 +174,7 @@ async def test_capability_endpoint_does_not_expose_notification_count_without_se
             settings_stale_timeout=600,
         ),
         active_session_generation=None,
+        observed_route="unverified",
         session_status_notification_count=0,
         has_pending_transaction=False,
     )

@@ -567,6 +567,9 @@ def _reconnect_review_candidate(
         and action_observation.get("operator_action")
         == "route interruption and restoration"
         and action_observation.get("operator_confirmed") is True
+        and action_observation.get("disconnect_observed") is True
+        and action_observation.get("observed_connected") is False
+        and action_observation.get("restoration_confirmed") is True
         and recovery.get("outcome") == "pass"
         and observation.get("disconnect_observed") is True
         and observation.get("connected") is True

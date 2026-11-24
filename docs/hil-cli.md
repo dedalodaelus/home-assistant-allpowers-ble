@@ -640,6 +640,36 @@ status telemetry and complete verified GATT route evidence. It reports
 `ha_recovered` when a changed session is observed and that evidence is
 complete. It captures a bounded route trace and asks for a numeric physical
 outcome where applicable.
+
+For the manual route test, the CLI displays the route verified for the active
+GATT session; it never infers it from `--route` or scanner advertisements. For
+`active_proxy`, temporarily make the connected ESPHome Bluetooth Proxy
+unavailable, restore it, and verify HA reconnects through that route. For
+`local_adapter`, physical USB removal is not required: on the Linux/BlueZ
+system that owns HA's controller, use `bluetoothctl list`, select the right
+controller, run `show`, then `power off`, wait for HA to detect disconnection,
+and `power on`. This interrupts all devices on that controller. In HA
+Container, the host usually owns it; in a VM, use the guest that owns the
+passed-through controller. Do not assume these commands are available in HA OS
+or an arbitrary SSH add-on. Skip if OS-level control is unavailable or unsafe.
+Turning off the station's Bluetooth tests a device-side interruption, and
+reloading HA tests an HA restart; neither proves proxy or adapter outage. A
+second scanner or proxy can take over, so a verified reconnect over another
+route does not demonstrate recovery of the route that was interrupted. The
+operator confirms the interruption first and leaves the route unavailable.
+The runner polls the selected device capability until it receives an explicit
+`connected=false` snapshot; API errors, missing data, and a still-connected
+snapshot do not count. Only then does it ask the operator to restore the route.
+If the bounded wait expires first, the result is inconclusive and no reconnect
+trace is exported as a pass. After restoration confirmation, the runner checks
+a changed session generation, fresh Home Assistant status, recovery on the
+pre-action route, a complete route-bound trace, and the physical outcome. The
+guided Silver `basic_reconnect` step also submits a registry-resolved read-only
+status refresh and requires its validated GATT write and decoded `StatusData`
+in that trace. Standalone `python -m scripts.hil run --suite recovery` does not
+require that explicit traced refresh; its PASS is not Silver reconnect evidence.
+Unknown routes receive only neutral guidance and a safe skip option.
+
 Missing route proof, incomplete trace, or missing recovery confirmation
 remains inconclusive. The evidence is not build-level HIL qualification.
 

@@ -7047,7 +7047,7 @@ def test_call_control_rejects_unallowlisted_actions(key, entity_id, value):
 
 
 def test_recovery_suite_only_observes_operator_action_and_new_route(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, capsys
 ):
     from types import SimpleNamespace
 
@@ -7057,9 +7057,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
         origin = "https://ha.example.test"
 
         def __init__(self):
-            # The operator confirms after restoring the route, so the first
-            # poll may already see the new session without a transient down state.
-            self.capabilities = iter(((True, 4), (True, 5)))
+            self.capabilities = iter(((True, 4), (False, 4), (True, 5)))
             self.commands = []
             self.capture = None
 
@@ -7071,6 +7069,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
                 "connected": connected,
                 "status_fresh": connected,
                 "session_generation": generation,
+                "observed_route": "local_adapter",
             }
 
         def request_read_only_refresh(self, button):
@@ -7152,7 +7151,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
     output_dir = tmp_path / "run"
     output_dir.mkdir(mode=0o700)
-    answers = iter(("1", "1", "1"))
+    answers = iter(("1", "1", "1", "1"))
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr(cli, "sleep", lambda _: None)
     monkeypatch.setattr(cli, "_validate_trace_result", lambda *args, **kwargs: None)
@@ -7171,6 +7170,12 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     )
 
     assert result == 0
+    prompt_output = capsys.readouterr().out
+    assert "observed route: local_adapter" in prompt_output
+    assert "Physical USB removal is not required" in prompt_output
+    assert "wait for HA to detect the disconnect" in prompt_output
+    assert "disrupts every device using that controller" in prompt_output
+    assert "does not test a device Bluetooth toggle or an HA reload" in prompt_output
     assert api_fake.commands[0]["type"] == "allpowers_ble/hil/start"
     assert api_fake.commands[1] == {
         "type": "call_service",
@@ -7185,7 +7190,7 @@ def test_recovery_suite_only_observes_operator_action_and_new_route(
     assert api_fake.commands[1]["domain"] == "button"
     stored = json.loads((output_dir / "scenarios.json").read_text())
     assert stored["steps"][-1]["outcome"] == "pass"
-    assert stored["steps"][-1]["disconnect_observed"] is False
+    assert stored["steps"][-1]["disconnect_observed"] is True
     assert stored["steps"][-1]["session_generation_before"] == 4
     assert stored["steps"][-1]["session_generation_after"] == 5
     assert stored["steps"][-1]["physical_outcome"] == "yes"
@@ -7212,13 +7217,15 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
 
         def hil_capabilities(self, entry_id):
             self.capability_calls += 1
-            generation = 4 if self.capability_calls == 1 else 5
+            connected = self.capability_calls != 2
+            generation = 4 if self.capability_calls <= 2 else 5
             return {
                 "verified": True,
                 "identity_conflicted": False,
-                "connected": True,
-                "status_fresh": True,
+                "connected": connected,
+                "status_fresh": connected,
                 "session_generation": generation,
+                "observed_route": "active_proxy",
             }
 
         def request_read_only_refresh(self, button):
@@ -7313,7 +7320,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
     )
     output_dir = tmp_path / "guided-delayed-status"
     output_dir.mkdir(mode=0o700)
-    answers = iter(("1", "1", "1"))
+    answers = iter(("1", "1", "1", "1"))
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
@@ -7339,7 +7346,7 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
     assert api_fake.status_recorded is True
     assert api_fake.refresh_requested is True
     assert clock[0] - api_fake.capture_started_at >= 8
-    assert observation["disconnect_observed"] is False
+    assert observation["disconnect_observed"] is True
     assert observation["session_generation_before"] == 4
     assert observation["session_generation_after"] == 5
     assert observation["fresh_status_telemetry"] is True
@@ -7347,6 +7354,208 @@ def test_guided_reconnect_waits_for_delayed_status_with_real_v2_trace_validation
     assert observation["trace_complete"] is True
     assert observation["physical_outcome"] == "yes"
     assert observation["outcome"] == "pass"
+
+
+def test_guided_reconnect_is_inconclusive_without_explicit_disconnect(
+    monkeypatch, tmp_path, capsys
+):
+    from types import SimpleNamespace
+
+    class NoObservedOutageHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.calls = 0
+            self.trace_commands = []
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            if self.calls == 2:
+                raise cli.HAAPIError("temporary unavailable")
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "session_generation": 4 if self.calls == 1 else 5,
+                "observed_route": "active_proxy",
+            }
+
+        def websocket(self, commands):
+            self.trace_commands.extend(commands)
+            raise AssertionError("must not start recovery trace without disconnect")
+
+    api_fake = NoObservedOutageHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "no-observed-outage"
+    output_dir.mkdir(mode=0o700)
+    clock = [100.0]
+    monkeypatch.setattr(cli, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cli, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    answers = iter(("1", "1"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
+        device,
+        output_dir,
+        "run-no-observed-outage",
+    )
+
+    stored = json.loads((output_dir / "scenarios.json").read_text())
+    action = stored["steps"][-1]
+    assert result == 2
+    assert action["step_id"] == "operator_action"
+    assert action["outcome"] == "inconclusive"
+    assert action["disconnect_observed"] is False
+    assert "explicit disconnected state" in action["reason"]
+    assert (
+        "Inconclusive: no explicit HA disconnected snapshot" in capsys.readouterr().out
+    )
+    assert api_fake.trace_commands == []
+
+
+def test_guided_reconnect_does_not_pass_without_restoration_confirmation(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class InterruptedRouteHA:
+        origin = "https://ha.example.test"
+
+        def __init__(self):
+            self.calls = 0
+            self.trace_started = False
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": self.calls != 2,
+                "status_fresh": self.calls != 2,
+                "session_generation": 4,
+                "observed_route": "active_proxy",
+            }
+
+        def websocket(self, commands):
+            self.trace_started = True
+            raise AssertionError("must not capture before restoration is confirmed")
+
+    api_fake = InterruptedRouteHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "restoration-unconfirmed"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1", "0"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+
+    result = cli._execute_recovery_suite(
+        api_fake,
+        SimpleNamespace(
+            non_interactive=False,
+            route="auto",
+            guided_reconnect_required=True,
+        ),
+        device,
+        output_dir,
+        "run-restoration-unconfirmed",
+    )
+
+    action = json.loads((output_dir / "scenarios.json").read_text())["steps"][-1]
+    assert result == 2
+    assert action["step_id"] == "operator_action"
+    assert action["outcome"] == "inconclusive"
+    assert action["disconnect_observed"] is True
+    assert "restoration" in action["reason"]
+    assert api_fake.trace_started is False
+
+
+def test_guided_reconnect_cancellation_after_disconnect_keeps_inconclusive_checkpoint(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    class InterruptedRouteHA:
+        origin = "https://ha.example.test"
+        calls = 0
+
+        def hil_capabilities(self, entry_id):
+            self.calls += 1
+            return {
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": self.calls != 2,
+                "status_fresh": self.calls != 2,
+                "session_generation": 4,
+                "observed_route": "active_proxy",
+            }
+
+    api_fake = InterruptedRouteHA()
+    device = discovery.Device(
+        device_id="private-device",
+        model="R600",
+        hardware="0.3",
+        firmware="0.2",
+        state_entities={},
+        entry_state="loaded",
+        config_entry_id="entry-safe",
+    )
+    output_dir = tmp_path / "cancel-after-disconnect"
+    output_dir.mkdir(mode=0o700)
+    answers = iter(("1", "1"))
+
+    def cancel_at_restore(_prompt):
+        try:
+            return next(answers)
+        except StopIteration as ex:
+            raise KeyboardInterrupt from ex
+
+    monkeypatch.setattr("builtins.input", cancel_at_restore)
+    monkeypatch.setattr(cli, "sleep", lambda _: None)
+
+    with pytest.raises(cli.HAAPIError, match="Recovery run interrupted"):
+        cli._execute_recovery_suite(
+            api_fake,
+            SimpleNamespace(
+                non_interactive=False,
+                route="auto",
+                guided_reconnect_required=True,
+            ),
+            device,
+            output_dir,
+            "run-cancel-after-disconnect",
+        )
+
+    steps = json.loads((output_dir / "scenarios.json").read_text())["steps"]
+    action = next(step for step in steps if step["step_id"] == "operator_action")
+    assert action["outcome"] == "inconclusive"
+    assert action["disconnect_observed"] is True
+    assert action["operator_confirmed"] is False
+    assert steps[-1] == {"step_id": "interrupted", "outcome": "inconclusive"}
 
 
 def test_recovery_transient_api_failure_does_not_prove_new_ble_session(
@@ -7474,12 +7683,16 @@ def test_recovery_resume_observes_only_and_does_not_repeat_operator_action(
                 "step_id": "baseline",
                 "outcome": "pass",
                 "session_generation": 4,
+                "observed_route": "active_proxy",
             },
             {
                 "step_id": "operator_action",
                 "outcome": "pass",
                 "action": "route interruption and restoration",
                 "operator_confirmed": True,
+                "disconnect_observed": True,
+                "observed_connected": False,
+                "restoration_confirmed": True,
             },
         ],
     }
@@ -9388,6 +9601,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
         "status_fresh": True,
         "settings_fresh": True,
         "session_generation": 4,
+        "observed_route": "active_proxy",
         "status_notification_count": 12,
         "pending_transaction": False,
         "entry_id": "private-entry",
@@ -9405,6 +9619,7 @@ def test_capability_snapshot_is_strict_and_discards_unrecognized_fields(monkeypa
     ]
     assert normalized["model"] == "R600"
     assert normalized["session_generation"] == 4
+    assert normalized["observed_route"] == "active_proxy"
     assert normalized["status_notification_count"] == 12
     assert "entry_id" not in normalized
     assert "raw_address" not in normalized
@@ -9432,6 +9647,81 @@ def test_capability_snapshot_rejects_unsafe_model_and_flags(monkeypatch):
     )
 
     with pytest.raises(api.HAAPIError):
+        client.hil_capabilities("entry-123")
+
+
+@pytest.mark.parametrize(
+    "observed_route", ["active_proxy", "local_adapter", "unverified"]
+)
+def test_reconnect_instructions_follow_only_observed_route(capsys, observed_route):
+    from scripts.hil.recovery import _print_reconnect_instructions
+
+    _print_reconnect_instructions(observed_route)
+    output = capsys.readouterr().out
+    assert f"observed route: {observed_route}" in output
+    if observed_route == "active_proxy":
+        assert "ESPHome Bluetooth Proxy unavailable" in output
+        assert "Do not turn off the station" in output
+    elif observed_route == "local_adapter":
+        assert "Physical USB removal is not required" in output
+        assert "power off" in output and "power on" in output
+        assert "disrupts every device" in output
+    else:
+        assert "route is not verified" in output
+        assert "do not infer a route from --route" in output
+
+
+@pytest.mark.parametrize(
+    ("expected_route", "actual_route", "matches"),
+    [
+        ("active_proxy", "active_proxy", True),
+        ("active_proxy", "local_adapter", False),
+        ("local_adapter", "active_proxy", False),
+        ("unverified", "local_adapter", False),
+    ],
+)
+def test_manual_reconnect_requires_same_observed_route(
+    expected_route, actual_route, matches
+):
+    from scripts.hil.recovery import _route_recovered_on_same_lane
+
+    assert _route_recovered_on_same_lane(expected_route, actual_route) is matches
+
+
+@pytest.mark.parametrize("observed_route", [None, [], {}, "mixed", True])
+def test_capability_snapshot_rejects_malformed_observed_route(
+    monkeypatch, observed_route
+):
+    client = api.HAClient("http://127.0.0.1:8123", "token")
+    monkeypatch.setattr(
+        client,
+        "websocket",
+        lambda commands: [
+            {
+                "schema_version": 1,
+                "model": "R600",
+                "profile": "r600-hw-0.3",
+                "classification": "verified",
+                "verified": True,
+                "identity_conflicted": False,
+                "connected": True,
+                "status_fresh": True,
+                "settings_fresh": True,
+                "session_generation": 4,
+                "observed_route": observed_route,
+                "pending_transaction": False,
+                "capabilities": {
+                    "read_telemetry": True,
+                    "write_output_controls": True,
+                    "write_settings_controls": True,
+                    "write_settings_keepalive": True,
+                    "car_charger_enabled": False,
+                },
+            }
+        ],
+    )
+
+    with pytest.raises(api.HAAPIError, match="observed route"):
         client.hil_capabilities("entry-123")
 
 
