@@ -2485,17 +2485,35 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
         "model": "R600",
         "hardware_revision": "0.3",
         "firmware_revision": "1.0",
+        "capabilities": {
+            "read_telemetry": True,
+            "write_output_controls": True,
+            "write_settings_controls": True,
+            "write_settings_keepalive": True,
+            "car_charger_enabled": False,
+        },
         "features": {
-            key: {"physical_presence": "present", "production_authorized": True}
-            for key in (
-                "ac_output",
-                "dc_output",
-                "light_output",
-                "eco_mode",
-                "work_mode",
-                "eco_timeout",
-                "car_charger",
-            )
+            "telemetry": {
+                "physical_presence": "present",
+                "production_authorized": False,
+                "candidate_hil_eligible": False,
+                "runtime_ready": True,
+            },
+            **{
+                key: {
+                    "physical_presence": "present",
+                    "production_authorized": True,
+                }
+                for key in (
+                    "ac_output",
+                    "dc_output",
+                    "light_output",
+                    "eco_mode",
+                    "work_mode",
+                    "eco_timeout",
+                    "car_charger",
+                )
+            },
         },
     }
     controls = {
@@ -2546,13 +2564,15 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
                             "outcome": "pass",
                             "action": "route interruption and restoration",
                             "operator_confirmed": True,
+                            "disconnect_observed": True,
+                            "restoration_confirmed": True,
                         },
                         {
                             "step_id": "recovered_session",
                             "outcome": "pass",
                             "session_generation_before": 1,
                             "session_generation_after": 2,
-                            "disconnect_observed": False,
+                            "disconnect_observed": True,
                             "connected": True,
                             "status_fresh": True,
                             "fresh_status_telemetry": True,
