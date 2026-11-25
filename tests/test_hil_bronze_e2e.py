@@ -430,6 +430,10 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
             or "Outcome [1-3]" in prompt
         ):
             return "1"
+        if "Physically inspect" in prompt:
+            feature = prompt.split(": confirm ", 1)[1].split(" is present", 1)[0]
+            fake.inventory_inspections.append(feature)
+            return "PRESENT"
         if "[no/yes]" in prompt:
             return "yes"
         if "[y/N]" in prompt:
@@ -471,6 +475,16 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
         archive, include_contents=True
     )
     public_artifacts = json.loads(public_members["tier-artifacts.json"])["artifacts"]
+    public_session = json.loads(public_members["session.json"])
+    silver_plan = public_session["data"]["test_plan"]
+    silver_inventory = silver_plan["physical_inventory_preflight"]["features"]
+    assert set(fake.inventory_inspections) == {"ac_output", "dc_output", "light_output"}
+    assert set(silver_inventory) == set(fake.inventory_inspections)
+    for step in silver_plan["steps"]:
+        if step.get("feature") in fake.inventory_inspections:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "operator_inspected_present"
+            assert step["eligibility"] == "eligible"
     assert {
         item["content"]["step_id"]
         for item in public_artifacts
