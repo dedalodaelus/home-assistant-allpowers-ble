@@ -443,7 +443,8 @@ jobs:
               }
 
               // Diagnostic logging to simplify gate troubleshooting in Actions UI.
-              core.info(`Head SHA: ${headSha}`);
+              core.info(`PR #${pr.number} base SHA: ${pr.base.sha}`);
+              core.info(`PR #${pr.number} head SHA: ${headSha}`);
               if (missing.length) core.info(`Missing: ${missing.join(", ")}`);
               if (pending.length) core.info(`Pending: ${pending.join(", ")}`);
               if (failed.length) core.info(`Failed: ${failed.join(", ")}`);
