@@ -24,6 +24,7 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/hassfest.yml",
     ".github/workflows/merge-gate.yml",
     ".github/workflows/promote-devel.yml",
+    ".github/workflows/sync-main-to-devel.yml",
     ".github/workflows/prepare-ha-upgrade.yml",
     ".github/workflows/release.yml",
     ".github/PULL_REQUEST_TEMPLATE/promotion.md",
@@ -40,8 +41,10 @@ REQUIRED_REPOSITORY_FILES = {
     "scripts/sync_ha_test_deps.py",
     "scripts/validate_ha_candidate.py",
     "scripts/promote_devel.py",
+    "scripts/sync_main_to_devel.py",
     "scripts/promotion_metadata.py",
     "tests/test_promote_devel.py",
+    "tests/test_sync_main_to_devel.py",
     "tests/test_sync_ha_test_deps.py",
     "tests/test_validate_ha_candidate.py",
 }
@@ -591,6 +594,59 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
         ):
             if forbidden in promotion_workflow:
                 errors.append(f"promotion workflow must not contain {forbidden!r}")
+
+    try:
+        sync_workflow = (
+            ROOT / ".github" / "workflows" / "sync-main-to-devel.yml"
+        ).read_text(encoding="utf-8")
+    except OSError as ex:
+        errors.append(f"failed reading .github/workflows/sync-main-to-devel.yml: {ex}")
+        sync_workflow = ""
+    if sync_workflow:
+        for required in (
+            "push:",
+            "workflow_dispatch:",
+            "github.ref == 'refs/heads/main'",
+            "contents: read",
+            "pull-requests: write",
+            "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+            "python3 -m scripts.sync_main_to_devel",
+            "cancel-in-progress: false",
+        ):
+            if required not in sync_workflow:
+                errors.append(f"main-to-devel sync workflow must contain {required!r}")
+        for forbidden in (
+            "pull_request_target",
+            "contents: write",
+            "create-github-app-token",
+            "gh pr merge",
+            "git push",
+            "git rebase",
+            "git cherry-pick",
+            "force-with-lease",
+        ):
+            if forbidden in sync_workflow:
+                errors.append(
+                    f"main-to-devel sync workflow must not contain {forbidden!r}"
+                )
+
+        try:
+            merge_gate = (ROOT / ".github" / "workflows" / "merge-gate.yml").read_text(
+                encoding="utf-8"
+            )
+        except OSError as ex:
+            errors.append(f"failed reading .github/workflows/merge-gate.yml: {ex}")
+            merge_gate = ""
+        for required in (
+            'const isMainToDevelSync = baseRef === "devel" && headRef === "main";',
+            "await validateReleaseMetadata(pr.base.sha, headSha, isMainToDevelSync)",
+            "compareVersion(headVersion, baseVersion) < 0",
+        ):
+            if required not in merge_gate:
+                errors.append(
+                    "Merge gate must validate incoming main-to-devel release "
+                    f"metadata with {required!r}"
+                )
 
 
 def _module_list(value: Any) -> list[str]:

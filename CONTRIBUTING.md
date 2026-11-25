@@ -132,6 +132,19 @@ The repository uses an explicit promotion model:
 - A PR created with `GITHUB_TOKEN` may require a maintainer with write access to
   select **Approve workflows to run** before its CI starts. Review the PR and
   wait for the existing `Gate all required checks` before merging manually.
+- **Sync main to devel** runs on `main` pushes after deployment and can be
+  dispatched manually from default `main` to recover a missed event. It opens
+  or reuses a reviewed PR carrying actual production commits and Release Please
+  metadata; it never edits branches, merges, or resolves conflicts. Enable
+  **Allow GitHub Actions to create and approve pull requests**; a maintainer may
+  need to approve the new PR's workflow runs.
+- Merge permanent-branch PRs with merge commits so branch ancestry is preserved.
+  Do not use **Update branch** on a `main` → `devel` PR if it would merge
+  `devel` into `main`. If conflicts, strict up-to-date rules, or linear-history
+  rules block the merge, stop for a maintainer-reviewed recovery rather than
+  weakening protections or creating a bypass branch.
+- A sync PR does not prove release publication or HACS asset upload. Release
+  Please remains responsible for publishing those assets.
 - Direct commits into `devel` and `main` are not permitted.
 - Urgent production fixes may target `main` only from a `hotfix/*` branch cut
   from `main`; the same fix must be propagated back to `devel` in a follow-up PR.

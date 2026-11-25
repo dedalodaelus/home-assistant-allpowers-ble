@@ -27,6 +27,20 @@
 - Direct commits into `devel` and `main` are not permitted. Pull requests into `main` are only allowed from `devel` or from `hotfix/*` branches cut from `main`.
 - Prepare routine promotion by manually dispatching **Promote devel to main** on
   `main`. It creates or reuses a draft PR and never merges or publishes.
+- After **Sync main to devel** reaches default `main`, pushes to `main` prepare
+  or reuse a reviewed return-sync PR when `main` is not already an ancestor of
+  `devel`. A manual dispatch from `main` recovers missed events. Enable **Allow
+  GitHub Actions to create and approve pull requests**; a maintainer may need to
+  approve the created PR's workflow runs before required checks execute.
+- Review the exact `main` → `devel` PR and merge with a merge commit. The sync
+  carries production commits and Release Please metadata; it neither publishes
+  nor verifies a release. Confirm publication and HACS assets through the
+  Release Please workflow separately.
+- If the sync PR conflicts, branch protection requires updating `main` from
+  `devel`, or linear history prevents an ancestry-preserving merge, stop for a
+  maintainer-reviewed recovery. Do not update the `main` head from `devel`,
+  bypass protection, or resolve conflicts automatically. Identical trees do not
+  prove synchronized histories.
 - Enable **Allow GitHub Actions to create and approve pull requests**. A
   maintainer with write access may need to select **Approve workflows to run**
   for CI on the `GITHUB_TOKEN`-created PR.

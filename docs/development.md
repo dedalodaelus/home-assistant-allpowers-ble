@@ -282,6 +282,38 @@ be needed when `main` and `devel` have diverged or their release metadata does
 not agree; resolve that separately before attempting promotion. Do not use this
 workflow to synchronize the branches.
 
+### Returning production changes from `main` to `devel`
+
+The separate **Sync main to devel** workflow runs on pushes to `main` and may
+also be dispatched from default `main` to recover a missed event. It fetches
+both current remote branch tips and checks commit ancestry. If `main` is not
+already an ancestor of `devel`, it creates or reuses one same-repository PR with
+head `main` and base `devel`. Its summary lists actual main-only commits and
+observed refs; it does not report test results. GitHub updates the PR as `main`
+advances. The workflow never pushes, merges, approves, changes release metadata,
+or resolves conflicts.
+
+Enable **Allow GitHub Actions to create and approve pull requests**. PR checks
+created with `GITHUB_TOKEN` may remain approval-required until a maintainer
+with write access selects **Approve workflows to run**. A workflow run does not
+prove release publication or HACS upload.
+
+Merge permanent-branch PRs with merge commits to preserve ancestry in both
+directions. Review the proposed merge and the required checks on the actual PR.
+GitHub may block a direct sync PR when branch protection requires its `main`
+head to include concurrent `devel` commits, when the merge conflicts, or when
+linear history is required. Do not update the `main` head from `devel`, relax
+protection, or resolve conflicts automatically. Stop for a maintainer-reviewed
+recovery that preserves both histories and Release Please metadata. For
+ancestry-only divergence with identical trees, the workflow attempts a
+reviewable PR and reports if GitHub cannot create it; defer or ask the
+maintainer to define a reviewed recovery rather than treating equal files as
+synchronized.
+
+The workflow file must reach default `main` before push events or manual
+dispatches can invoke it. First deployment and live trigger/check behavior remain
+unverified until that reviewed deployment occurs.
+
 ## Manual Home Assistant development
 
 For interactive work, copy or symlink `custom_components/allpowers_ble` into a test
