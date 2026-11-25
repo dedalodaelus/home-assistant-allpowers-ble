@@ -585,12 +585,26 @@ def test_main_branch_policy_restricts_sources_and_release_bot_identity() -> None
         )
 
 
-def test_approved_release_please_bot_and_hotfix_ancestry_are_preserved() -> None:
+@pytest.mark.parametrize(
+    ("base_repo", "head_repo"),
+    [
+        (f"{OWNER}/{REPO}", f"{OWNER}/{REPO}"),
+        (f"{OWNER}/{REPO}", "foreign/repo"),
+        (f"{OWNER}/{REPO}", None),
+        ("foreign/repo", f"{OWNER}/{REPO}"),
+        (None, f"{OWNER}/{REPO}"),
+    ],
+)
+def test_release_please_exception_requires_target_repository_identity(
+    base_repo: str | None, head_repo: str | None
+) -> None:
     release_pr = FakeApi(
         base_ref="main",
         head_ref="release-please--1",
         base_version="1.2.0",
         head_version="1.3.0",
+        base_repo=base_repo,
+        head_repo=head_repo,
         files=[
             {"filename": "CHANGELOG.md"},
             {"filename": ".release-please-manifest.json"},
@@ -602,9 +616,22 @@ def test_approved_release_please_bot_and_hotfix_ancestry_are_preserved() -> None
         "login": "release-please[bot]",
         "type": "Bot",
     }
-    messages: list[str] = []
-    run_gate(release_event, release_pr, OWNER, REPO, log=messages.append)
-    assert messages[-1] == "All required checks completed successfully."
+    if base_repo == f"{OWNER}/{REPO}" and head_repo == f"{OWNER}/{REPO}":
+        messages: list[str] = []
+        run_gate(release_event, release_pr, OWNER, REPO, log=messages.append)
+        assert messages[-1] == "All required checks completed successfully."
+    else:
+        with pytest.raises(GateError, match="same target repository"):
+            run_gate(
+                release_event,
+                release_pr,
+                OWNER,
+                REPO,
+                log=lambda _message: None,
+            )
+
+
+def test_approved_hotfix_ancestry_is_preserved() -> None:
 
     hotfix = FakeApi(
         base_ref="main",
@@ -1278,6 +1305,64 @@ def _add_ci_attempt(
         }
     ]
     return candidate
+
+
+@pytest.mark.parametrize("status", ["waiting", "pending", "requested"])
+def test_nonterminal_current_attempt_job_polls_until_success(status: str) -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    _add_ci_attempt(api, attempt=2, status=status, conclusion=None)
+    attempt_jobs = api.workflow_run_attempt_jobs
+    calls = 0
+
+    def complete_job_on_poll(run_id: int, attempt: int) -> list[dict[str, Any]]:
+        nonlocal calls
+        if run_id == 1010 and attempt == 2:
+            calls += 1
+        if run_id == 1010 and attempt == 2 and calls == 2:
+            api.workflow_jobs[(run_id, attempt)][0].update(
+                status="completed", conclusion="success"
+            )
+        return attempt_jobs(run_id, attempt)
+
+    api.workflow_run_attempt_jobs = complete_job_on_poll  # type: ignore[method-assign]
+    clock = FakeClock()
+    sleeps: list[float] = []
+    messages: list[str] = []
+    run_gate(
+        _event(api),
+        api,
+        OWNER,
+        REPO,
+        log=messages.append,
+        now=clock.now,
+        sleep=lambda seconds: (sleeps.append(seconds), clock.sleep(seconds)),
+    )
+    assert calls == 2
+    assert sleeps == [15]
+    assert any("Pending:" in message for message in messages)
+    assert messages[-1] == "All required checks completed successfully."
+
+
+def test_current_attempt_job_staying_pending_cannot_satisfy_gate() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    _add_ci_attempt(api, attempt=2, status="pending", conclusion=None)
+    clock = FakeClock()
+    messages: list[str] = []
+    with pytest.raises(GateError, match="Timeout waiting"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=messages.append,
+            now=clock.now,
+            sleep=clock.sleep_to_timeout,
+        )
+    assert any(
+        "Pending: Python, tests, and release validation (pending)" in msg
+        for msg in messages
+    )
+    assert not any("All required checks completed" in msg for msg in messages)
 
 
 def test_same_workflow_run_retry_without_job_does_not_reuse_attempt_one_success() -> (

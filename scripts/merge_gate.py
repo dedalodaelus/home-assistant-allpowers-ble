@@ -59,6 +59,10 @@ REQUIRED_EVIDENCE_IDS = {
     "HIL qualification (opt-in)": ("hil", "qualification"),
 }
 ACCEPTED_CONCLUSIONS = {"success", "neutral", "skipped"}
+NONTERMINAL_STATUSES = frozenset(
+    {"queued", "in_progress", "waiting", "pending", "requested"}
+)
+WORKFLOW_RUN_STATUSES = NONTERMINAL_STATUSES | {"completed"}
 POLL_INTERVAL_SECONDS = 15
 TIMEOUT_SECONDS = 30 * 60
 MISSING_CHECKS_GRACE_SECONDS = 10 * 60
@@ -316,14 +320,7 @@ def _current_workflow_run(
             f"Applicable workflow run {run_id} has missing or invalid run_number."
         )
     status = workflow_run.get("status")
-    if not isinstance(status, str) or status not in {
-        "queued",
-        "in_progress",
-        "completed",
-        "waiting",
-        "pending",
-        "requested",
-    }:
+    if not isinstance(status, str) or status not in WORKFLOW_RUN_STATUSES:
         raise GateError(
             f"Applicable workflow run {run_id} has unknown status {status!r}."
         )
@@ -479,6 +476,15 @@ def _check_policy(
     repository_name = f"{owner}/{repo}"
     base_repo = _mapping(base.get("repo")).get("full_name")
     head_repo = _mapping(head.get("repo")).get("full_name")
+    if (
+        base_ref == "main"
+        and is_release_please
+        and (base_repo != repository_name or head_repo != repository_name)
+    ):
+        raise GateError(
+            "Release Please PRs targeting main must use the same target repository "
+            "for both base and head."
+        )
     is_sync = (
         base_ref == "devel"
         and head_ref == "main"
@@ -696,27 +702,20 @@ def run_gate(
             check = latest.get(name)
             if check is None:
                 selected = selected_runs.get(name)
-                if selected is not None and selected.get("status") in {
-                    "queued",
-                    "in_progress",
-                    "waiting",
-                    "pending",
-                    "requested",
-                }:
+                if (
+                    selected is not None
+                    and selected.get("status") in NONTERMINAL_STATUSES
+                ):
                     pending.append(f"{name} (current attempt job not yet available)")
                 else:
                     missing.append(name)
                 continue
             status = check.get("status")
-            if not isinstance(status, str) or status not in {
-                "queued",
-                "in_progress",
-                "completed",
-            }:
+            if not isinstance(status, str) or status not in WORKFLOW_RUN_STATUSES:
                 raise GateError(
                     f"Required check {name} has malformed status {status!r}."
                 )
-            if status != "completed":
+            if status in NONTERMINAL_STATUSES:
                 pending.append(f"{name} ({status})")
             elif check.get("conclusion") not in ACCEPTED_CONCLUSIONS:
                 failed.append(f"{name} ({check.get('conclusion') or 'unknown'})")
