@@ -398,6 +398,9 @@ def test_fork_version_preserving_manifest_change_is_validated() -> None:
         head_version="1.0.0",
         files=[{"filename": "custom_components/allpowers_ble/manifest.json"}],
     )
+    api.contents[(HEAD_SHA, "custom_components/allpowers_ble/manifest.json")] = (
+        json.dumps({"version": "1.0.0", "name": "Fork-edited integration metadata"})
+    )
 
     assert _run(api)[-1] == "All required checks completed successfully."
 
