@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from custom_components.allpowers_ble.model_support import (
+    ModelFeature,
+    identify_model,
+    model_feature_capability,
+)
 from scripts.validate_hil_qualification import STATUS_REQUEST
 
 
@@ -25,6 +30,13 @@ class SyntheticHILHA:
         self.silver = silver or gold
         self.gold = gold
         self.omit_setting_restoration = omit_setting_restoration
+        self.model_support = identify_model(
+            "R600", hardware_version="0.3", raw_hardware_version=3
+        )
+        self.profile_features = {
+            feature.value: model_feature_capability(self.model_support, feature)
+            for feature in ModelFeature
+        }
         self.calls: list[tuple[Any, ...]] = []
         self.state_changing_calls: list[tuple[Any, ...]] = []
         self.capture_id = "synthetic-capture"
@@ -52,9 +64,14 @@ class SyntheticHILHA:
             "eco_timeout": "four_hours",
         }
         self.setting_writes: list[tuple[str, str, int, str]] = []
+        self.setting_consents: list[tuple[str, str]] = []
+        self.consumed_setting_consents: list[tuple[str, str]] = []
+        self.inventory_inspections: list[str] = []
+        self.tier_plans: list[dict[str, Any]] = []
         self.recovery_requested = False
         self.restore_requested = False
         self.capability_snapshots: list[tuple[bool, bool]] = []
+        self.settings_fresh_snapshots: list[bool] = []
         self.disconnected_before_restoration = False
 
     @staticmethod
@@ -185,18 +202,31 @@ class SyntheticHILHA:
 
     def hil_capabilities(self, _entry_id: str) -> dict[str, Any]:
         self.calls.append(("read", "hil_capabilities"))
-        disconnected = (
-            self.silver and self.recovery_requested and not self.restore_requested
-        )
+        disconnected = self._disconnected
         self.capability_snapshots.append((self.restore_requested, not disconnected))
-        features = {
-            "telemetry": {
-                "physical_presence": "present",
-                "production_authorized": False,
-                "candidate_hil_eligible": False,
-                "runtime_ready": True,
+        self.settings_fresh_snapshots.append(not disconnected)
+        features: dict[str, dict[str, Any]] = {}
+        for feature in ModelFeature:
+            if feature is ModelFeature.TELEMETRY:
+                included = True
+            elif feature in {
+                ModelFeature.AC_OUTPUT,
+                ModelFeature.DC_OUTPUT,
+                ModelFeature.LIGHT_OUTPUT,
+            }:
+                included = self.silver
+            else:
+                included = self.gold
+            if not included:
+                continue
+            declaration = self.profile_features[feature.value]
+            runtime_fresh = not disconnected
+            features[feature.value] = {
+                "physical_presence": declaration.physical_presence.value,
+                "production_authorized": declaration.production_authorized,
+                "candidate_hil_eligible": declaration.hil_candidate_eligible,
+                "runtime_ready": runtime_fresh,
             }
-        }
         flags = {
             "read_telemetry": True,
             "write_output_controls": self.silver,
@@ -204,28 +234,6 @@ class SyntheticHILHA:
             "write_settings_keepalive": False,
             "car_charger_enabled": False,
         }
-        if self.silver:
-            for feature in ("ac_output", "dc_output", "light_output"):
-                features[feature] = {
-                    "physical_presence": "present",
-                    "production_authorized": True,
-                    "candidate_hil_eligible": False,
-                    "runtime_ready": True,
-                }
-        if self.gold:
-            for feature in ("eco_mode", "work_mode", "eco_timeout"):
-                features[feature] = {
-                    "physical_presence": "present",
-                    "production_authorized": True,
-                    "candidate_hil_eligible": False,
-                    "runtime_ready": True,
-                }
-            features["car_charger"] = {
-                "physical_presence": "unknown",
-                "production_authorized": True,
-                "candidate_hil_eligible": False,
-                "runtime_ready": True,
-            }
         return {
             "schema_version": 2,
             "model": "R600",
@@ -240,7 +248,7 @@ class SyntheticHILHA:
             "capabilities": flags,
             "connected": not disconnected,
             "status_fresh": not disconnected,
-            "settings_fresh": True,
+            "settings_fresh": not disconnected,
             "status_notification_count": self.status_count,
             "session_generation": 8 if self.restore_requested else 7,
             "observed_route": "active_proxy" if self.silver else "unverified",
@@ -254,6 +262,7 @@ class SyntheticHILHA:
         }
 
     def control_state(self, key: str, entity_id: str) -> dict[str, Any]:
+        disconnected = self._disconnected
         if self.silver:
             assert entity_id == self._registry_entity_id(key), (
                 f"Control state must use the registry entity for {key}"
@@ -266,15 +275,21 @@ class SyntheticHILHA:
                 "eco_timeout": ["one_hour", "two_hours", "four_hours", "six_hours"],
             }[key]
             return {
-                "available": self.gold,
-                "state": self.setting_states[key] if self.gold else None,
-                "options": options if self.gold else [],
+                "available": self.gold and not disconnected,
+                "state": self.setting_states[key]
+                if self.gold and not disconnected
+                else None,
+                "options": options if self.gold and not disconnected else [],
             }
         target = "light" if key == "light" else key
         return {
-            "available": target in self.output_states,
-            "state": self.output_states.get(target),
+            "available": target in self.output_states and not disconnected,
+            "state": self.output_states.get(target) if not disconnected else None,
         }
+
+    @property
+    def _disconnected(self) -> bool:
+        return self.silver and self.recovery_requested and not self.restore_requested
 
     def request_read_only_refresh(self, refresh_button: Any) -> None:
         assert self.capture_active, "Status refresh must run during an active capture"
@@ -293,6 +308,12 @@ class SyntheticHILHA:
             if key in self.setting_states:
                 assert self.gold and entity_id == self._registry_entity_id(key)
                 assert self.capture_active and self.scenario_id.startswith("settings_")
+                authorization = (key, value)
+                assert authorization in self.setting_consents, (
+                    f"Settings write {authorization} requires its own consent prompt"
+                )
+                self.setting_consents.remove(authorization)
+                self.consumed_setting_consents.append(authorization)
                 self.state_changing_calls.append(("call_control", key, value))
                 self.setting_states[key] = value
                 self.setting_writes.append(

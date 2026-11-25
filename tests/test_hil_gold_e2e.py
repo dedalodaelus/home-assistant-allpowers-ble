@@ -16,6 +16,7 @@ import pytest
 
 from scripts import validate_hil_qualification
 from scripts.hil import cli
+from scripts.hil import guided
 from scripts.hil.qualification import migrate_v1_to_v3
 from scripts.hil.tiers import evaluate_tiers
 from tests.hil.synthetic_hil import SyntheticHILHA
@@ -107,6 +108,15 @@ def _gold_onboard_answers(
                 not restored and not connected
                 for restored, connected in fake.capability_snapshots
             ), "restore consent must follow an explicit disconnected snapshot"
+            disconnected_caps = fake.hil_capabilities(fake.entry_id)
+            assert disconnected_caps["settings_fresh"] is False
+            assert disconnected_caps["features"]["eco_mode"]["runtime_ready"] is False
+            assert (
+                fake.control_state("eco_mode", fake._registry_entity_id("eco_mode"))[
+                    "available"
+                ]
+                is False
+            )
             fake.disconnected_before_restoration = True
             fake.restore_requested = True
             return "1"
@@ -131,11 +141,31 @@ def _gold_onboard_answers(
         ):
             return "1"
         if "Physically inspect" in prompt:
+            feature = prompt.split(": confirm ", 1)[1].split(" is present", 1)[0]
+            fake.inventory_inspections.append(feature)
             return "PRESENT"
-        if "[no/yes]" in prompt or "[y/N]" in prompt:
-            return "yes"
+        if prompt.startswith("Type 1 to authorize the single settings change "):
+            target = prompt.split(" -> ", 1)[1].split(":", 1)[0]
+            feature = {
+                "on": "eco_mode",
+                "standard": "work_mode",
+                "two_hours": "eco_timeout",
+            }[target]
+            fake.setting_consents.append((feature, target))
+            return "1"
+        if prompt.startswith("Type 1 to authorize restoring the original setting:"):
+            feature = fake.setting_writes[-1][0]
+            original = {
+                "eco_mode": "off",
+                "work_mode": "mute",
+                "eco_timeout": "four_hours",
+            }[feature]
+            fake.setting_consents.append((feature, original))
+            return "1"
         if "Type 1" in prompt:
             return "1"
+        if "[no/yes]" in prompt or "[y/N]" in prompt:
+            return "yes"
         return "yes"
 
     monkeypatch.setattr(builtins, "input", answer)
@@ -149,6 +179,14 @@ def _run_gold_onboard(
     repo_root, matrix_path = _temporary_checkout(tmp_path / "gold-checkout")
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
     monkeypatch.setattr(cli, "HAClient", lambda *_args, **_kwargs: fake)
+    real_build_tier_plan = guided.build_tier_plan
+
+    def recording_build_tier_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        plan = real_build_tier_plan(*args, **kwargs)
+        fake.tier_plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(guided, "build_tier_plan", recording_build_tier_plan)
     monkeypatch.setenv("HA_HIL_TOKEN", "SYNTHETIC_PRIVATE_TOKEN")
     _gold_onboard_answers(monkeypatch, fake)
     real_import_review = cli._onboard_import_review
@@ -195,6 +233,45 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     assert result == 0, f"result={result}; output tail:\n{output[-3000:]}"
     assert "Requested tier: Gold" in output
     assert "POST-REVIEW QUALIFICATION: attained gold" in output
+    inspected_features = {
+        "ac_output",
+        "dc_output",
+        "light_output",
+        "eco_mode",
+        "work_mode",
+        "eco_timeout",
+    }
+    assert set(fake.inventory_inspections) == inspected_features
+    assert len(fake.inventory_inspections) == len(inspected_features)
+    assert all(
+        fake.profile_features[feature].physical_presence.value == "unknown"
+        and fake.profile_features[feature].production_authorized is True
+        for feature in inspected_features
+    )
+    profile_snapshot = fake.hil_capabilities(fake.entry_id)
+    assert all(
+        profile_snapshot["features"][feature]["physical_presence"] == "unknown"
+        and profile_snapshot["features"][feature]["production_authorized"] is True
+        for feature in inspected_features
+    )
+    assert "car_charger" not in fake.inventory_inspections
+    assert fake.profile_features["car_charger"].physical_presence.value == "unknown"
+    inspected_plans = [
+        plan
+        for plan in fake.tier_plans
+        if plan.get("physical_inventory_preflight", {}).get("features")
+    ]
+    assert inspected_plans
+    inspected_plan = inspected_plans[-1]
+    assert (
+        set(inspected_plan["physical_inventory_preflight"]["features"])
+        == inspected_features
+    )
+    for step in inspected_plan["steps"]:
+        if step.get("feature") in inspected_features:
+            assert step["physical_presence"] == "unknown"
+            assert step["inventory_preflight"] == "operator_inspected_present"
+            assert step["eligibility"] == "eligible"
     assert execution["requested_tier"] == execution["execution_tier"] == "gold"
     expected = [
         "read_only_probe",
@@ -249,7 +326,12 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     ]
     assert len({generation for _, _, generation, _ in fake.setting_writes}) == 1
     assert len({capture for _, _, _, capture in fake.setting_writes}) == 6
+    assert fake.consumed_setting_consents == [
+        (key, value) for key, value, _, _ in fake.setting_writes
+    ]
+    assert fake.setting_consents == []
     assert fake.disconnected_before_restoration is True
+    assert any(not fresh for fresh in fake.settings_fresh_snapshots)
     assert fake.output_states == {
         "ac_output": "off",
         "dc_output": "off",
@@ -280,6 +362,10 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     assert imported["feature_presence"]["eco_mode"]["status"] == "present"
     assert imported["feature_presence"]["work_mode"]["status"] == "present"
     assert imported["feature_presence"]["eco_timeout"]["status"] == "present"
+    assert imported["feature_presence"]["car_charger"] == {
+        "status": "unknown",
+        "evidence": [],
+    }
     car_charger_contract = matrix["revisions"][0]["feature_contract"]["car_charger"]
     assert car_charger_contract["status"] == "excluded"
     assert car_charger_contract["safely_disabled"] is True
@@ -398,7 +484,20 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     contract_file.unlink()
     contract_file.write_bytes(contract_bytes)
     public_execution = json.loads(public_members["tier-execution.json"])
+    public_session = json.loads(public_members["session.json"])
+    public_plan = public_session["data"]["test_plan"]
     assert public_execution["requested_tier"] == "gold"
+    assert public_plan["requested_tier"] == "gold"
+    assert public_plan["physical_inventory_preflight"] == {
+        "source": "operator_physical_inspection",
+        "features": {
+            feature: {
+                "outcome": "present",
+                "basis": "operator_physical_inspection",
+            }
+            for feature in sorted(inspected_features)
+        },
+    }
     public_artifacts = json.loads(public_members["tier-artifacts.json"])["artifacts"]
     trace_scenarios = {
         item["content"].get("scenario_id")
@@ -529,6 +628,26 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     assert not any(
         "hil-results" in path or path.endswith(".zip") for path in staged_paths
     )
+    staged_tree = tmp_path / "staged-tree"
+    staged_tree.mkdir()
+    subprocess.run(
+        ["git", "checkout-index", "--all", f"--prefix={staged_tree}/"],
+        cwd=repo_root,
+        check=True,
+    )
+    staged_matrix_path = staged_tree / matrix_path.relative_to(repo_root)
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", staged_tree)
+    staged_errors, _ = validate_hil_qualification.validate_matrix(
+        json.loads(staged_matrix_path.read_text(encoding="utf-8")),
+        matrix_path=staged_matrix_path,
+        require_pass=False,
+        max_age_days=None,
+    )
+    assert staged_errors == []
+    staged_tier = evaluate_tiers(
+        json.loads(staged_matrix_path.read_text(encoding="utf-8"))
+    )["tiers"][0]
+    assert staged_tier["tier"] == "gold"
     pr_body_line = next(
         line for line in output.splitlines() if line.startswith("Local PR body: ")
     )
@@ -581,3 +700,15 @@ def test_onboard_gold_does_not_qualify_without_setting_restoration_trace(
     assert not (run_root / "hil-evidence.zip").exists()
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
     assert matrix["revisions"][0]["runs"] == []
+
+
+def test_synthetic_settings_write_without_individual_consent_is_rejected() -> None:
+    fake = SyntheticHILHA(gold=True)
+    fake.capture_active = True
+    fake.scenario_id = "settings_eco_mode"
+
+    with pytest.raises(AssertionError, match="requires its own consent prompt"):
+        fake.call_control("eco_mode", fake._registry_entity_id("eco_mode"), "on")
+
+    assert fake.setting_states["eco_mode"] == "off"
+    assert fake.setting_writes == []
