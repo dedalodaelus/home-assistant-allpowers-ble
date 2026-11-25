@@ -14,6 +14,18 @@ These instructions apply to AI coding agents. Human contributors follow
   and proportionate to this mostly single-developer project; avoid unrelated
   refactors, speculative abstractions, and unnecessary dependencies.
 
+- Use Python for repository-owned executable CI/CD, release automation,
+  validation scripts, and their tests. Keep GitHub Actions YAML declarative;
+  short shell commands for invoking tools and scripts are fine, but put
+  substantial logic in testable Python modules. Reuse shared policy
+  implementations and the existing pytest and Python quality tooling.
+- Do not introduce or expand repository-owned JavaScript, TypeScript, Node.js,
+  or other language-specific implementation or test toolchains without explicit
+  maintainer approval. External GitHub Actions and tools implemented in other
+  languages are permitted; this rule concerns code and toolchains maintained by
+  this repository. Do not refactor unrelated existing code solely to enforce
+  this policy.
+
 ## 2. Branches and development workflow
 
 - Fetch the latest `origin/devel` and create an isolated feature branch or
