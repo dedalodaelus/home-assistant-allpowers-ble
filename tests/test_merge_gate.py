@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -836,6 +837,68 @@ def test_rest_api_malformed_response_and_permission_failure_are_actionable(
 
 
 @pytest.mark.parametrize(
+    ("encoding", "content", "message"),
+    [
+        ("none", "IyBDaGFuZ2Vsb2c=", "unsupported content encoding"),
+        ("base64", "%%%", "Could not decode"),
+        ("base64", "IyBDaGFuZ2Vsb2c", "Could not decode"),
+    ],
+)
+def test_rest_api_rejects_unsupported_or_malformed_file_content(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+    content: str,
+    message: str,
+) -> None:
+    class Response:
+        headers: dict[str, str] = {}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"type": "file", "encoding": encoding, "content": content}
+            ).encode()
+
+    monkeypatch.setattr(merge_gate, "urlopen", lambda *_args, **_kwargs: Response())
+    api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
+
+    with pytest.raises(GateError, match=message):
+        api.content("CHANGELOG.md", HEAD_SHA)
+
+
+def test_rest_api_content_decodes_line_wrapped_base64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = "# Changelog\n\n## [1.2.0]\n"
+    encoded = base64.b64encode(expected.encode()).decode()
+    content = encoded[:12] + "\n" + encoded[12:]
+
+    class Response:
+        headers: dict[str, str] = {}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"type": "file", "encoding": "base64", "content": content}
+            ).encode()
+
+    monkeypatch.setattr(merge_gate, "urlopen", lambda *_args, **_kwargs: Response())
+    api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
+
+    assert api.content("CHANGELOG.md", HEAD_SHA) == expected
+
+
+@pytest.mark.parametrize(
     "status,conclusion",
     [
         ("in_progress", None),
@@ -965,6 +1028,15 @@ def test_gate_entry_point_reads_event_file_and_reports_failures(
     captured = capsys.readouterr()
     assert "GitHub API check request denied" in captured.err
     assert "entrypoint-token-sentinel" not in captured.out + captured.err
+
+
+def test_gate_rejects_boolean_pr_number() -> None:
+    api = FakeApi()
+    event = _event(api)
+    event["pull_request"]["number"] = True
+
+    with pytest.raises(GateError, match="missing its number"):
+        run_gate(event, api, OWNER, REPO, log=lambda _message: None)
 
 
 @pytest.mark.parametrize(

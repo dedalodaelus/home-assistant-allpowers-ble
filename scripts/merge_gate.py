@@ -150,10 +150,15 @@ class RestGitHubApi:
         if not isinstance(value, dict) or value.get("type") != "file":
             raise GateError(f"Expected a file at {path} for {ref}.")
         encoded = value.get("content")
-        if not isinstance(encoded, str):
-            raise GateError(f"GitHub returned no file content for {path} at {ref}.")
+        if value.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise GateError(
+                f"GitHub returned missing or unsupported content encoding for {path} at {ref}."
+            )
         try:
-            return base64.b64decode(encoded, validate=False).decode("utf-8")
+            # The Contents API may line-wrap base64, but invalid characters must
+            # not be silently discarded (notably for changelog history checks).
+            compact = encoded.replace("\r", "").replace("\n", "")
+            return base64.b64decode(compact, validate=True).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as error:
             raise GateError(f"Could not decode {path} at {ref}: {error}") from error
 
@@ -299,7 +304,12 @@ def _check_policy(
     head_sha = str(head.get("sha") or "")
     base_sha = str(base.get("sha") or "")
     number = pr.get("number")
-    if not isinstance(number, int) or not head_sha or not base_sha:
+    if (
+        isinstance(number, bool)
+        or not isinstance(number, int)
+        or not head_sha
+        or not base_sha
+    ):
         raise GateError("PR event is missing its number or immutable base/head SHA.")
 
     author = _mapping(pr.get("user"))
