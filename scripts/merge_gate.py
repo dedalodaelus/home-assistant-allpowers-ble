@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -31,6 +31,24 @@ REQUIRED_CHECKS = (
     "Review dependency changes",
     "Analyze Python",
 )
+REQUIRED_WORKFLOWS = {
+    "Python, tests, and release validation": "CI",
+    "HACS validation": "HACS",
+    "Home Assistant Hassfest": "Hassfest",
+    "Validate title": "Conventional pull request title",
+    "Review dependency changes": "Dependency review",
+    "Analyze Python": "CodeQL",
+    "HIL qualification (opt-in)": "HIL qualification",
+}
+REQUIRED_EVIDENCE_IDS = {
+    "Python, tests, and release validation": ("ci", "quality"),
+    "HACS validation": ("hacs", "validate"),
+    "Home Assistant Hassfest": ("hassfest", "validate"),
+    "Validate title": ("title", "validate"),
+    "Review dependency changes": ("dependencies", "review"),
+    "Analyze Python": ("codeql", "analyze"),
+    "HIL qualification (opt-in)": ("hil", "qualification"),
+}
 ACCEPTED_CONCLUSIONS = {"success", "neutral", "skipped"}
 POLL_INTERVAL_SECONDS = 15
 TIMEOUT_SECONDS = 30 * 60
@@ -50,7 +68,9 @@ class GitHubApi(Protocol):
 
     def compare(self, base: str, head: str) -> dict[str, Any]: ...
 
-    def content(self, path: str, ref: str) -> str: ...
+    def content(
+        self, path: str, ref: str, repository_full_name: str | None = None
+    ) -> str: ...
 
     def check_runs(self, ref: str) -> list[dict[str, Any]]: ...
 
@@ -143,9 +163,17 @@ class RestGitHubApi:
             raise GateError("GitHub returned an invalid commit comparison.")
         return value
 
-    def content(self, path: str, ref: str) -> str:
+    def content(
+        self, path: str, ref: str, repository_full_name: str | None = None
+    ) -> str:
+        repository_path = self.repository_path
+        if repository_full_name is not None:
+            parts = repository_full_name.split("/")
+            if len(parts) != 2 or not all(parts):
+                raise GateError("GitHub returned an invalid head repository identity.")
+            repository_path = f"/repos/{quote(parts[0])}/{quote(parts[1])}"
         value = self._get(
-            f"{self.repository_path}/contents/{quote(path, safe='/')}", ref=ref
+            f"{repository_path}/contents/{quote(path, safe='/')}", ref=ref
         )
         if not isinstance(value, dict) or value.get("type") != "file":
             raise GateError(f"Expected a file at {path} for {ref}.")
@@ -166,6 +194,7 @@ class RestGitHubApi:
         return self._all_pages(
             f"{self.repository_path}/commits/{quote(ref, safe='')}/check-runs",
             "check_runs",
+            filter="all",
         )
 
     def workflow_run(self, run_id: int) -> dict[str, Any]:
@@ -177,50 +206,6 @@ class RestGitHubApi:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _association_matches(
-    associations: Any, number: int, base_sha: str, head_sha: str
-) -> bool:
-    if not isinstance(associations, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and item.get("number") == number
-        and _mapping(item.get("base")).get("sha") == base_sha
-        and _mapping(item.get("head")).get("sha") == head_sha
-        for item in associations
-    )
-
-
-def latest_runs_by_name(
-    check_runs: Iterable[dict[str, Any]], number: int, base_sha: str, head_sha: str
-) -> dict[str, dict[str, Any]]:
-    """Keep the latest run per name only among exact PR/base/head associations."""
-    latest: dict[str, dict[str, Any]] = {}
-    for run in check_runs:
-        if not isinstance(run, dict):
-            raise GateError("GitHub returned a malformed check-run entry.")
-        name = run.get("name")
-        if not isinstance(name, str) or not _association_matches(
-            run.get("pull_requests"), number, base_sha, head_sha
-        ):
-            continue
-        previous = latest.get(name)
-        run_id = run.get("id")
-        previous_id = previous.get("id") if previous else -1
-        if (
-            isinstance(run_id, bool)
-            or not isinstance(run_id, int)
-            or isinstance(previous_id, bool)
-            or not isinstance(previous_id, int)
-        ):
-            raise GateError(f"Check run {name!r} has a missing or invalid ID.")
-        if run_id < 0:
-            raise GateError(f"Check run {name!r} has a negative ID.")
-        if previous is None or run_id > previous_id:
-            latest[name] = run
-    return latest
 
 
 def _workflow_run_id(details_url: Any, owner: str, repo: str) -> int | None:
@@ -248,9 +233,13 @@ def _has_current_workflow_run(
     number: int,
     base_sha: str,
     head_sha: str,
+    tested_sha: str,
+    check_name: str,
     cache: dict[int, bool],
 ) -> bool:
-    if not _association_matches(run.get("pull_requests"), number, base_sha, head_sha):
+    workflow_name = REQUIRED_WORKFLOWS.get(check_name)
+    evidence_ids = REQUIRED_EVIDENCE_IDS.get(check_name)
+    if workflow_name is None or evidence_ids is None:
         return False
     run_id = _workflow_run_id(run.get("details_url"), owner, repo)
     if run_id is None:
@@ -259,20 +248,30 @@ def _has_current_workflow_run(
         workflow_run = api.workflow_run(run_id)
         if not isinstance(workflow_run, dict):
             raise GateError("GitHub returned a malformed Actions workflow run.")
-        cache[run_id] = workflow_run.get(
-            "event"
-        ) == "pull_request" and _association_matches(
-            workflow_run.get("pull_requests"), number, base_sha, head_sha
+        expected = (
+            f"evidence w={evidence_ids[0]} j={evidence_ids[1]} pr={number} "
+            f"r={owner}/{repo} b={base_sha} h={head_sha} s={tested_sha} "
+            f"a={workflow_run.get('run_attempt')}"
+        )
+        cache[run_id] = (
+            workflow_run.get("event") == "pull_request"
+            and workflow_run.get("display_title") == expected
+            and workflow_run.get("name") == workflow_name
+            and workflow_run.get("head_sha") == head_sha
         )
     return cache[run_id]
 
 
 def _validate_release_metadata(
-    api: GitHubApi, base_sha: str, head_sha: str, allow_newer: bool
+    api: GitHubApi,
+    base_sha: str,
+    head_sha: str,
+    allow_newer: bool,
+    head_repository: str | None = None,
 ) -> None:
-    def json_at(path: str, ref: str) -> Any:
+    def json_at(path: str, ref: str, repository: str | None = None) -> Any:
         try:
-            return json.loads(api.content(path, ref))
+            return json.loads(api.content(path, ref, repository))
         except json.JSONDecodeError as error:
             raise GateError(f"Invalid JSON in {path} at {ref}.") from error
 
@@ -281,12 +280,14 @@ def _validate_release_metadata(
             "custom_components/allpowers_ble/manifest.json", base_sha
         ),
         head_integration=json_at(
-            "custom_components/allpowers_ble/manifest.json", head_sha
+            "custom_components/allpowers_ble/manifest.json", head_sha, head_repository
         ),
         base_release=json_at(".release-please-manifest.json", base_sha),
-        head_release=json_at(".release-please-manifest.json", head_sha),
+        head_release=json_at(
+            ".release-please-manifest.json", head_sha, head_repository
+        ),
         base_changelog=api.content("CHANGELOG.md", base_sha),
-        head_changelog=api.content("CHANGELOG.md", head_sha),
+        head_changelog=api.content("CHANGELOG.md", head_sha, head_repository),
         allow_newer=allow_newer,
     )
 
@@ -390,15 +391,21 @@ def _check_policy(
 
     manifest_changed = INTEGRATION_MANIFEST in changed_paths
     if manifest_changed and not (is_sync or is_promotion or release_please_update):
-        if base_repo != repository_name or head_repo != repository_name:
+        if not isinstance(head_repo, str) or not head_repo:
             raise GateError(
-                "Integration manifest changes from a fork cannot be validated against the base repository."
+                "Head repository identity is required to validate manifest changes."
             )
 
     if is_sync or is_promotion or release_please_update or manifest_changed:
         allow_newer = is_sync or release_please_update
         try:
-            _validate_release_metadata(api, base_sha, head_sha, allow_newer=allow_newer)
+            _validate_release_metadata(
+                api,
+                base_sha,
+                head_sha,
+                allow_newer=allow_newer,
+                head_repository=head_repo if head_repo != repository_name else None,
+            )
         except MetadataError as error:
             raise GateError(f"Release metadata validation failed: {error}") from error
         current = api.pull_request(number)
@@ -428,6 +435,7 @@ def run_gate(
     owner: str,
     repo: str,
     *,
+    tested_sha: str | None = None,
     require_hil_stable: bool = False,
     log: Callable[[str], None] = print,
     now: Callable[[], float] = time.monotonic,
@@ -445,6 +453,9 @@ def run_gate(
     base_ref = str(base.get("ref") or "")
     base_sha = str(base.get("sha") or "")
     head_sha = str(head.get("sha") or "")
+    tested_sha = tested_sha or str(pr.get("merge_commit_sha") or "")
+    if not tested_sha:
+        raise GateError("Event is missing the immutable pull request merge revision.")
     title_was_edited = "title" in _mapping(event.get("changes"))
     required = list(REQUIRED_CHECKS)
     if base_ref == "main" and require_hil_stable:
@@ -459,7 +470,35 @@ def run_gate(
             raise GateError("Timeout waiting for required checks to complete.")
 
         runs = api.check_runs(head_sha)
-        latest = latest_runs_by_name(runs, number, base_sha, head_sha)
+        latest: dict[str, dict[str, Any]] = {}
+        for candidate in runs:
+            if not isinstance(candidate, dict):
+                raise GateError("GitHub returned a malformed check-run entry.")
+            name = candidate.get("name")
+            if (
+                candidate.get("head_sha") != head_sha
+                or not isinstance(name, str)
+                or name not in REQUIRED_WORKFLOWS
+                or not _has_current_workflow_run(
+                    api,
+                    candidate,
+                    owner,
+                    repo,
+                    number,
+                    base_sha,
+                    head_sha,
+                    tested_sha,
+                    name,
+                    workflow_evidence,
+                )
+            ):
+                continue
+            candidate_id = candidate.get("id")
+            if isinstance(candidate_id, bool) or not isinstance(candidate_id, int):
+                raise GateError(f"Check run {name!r} has a missing or invalid ID.")
+            previous = latest.get(name)
+            if previous is None or candidate_id > previous["id"]:
+                latest[name] = candidate
         missing: list[str] = []
         pending: list[str] = []
         failed: list[str] = []
@@ -467,9 +506,7 @@ def run_gate(
             if name == "Validate title" and title_was_edited:
                 continue
             check = latest.get(name)
-            if check is None or not _has_current_workflow_run(
-                api, check, owner, repo, number, base_sha, head_sha, workflow_evidence
-            ):
+            if check is None:
                 missing.append(name)
                 continue
             status = check.get("status")
@@ -543,6 +580,7 @@ def main() -> int:
             api,
             owner,
             repo,
+            tested_sha=os.environ.get("GITHUB_SHA", ""),
             require_hil_stable=os.environ.get(
                 "REQUIRE_HIL_STABLE_GATE", "false"
             ).lower()

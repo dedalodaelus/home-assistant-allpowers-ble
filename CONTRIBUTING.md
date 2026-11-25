@@ -147,13 +147,16 @@ The repository uses an explicit promotion model:
   workflow is not ready for deployment. A maintainer must approve an
   ancestry-preserving merge policy and current-base revalidation procedure
   first. The Merge gate accepts required checks only when their Actions run is
-  from a `pull_request` event and GitHub associates both the run and check with
-  the current PR number and exact base/head SHAs; a base-branch update alone may
-  not start a new gate run. Before merging a return PR, the maintainer
-  must trigger a fresh `edited` event (for example, add then remove harmless
-  whitespace in the PR description), confirm the newest Merge gate run records
-  the current base/head pair, and review the merge-commit result. This manual
-  procedure is not enforced by branch protection.
+  from a `pull_request` event and its immutable run display title records
+  workflow/job identity, PR number, repository, base/head SHAs, the checked-out
+  `github.sha` merge revision, and run attempt. Check
+  associations are treated as mutable metadata, not evidence. A base update alone
+  may not start every required workflow. Before merging a return PR after `devel`
+  advances, a maintainer must close and reopen the PR to trigger fresh
+  `reopened` runs, then verify each required check links to a successful workflow
+  run whose display title records the current base/head and merge revision. Also
+  confirm the Merge gate itself completed for that revision. This is a manual
+  procedure, not enforced by current branch protection.
 - A sync PR does not prove release publication or HACS asset upload. Release
   Please remains responsible for publishing those assets.
 - Direct commits into `devel` and `main` are not permitted.

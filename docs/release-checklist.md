@@ -38,13 +38,14 @@
   Release Please workflow separately.
 - The current `devel` ruleset permits squash merges only. Do not deploy or merge
   the return-sync workflow until a maintainer approves an ancestry-preserving
-  merge policy and current-base revalidation procedure. The Merge gate accepts
-  only check and Actions workflow runs from a `pull_request` event associated
-  with the exact PR number and base/head SHAs. A `devel` update may not trigger
-  a new gate run, so the maintainer must trigger
-  a fresh `edited` event (for example, add then remove harmless whitespace in
-  the PR description) and verify the newest gate run's base/head SHAs before
-  merging. This is a manual procedure and is not enforced by branch protection.
+  merge policy and current-base revalidation procedure. The Merge gate requires
+  an Actions run display title that binds each required check to its workflow/job
+  identity, PR number, repository, exact base/head SHAs, tested `github.sha`
+  merge revision, and run attempt. Mutable PR association fields do not establish
+  this evidence. If `devel` advances, close and reopen the PR to trigger fresh
+  `reopened` runs; verify each required check links to a successful run with the
+  current revision evidence and confirm the Merge gate completed for that merge
+  revision. This manual procedure is not enforced by branch protection.
 - If the sync PR conflicts, branch protection requires updating `main` from
   `devel`, or linear history prevents an ancestry-preserving merge, stop for a
   maintainer-reviewed recovery. Do not update the `main` head from `devel`,

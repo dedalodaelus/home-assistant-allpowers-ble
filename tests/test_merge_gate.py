@@ -16,13 +16,15 @@ from scripts import merge_gate, promotion_metadata
 from scripts.merge_gate import (
     GateError,
     REQUIRED_CHECKS,
+    REQUIRED_EVIDENCE_IDS,
+    REQUIRED_WORKFLOWS,
     RestGitHubApi,
-    latest_runs_by_name,
     run_gate,
 )
 
 BASE_SHA = "base-current"
 HEAD_SHA = "head-current"
+TESTED_SHA = "merge-current"
 PR_NUMBER = 396
 OWNER = "owner"
 REPO = "repo"
@@ -97,12 +99,21 @@ class FakeApi:
             }
             self.workflow_runs[workflow_id] = {
                 "event": "pull_request",
-                "pull_requests": [association],
+                "name": REQUIRED_WORKFLOWS[name],
+                "run_attempt": 1,
+                "head_sha": self.head_sha,
+                "display_title": (
+                    f"evidence w={REQUIRED_EVIDENCE_IDS[name][0]} "
+                    f"j={REQUIRED_EVIDENCE_IDS[name][1]} pr={PR_NUMBER} "
+                    f"r={OWNER}/{REPO} b={self.base_sha} h={self.head_sha} "
+                    f"s={TESTED_SHA} a=1"
+                ),
             }
             values.append(
                 {
                     "id": index,
                     "name": name,
+                    "head_sha": self.head_sha,
                     "status": "completed",
                     "conclusion": "success",
                     "pull_requests": [association],
@@ -118,6 +129,7 @@ class FakeApi:
         assert number == PR_NUMBER
         value = {
             "number": number,
+            "merge_commit_sha": TESTED_SHA,
             "title": "chore(ci): synchronize main into devel",
             "draft": False,
             "user": {"login": "maintainer", "type": "User"},
@@ -143,7 +155,9 @@ class FakeApi:
         assert (base, head) == ("main", self.head_sha)
         return {"status": "ahead"}
 
-    def content(self, path: str, ref: str) -> str:
+    def content(
+        self, path: str, ref: str, repository_full_name: str | None = None
+    ) -> str:
         try:
             return self.contents[(ref, path)]
         except KeyError as error:
@@ -377,14 +391,37 @@ def test_feature_pr_cannot_delete_or_rename_integration_manifest(
         _run(api)
 
 
-def test_fork_cannot_change_integration_manifest_even_without_version_bump() -> None:
+def test_fork_version_preserving_manifest_change_is_validated() -> None:
+    api = FakeApi(
+        head_ref="feature/manifest",
+        head_repo="fork/repo",
+        head_version="1.0.0",
+        files=[{"filename": "custom_components/allpowers_ble/manifest.json"}],
+    )
+
+    assert _run(api)[-1] == "All required checks completed successfully."
+
+
+def test_fork_cannot_use_manifest_change_to_bump_release_version() -> None:
     api = FakeApi(
         head_ref="feature/manifest",
         head_repo="fork/repo",
         files=[{"filename": "custom_components/allpowers_ble/manifest.json"}],
     )
+    api.contents[(HEAD_SHA, "custom_components/allpowers_ble/manifest.json")] = (
+        json.dumps({"version": "9.9.9"})
+    )
+    with pytest.raises(GateError, match="must preserve the integration version"):
+        _run(api)
 
-    with pytest.raises(GateError, match="from a fork cannot be validated"):
+
+def test_fork_named_main_cannot_use_sync_release_exception() -> None:
+    api = FakeApi(
+        head_ref="main",
+        head_repo="fork/repo",
+        files=[{"filename": "custom_components/allpowers_ble/manifest.json"}],
+    )
+    with pytest.raises(GateError, match="must preserve the integration version"):
         _run(api)
 
 
@@ -546,77 +583,11 @@ def test_approved_release_please_bot_and_hotfix_ancestry_are_preserved() -> None
         _run(hotfix)
 
 
-def test_latest_checks_are_selected_only_for_exact_pr_and_revisions() -> None:
-    api = FakeApi()
-    current = api.runs[0]
-    stale = {
-        **current,
-        "id": current["id"] + 100,
-        "pull_requests": [
-            {
-                "number": PR_NUMBER + 1,
-                "base": {"sha": BASE_SHA},
-                "head": {"sha": HEAD_SHA},
-            }
-        ],
-    }
-    old_base = {
-        **current,
-        "id": current["id"] + 200,
-        "pull_requests": [
-            {
-                "number": PR_NUMBER,
-                "base": {"sha": "old-base"},
-                "head": {"sha": HEAD_SHA},
-            }
-        ],
-    }
-
-    selected = latest_runs_by_name(
-        [current, stale, old_base], PR_NUMBER, BASE_SHA, HEAD_SHA
-    )
-
-    assert selected[current["name"]] is current
-    newer_current = {
-        **current,
-        "id": current["id"] + 1,
-        "status": "in_progress",
-        "conclusion": None,
-    }
-    assert (
-        latest_runs_by_name([newer_current, current], PR_NUMBER, BASE_SHA, HEAD_SHA)[
-            current["name"]
-        ]
-        is newer_current
-    )
-
-
-@pytest.mark.parametrize(
-    "association",
-    [
-        None,
-        {
-            "number": PR_NUMBER,
-            "base": {"sha": "old-base"},
-            "head": {"sha": HEAD_SHA},
-        },
-        {
-            "number": PR_NUMBER,
-            "base": {"sha": BASE_SHA},
-            "head": {"sha": "other-head"},
-        },
-        {
-            "number": PR_NUMBER + 1,
-            "base": {"sha": BASE_SHA},
-            "head": {"sha": HEAD_SHA},
-        },
-    ],
-)
-def test_mismatched_check_association_never_satisfies_gate(
-    association: dict[str, Any] | None,
-) -> None:
+def test_mutable_associations_cannot_substitute_for_run_title_evidence() -> None:
     api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
-    api.runs[0]["pull_requests"] = [] if association is None else [association]
+    api.runs[0]["pull_requests"] = []
+    api.workflow_runs[1010]["pull_requests"] = []
+    api.workflow_runs[1010]["display_title"] = "old run with rewritten associations"
     clock = FakeClock()
 
     with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
@@ -661,9 +632,10 @@ def test_invalid_or_mismatched_workflow_url_never_satisfies_gate(
         )
 
 
-def test_missing_workflow_run_association_fails_closed() -> None:
+def test_missing_immutable_run_evidence_fails_closed() -> None:
     api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
     api.workflow_runs[1010]["pull_requests"] = []
+    api.workflow_runs[1010]["display_title"] = "rewritten associations are not evidence"
     clock = FakeClock()
 
     with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
@@ -677,6 +649,46 @@ def test_missing_workflow_run_association_fails_closed() -> None:
             sleep=clock.sleep_to_missing_grace,
         )
 
+
+def test_rewritten_associations_do_not_make_old_revision_evidence_current() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.base_sha = "advanced-base"
+    rewritten = [
+        {
+            "number": PR_NUMBER,
+            "base": {"sha": api.base_sha},
+            "head": {"sha": api.head_sha},
+        }
+    ]
+    for check in api.runs:
+        check["pull_requests"] = rewritten
+    for workflow in api.workflow_runs.values():
+        workflow["pull_requests"] = rewritten
+    clock = FakeClock()
+    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=lambda _message: None,
+            now=clock.now,
+            sleep=clock.sleep_to_missing_grace,
+        )
+
+
+def test_fork_pr_with_empty_associations_uses_bound_run_evidence() -> None:
+    api = FakeApi(
+        head_ref="feature/docs",
+        files=[{"filename": "README.md"}],
+        head_repo="fork/repo",
+    )
+    for check in api.runs:
+        check["pull_requests"] = []
+    for workflow in api.workflow_runs.values():
+        workflow["pull_requests"] = []
+    assert _run(api)[-1] == "All required checks completed successfully."
+
     api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
     api.workflow_runs[1010]["pull_requests"] = [
         {
@@ -685,6 +697,7 @@ def test_missing_workflow_run_association_fails_closed() -> None:
             "head": {"sha": HEAD_SHA},
         }
     ]
+    api.workflow_runs[1010]["display_title"] = "rewritten associations are not evidence"
     clock = FakeClock()
     with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
         run_gate(
@@ -770,6 +783,10 @@ def test_rest_api_paginates_check_runs_and_uses_read_only_get_requests(
     assert all(request.get_method() == "GET" for request in requests)
     assert all(
         request.get_header("Authorization") == "Bearer read-only-test-token"
+        for request in requests
+    )
+    assert all(
+        parse_qs(urlparse(request.full_url).query)["filter"] == ["all"]
         for request in requests
     )
 
@@ -896,6 +913,36 @@ def test_rest_api_content_decodes_line_wrapped_base64(
     api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
 
     assert api.content("CHANGELOG.md", HEAD_SHA) == expected
+
+
+def test_rest_api_reads_fork_manifest_from_declared_head_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
+    calls: list[tuple[str, dict[str, str | int]]] = []
+
+    def get(path: str, **query: str | int) -> dict[str, str]:
+        calls.append((path, query))
+        return {
+            "type": "file",
+            "encoding": "base64",
+            "content": base64.b64encode(b'{"version":"1.0.0"}').decode(),
+        }
+
+    monkeypatch.setattr(api, "_get", get)
+
+    assert (
+        api.content(
+            "custom_components/allpowers_ble/manifest.json", HEAD_SHA, "fork/repo"
+        )
+        == '{"version":"1.0.0"}'
+    )
+    assert calls == [
+        (
+            "/repos/fork/repo/contents/custom_components/allpowers_ble/manifest.json",
+            {"ref": HEAD_SHA},
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1138,12 +1185,19 @@ def test_hil_gate_is_conditional_on_main_and_configuration() -> None:
     }
     api.workflow_runs[hil_id] = {
         "event": "pull_request",
-        "pull_requests": [association],
+        "name": REQUIRED_WORKFLOWS["HIL qualification (opt-in)"],
+        "run_attempt": 1,
+        "head_sha": api.head_sha,
+        "display_title": (
+            f"evidence w=hil j=qualification pr={PR_NUMBER} r={OWNER}/{REPO} "
+            f"b={api.base_sha} h={api.head_sha} s={TESTED_SHA} a=1"
+        ),
     }
     api.runs.append(
         {
             "id": hil_id,
             "name": "HIL qualification (opt-in)",
+            "head_sha": api.head_sha,
             "status": "completed",
             "conclusion": "success",
             "pull_requests": [association],
@@ -1175,6 +1229,50 @@ def test_workflow_wiring_preserves_gate_contract_without_privileged_checkout() -
         "ready_for_review",
         "edited",
     ]
+    for name in (
+        "ci",
+        "hacs",
+        "hassfest",
+        "codeql",
+        "conventional-commits",
+        "dependency-review",
+        "hil-qualification",
+    ):
+        evidence_workflow = yaml.load(
+            Path(f".github/workflows/{name}.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        workflow_name = {
+            "ci": "CI",
+            "hacs": "HACS",
+            "hassfest": "Hassfest",
+            "codeql": "CodeQL",
+            "conventional-commits": "Conventional pull request title",
+            "dependency-review": "Dependency review",
+            "hil-qualification": "HIL qualification",
+        }[name]
+        evidence_id = REQUIRED_EVIDENCE_IDS[
+            next(
+                check
+                for check, value in REQUIRED_WORKFLOWS.items()
+                if value == workflow_name
+            )
+        ]
+        assert evidence_workflow["run-name"].startswith(
+            f"evidence w={evidence_id[0]} j={evidence_id[1]} "
+        )
+        assert "${{ github.sha }}" in evidence_workflow["run-name"]
+        assert "${{ github.run_attempt }}" in evidence_workflow["run-name"]
+        if name != "hil-qualification":
+            pr_config = evidence_workflow["on"]["pull_request"]
+            types = (
+                pr_config.get(
+                    "types", ["opened", "reopened", "synchronize", "ready_for_review"]
+                )
+                if isinstance(pr_config, dict)
+                else ["opened", "reopened", "synchronize", "ready_for_review"]
+            )
+            assert "reopened" in types
     job = workflow["jobs"]["gate"]
     assert job["name"] == "Gate all required checks"
     assert job["timeout-minutes"] == "50"

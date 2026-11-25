@@ -1,5 +1,7 @@
 name: CI
 
+run-name: evidence w=ci j=quality pr=${{ github.event.pull_request.number }} r=${{ github.repository }} b=${{ github.event.pull_request.base.sha }} h=${{ github.event.pull_request.head.sha }} s=${{ github.sha }} a=${{ github.run_attempt }}
+
 on:
   push:
     branches:
