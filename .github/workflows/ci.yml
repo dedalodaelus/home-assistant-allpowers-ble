@@ -51,15 +51,15 @@ jobs:
       - name: Pre-commit hooks
         run: pre-commit run --all-files
 
-      - name: Merge gate behavior tests
-        run: pytest tests/test_merge_gate.py
-
       # Repository validation rejects generated caches, so run it before tests
       # create Python bytecode in the shared checkout.
       - name: Validate repository
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python scripts/validate_repository.py
+
+      - name: Merge gate behavior tests
+        run: pytest tests/test_merge_gate.py
 
       # GitHub waits for every step in this group before continuing.
       # Keep this group at or below GitHub's ten-step parallel limit.
