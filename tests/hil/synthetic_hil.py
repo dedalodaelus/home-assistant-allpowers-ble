@@ -1,4 +1,4 @@
-"""Stateful HA boundary fixture for synthetic Bronze onboarding coverage."""
+"""Stateful HA boundary fixture shared by synthetic tier onboarding tests."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 from scripts.validate_hil_qualification import STATUS_REQUEST
 
 
-class SyntheticBronzeHA:
+class SyntheticHILHA:
     """Simulate the external HA boundary while retaining production HIL flow."""
 
     origin = "https://ha.example.test"

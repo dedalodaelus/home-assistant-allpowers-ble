@@ -16,10 +16,10 @@ from scripts.hil import cli
 from scripts.hil.qualification import migrate_v1_to_v3
 from scripts.hil.tiers import evaluate_tiers
 from scripts import validate_hil_qualification
-from tests.hil.synthetic_bronze import SyntheticBronzeHA
+from tests.hil.synthetic_hil import SyntheticHILHA
 
 
-def _start_synthetic_capture(fake: SyntheticBronzeHA, scenario_id: str) -> None:
+def _start_synthetic_capture(fake: SyntheticHILHA, scenario_id: str) -> None:
     fake.websocket(
         [
             {
@@ -33,7 +33,7 @@ def _start_synthetic_capture(fake: SyntheticBronzeHA, scenario_id: str) -> None:
     )
 
 
-def _stop_synthetic_capture(fake: SyntheticBronzeHA) -> dict[str, object]:
+def _stop_synthetic_capture(fake: SyntheticHILHA) -> dict[str, object]:
     return fake.websocket(
         [
             {
@@ -46,7 +46,7 @@ def _stop_synthetic_capture(fake: SyntheticBronzeHA) -> dict[str, object]:
 
 
 def test_synthetic_reconnect_trace_requires_refresh_in_current_capture() -> None:
-    fake = SyntheticBronzeHA(silver=True)
+    fake = SyntheticHILHA(silver=True)
     _start_synthetic_capture(fake, "recovery_reconnect")
 
     fake.request_read_only_refresh("button.synthetic_refresh")
@@ -74,7 +74,7 @@ def test_synthetic_reconnect_trace_requires_refresh_in_current_capture() -> None
 
 
 def test_synthetic_output_trace_requires_matching_control_in_current_capture() -> None:
-    fake = SyntheticBronzeHA(silver=True)
+    fake = SyntheticHILHA(silver=True)
     _start_synthetic_capture(fake, "output_ac_cycle")
 
     fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
@@ -114,10 +114,10 @@ def test_synthetic_output_trace_requires_matching_control_in_current_capture() -
         ("capture_id", "other-capture", "Mismatched capture identifier"),
     ],
 )
-def test_synthetic_bronze_rejects_mismatched_capture_identifiers(
+def test_synthetic_hil_rejects_mismatched_capture_identifiers(
     field: str, value: str, message: str
 ) -> None:
-    fake = SyntheticBronzeHA()
+    fake = SyntheticHILHA()
     fake.websocket(
         [
             {
@@ -244,7 +244,7 @@ def test_onboard_bronze_runs_the_real_pipeline_in_an_empty_matrix(
     )
     original_workspace_matrix = workspace_matrix.read_bytes()
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
-    fake = SyntheticBronzeHA(correlated_status=correlated_status)
+    fake = SyntheticHILHA(correlated_status=correlated_status)
     monkeypatch.setattr(cli, "HAClient", lambda *_args, **_kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "SYNTHETIC_PRIVATE_TOKEN")
     _onboard_answers(monkeypatch, status_ok=correlated_status)
@@ -376,7 +376,7 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
     )
     original_workspace_matrix = workspace_matrix.read_bytes()
     monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
-    fake = SyntheticBronzeHA(silver=True)
+    fake = SyntheticHILHA(silver=True)
     monkeypatch.setattr(cli, "HAClient", lambda *_args, **_kwargs: fake)
     monkeypatch.setenv("HA_HIL_TOKEN", "SYNTHETIC_PRIVATE_TOKEN")
 
