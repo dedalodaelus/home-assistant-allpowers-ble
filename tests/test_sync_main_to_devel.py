@@ -64,7 +64,10 @@ def divergent_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     (repo / ".release-please-manifest.json").write_text(
         '{".": "1.1.0"}\n', encoding="utf-8"
     )
-    (repo / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [1.0.0](https://example.test/compare/0.9.0...1.0.0)\n",
+        encoding="utf-8",
+    )
     base_sha = _commit(repo, "chore: initialize release files")
     _git(repo, "push", "origin", "main")
 
@@ -81,7 +84,12 @@ def divergent_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     (repo / ".release-please-manifest.json").write_text(
         '{".": "1.2.0"}\n', encoding="utf-8"
     )
-    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## 1.2.0\n", encoding="utf-8")
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n"
+        "## [1.2.0](https://example.test/compare/1.1.0...1.2.0)\n\n"
+        "## [1.0.0](https://example.test/compare/0.9.0...1.0.0)\n",
+        encoding="utf-8",
+    )
     (repo / "hotfix.txt").write_text("production fix\n", encoding="utf-8")
     main_sha = _commit(repo, "fix: preserve production hotfix")
     _git(repo, "push", "origin", "main")
@@ -205,7 +213,9 @@ def test_real_merge_preserves_main_ancestry_release_data_and_devel_fields(
     assert (
         json.loads((repo / ".release-please-manifest.json").read_text())["."] == "1.2.0"
     )
-    assert "## 1.2.0" in (repo / "CHANGELOG.md").read_text()
+    changelog = (repo / "CHANGELOG.md").read_text()
+    assert "## [1.2.0]" in changelog
+    assert "## [1.0.0]" in changelog
     assert (repo / "hotfix.txt").read_text() == "production fix\n"
     assert (repo / "devel-only.txt").read_text() == "development work\n"
 
@@ -471,3 +481,76 @@ def test_github_api_errors_are_reported_and_no_protected_branch_is_written(
         _git(divergent_repo["repo"], "ls-remote", "origin", "refs/heads/devel"),
     )
     assert after == before
+
+
+def test_repeated_prepare_reuses_pr_after_remote_refs_advance(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second real preflight observes new tips without editing branches or PR."""
+    repo = divergent_repo["repo"]
+    url = "https://github.com/owner/repo/pull/14"
+    real_run = sync_main_to_devel.run
+    created: list[str] = []
+    viewed: list[tuple[str, str]] = []
+    pr_exists = False
+
+    def gh_boundary(command: list[str], *, check: bool = True) -> str:
+        nonlocal pr_exists
+        if command[0] != "gh":
+            return real_run(command, check=check)
+        if command[1:3] == ["pr", "list"]:
+            return (
+                json.dumps(
+                    [
+                        {
+                            "url": url,
+                            "headRefName": "main",
+                            "baseRefName": "devel",
+                            "isCrossRepository": False,
+                        }
+                    ]
+                )
+                if pr_exists
+                else "[]"
+            )
+        if command[1:3] == ["pr", "create"]:
+            created.append(command[command.index("--head") + 1])
+            pr_exists = True
+            return url
+        if command[1:3] == ["pr", "view"]:
+            main_sha, devel_sha = sync_main_to_devel.fetch_refs()
+            viewed.append((main_sha, devel_sha))
+            return json.dumps(_pr(url, main_sha, devel_sha))
+        raise AssertionError(f"Unexpected gh command: {command}")
+
+    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    initial_remote = _remote_shas(repo)
+    first = sync_main_to_devel.prepare_sync()
+    assert first.url == url
+    assert _remote_shas(repo) == initial_remote
+
+    _git(repo, "switch", "main")
+    (repo / "hotfix.txt").write_text("follow-up production fix\n", encoding="utf-8")
+    _commit(repo, "fix: follow up production change")
+    _git(repo, "push", "origin", "main")
+    _git(repo, "switch", "devel")
+    (repo / "devel-only-follow-up.txt").write_text(
+        "new development work\n", encoding="utf-8"
+    )
+    _commit(repo, "feat: add follow-up development work")
+    _git(repo, "push", "origin", "devel")
+    remote_before = _remote_shas(repo)
+
+    second = sync_main_to_devel.prepare_sync()
+    remote_after = _remote_shas(repo)
+
+    assert second.url == url
+    assert second.main_sha != first.main_sha
+    assert second.devel_sha != first.devel_sha
+    assert created == ["main"]
+    assert viewed == [
+        (first.main_sha, first.devel_sha),
+        (second.main_sha, second.devel_sha),
+    ]
+    assert remote_after == remote_before
+    assert (repo / "devel-only-follow-up.txt").read_text() == "new development work\n"

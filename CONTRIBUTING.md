@@ -143,6 +143,17 @@ The repository uses an explicit promotion model:
   `devel` into `main`. If conflicts, strict up-to-date rules, or linear-history
   rules block the merge, stop for a maintainer-reviewed recovery rather than
   weakening protections or creating a bypass branch.
+- The current `devel` ruleset permits squash merges only, so the reviewed sync
+  workflow is not ready for deployment. A maintainer must approve an
+  ancestry-preserving merge policy and current-base revalidation procedure
+  first. The Merge gate accepts required checks only when their Actions run is
+  from a `pull_request` event and GitHub associates both the run and check with
+  the current PR number and exact base/head SHAs; a base-branch update alone may
+  not start a new gate run. Before merging a return PR, the maintainer
+  must trigger a fresh `edited` event (for example, add then remove harmless
+  whitespace in the PR description), confirm the newest Merge gate run records
+  the current base/head pair, and review the merge-commit result. This manual
+  procedure is not enforced by branch protection.
 - A sync PR does not prove release publication or HACS asset upload. Release
   Please remains responsible for publishing those assets.
 - Direct commits into `devel` and `main` are not permitted.

@@ -29,6 +29,7 @@ jobs:
       contents: read
       checks: read
       pull-requests: read
+      actions: read
     env:
       REQUIRE_HIL_STABLE_GATE: ${{ vars.REQUIRE_HIL_STABLE_GATE || 'false' }}
     steps:
@@ -138,7 +139,12 @@ jobs:
             const touchesChangelog = files.some((file) => file.filename === "CHANGELOG.md");
             const isFeatureToDevel = baseRef === "devel";
             const isPromotionToMain = baseRef === "main";
-            const isMainToDevelSync = baseRef === "devel" && headRef === "main";
+            const repositoryName = `${owner}/${repo}`;
+            const isMainToDevelSync =
+              baseRef === "devel"
+              && headRef === "main"
+              && pr.base?.repo?.full_name === repositoryName
+              && pr.head?.repo?.full_name === repositoryName;
 
             if (
               touchesChangelog
@@ -153,12 +159,15 @@ jobs:
               return;
             }
 
-            const readJsonAt = async (path, ref) => {
+            const readTextAt = async (path, ref) => {
               const response = await github.rest.repos.getContent({ owner, repo, path, ref });
               if (Array.isArray(response.data) || response.data.type !== "file") {
                 throw new Error(`Expected a file at ${path} for ${ref}.`);
               }
-              return JSON.parse(Buffer.from(response.data.content, "base64").toString("utf8"));
+              return Buffer.from(response.data.content, "base64").toString("utf8");
+            };
+            const readJsonAt = async (path, ref) => {
+              return JSON.parse(await readTextAt(path, ref));
             };
             const parseVersion = (value) => {
               const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value);
@@ -187,11 +196,13 @@ jobs:
               return 0;
             };
             const validateReleaseMetadata = async (baseSha, headSha, allowIncomingVersion) => {
-              const [baseIntegration, headIntegration, baseRelease, headRelease] = await Promise.all([
+              const [baseIntegration, headIntegration, baseRelease, headRelease, baseChangelog, headChangelog] = await Promise.all([
                 readJsonAt("custom_components/allpowers_ble/manifest.json", baseSha),
                 readJsonAt("custom_components/allpowers_ble/manifest.json", headSha),
                 readJsonAt(".release-please-manifest.json", baseSha),
                 readJsonAt(".release-please-manifest.json", headSha),
+                readTextAt("CHANGELOG.md", baseSha),
+                readTextAt("CHANGELOG.md", headSha),
               ]);
               const baseVersion = baseIntegration.version;
               const headVersion = headIntegration.version;
@@ -226,6 +237,22 @@ jobs:
               for (const version of Object.values(headRelease)) {
                 if (typeof version !== "string") throw new Error("Release Please manifest versions must be strings.");
                 parseVersion(version);
+              }
+              const changelogHeadings = (contents) => {
+                const headings = new Set();
+                for (const match of contents.matchAll(/^## \[([^\]]+)\]/gm)) {
+                  const version = match[1];
+                  if (version.toLowerCase() === "unreleased") continue;
+                  parseVersion(version);
+                  headings.add(version);
+                }
+                return headings;
+              };
+              const headChangelogHeadings = changelogHeadings(headChangelog);
+              for (const version of changelogHeadings(baseChangelog)) {
+                if (!headChangelogHeadings.has(version)) {
+                  throw new Error(`Changelog history was removed for ${version}.`);
+                }
               }
             };
 
@@ -287,10 +314,70 @@ jobs:
             const timeoutMs = 30 * 60 * 1000;
             const missingChecksGraceMs = 10 * 60 * 1000;
             const start = Date.now();
+            const workflowRunEvidence = new Map();
 
-            function latestRunsByName(checkRuns) {
+            async function isCurrentPullRequestWorkflowRun(run, currentPullRequest) {
+              const checkAssociation = Array.isArray(run.pull_requests)
+                && run.pull_requests.some((association) =>
+                  association.number === currentPullRequest.number
+                  && association.head?.sha === currentPullRequest.headSha
+                  && association.base?.sha === currentPullRequest.baseSha
+                );
+              if (!checkAssociation || typeof run.details_url !== "string") return false;
+
+              let detailsUrl;
+              try {
+                detailsUrl = new URL(run.details_url);
+              } catch {
+                return false;
+              }
+              const expectedRepositoryPath = `/${owner}/${repo}/actions/runs/`;
+              if (
+                detailsUrl.origin !== "https://github.com"
+                || !detailsUrl.pathname.toLowerCase().startsWith(expectedRepositoryPath.toLowerCase())
+              ) {
+                return false;
+              }
+              const runId = /^\/(\d+)(?:\/|$)/.exec(
+                detailsUrl.pathname.slice(expectedRepositoryPath.length)
+              )?.[1];
+              if (!runId) return false;
+
+              if (!workflowRunEvidence.has(runId)) {
+                workflowRunEvidence.set(runId, (async () => {
+                  const response = await github.rest.actions.getWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: Number(runId),
+                  });
+                  const workflowRun = response.data;
+                  const exactAssociation = Array.isArray(workflowRun.pull_requests)
+                    && workflowRun.pull_requests.some((association) =>
+                      association.number === currentPullRequest.number
+                      && association.head?.sha === currentPullRequest.headSha
+                      && association.base?.sha === currentPullRequest.baseSha
+                    );
+                  return workflowRun.event === "pull_request"
+                    && exactAssociation;
+                })());
+              }
+              return workflowRunEvidence.get(runId);
+            }
+
+            function latestRunsByName(checkRuns, currentPullRequest) {
               const latest = new Map();
               for (const run of checkRuns) {
+                // The check must explicitly identify this PR and the immutable
+                // base/head pair that this gate is validating. Push checks,
+                // checks from another PR, and runs from an older base are not
+                // evidence for the current proposed merge.
+                const currentAssociation = Array.isArray(run.pull_requests)
+                  && run.pull_requests.some((association) =>
+                    association.number === currentPullRequest.number
+                    && association.head?.sha === currentPullRequest.headSha
+                    && association.base?.sha === currentPullRequest.baseSha
+                  );
+                if (!currentAssociation) continue;
                 const previous = latest.get(run.name);
                 if (!previous || Number(run.id) > Number(previous.id)) latest.set(run.name, run);
               }
@@ -314,7 +401,11 @@ jobs:
               });
 
               const checkRuns = response.data.check_runs || [];
-              const latestByName = latestRunsByName(checkRuns);
+              const latestByName = latestRunsByName(checkRuns, {
+                number: pr.number,
+                baseSha: pr.base.sha,
+                headSha,
+              });
 
               const missing = [];
               const pending = [];
@@ -328,6 +419,15 @@ jobs:
 
                 const run = latestByName.get(checkName);
                 if (!run) {
+                  missing.push(checkName);
+                  continue;
+                }
+
+                if (!(await isCurrentPullRequestWorkflowRun(run, {
+                  number: pr.number,
+                  baseSha: pr.base.sha,
+                  headSha,
+                }))) {
                   missing.push(checkName);
                   continue;
                 }

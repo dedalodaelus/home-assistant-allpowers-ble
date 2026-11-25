@@ -36,6 +36,15 @@
   carries production commits and Release Please metadata; it neither publishes
   nor verifies a release. Confirm publication and HACS assets through the
   Release Please workflow separately.
+- The current `devel` ruleset permits squash merges only. Do not deploy or merge
+  the return-sync workflow until a maintainer approves an ancestry-preserving
+  merge policy and current-base revalidation procedure. The Merge gate accepts
+  only check and Actions workflow runs from a `pull_request` event associated
+  with the exact PR number and base/head SHAs. A `devel` update may not trigger
+  a new gate run, so the maintainer must trigger
+  a fresh `edited` event (for example, add then remove harmless whitespace in
+  the PR description) and verify the newest gate run's base/head SHAs before
+  merging. This is a manual procedure and is not enforced by branch protection.
 - If the sync PR conflicts, branch protection requires updating `main` from
   `devel`, or linear history prevents an ancestry-preserving merge, stop for a
   maintainer-reviewed recovery. Do not update the `main` head from `devel`,

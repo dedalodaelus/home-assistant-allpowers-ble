@@ -310,6 +310,18 @@ reviewable PR and reports if GitHub cannot create it; defer or ask the
 maintainer to define a reviewed recovery rather than treating equal files as
 synchronized.
 
+The current `devel` ruleset permits squash merges only, so this workflow is not
+ready for deployment until a maintainer approves an ancestry-preserving merge
+policy and a procedure for revalidating against the current base. The Merge gate
+requires each check and its Actions workflow run to identify the current PR
+number, `pull_request` event, and exact base/head SHAs. A base-branch update
+alone may not trigger a new gate run. Before merging a return PR, the maintainer
+must trigger a fresh `edited` event (for example, add
+then remove harmless whitespace in the PR description), verify the newest gate
+run records the current base/head SHAs, and inspect the merge-commit result.
+This manual review is procedural guidance; branch protection does not enforce
+current-base revalidation.
+
 The workflow file must reach default `main` before push events or manual
 dispatches can invoke it. First deployment and live trigger/check behavior remain
 unverified until that reviewed deployment occurs.

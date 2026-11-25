@@ -51,6 +51,9 @@ jobs:
       - name: Pre-commit hooks
         run: pre-commit run --all-files
 
+      - name: Merge gate behavior tests
+        run: node --test .github/scripts/test_merge_gate.js
+
       # Repository validation rejects generated caches, so run it before tests
       # create Python bytecode in the shared checkout.
       - name: Validate repository

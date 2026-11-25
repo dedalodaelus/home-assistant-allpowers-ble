@@ -25,6 +25,7 @@ REQUIRED_REPOSITORY_FILES = {
     ".github/workflows/merge-gate.yml",
     ".github/workflows/promote-devel.yml",
     ".github/workflows/sync-main-to-devel.yml",
+    ".github/scripts/test_merge_gate.js",
     ".github/workflows/prepare-ha-upgrade.yml",
     ".github/workflows/release.yml",
     ".github/PULL_REQUEST_TEMPLATE/promotion.md",
@@ -638,9 +639,17 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             errors.append(f"failed reading .github/workflows/merge-gate.yml: {ex}")
             merge_gate = ""
         for required in (
-            'const isMainToDevelSync = baseRef === "devel" && headRef === "main";',
+            "pr.base?.repo?.full_name === repositoryName",
+            "pr.head?.repo?.full_name === repositoryName",
             "await validateReleaseMetadata(pr.base.sha, headSha, isMainToDevelSync)",
             "compareVersion(headVersion, baseVersion) < 0",
+            "Changelog history was removed for ${version}",
+            "association.number === currentPullRequest.number",
+            "association.head?.sha === currentPullRequest.headSha",
+            "association.base?.sha === currentPullRequest.baseSha",
+            "github.rest.actions.getWorkflowRun",
+            'workflowRun.event === "pull_request"',
+            "Number(run.id) > Number(previous.id)",
             "current.data.base.sha !== pr.base.sha",
             "base commit, or head changed while required checks were being validated",
         ):
@@ -649,6 +658,10 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
                     "Merge gate must validate incoming main-to-devel release "
                     f"metadata with {required!r}"
                 )
+        if "node --test .github/scripts/test_merge_gate.js" not in (
+            ROOT / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8"):
+            errors.append("CI must execute the Merge gate behavior test harness")
 
 
 def _module_list(value: Any) -> list[str]:
