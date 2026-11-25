@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import builtins
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 from typing import Any
@@ -268,6 +270,8 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
     ]
 
     imported = matrix["revisions"][0]["runs"][0]
+    assert imported["authorization_context"] == "production"
+    assert imported["authorization_context_source"] == "reviewed_production_session"
     errors, _ = validate_hil_qualification.validate_matrix(
         matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
     )
@@ -300,12 +304,99 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
         "work_mode_reversal",
         "eco_timeout_reversal",
     }
+    scenario_by_id = {
+        scenario["scenario_id"]: scenario
+        for path in run_root.parent.glob("tier_*/private/scenarios.json")
+        if (scenario := json.loads(path.read_text(encoding="utf-8")))
+    }
+    recovered_session = next(
+        step
+        for step in scenario_by_id["recovery_reconnect"]["steps"]
+        if step["step_id"] == "recovered_session"
+    )
+    assert recovered_session["disconnect_observed"] is True
+    assert recovered_session["session_generation_before"] == 7
+    assert recovered_session["session_generation_after"] == 8
+    assert recovered_session["fresh_status_telemetry"] is True
+    assert recovered_session["route"] == "active_proxy"
+    recovery_scenario_path = next(
+        path
+        for path in run_root.parent.glob("tier_*/private/scenarios.json")
+        if json.loads(path.read_text(encoding="utf-8"))["scenario_id"]
+        == "recovery_reconnect"
+    )
+    for scenario_id in (
+        "settings_eco_mode",
+        "settings_work_mode",
+        "settings_eco_timeout",
+    ):
+        actions = scenario_by_id[scenario_id]["steps"]
+        assert len(actions) == 3
+        for action in actions[1:]:
+            assert action["outcome"] == "pass"
+            assert action["session_generation"] == 8
+            assert action["transaction"]["kind"] == "settings"
+            assert action["transaction"]["session_generation"] == 8
+    assert {generation for _, _, generation, _ in fake.setting_writes} == {
+        recovered_session["session_generation_after"]
+    }
     archive = run_root / "hil-evidence.zip"
     from scripts.hil.evidence import verify_public_archive
 
-    _manifest, public_members, _digest = verify_public_archive(
+    manifest, public_members, archive_digest = verify_public_archive(
         archive, include_contents=True
     )
+    assert imported["source_run_id"] == manifest["run_id"]
+    assert imported["archive_sha256"] == archive_digest
+    contract_path = car_charger_contract["evidence"][0]
+    contract_artifact = json.loads(
+        (matrix_path.parents[2] / contract_path).read_text(encoding="utf-8")
+    )
+    assert contract_artifact["source_run_id"] == imported["run_id"]
+    assert contract_artifact["source_archive_sha256"] == archive_digest
+    repo_root = matrix_path.parents[2]
+    stage_paths = cli._verified_review_stage_paths(
+        matrix,
+        matrix_path,
+        repo_root,
+        revision_id=matrix["revisions"][0]["id"],
+        run_id=imported["run_id"],
+        tier="gold",
+    )
+    assert stage_paths is not None
+    assert contract_path in stage_paths
+    contract_file = repo_root / contract_path
+    contract_bytes = contract_file.read_bytes()
+    contract_file.write_bytes(contract_bytes + b" ")
+    assert (
+        cli._verified_review_stage_paths(
+            matrix,
+            matrix_path,
+            repo_root,
+            revision_id=matrix["revisions"][0]["id"],
+            run_id=imported["run_id"],
+            tier="gold",
+        )
+        is None
+    )
+    contract_file.write_bytes(contract_bytes)
+    external_contract = tmp_path / "external-contract.json"
+    external_contract.write_bytes(contract_bytes)
+    contract_file.unlink()
+    contract_file.symlink_to(external_contract)
+    assert (
+        cli._verified_review_stage_paths(
+            matrix,
+            matrix_path,
+            repo_root,
+            revision_id=matrix["revisions"][0]["id"],
+            run_id=imported["run_id"],
+            tier="gold",
+        )
+        is None
+    )
+    contract_file.unlink()
+    contract_file.write_bytes(contract_bytes)
     public_execution = json.loads(public_members["tier-execution.json"])
     assert public_execution["requested_tier"] == "gold"
     public_artifacts = json.loads(public_members["tier-artifacts.json"])["artifacts"]
@@ -323,7 +414,130 @@ def test_onboard_gold_runs_full_pipeline_and_reviews_gold_in_isolation(
         "settings_work_mode",
         "settings_eco_timeout",
     }
+    public_steps = {item["step_id"]: item for item in public_execution["steps"]}
+    for step_id in (
+        "eco_mode_reversal",
+        "work_mode_reversal",
+        "eco_timeout_reversal",
+    ):
+        assert public_steps[step_id]["authorization_context"] == "production"
+        assert (
+            public_steps[step_id]["authorization_context_source"]
+            == "runtime_production_authorized"
+        )
+        guided = next(
+            item["content"]
+            for item in public_artifacts
+            if item["content"].get("kind") == "guided_step_evidence"
+            and item["content"].get("step_id") == step_id
+        )
+        assert len(guided["actions"]) == 2
+        assert all(
+            action["session_generation"] == 8
+            and action["transaction"]["session_generation"] == 8
+            and action["transaction"]["kind"] == "settings"
+            for action in guided["actions"]
+        )
+        transactions = {
+            action["transaction"]["transaction_sha256"] for action in guided["actions"]
+        }
+        setting_traces = [
+            item["content"]
+            for item in public_artifacts
+            if item["content"].get("kind") == "gatt_trace_metadata"
+            and item["content"].get("scenario_id")
+            == {
+                "eco_mode_reversal": "settings_eco_mode",
+                "work_mode_reversal": "settings_work_mode",
+                "eco_timeout_reversal": "settings_eco_timeout",
+            }[step_id]
+        ]
+        assert len(setting_traces) == 2
+        assert all(
+            trace["observed_route"] == "active_proxy"
+            and {event["session_generation"] for event in trace["events"]} == {8}
+            and {frame["session_generation"] for frame in trace["frames"]} == {8}
+            and all(
+                frame["command_type"] == "settings_control"
+                and frame["direction"] == "tx"
+                for frame in trace["frames"]
+            )
+            for trace in setting_traces
+        )
+        assert {
+            next(
+                event["transaction_sha256"]
+                for event in trace["events"]
+                if event["event"] == "transaction_confirmed"
+            )
+            for trace in setting_traces
+        } == transactions
+    reconnect_trace = next(
+        item["content"]
+        for item in public_artifacts
+        if item["content"].get("kind") == "gatt_trace_metadata"
+        and item["content"].get("scenario_id") == "recovery_reconnect"
+    )
+    assert reconnect_trace["observed_route"] == "active_proxy"
+    assert {event["session_generation"] for event in reconnect_trace["events"]} == {8}
+    assert {frame["session_generation"] for frame in reconnect_trace["frames"]} == {8}
+    assert public_steps["basic_reconnect"]["outcome"] == "pass"
+    assert (
+        hashlib.sha256(recovery_scenario_path.read_bytes()).hexdigest()
+        in (public_steps["basic_reconnect"]["machine_evidence_sha256"])
+    )
     assert b"SYNTHETIC_PRIVATE_TOKEN" not in b"".join(public_members.values())
+    git_add_line = next(
+        line for line in output.splitlines() if line.startswith("  git add ")
+    )
+    git_add_args = shlex.split(git_add_line.strip())[2:]
+    repo_root = matrix_path.parents[2]
+    subprocess.run(["git", "add", *git_add_args], cwd=repo_root, check=True)
+    staged_paths = set(
+        subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=repo_root,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.splitlines()
+    )
+    expected_staged = {matrix_path.relative_to(repo_root).as_posix()}
+    for section in (
+        "bronze_evidence",
+        "write_capabilities",
+        "scenarios",
+        "feature_presence",
+    ):
+        records = imported.get(section, {})
+        if isinstance(records, dict):
+            expected_staged.update(
+                reference
+                for record in records.values()
+                if isinstance(record, dict)
+                for reference in record.get("evidence", [])
+            )
+    expected_staged.update(imported["evidence"])
+    expected_staged.update(car_charger_contract["evidence"])
+    assert expected_staged <= staged_paths
+    run_prefix = f"tests/hil/fixtures/r600-hw03/runs/{imported['run_id']}/"
+    assert all(
+        path.startswith(run_prefix)
+        for path in staged_paths
+        if path != matrix_path.relative_to(repo_root).as_posix()
+    )
+    assert not any(
+        "hil-results" in path or path.endswith(".zip") for path in staged_paths
+    )
+    pr_body_line = next(
+        line for line in output.splitlines() if line.startswith("Local PR body: ")
+    )
+    pr_body = Path(pr_body_line.removeprefix("Local PR body: ")).read_text(
+        encoding="utf-8"
+    )
+    assert "car_charger: excluded/unverified (safely disabled)" in pr_body
+    assert "tested controls:" in pr_body
+    assert "physical absences:" in pr_body
     assert workspace_matrix.read_bytes() == original_workspace_matrix
     assert run_root.is_relative_to(tmp_path)
 
@@ -356,6 +570,7 @@ def test_onboard_gold_does_not_qualify_without_setting_restoration_trace(
     )
     assert restoration["outcome"] == "inconclusive"
     assert restoration.get("transaction") is None
+    assert fake.setting_states["work_mode"] == "mute"
     trace_path = checkpoint_path.parent / restoration["trace"] / "trace.json"
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
     assert not any(
