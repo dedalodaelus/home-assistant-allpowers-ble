@@ -3749,6 +3749,22 @@ def _matrix_evidence_paths(matrix: Any, run_id: str) -> list[Any] | None:
     ):
         return None
     paths = list(evidence)
+    feature_contracts = revision.get("feature_contract", {})
+    if not isinstance(feature_contracts, dict):
+        return None
+    for contract in feature_contracts.values():
+        if not isinstance(contract, dict):
+            return None
+        references = contract.get("evidence", [])
+        if not isinstance(references, list) or any(
+            not isinstance(path, str) for path in references
+        ):
+            return None
+        paths.extend(
+            reference
+            for reference in references
+            if PurePosixPath(reference).is_relative_to(expected_run_dir)
+        )
     for section in (
         "bronze_evidence",
         "write_capabilities",

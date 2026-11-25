@@ -13,9 +13,18 @@ class SyntheticHILHA:
 
     origin = "https://ha.example.test"
 
-    def __init__(self, *, correlated_status: bool = True, silver: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        correlated_status: bool = True,
+        silver: bool = False,
+        gold: bool = False,
+        omit_setting_restoration: str | None = None,
+    ) -> None:
         self.correlated_status = correlated_status
-        self.silver = silver
+        self.silver = silver or gold
+        self.gold = gold
+        self.omit_setting_restoration = omit_setting_restoration
         self.calls: list[tuple[Any, ...]] = []
         self.state_changing_calls: list[tuple[Any, ...]] = []
         self.capture_id = "synthetic-capture"
@@ -37,6 +46,12 @@ class SyntheticHILHA:
             "dc_output": "off",
             "light": "off",
         }
+        self.setting_states = {
+            "eco_mode": "off",
+            "work_mode": "mute",
+            "eco_timeout": "four_hours",
+        }
+        self.setting_writes: list[tuple[str, str, int, str]] = []
         self.recovery_requested = False
         self.restore_requested = False
         self.capability_snapshots: list[tuple[bool, bool]] = []
@@ -47,6 +62,8 @@ class SyntheticHILHA:
         if key == "read_only_refresh":
             return "button.synthetic_refresh"
         target = "light" if key == "light_output" else key
+        if target in {"work_mode", "eco_timeout"}:
+            return f"select.synthetic_{target}"
         return f"switch.synthetic_{target}"
 
     def config(self) -> dict[str, str]:
@@ -113,6 +130,18 @@ class SyntheticHILHA:
                         "disabled_by": None,
                     }
                 )
+        if self.gold:
+            for key in ("eco_mode", "work_mode", "eco_timeout"):
+                entity_id = self._registry_entity_id(key)
+                entities.append(
+                    {
+                        "device_id": device_id,
+                        "platform": "allpowers_ble",
+                        "entity_id": entity_id,
+                        "unique_id": f"synthetic_{key}",
+                        "disabled_by": None,
+                    }
+                )
         devices = [
             {
                 "id": device_id,
@@ -171,7 +200,7 @@ class SyntheticHILHA:
         flags = {
             "read_telemetry": True,
             "write_output_controls": self.silver,
-            "write_settings_controls": False,
+            "write_settings_controls": self.gold,
             "write_settings_keepalive": False,
             "car_charger_enabled": False,
         }
@@ -183,6 +212,20 @@ class SyntheticHILHA:
                     "candidate_hil_eligible": False,
                     "runtime_ready": True,
                 }
+        if self.gold:
+            for feature in ("eco_mode", "work_mode", "eco_timeout"):
+                features[feature] = {
+                    "physical_presence": "present",
+                    "production_authorized": True,
+                    "candidate_hil_eligible": False,
+                    "runtime_ready": True,
+                }
+            features["car_charger"] = {
+                "physical_presence": "unknown",
+                "production_authorized": True,
+                "candidate_hil_eligible": False,
+                "runtime_ready": True,
+            }
         return {
             "schema_version": 2,
             "model": "R600",
@@ -215,6 +258,18 @@ class SyntheticHILHA:
             assert entity_id == self._registry_entity_id(key), (
                 f"Control state must use the registry entity for {key}"
             )
+        if key in self.setting_states:
+            assert self.gold and entity_id == self._registry_entity_id(key)
+            options = {
+                "eco_mode": ["off", "on"],
+                "work_mode": ["mute", "standard", "fast"],
+                "eco_timeout": ["one_hour", "two_hours", "four_hours", "six_hours"],
+            }[key]
+            return {
+                "available": self.gold,
+                "state": self.setting_states[key] if self.gold else None,
+                "options": options if self.gold else [],
+            }
         target = "light" if key == "light" else key
         return {
             "available": target in self.output_states,
@@ -235,6 +290,16 @@ class SyntheticHILHA:
     def call_control(self, *args: Any, **kwargs: Any) -> None:
         if self.silver:
             key, entity_id, value = args
+            if key in self.setting_states:
+                assert self.gold and entity_id == self._registry_entity_id(key)
+                assert self.capture_active and self.scenario_id.startswith("settings_")
+                self.state_changing_calls.append(("call_control", key, value))
+                self.setting_states[key] = value
+                self.setting_writes.append(
+                    (key, value, self._trace_generation, self.capture_id)
+                )
+                self.capture_setting_write = (key, value)
+                return
             target = "light" if key == "light" else key
             assert entity_id == self._registry_entity_id(target)
             self.state_changing_calls.append(("call_control", key, value))
@@ -263,7 +328,9 @@ class SyntheticHILHA:
             "allpowers_ble/hil/fetch",
             "allpowers_ble/hil/stop",
         }:
-            raise AssertionError(f"Unexpected HIL command during Bronze: {kind}")
+            raise AssertionError(
+                f"Unexpected HIL command during synthetic acquisition: {kind}"
+            )
         self.calls.append(("websocket", kind))
         if kind.endswith("/start"):
             assert not self.capture_active, "Capture is already active"
@@ -273,6 +340,7 @@ class SyntheticHILHA:
             self.started_run_id = command["run_id"]
             self.capture_refresh_seen = False
             self.capture_output_calls = []
+            self.capture_setting_write = None
             self.active_output = None
             self.capture_active = True
             return [
@@ -417,10 +485,15 @@ class SyntheticHILHA:
 
     @property
     def _trace_generation(self) -> int:
-        return 8 if self.silver and self.scenario_id == "recovery_reconnect" else 7
+        return 8 if self.restore_requested else 7
 
     def _tier_trace_snapshot(self, *, sealed: bool) -> dict[str, Any]:
-        from custom_components.allpowers_ble.protocol.codec import encode_output_control
+        from custom_components.allpowers_ble.protocol import (
+            SettingsData,
+            WorkMode,
+            encode_output_control,
+            encode_settings_control,
+        )
 
         run_id = self.started_run_id
         now = self.trace_utc
@@ -501,6 +574,66 @@ class SyntheticHILHA:
                     "hex": encoded.hex(),
                 }
             )
+        elif self.scenario_id.startswith("settings_") and self.capture_setting_write:
+            key, value = self.capture_setting_write
+            tx_id = f"synthetic-settings-{self.capture_id}"
+            frame = add(3, "write_attempt", transaction_id=tx_id)
+            add(4, "write_ok", transaction_id=tx_id)
+            add(
+                5,
+                "transaction_submitted",
+                transaction_id=tx_id,
+                transaction_kind="settings",
+            )
+            add(
+                6,
+                "transaction_confirmed",
+                transaction_id=tx_id,
+                reason="matching_validated_telemetry",
+            )
+            work_modes = {
+                "mute": WorkMode.MUTE,
+                "standard": WorkMode.STANDARD,
+                "fast": WorkMode.FAST,
+            }
+            timeout_hours = {
+                "one_hour": 1,
+                "two_hours": 2,
+                "four_hours": 4,
+                "six_hours": 6,
+            }
+            setting = SettingsData(
+                eco_enabled=self.setting_states["eco_mode"] == "on",
+                work_mode=work_modes[self.setting_states["work_mode"]],
+                car_charger_enabled=False,
+                eco_timeout_hours=timeout_hours[self.setting_states["eco_timeout"]],
+                hardware_version="0.3",
+                firmware_version="0.2",
+                raw_flags=0xA0
+                | (1 if self.setting_states["eco_mode"] == "on" else 0)
+                | (work_modes[self.setting_states["work_mode"]].value << 1),
+                raw_hardware_version=3,
+                raw_firmware_version=2,
+            )
+            missing_restoration_trace = (
+                self.omit_setting_restoration == key
+                and value
+                == {
+                    "eco_mode": "off",
+                    "work_mode": "mute",
+                    "eco_timeout": "four_hours",
+                }[key]
+            )
+            if not missing_restoration_trace:
+                frames.append(
+                    {
+                        **frame,
+                        "direction": "tx",
+                        "command_type": "settings_control",
+                        "frame_validation": "validated_tx",
+                        "hex": encode_settings_control(setting).hex(),
+                    }
+                )
         if sealed:
             add(len(events) + 1, "capture_stopped")
         return {
