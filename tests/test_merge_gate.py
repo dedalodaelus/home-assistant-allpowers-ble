@@ -137,6 +137,7 @@ class FakeApi:
                 {
                     "id": workflow_id + 10000,
                     "run_id": workflow_id,
+                    "run_attempt": 1,
                     "name": name,
                     "status": "completed",
                     "conclusion": "success",
@@ -1114,6 +1115,133 @@ def test_newer_pending_or_failed_current_run_cannot_be_hidden(
         assert sleeps == [15]
 
 
+@pytest.mark.parametrize("status", ["waiting", "pending", "requested"])
+def test_newer_unready_applicable_run_prevents_fallback_to_old_success(
+    status: str,
+) -> None:
+    api = FakeApi()
+    original = api.runs[0]
+    run_id = 9999
+    api.runs.append(
+        {
+            **original,
+            "id": 510,
+            "status": "in_progress",
+            "details_url": f"https://github.com/{OWNER}/{REPO}/actions/runs/{run_id}/job/1",
+        }
+    )
+    api.workflow_runs[run_id] = {
+        **api.workflow_runs[original["id"] + 1000],
+        "id": run_id,
+        "run_number": 999,
+        "status": status,
+    }
+    api.workflows[run_id] = api.workflows[original["id"] + 1000]
+    clock = FakeClock()
+    messages: list[str] = []
+
+    with pytest.raises(GateError, match="Timeout waiting"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=messages.append,
+            now=clock.now,
+            sleep=clock.sleep_to_timeout,
+        )
+    assert any("Pending:" in message for message in messages)
+    assert not any("All required checks completed" in message for message in messages)
+
+
+@pytest.mark.parametrize("status", ["waiting", "pending", "requested"])
+def test_unready_latest_run_is_accepted_after_its_current_job_succeeds(
+    status: str,
+) -> None:
+    api = FakeApi()
+    original = api.runs[0]
+    run_id = 9999
+    candidate = {
+        **original,
+        "id": 510,
+        "details_url": f"https://github.com/{OWNER}/{REPO}/actions/runs/{run_id}/job/1",
+    }
+    api.runs.append(candidate)
+    api.workflow_runs[run_id] = {
+        **api.workflow_runs[original["id"] + 1000],
+        "id": run_id,
+        "run_number": 999,
+        "status": status,
+    }
+    api.workflows[run_id] = api.workflows[original["id"] + 1000]
+    clock = FakeClock()
+    check_runs = api.check_runs
+    calls = 0
+
+    def complete_on_poll(ref: str) -> list[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            api.workflow_runs[run_id]["status"] = "completed"
+            api.workflow_jobs[(run_id, 1)] = [
+                {
+                    "id": 20000,
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "name": REQUIRED_CHECKS[0],
+                    "status": "completed",
+                    "conclusion": "success",
+                    "check_run_url": f"https://api.github.com/repos/{OWNER}/{REPO}/check-runs/510",
+                }
+            ]
+        return check_runs(ref)
+
+    api.check_runs = complete_on_poll  # type: ignore[method-assign]
+    messages: list[str] = []
+    run_gate(
+        _event(api),
+        api,
+        OWNER,
+        REPO,
+        log=messages.append,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+    assert calls == 2
+    assert messages[-1] == "All required checks completed successfully."
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "mystery"),
+        ("status", []),
+        ("run_attempt", None),
+        ("run_number", True),
+    ],
+)
+def test_malformed_newer_applicable_run_fails_closed(field: str, value: Any) -> None:
+    api = FakeApi()
+    original = api.runs[0]
+    run_id = 9999
+    api.runs.append(
+        {
+            **original,
+            "id": 510,
+            "details_url": f"https://github.com/{OWNER}/{REPO}/actions/runs/{run_id}/job/1",
+        }
+    )
+    api.workflow_runs[run_id] = {
+        **api.workflow_runs[original["id"] + 1000],
+        "id": run_id,
+        "run_number": 999,
+    }
+    api.workflow_runs[run_id][field] = value
+    api.workflows[run_id] = api.workflows[original["id"] + 1000]
+    with pytest.raises(GateError, match="Applicable workflow run"):
+        _run(api)
+
+
 def _add_ci_attempt(
     api: FakeApi,
     *,
@@ -1140,6 +1268,7 @@ def _add_ci_attempt(
         {
             "id": 20000 + attempt,
             "run_id": run_id,
+            "run_attempt": attempt,
             "name": REQUIRED_CHECKS[0],
             "status": status,
             "conclusion": conclusion,
@@ -1387,7 +1516,7 @@ def test_malformed_current_run_attempt_cannot_satisfy_gate(attempt: Any) -> None
     api.workflow_runs[1010]["run_attempt"] = attempt
     clock = FakeClock()
 
-    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+    with pytest.raises(GateError, match="invalid run_attempt"):
         run_gate(
             _event(api),
             api,
@@ -1406,6 +1535,9 @@ def test_malformed_current_run_attempt_cannot_satisfy_gate(attempt: Any) -> None
         ("run_id", 9999),
         ("check_run_url", "https://api.github.com/repos/owner/repo/check-runs/9999"),
         ("id", 0),
+        ("run_attempt", 1),
+        ("run_attempt", None),
+        ("run_attempt", True),
     ],
 )
 def test_job_identity_must_match_the_selected_run_attempt_and_check(
@@ -1482,6 +1614,8 @@ def test_missing_or_pending_checks_can_finish_successfully(first_runs: Any) -> N
 def test_accepted_terminal_conclusions_remain_allowed(conclusion: str) -> None:
     api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
     api.runs = [{**run, "conclusion": conclusion} for run in api.runs]
+    for jobs in api.workflow_jobs.values():
+        jobs[0]["conclusion"] = conclusion
 
     assert _run(api)[-1] == "All required checks completed successfully."
 
@@ -1501,6 +1635,29 @@ def test_green_checks_from_push_event_do_not_satisfy_gate() -> None:
             now=lambda: next(ticks),
             sleep=lambda _seconds: None,
         )
+
+
+def test_tested_merge_sha_is_independently_required() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    run_id = 1010
+    evidence = api.workflow_runs[run_id]["display_title"]
+    api.workflow_runs[run_id]["display_title"] = evidence.replace(
+        f"s={TESTED_SHA}", "s=other-merge"
+    )
+    clock = FakeClock()
+    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=lambda _message: None,
+            now=clock.now,
+            sleep=clock.sleep_to_missing_grace,
+        )
+
+    api.workflow_runs[run_id]["display_title"] = evidence
+    assert _run(api)[-1] == "All required checks completed successfully."
 
 
 def test_gate_entry_point_reads_event_file_and_reports_failures(
@@ -1657,6 +1814,7 @@ def test_hil_gate_is_conditional_on_main_and_configuration() -> None:
         {
             "id": 10999,
             "run_id": hil_id,
+            "run_attempt": 1,
             "name": "HIL qualification (opt-in)",
             "status": "completed",
             "conclusion": "success",

@@ -289,19 +289,6 @@ def _current_workflow_run(
         if not isinstance(workflow, dict):
             raise GateError("GitHub returned a malformed Actions workflow.")
         workflow_cache[workflow_id] = workflow
-    attempt = workflow_run.get("run_attempt")
-    run_number = workflow_run.get("run_number")
-    if (
-        isinstance(attempt, bool)
-        or not isinstance(attempt, int)
-        or attempt <= 0
-        or isinstance(run_number, bool)
-        or not isinstance(run_number, int)
-        or run_number <= 0
-    ):
-        return None
-    if workflow_run.get("status") not in {"queued", "in_progress", "completed"}:
-        return None
     expected = (
         f"evidence w={evidence_ids[0]} j={evidence_ids[1]} pr={number} "
         f"r={owner}/{repo} b={base_sha} h={head_sha} s={tested_sha}"
@@ -314,6 +301,32 @@ def _current_workflow_run(
         and workflow_run.get("head_sha") == head_sha
     ):
         return None
+    attempt = workflow_run.get("run_attempt")
+    run_number = workflow_run.get("run_number")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt <= 0:
+        raise GateError(
+            f"Applicable workflow run {run_id} has missing or invalid run_attempt."
+        )
+    if (
+        isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number <= 0
+    ):
+        raise GateError(
+            f"Applicable workflow run {run_id} has missing or invalid run_number."
+        )
+    status = workflow_run.get("status")
+    if not isinstance(status, str) or status not in {
+        "queued",
+        "in_progress",
+        "completed",
+        "waiting",
+        "pending",
+        "requested",
+    }:
+        raise GateError(
+            f"Applicable workflow run {run_id} has unknown status {status!r}."
+        )
     return workflow_run
 
 
@@ -361,6 +374,9 @@ def _job_for_current_attempt(
         or isinstance(job_run_id, bool)
         or not isinstance(job_run_id, int)
         or job_run_id != run_id
+        or isinstance(job.get("run_attempt"), bool)
+        or not isinstance(job.get("run_attempt"), int)
+        or job.get("run_attempt") != attempt
         or check_run_id is None
         or check_run_id not in candidates
     ):
@@ -683,13 +699,20 @@ def run_gate(
                 if selected is not None and selected.get("status") in {
                     "queued",
                     "in_progress",
+                    "waiting",
+                    "pending",
+                    "requested",
                 }:
                     pending.append(f"{name} (current attempt job not yet available)")
                 else:
                     missing.append(name)
                 continue
             status = check.get("status")
-            if status not in {"queued", "in_progress", "completed"}:
+            if not isinstance(status, str) or status not in {
+                "queued",
+                "in_progress",
+                "completed",
+            }:
                 raise GateError(
                     f"Required check {name} has malformed status {status!r}."
                 )
