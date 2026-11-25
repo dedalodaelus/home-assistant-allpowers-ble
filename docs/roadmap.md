@@ -34,6 +34,13 @@ dependencies are ready. No dates are set here. Shipping a release does not by
 itself close an umbrella or planning issue; only verified acceptance criteria
 can do that.
 
+Across releases, continue collecting sanitized compatibility reports, expand
+HIL reconnect and proxy-failover regression, decode telemetry only when its
+meaning is verified, add Repairs only for persistent actionable conditions
+with deterministic dismissal, consider a pure protocol extraction when a
+second consumer exists, and track Bluetooth connection-slot coordination as
+Home Assistant APIs evolve.
+
 ## HIL evidence, write authorization, and support
 
 Synthetic tests validate software behavior and evidence-processing logic; they
