@@ -33,42 +33,76 @@ def _start_synthetic_capture(fake: SyntheticBronzeHA, scenario_id: str) -> None:
     )
 
 
+def _stop_synthetic_capture(fake: SyntheticBronzeHA) -> dict[str, object]:
+    return fake.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/stop",
+                "entry_id": fake.entry_id,
+                "capture_id": fake.capture_id,
+            }
+        ]
+    )[0]
+
+
 def test_synthetic_reconnect_trace_requires_refresh_in_current_capture() -> None:
     fake = SyntheticBronzeHA(silver=True)
     _start_synthetic_capture(fake, "recovery_reconnect")
 
-    missing_refresh = fake._tier_trace_snapshot(sealed=True)
+    fake.request_read_only_refresh("button.synthetic_refresh")
+    refreshed = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in refreshed["frames"]] == [
+        "status_request"
+    ]
+
+    _start_synthetic_capture(fake, "recovery_reconnect")
+    missing_refresh = _stop_synthetic_capture(fake)
     assert missing_refresh["frames"] == []
     assert not any(
         row["event"] in {"write_attempt", "write_ok", "notification_decoded"}
         for row in missing_refresh["events"]
     )
 
-    fake.request_read_only_refresh("button.synthetic_refresh")
-    refreshed = fake._tier_trace_snapshot(sealed=True)
-    assert [frame["command_type"] for frame in refreshed["frames"]] == [
-        "status_request"
-    ]
+    _start_synthetic_capture(fake, "recovery_reconnect")
     with pytest.raises(AssertionError):
         fake.request_read_only_refresh("button.wrong_entity")
+    fake.request_read_only_refresh("button.synthetic_refresh")
+    refreshed_again = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in refreshed_again["frames"]] == [
+        "status_request"
+    ]
 
 
 def test_synthetic_output_trace_requires_matching_control_in_current_capture() -> None:
     fake = SyntheticBronzeHA(silver=True)
     _start_synthetic_capture(fake, "output_ac_cycle")
 
-    missing_control = fake._tier_trace_snapshot(sealed=True)
+    fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
+    controlled = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in controlled["frames"]] == [
+        "output_control"
+    ]
+
+    _start_synthetic_capture(fake, "output_ac_cycle")
+    missing_control = _stop_synthetic_capture(fake)
     assert missing_control["frames"] == []
     assert not any(
-        row["event"] in {"write_attempt", "write_ok", "transaction_submitted"}
+        row["event"]
+        in {
+            "write_attempt",
+            "write_ok",
+            "transaction_submitted",
+            "transaction_confirmed",
+        }
         for row in missing_control["events"]
     )
 
+    _start_synthetic_capture(fake, "output_ac_cycle")
     with pytest.raises(AssertionError):
         fake.call_control("ac_output", "switch.wrong_entity", "on")
     fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
-    controlled = fake._tier_trace_snapshot(sealed=True)
-    assert [frame["command_type"] for frame in controlled["frames"]] == [
+    controlled_again = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in controlled_again["frames"]] == [
         "output_control"
     ]
 
