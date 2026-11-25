@@ -1,21 +1,42 @@
-"""Stateful HA boundary fixture for synthetic Bronze onboarding coverage."""
+"""Stateful HA boundary fixture shared by synthetic tier onboarding tests."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
 
+from custom_components.allpowers_ble.model_support import (
+    ModelFeature,
+    identify_model,
+    model_feature_capability,
+)
 from scripts.validate_hil_qualification import STATUS_REQUEST
 
 
-class SyntheticBronzeHA:
+class SyntheticHILHA:
     """Simulate the external HA boundary while retaining production HIL flow."""
 
     origin = "https://ha.example.test"
 
-    def __init__(self, *, correlated_status: bool = True, silver: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        correlated_status: bool = True,
+        silver: bool = False,
+        gold: bool = False,
+        omit_setting_restoration: str | None = None,
+    ) -> None:
         self.correlated_status = correlated_status
-        self.silver = silver
+        self.silver = silver or gold
+        self.gold = gold
+        self.omit_setting_restoration = omit_setting_restoration
+        self.model_support = identify_model(
+            "R600", hardware_version="0.3", raw_hardware_version=3
+        )
+        self.profile_features = {
+            feature.value: model_feature_capability(self.model_support, feature)
+            for feature in ModelFeature
+        }
         self.calls: list[tuple[Any, ...]] = []
         self.state_changing_calls: list[tuple[Any, ...]] = []
         self.capture_id = "synthetic-capture"
@@ -37,9 +58,20 @@ class SyntheticBronzeHA:
             "dc_output": "off",
             "light": "off",
         }
+        self.setting_states = {
+            "eco_mode": "off",
+            "work_mode": "mute",
+            "eco_timeout": "four_hours",
+        }
+        self.setting_writes: list[tuple[str, str, int, str]] = []
+        self.setting_consents: list[tuple[str, str]] = []
+        self.consumed_setting_consents: list[tuple[str, str]] = []
+        self.inventory_inspections: list[str] = []
+        self.tier_plans: list[dict[str, Any]] = []
         self.recovery_requested = False
         self.restore_requested = False
         self.capability_snapshots: list[tuple[bool, bool]] = []
+        self.settings_fresh_snapshots: list[bool] = []
         self.disconnected_before_restoration = False
 
     @staticmethod
@@ -47,6 +79,8 @@ class SyntheticBronzeHA:
         if key == "read_only_refresh":
             return "button.synthetic_refresh"
         target = "light" if key == "light_output" else key
+        if target in {"work_mode", "eco_timeout"}:
+            return f"select.synthetic_{target}"
         return f"switch.synthetic_{target}"
 
     def config(self) -> dict[str, str]:
@@ -113,6 +147,18 @@ class SyntheticBronzeHA:
                         "disabled_by": None,
                     }
                 )
+        if self.gold:
+            for key in ("eco_mode", "work_mode", "eco_timeout"):
+                entity_id = self._registry_entity_id(key)
+                entities.append(
+                    {
+                        "device_id": device_id,
+                        "platform": "allpowers_ble",
+                        "entity_id": entity_id,
+                        "unique_id": f"synthetic_{key}",
+                        "disabled_by": None,
+                    }
+                )
         devices = [
             {
                 "id": device_id,
@@ -156,33 +202,38 @@ class SyntheticBronzeHA:
 
     def hil_capabilities(self, _entry_id: str) -> dict[str, Any]:
         self.calls.append(("read", "hil_capabilities"))
-        disconnected = (
-            self.silver and self.recovery_requested and not self.restore_requested
-        )
+        disconnected = self._disconnected
         self.capability_snapshots.append((self.restore_requested, not disconnected))
-        features = {
-            "telemetry": {
-                "physical_presence": "present",
-                "production_authorized": False,
-                "candidate_hil_eligible": False,
-                "runtime_ready": True,
+        self.settings_fresh_snapshots.append(not disconnected)
+        features: dict[str, dict[str, Any]] = {}
+        for feature in ModelFeature:
+            if feature is ModelFeature.TELEMETRY:
+                included = True
+            elif feature in {
+                ModelFeature.AC_OUTPUT,
+                ModelFeature.DC_OUTPUT,
+                ModelFeature.LIGHT_OUTPUT,
+            }:
+                included = self.silver
+            else:
+                included = self.gold
+            if not included:
+                continue
+            declaration = self.profile_features[feature.value]
+            runtime_fresh = not disconnected
+            features[feature.value] = {
+                "physical_presence": declaration.physical_presence.value,
+                "production_authorized": declaration.production_authorized,
+                "candidate_hil_eligible": declaration.hil_candidate_eligible,
+                "runtime_ready": runtime_fresh,
             }
-        }
         flags = {
             "read_telemetry": True,
             "write_output_controls": self.silver,
-            "write_settings_controls": False,
+            "write_settings_controls": self.gold,
             "write_settings_keepalive": False,
             "car_charger_enabled": False,
         }
-        if self.silver:
-            for feature in ("ac_output", "dc_output", "light_output"):
-                features[feature] = {
-                    "physical_presence": "present",
-                    "production_authorized": True,
-                    "candidate_hil_eligible": False,
-                    "runtime_ready": True,
-                }
         return {
             "schema_version": 2,
             "model": "R600",
@@ -197,7 +248,7 @@ class SyntheticBronzeHA:
             "capabilities": flags,
             "connected": not disconnected,
             "status_fresh": not disconnected,
-            "settings_fresh": True,
+            "settings_fresh": not disconnected,
             "status_notification_count": self.status_count,
             "session_generation": 8 if self.restore_requested else 7,
             "observed_route": "active_proxy" if self.silver else "unverified",
@@ -211,15 +262,34 @@ class SyntheticBronzeHA:
         }
 
     def control_state(self, key: str, entity_id: str) -> dict[str, Any]:
+        disconnected = self._disconnected
         if self.silver:
             assert entity_id == self._registry_entity_id(key), (
                 f"Control state must use the registry entity for {key}"
             )
+        if key in self.setting_states:
+            assert self.gold and entity_id == self._registry_entity_id(key)
+            options = {
+                "eco_mode": ["off", "on"],
+                "work_mode": ["mute", "standard", "fast"],
+                "eco_timeout": ["one_hour", "two_hours", "four_hours", "six_hours"],
+            }[key]
+            return {
+                "available": self.gold and not disconnected,
+                "state": self.setting_states[key]
+                if self.gold and not disconnected
+                else None,
+                "options": options if self.gold and not disconnected else [],
+            }
         target = "light" if key == "light" else key
         return {
-            "available": target in self.output_states,
-            "state": self.output_states.get(target),
+            "available": target in self.output_states and not disconnected,
+            "state": self.output_states.get(target) if not disconnected else None,
         }
+
+    @property
+    def _disconnected(self) -> bool:
+        return self.silver and self.recovery_requested and not self.restore_requested
 
     def request_read_only_refresh(self, refresh_button: Any) -> None:
         assert self.capture_active, "Status refresh must run during an active capture"
@@ -235,6 +305,22 @@ class SyntheticBronzeHA:
     def call_control(self, *args: Any, **kwargs: Any) -> None:
         if self.silver:
             key, entity_id, value = args
+            if key in self.setting_states:
+                assert self.gold and entity_id == self._registry_entity_id(key)
+                assert self.capture_active and self.scenario_id.startswith("settings_")
+                authorization = (key, value)
+                assert authorization in self.setting_consents, (
+                    f"Settings write {authorization} requires its own consent prompt"
+                )
+                self.setting_consents.remove(authorization)
+                self.consumed_setting_consents.append(authorization)
+                self.state_changing_calls.append(("call_control", key, value))
+                self.setting_states[key] = value
+                self.setting_writes.append(
+                    (key, value, self._trace_generation, self.capture_id)
+                )
+                self.capture_setting_write = (key, value)
+                return
             target = "light" if key == "light" else key
             assert entity_id == self._registry_entity_id(target)
             self.state_changing_calls.append(("call_control", key, value))
@@ -263,7 +349,9 @@ class SyntheticBronzeHA:
             "allpowers_ble/hil/fetch",
             "allpowers_ble/hil/stop",
         }:
-            raise AssertionError(f"Unexpected HIL command during Bronze: {kind}")
+            raise AssertionError(
+                f"Unexpected HIL command during synthetic acquisition: {kind}"
+            )
         self.calls.append(("websocket", kind))
         if kind.endswith("/start"):
             assert not self.capture_active, "Capture is already active"
@@ -273,6 +361,7 @@ class SyntheticBronzeHA:
             self.started_run_id = command["run_id"]
             self.capture_refresh_seen = False
             self.capture_output_calls = []
+            self.capture_setting_write = None
             self.active_output = None
             self.capture_active = True
             return [
@@ -417,10 +506,15 @@ class SyntheticBronzeHA:
 
     @property
     def _trace_generation(self) -> int:
-        return 8 if self.silver and self.scenario_id == "recovery_reconnect" else 7
+        return 8 if self.restore_requested else 7
 
     def _tier_trace_snapshot(self, *, sealed: bool) -> dict[str, Any]:
-        from custom_components.allpowers_ble.protocol.codec import encode_output_control
+        from custom_components.allpowers_ble.protocol import (
+            SettingsData,
+            WorkMode,
+            encode_output_control,
+            encode_settings_control,
+        )
 
         run_id = self.started_run_id
         now = self.trace_utc
@@ -501,6 +595,66 @@ class SyntheticBronzeHA:
                     "hex": encoded.hex(),
                 }
             )
+        elif self.scenario_id.startswith("settings_") and self.capture_setting_write:
+            key, value = self.capture_setting_write
+            tx_id = f"synthetic-settings-{self.capture_id}"
+            frame = add(3, "write_attempt", transaction_id=tx_id)
+            add(4, "write_ok", transaction_id=tx_id)
+            add(
+                5,
+                "transaction_submitted",
+                transaction_id=tx_id,
+                transaction_kind="settings",
+            )
+            add(
+                6,
+                "transaction_confirmed",
+                transaction_id=tx_id,
+                reason="matching_validated_telemetry",
+            )
+            work_modes = {
+                "mute": WorkMode.MUTE,
+                "standard": WorkMode.STANDARD,
+                "fast": WorkMode.FAST,
+            }
+            timeout_hours = {
+                "one_hour": 1,
+                "two_hours": 2,
+                "four_hours": 4,
+                "six_hours": 6,
+            }
+            setting = SettingsData(
+                eco_enabled=self.setting_states["eco_mode"] == "on",
+                work_mode=work_modes[self.setting_states["work_mode"]],
+                car_charger_enabled=False,
+                eco_timeout_hours=timeout_hours[self.setting_states["eco_timeout"]],
+                hardware_version="0.3",
+                firmware_version="0.2",
+                raw_flags=0xA0
+                | (1 if self.setting_states["eco_mode"] == "on" else 0)
+                | (work_modes[self.setting_states["work_mode"]].value << 1),
+                raw_hardware_version=3,
+                raw_firmware_version=2,
+            )
+            missing_restoration_trace = (
+                self.omit_setting_restoration == key
+                and value
+                == {
+                    "eco_mode": "off",
+                    "work_mode": "mute",
+                    "eco_timeout": "four_hours",
+                }[key]
+            )
+            if not missing_restoration_trace:
+                frames.append(
+                    {
+                        **frame,
+                        "direction": "tx",
+                        "command_type": "settings_control",
+                        "frame_validation": "validated_tx",
+                        "hex": encode_settings_control(setting).hex(),
+                    }
+                )
         if sealed:
             add(len(events) + 1, "capture_stopped")
         return {

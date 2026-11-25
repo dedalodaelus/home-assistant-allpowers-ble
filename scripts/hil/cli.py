@@ -3749,6 +3749,22 @@ def _matrix_evidence_paths(matrix: Any, run_id: str) -> list[Any] | None:
     ):
         return None
     paths = list(evidence)
+    feature_contracts = revision.get("feature_contract", {})
+    if not isinstance(feature_contracts, dict):
+        return None
+    for contract in feature_contracts.values():
+        if not isinstance(contract, dict):
+            return None
+        references = contract.get("evidence", [])
+        if not isinstance(references, list) or any(
+            not isinstance(path, str) for path in references
+        ):
+            return None
+        paths.extend(
+            reference
+            for reference in references
+            if PurePosixPath(reference).is_relative_to(expected_run_dir)
+        )
     for section in (
         "bronze_evidence",
         "write_capabilities",
@@ -4010,6 +4026,86 @@ def _verified_review_stage_paths(
                         ).hexdigest()
                 if matrix_run_id == run_id:
                     stage_references.update(run_references)
+            feature_contracts = matrix_revision.get("feature_contract", {})
+            if not isinstance(feature_contracts, dict):
+                return None
+            source_runs = {
+                item.get("run_id"): item
+                for item in matrix_revision.get("runs", [])
+                if isinstance(item, dict)
+            }
+            for feature, contract in feature_contracts.items():
+                if (
+                    not isinstance(feature, str)
+                    or not isinstance(contract, dict)
+                    or contract.get("status") != "excluded"
+                    or contract.get("safely_disabled") is not True
+                ):
+                    return None
+                contract_references = contract.get("evidence")
+                review = contract.get("physical_review")
+                reviewed_digests = (
+                    review.get("evidence_sha256") if isinstance(review, dict) else None
+                )
+                if (
+                    not isinstance(contract_references, list)
+                    or len(contract_references) != 1
+                    or any(not isinstance(item, str) for item in contract_references)
+                    or not isinstance(review, dict)
+                    or review.get("outcome") != "confirmed_pass"
+                    or not isinstance(reviewed_digests, dict)
+                    or set(reviewed_digests) != set(contract_references)
+                ):
+                    return None
+                for reference in contract_references:
+                    relative = PurePosixPath(reference)
+                    fixture_prefix = (
+                        PurePosixPath("tests/hil/fixtures") / matrix_revision_id
+                    )
+                    if (
+                        "\\" in reference
+                        or relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or not relative.is_relative_to(fixture_prefix / "runs")
+                    ):
+                        return None
+                    target = repo_root.joinpath(*relative.parts)
+                    _reject_symlink_components(target, repo_root)
+                    metadata = target.lstat()
+                    if not stat.S_ISREG(metadata.st_mode):
+                        return None
+                    content = target.read_bytes()
+                    digest = hashlib.sha256(content).hexdigest()
+                    if reviewed_digests.get(reference) != digest:
+                        return None
+                    artifact = json.loads(content)
+                    source_run_id = (
+                        artifact.get("source_run_id")
+                        if isinstance(artifact, dict)
+                        else None
+                    )
+                    source_run = source_runs.get(source_run_id)
+                    expected_source_dir = fixture_prefix / "runs" / str(source_run_id)
+                    if (
+                        source_run is None
+                        or not isinstance(source_run_id, str)
+                        or re.fullmatch(r"archive-[a-f0-9]{64}", source_run_id) is None
+                        or not relative.is_relative_to(expected_source_dir)
+                        or artifact.get("artifact_type") != "feature_contract"
+                        or artifact.get("revision_id") != matrix_revision_id
+                        or artifact.get("model") != matrix_revision.get("model")
+                        or artifact.get("hardware_revision")
+                        != matrix_revision.get("hardware_version")
+                        or artifact.get("feature") != feature
+                        or artifact.get("safely_disabled") is not True
+                        or artifact.get("rationale") != contract.get("rationale")
+                        or artifact.get("source_archive_sha256")
+                        != source_run.get("archive_sha256")
+                    ):
+                        return None
+                    if matrix_revision_id == revision_id and source_run_id == run_id:
+                        digests[reference] = digest
+                        stage_references.add(reference)
     except HAAPIError, OSError, ValueError:
         return None
 
@@ -4646,6 +4742,28 @@ def _onboard_import_review(
     evidence_paths = [
         path for path in stage_paths[1:] if path.startswith(current_run_prefix)
     ]
+    current_revision = next(
+        (
+            item
+            for item in matrix.get("revisions", [])
+            if isinstance(item, dict) and item.get("id") == proposal["revision_id"]
+        ),
+        {},
+    )
+    feature_contracts = current_revision.get("feature_contract", {})
+    reviewed_exclusions = (
+        sorted(
+            f"{feature}: excluded/unverified (safely disabled)"
+            for feature, contract in feature_contracts.items()
+            if isinstance(contract, dict)
+            and contract.get("status") == "excluded"
+            and contract.get("safely_disabled") is True
+            and isinstance(contract.get("evidence"), list)
+            and any(path in evidence_paths for path in contract["evidence"])
+        )
+        if isinstance(feature_contracts, dict)
+        else []
+    )
     controls = (
         selected_run.get("write_capabilities", {})
         if isinstance(selected_run, dict)
@@ -4709,7 +4827,9 @@ def _onboard_import_review(
             f"The acquisition performed {assurance_label} control transitions "
             f"({', '.join(reviewed_controls) or 'none'}) and scenarios "
             f"({', '.join(reviewed_scenarios) or 'none'}); reviewed evidence includes "
-            f"restoration records and physical absences ({', '.join(reviewed_absences) or 'none'})."
+            f"restoration records and physical absences ({', '.join(reviewed_absences) or 'none'}). "
+            f"Safely disabled optional controls excluded/unverified: "
+            f"{', '.join(reviewed_exclusions) or 'none'}."
             if requested_tier in {"silver", "gold"}
             else "The evidence contains a read-only status request; no output controls were changed."
         )
@@ -4767,7 +4887,12 @@ def _onboard_import_review(
             "and reviewer issues are linked; check for duplicate issues and PRs before "
             "submitting this generated hardware-evidence PR. "
             "No new production write authorization is requested or granted; "
-            f"scope-specific reviewed control evidence is included for {', '.join(reviewed_controls) or 'no controls'}. "
+            f"tested controls: {', '.join(reviewed_controls) or 'none'}; "
+            f"safely disabled optional controls excluded/unverified: "
+            f"{', '.join(reviewed_exclusions) or 'none'}; "
+            f"physical absences: {', '.join(reviewed_absences) or 'none'}. "
+            "The exact staging allowlist includes the verified evidence for this "
+            "acquisition, so its reviewed matrix remains valid in a clean checkout. "
             "Release tooling owns "
             "CHANGELOG.md; no changelog entry is included. No user-facing strings "
             "changed, so translations are not applicable. The main-source-branch "

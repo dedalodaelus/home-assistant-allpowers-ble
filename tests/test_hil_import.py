@@ -6875,7 +6875,11 @@ def test_onboard_silver_and_gold_review_reach_self_contained_handoff(
         "No new production write authorization is requested or granted"
         in generated_body
     )
-    assert "scope-specific reviewed control evidence" in generated_body
+    assert "tested controls:" in generated_body
+    assert (
+        "safely disabled optional controls excluded/unverified: none" in generated_body
+    )
+    assert "physical absences:" in generated_body
 
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
     runs = [run for revision in matrix["revisions"] for run in revision["runs"]]
