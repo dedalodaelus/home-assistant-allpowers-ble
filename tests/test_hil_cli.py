@@ -2565,6 +2565,7 @@ def test_gold_executor_dispatches_existing_suites_and_reuses_recovery_evidence(
                             "action": "route interruption and restoration",
                             "operator_confirmed": True,
                             "disconnect_observed": True,
+                            "observed_connected": False,
                             "restoration_confirmed": True,
                         },
                         {
@@ -2910,7 +2911,23 @@ def test_tier_executor_reaches_production_runner_from_r600_inventory_preflight(
     assert execution["steps"][0]["outcome"] == "pass"
 
 
-def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("all", True),
+        ("action_disconnect", False),
+        ("action_disconnect", None),
+        ("recovered_disconnect", False),
+        ("recovered_disconnect", None),
+        ("observed_connected", True),
+        ("observed_connected", None),
+        ("restoration_confirmed", False),
+        ("restoration_confirmed", None),
+    ],
+)
+def test_parent_basic_reconnect_requires_complete_interruption_evidence(
+    monkeypatch, tmp_path, field, value
+):
     from argparse import Namespace
 
     from scripts.hil import recovery
@@ -2920,36 +2937,55 @@ def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_pa
     class FakeHA:
         origin = "https://example.test"
 
-    def stable_vendor_observation(
+    def recovery_observation(
         _api, args, _device, output_dir, _run_id, _services, _resume
     ):
         assert args.guided_reconnect_required is True
+        action = {
+            "step_id": "operator_action",
+            "outcome": "pass",
+            "action": "route interruption and restoration",
+            "operator_confirmed": True,
+            "disconnect_observed": True,
+            "observed_connected": False,
+            "restoration_confirmed": True,
+        }
+        recovered = {
+            "step_id": "recovered_session",
+            "outcome": "pass",
+            "session_generation_before": 7,
+            "session_generation_after": 8,
+            "disconnect_observed": True,
+            "connected": True,
+            "status_fresh": True,
+            "fresh_status_telemetry": True,
+            "route_verified": True,
+            "trace_complete": True,
+            "physical_outcome": "yes",
+            "route": "local_adapter",
+        }
+        if field == "action_disconnect":
+            if value is None:
+                action.pop("disconnect_observed")
+            else:
+                action["disconnect_observed"] = value
+        elif field == "recovered_disconnect":
+            if value is None:
+                recovered.pop("disconnect_observed")
+            else:
+                recovered["disconnect_observed"] = value
+        elif field in {"observed_connected", "restoration_confirmed"}:
+            if value is None:
+                action.pop(field)
+            else:
+                action[field] = value
         (output_dir / "checkpoint.json").write_text(
             json.dumps(
                 {
                     "steps": [
                         {"step_id": "baseline", "outcome": "pass"},
-                        {
-                            "step_id": "operator_action",
-                            "outcome": "pass",
-                            "action": "vendor-app contention",
-                            "operator_confirmed": True,
-                            "operator_app_result": "connected",
-                        },
-                        {
-                            "step_id": "recovered_session",
-                            "outcome": "pass",
-                            "session_generation_before": 4,
-                            "session_generation_after": 4,
-                            "disconnect_observed": False,
-                            "connected": True,
-                            "status_fresh": True,
-                            "fresh_status_telemetry": True,
-                            "route_verified": True,
-                            "trace_complete": True,
-                            "route": "local_adapter",
-                            "ha_observation": "ha_stable",
-                        },
+                        action,
+                        recovered,
                     ]
                 }
             ),
@@ -2961,7 +2997,7 @@ def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_pa
         )
         return 0
 
-    monkeypatch.setattr(recovery, "_execute_recovery_suite", stable_vendor_observation)
+    monkeypatch.setattr(recovery, "_execute_recovery_suite", recovery_observation)
     device = Device(
         device_id="fake-device",
         model="R600",
@@ -2986,9 +3022,14 @@ def test_guided_basic_reconnect_rejects_vendor_app_stability(monkeypatch, tmp_pa
 
     execution = json.loads((parent / "tier-execution.json").read_text())
     step = execution["steps"][0]
-    assert result == 2
-    assert step["outcome"] == "inconclusive"
-    assert "mandatory reconnect requires" in step["reason"]
+    if field == "all":
+        assert result == 0
+        assert step["outcome"] == "pass"
+    else:
+        assert result == 2
+        assert step["outcome"] == "inconclusive"
+        assert "mandatory reconnect requires" in step["reason"]
+        assert "observed disconnect" in step["reason"]
 
 
 def test_noninteractive_tier_read_only_failure_records_inconclusive_without_writes(

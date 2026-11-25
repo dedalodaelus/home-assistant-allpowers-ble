@@ -19,6 +19,60 @@ from scripts import validate_hil_qualification
 from tests.hil.synthetic_bronze import SyntheticBronzeHA
 
 
+def _start_synthetic_capture(fake: SyntheticBronzeHA, scenario_id: str) -> None:
+    fake.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/start",
+                "entry_id": fake.entry_id,
+                "run_id": "synthetic-run",
+                "scenario_id": scenario_id,
+                "requested_route": "auto",
+            }
+        ]
+    )
+
+
+def test_synthetic_reconnect_trace_requires_refresh_in_current_capture() -> None:
+    fake = SyntheticBronzeHA(silver=True)
+    _start_synthetic_capture(fake, "recovery_reconnect")
+
+    missing_refresh = fake._tier_trace_snapshot(sealed=True)
+    assert missing_refresh["frames"] == []
+    assert not any(
+        row["event"] in {"write_attempt", "write_ok", "notification_decoded"}
+        for row in missing_refresh["events"]
+    )
+
+    fake.request_read_only_refresh("button.synthetic_refresh")
+    refreshed = fake._tier_trace_snapshot(sealed=True)
+    assert [frame["command_type"] for frame in refreshed["frames"]] == [
+        "status_request"
+    ]
+    with pytest.raises(AssertionError):
+        fake.request_read_only_refresh("button.wrong_entity")
+
+
+def test_synthetic_output_trace_requires_matching_control_in_current_capture() -> None:
+    fake = SyntheticBronzeHA(silver=True)
+    _start_synthetic_capture(fake, "output_ac_cycle")
+
+    missing_control = fake._tier_trace_snapshot(sealed=True)
+    assert missing_control["frames"] == []
+    assert not any(
+        row["event"] in {"write_attempt", "write_ok", "transaction_submitted"}
+        for row in missing_control["events"]
+    )
+
+    with pytest.raises(AssertionError):
+        fake.call_control("ac_output", "switch.wrong_entity", "on")
+    fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
+    controlled = fake._tier_trace_snapshot(sealed=True)
+    assert [frame["command_type"] for frame in controlled["frames"]] == [
+        "output_control"
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -306,9 +360,19 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
             fake.recovery_requested = True
             return "1"
         if "Type 1 after restoring the same BLE route" in prompt:
+            assert any(
+                not restored and not connected
+                for restored, connected in fake.capability_snapshots
+            ), "recovery must return an explicit disconnected HA snapshot first"
+            fake.disconnected_before_restoration = True
             fake.restore_requested = True
             return "1"
         if "Restore the selected route now" in prompt:
+            assert any(
+                not restored and not connected
+                for restored, connected in fake.capability_snapshots
+            ), "recovery must return an explicit disconnected HA snapshot first"
+            fake.disconnected_before_restoration = True
             fake.restore_requested = True
             return "1"
         if "APPLY IMPORT" in prompt:
@@ -435,6 +499,7 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
     assert recovered_session["session_generation_after"] == 8
     assert recovered_session["fresh_status_telemetry"] is True
     assert recovered_session["route"] == "active_proxy"
+    assert fake.disconnected_before_restoration is True
     assert all(
         row["authorization_context"] == "production"
         and row["authorization_context_source"] == "runtime_production_authorized"
@@ -446,6 +511,11 @@ def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
         "dc_output": "off",
         "light": "off",
     }
+    assert fake.state_changing_calls == [
+        ("call_control", target, value)
+        for target in ("ac_output", "dc_output", "light")
+        for value in ("on", "off", "on", "off")
+    ]
     assert not any(
         call[0] == "experimental_output" for call in fake.state_changing_calls
     )

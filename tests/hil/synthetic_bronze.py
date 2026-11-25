@@ -22,6 +22,8 @@ class SyntheticBronzeHA:
         self.entry_id = "synthetic-entry"
         self.capture_active = False
         self.refresh_seen = False
+        self.capture_refresh_seen = False
+        self.capture_output_calls: list[tuple[str, str]] = []
         self.fetch_count = 0
         self.fetch_snapshots: list[dict[str, Any]] = []
         self.stop_count = 0
@@ -37,6 +39,15 @@ class SyntheticBronzeHA:
         }
         self.recovery_requested = False
         self.restore_requested = False
+        self.capability_snapshots: list[tuple[bool, bool]] = []
+        self.disconnected_before_restoration = False
+
+    @staticmethod
+    def _registry_entity_id(key: str) -> str:
+        if key == "read_only_refresh":
+            return "button.synthetic_refresh"
+        target = "light" if key == "light_output" else key
+        return f"switch.synthetic_{target}"
 
     def config(self) -> dict[str, str]:
         self.calls.append(("read", "config"))
@@ -148,6 +159,7 @@ class SyntheticBronzeHA:
         disconnected = (
             self.silver and self.recovery_requested and not self.restore_requested
         )
+        self.capability_snapshots.append((self.restore_requested, not disconnected))
         features = {
             "telemetry": {
                 "physical_presence": "present",
@@ -198,30 +210,39 @@ class SyntheticBronzeHA:
             },
         }
 
-    def control_state(self, key: str, _entity_id: str) -> dict[str, Any]:
+    def control_state(self, key: str, entity_id: str) -> dict[str, Any]:
+        if self.silver:
+            assert entity_id == self._registry_entity_id(key), (
+                f"Control state must use the registry entity for {key}"
+            )
         target = "light" if key == "light" else key
         return {
             "available": target in self.output_states,
             "state": self.output_states.get(target),
         }
 
-    def request_read_only_refresh(self, entity_id: str) -> None:
+    def request_read_only_refresh(self, refresh_button: Any) -> None:
         assert self.capture_active, "Status refresh must run during an active capture"
+        entity_id = getattr(refresh_button, "entity_id", refresh_button)
+        assert entity_id == self._registry_entity_id("read_only_refresh")
         if self.scenario_id == "read_only_snapshot":
             assert not self.refresh_seen, "Bronze should request one status refresh"
-        self.calls.append(("read_only_refresh", entity_id))
+        self.calls.append(("read_only_refresh", refresh_button))
         self.refresh_seen = True
+        self.capture_refresh_seen = True
         self.status_count += 1
 
     def call_control(self, *args: Any, **kwargs: Any) -> None:
         if self.silver:
-            key, _entity_id, value = args
-            self.state_changing_calls.append(("call_control", key, value))
+            key, entity_id, value = args
             target = "light" if key == "light" else key
+            assert entity_id == self._registry_entity_id(target)
+            self.state_changing_calls.append(("call_control", key, value))
             assert self.capture_active
             assert target in self.output_states and value in {"on", "off"}
             self.output_states[target] = value
             self.active_output = (target, value)
+            self.capture_output_calls.append((target, value))
             return
         self.state_changing_calls.append(("call_control", args, kwargs))
         raise AssertionError("Bronze must not call a state-changing HA control")
@@ -250,6 +271,9 @@ class SyntheticBronzeHA:
             self.scenario_id = command["scenario_id"]
             self.capture_id = f"synthetic-capture-{len(self.calls)}"
             self.started_run_id = command["run_id"]
+            self.capture_refresh_seen = False
+            self.capture_output_calls = []
+            self.active_output = None
             self.capture_active = True
             return [
                 {"schema_version": 2, "capture_id": self.capture_id, "ttl_seconds": 10}
@@ -259,7 +283,9 @@ class SyntheticBronzeHA:
         assert self.capture_active, "Fetch/stop requires an active capture"
         if kind.endswith("/fetch"):
             if self.scenario_id == "read_only_snapshot":
-                assert self.refresh_seen, "Capture must include the status refresh"
+                assert self.capture_refresh_seen, (
+                    "Capture must include the status refresh"
+                )
             self.fetch_count += 1
             snapshot = self._trace_snapshot(sealed=False)
             assert snapshot["closed"] is False
@@ -427,7 +453,7 @@ class SyntheticBronzeHA:
             backend_kind="esphome",
             evidence="esphome_scanner_binding",
         )
-        if self.scenario_id == "recovery_reconnect":
+        if self.scenario_id == "recovery_reconnect" and self.capture_refresh_seen:
             tx_id = "synthetic-reconnect-status"
             frame = add(3, "write_attempt", transaction_id=tx_id)
             add(4, "write_ok", transaction_id=tx_id)
@@ -440,7 +466,8 @@ class SyntheticBronzeHA:
                 "hex": STATUS_REQUEST.hex(),
             }
             frames.append(frame_record)
-        else:
+        elif self.scenario_id != "recovery_reconnect" and self.capture_output_calls:
+            assert len(self.capture_output_calls) == 1
             assert self.active_output is not None
             target, state = self.active_output
             assert self.output_states[target] == state
@@ -475,7 +502,7 @@ class SyntheticBronzeHA:
                 }
             )
         if sealed:
-            add(6 if self.scenario_id == "recovery_reconnect" else 7, "capture_stopped")
+            add(len(events) + 1, "capture_stopped")
         return {
             "schema_version": 2,
             "run_id": run_id,
