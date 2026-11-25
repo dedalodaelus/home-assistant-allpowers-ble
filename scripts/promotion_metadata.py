@@ -98,11 +98,66 @@ def validate_release_please_versions(
             raise MetadataError(f"Release Please package {package}: {error}") from error
 
 
+def validate_changelog_history(base_changelog: str, head_changelog: str) -> None:
+    """Require every released version heading in the base changelog to survive."""
+    heading = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
+
+    def versions(contents: str) -> set[str]:
+        found: set[str] = set()
+        for version in heading.findall(contents):
+            if version.lower() == "unreleased":
+                continue
+            semver_key(version)
+            found.add(version)
+        return found
+
+    missing = sorted(versions(base_changelog) - versions(head_changelog))
+    if missing:
+        raise MetadataError(
+            "Changelog history was removed for " + ", ".join(missing) + "."
+        )
+
+
+def validate_gate_release_metadata(
+    *,
+    base_integration: Any,
+    head_integration: Any,
+    base_release: Any,
+    head_release: Any,
+    base_changelog: str,
+    head_changelog: str,
+    allow_newer: bool,
+) -> None:
+    """Validate exact-revision release metadata for sync or promotion PRs."""
+    if not isinstance(base_integration, dict) or not isinstance(head_integration, dict):
+        raise MetadataError("Integration manifests must contain JSON objects.")
+    base_version = base_integration.get("version")
+    head_version = head_integration.get("version")
+    if not isinstance(base_version, str) or not isinstance(head_version, str):
+        raise MetadataError("Integration manifests must contain string versions.")
+    validate_version_change(base_version, head_version)
+    if not allow_newer and head_version != base_version:
+        raise MetadataError(
+            "Promotion must preserve the integration version; use Release Please "
+            "or a reviewed synchronization PR."
+        )
+    if not isinstance(base_release, dict) or not isinstance(head_release, dict):
+        raise MetadataError("Release Please manifests must contain version objects.")
+    validate_release_please_versions(base_release, head_release)
+    validate_changelog_history(base_changelog, head_changelog)
+
+
 def validate_release_file_changes(
-    changed_paths: set[str], base_ref: str, head_ref: str
+    changed_paths: set[str],
+    base_ref: str,
+    head_ref: str,
+    *,
+    same_repository_sync: bool = False,
 ) -> None:
     """Enforce Release Please file ownership, including rename source paths."""
-    is_main_to_devel_sync = base_ref == "devel" and head_ref == "main"
+    is_main_to_devel_sync = (
+        same_repository_sync and base_ref == "devel" and head_ref == "main"
+    )
     is_release_please = base_ref == "main" and head_ref.startswith("release-please--")
     if (
         CHANGELOG in changed_paths
@@ -171,24 +226,21 @@ def validate_revisions(
         head_manifest = json.loads(_git_text(head_sha, INTEGRATION_MANIFEST))
         base_release_versions = json.loads(_git_text(base_sha, RELEASE_MANIFEST))
         head_release_versions = json.loads(_git_text(head_sha, RELEASE_MANIFEST))
+        base_changelog = _git_text(base_sha, CHANGELOG)
+        head_changelog = _git_text(head_sha, CHANGELOG)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as error:
         raise MetadataError(
             f"Cannot read integration manifest at PR base/head revisions: {error}"
         ) from error
-    base_version = base_manifest.get("version")
-    head_version = head_manifest.get("version")
-    if not isinstance(base_version, str) or not isinstance(head_version, str):
-        raise MetadataError(
-            "Integration manifest must have a string version at both revisions."
-        )
-    validate_version_policy(base_version, head_version, base_ref, head_ref)
-    if not isinstance(base_release_versions, dict) or not isinstance(
-        head_release_versions, dict
-    ):
-        raise MetadataError(
-            "Release Please manifest must contain package version objects."
-        )
-    validate_release_please_versions(base_release_versions, head_release_versions)
+    validate_gate_release_metadata(
+        base_integration=base_manifest,
+        head_integration=head_manifest,
+        base_release=base_release_versions,
+        head_release=head_release_versions,
+        base_changelog=base_changelog,
+        head_changelog=head_changelog,
+        allow_newer=base_ref == "devel" and head_ref == "main",
+    )
 
 
 def main() -> int:

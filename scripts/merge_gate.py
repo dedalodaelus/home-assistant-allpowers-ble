@@ -1,0 +1,548 @@
+#!/usr/bin/env python3
+"""Enforce pull request policy and wait for checks tied to exact PR revisions."""
+
+from __future__ import annotations
+
+import base64
+from collections.abc import Callable, Iterable
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import time
+from typing import Any, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import Request, urlopen
+
+from scripts.promotion_metadata import (
+    INTEGRATION_MANIFEST,
+    MetadataError,
+    validate_gate_release_metadata,
+    validate_release_file_changes,
+)
+
+REQUIRED_CHECKS = (
+    "Python, tests, and release validation",
+    "HACS validation",
+    "Home Assistant Hassfest",
+    "Validate title",
+    "Review dependency changes",
+    "Analyze Python",
+)
+ACCEPTED_CONCLUSIONS = {"success", "neutral", "skipped"}
+POLL_INTERVAL_SECONDS = 15
+TIMEOUT_SECONDS = 30 * 60
+MISSING_CHECKS_GRACE_SECONDS = 10 * 60
+
+
+class GateError(RuntimeError):
+    """A policy violation or incomplete required-check set."""
+
+
+class GitHubApi(Protocol):
+    """Small API surface used by the gate and its focused tests."""
+
+    def pull_request(self, number: int) -> dict[str, Any]: ...
+
+    def pull_request_files(self, number: int) -> list[dict[str, Any]]: ...
+
+    def compare(self, base: str, head: str) -> dict[str, Any]: ...
+
+    def content(self, path: str, ref: str) -> str: ...
+
+    def check_runs(self, ref: str) -> list[dict[str, Any]]: ...
+
+    def workflow_run(self, run_id: int) -> dict[str, Any]: ...
+
+
+class RestGitHubApi:
+    """GitHub REST client using only Python's standard library."""
+
+    def __init__(self, owner: str, repo: str, token: str, api_url: str) -> None:
+        if not token:
+            raise GateError("GITHUB_TOKEN is required to inspect PR checks.")
+        self.owner = owner
+        self.repo = repo
+        self.token = token
+        self.api_url = api_url.rstrip("/")
+        self.repository_path = f"/repos/{quote(owner)}/{quote(repo)}"
+
+    def _request(self, path: str) -> tuple[Any, dict[str, str]]:
+        url = f"{self.api_url}{path}"
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.token}",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "home-assistant-allpowers-ble-merge-gate",
+            },
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read()), dict(response.headers.items())
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as error:
+            raise GateError(f"GitHub API request failed for {path}: {error}") from error
+
+    def _get(self, path: str, **query: str | int) -> Any:
+        suffix = f"?{urlencode(query)}" if query else ""
+        return self._request(f"{path}{suffix}")[0]
+
+    def _all_pages(self, path: str, key: str, **query: str | int) -> list[Any]:
+        page = 1
+        results: list[Any] = []
+        while True:
+            payload = self._get(path, per_page=100, page=page, **query)
+            if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+                raise GateError(f"Unexpected GitHub API response while reading {path}.")
+            batch = payload[key]
+            if any(not isinstance(item, dict) for item in batch):
+                raise GateError(f"Malformed GitHub API entries while reading {path}.")
+            results.extend(batch)
+            if len(batch) < 100:
+                return results
+            page += 1
+
+    def pull_request(self, number: int) -> dict[str, Any]:
+        value = self._get(f"{self.repository_path}/pulls/{number}")
+        if not isinstance(value, dict):
+            raise GateError("GitHub returned an invalid pull request object.")
+        return value
+
+    def pull_request_files(self, number: int) -> list[dict[str, Any]]:
+        page = 1
+        files: list[dict[str, Any]] = []
+        while True:
+            values = self._get(
+                f"{self.repository_path}/pulls/{number}/files",
+                per_page=100,
+                page=page,
+            )
+            if not isinstance(values, list) or any(
+                not isinstance(value, dict) for value in values
+            ):
+                raise GateError("GitHub returned an invalid pull request file list.")
+            files.extend(values)
+            if len(values) < 100:
+                return files
+            page += 1
+
+    def compare(self, base: str, head: str) -> dict[str, Any]:
+        value = self._get(
+            f"{self.repository_path}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
+        )
+        if not isinstance(value, dict):
+            raise GateError("GitHub returned an invalid commit comparison.")
+        return value
+
+    def content(self, path: str, ref: str) -> str:
+        value = self._get(
+            f"{self.repository_path}/contents/{quote(path, safe='/')}", ref=ref
+        )
+        if not isinstance(value, dict) or value.get("type") != "file":
+            raise GateError(f"Expected a file at {path} for {ref}.")
+        encoded = value.get("content")
+        if not isinstance(encoded, str):
+            raise GateError(f"GitHub returned no file content for {path} at {ref}.")
+        try:
+            return base64.b64decode(encoded, validate=False).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise GateError(f"Could not decode {path} at {ref}: {error}") from error
+
+    def check_runs(self, ref: str) -> list[dict[str, Any]]:
+        return self._all_pages(
+            f"{self.repository_path}/commits/{quote(ref, safe='')}/check-runs",
+            "check_runs",
+        )
+
+    def workflow_run(self, run_id: int) -> dict[str, Any]:
+        value = self._get(f"{self.repository_path}/actions/runs/{run_id}")
+        if not isinstance(value, dict):
+            raise GateError("GitHub returned an invalid Actions workflow run.")
+        return value
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _association_matches(
+    associations: Any, number: int, base_sha: str, head_sha: str
+) -> bool:
+    if not isinstance(associations, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("number") == number
+        and _mapping(item.get("base")).get("sha") == base_sha
+        and _mapping(item.get("head")).get("sha") == head_sha
+        for item in associations
+    )
+
+
+def latest_runs_by_name(
+    check_runs: Iterable[dict[str, Any]], number: int, base_sha: str, head_sha: str
+) -> dict[str, dict[str, Any]]:
+    """Keep the latest run per name only among exact PR/base/head associations."""
+    latest: dict[str, dict[str, Any]] = {}
+    for run in check_runs:
+        if not isinstance(run, dict):
+            raise GateError("GitHub returned a malformed check-run entry.")
+        name = run.get("name")
+        if not isinstance(name, str) or not _association_matches(
+            run.get("pull_requests"), number, base_sha, head_sha
+        ):
+            continue
+        previous = latest.get(name)
+        run_id = run.get("id")
+        previous_id = previous.get("id") if previous else -1
+        if (
+            isinstance(run_id, bool)
+            or not isinstance(run_id, int)
+            or isinstance(previous_id, bool)
+            or not isinstance(previous_id, int)
+        ):
+            raise GateError(f"Check run {name!r} has a missing or invalid ID.")
+        if run_id < 0:
+            raise GateError(f"Check run {name!r} has a negative ID.")
+        if previous is None or run_id > previous_id:
+            latest[name] = run
+    return latest
+
+
+def _workflow_run_id(details_url: Any, owner: str, repo: str) -> int | None:
+    if not isinstance(details_url, str):
+        return None
+    parsed = urlparse(details_url)
+    expected_prefix = f"/{owner}/{repo}/actions/runs/"
+    if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
+        return None
+    if not parsed.path.lower().startswith(expected_prefix.lower()):
+        return None
+    suffix = parsed.path[len(expected_prefix) :]
+    match = re.match(r"^(\d+)(?:/|$)", suffix)
+    try:
+        return int(match.group(1)) if match else None
+    except ValueError:
+        return None
+
+
+def _has_current_workflow_run(
+    api: GitHubApi,
+    run: dict[str, Any],
+    owner: str,
+    repo: str,
+    number: int,
+    base_sha: str,
+    head_sha: str,
+    cache: dict[int, bool],
+) -> bool:
+    if not _association_matches(run.get("pull_requests"), number, base_sha, head_sha):
+        return False
+    run_id = _workflow_run_id(run.get("details_url"), owner, repo)
+    if run_id is None:
+        return False
+    if run_id not in cache:
+        workflow_run = api.workflow_run(run_id)
+        if not isinstance(workflow_run, dict):
+            raise GateError("GitHub returned a malformed Actions workflow run.")
+        cache[run_id] = workflow_run.get(
+            "event"
+        ) == "pull_request" and _association_matches(
+            workflow_run.get("pull_requests"), number, base_sha, head_sha
+        )
+    return cache[run_id]
+
+
+def _validate_release_metadata(
+    api: GitHubApi, base_sha: str, head_sha: str, allow_newer: bool
+) -> None:
+    def json_at(path: str, ref: str) -> Any:
+        try:
+            return json.loads(api.content(path, ref))
+        except json.JSONDecodeError as error:
+            raise GateError(f"Invalid JSON in {path} at {ref}.") from error
+
+    validate_gate_release_metadata(
+        base_integration=json_at(
+            "custom_components/allpowers_ble/manifest.json", base_sha
+        ),
+        head_integration=json_at(
+            "custom_components/allpowers_ble/manifest.json", head_sha
+        ),
+        base_release=json_at(".release-please-manifest.json", base_sha),
+        head_release=json_at(".release-please-manifest.json", head_sha),
+        base_changelog=api.content("CHANGELOG.md", base_sha),
+        head_changelog=api.content("CHANGELOG.md", head_sha),
+        allow_newer=allow_newer,
+    )
+
+
+def _check_policy(
+    api: GitHubApi, event: dict[str, Any], owner: str, repo: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool, bool]:
+    pr = event.get("pull_request")
+    if not isinstance(pr, dict):
+        raise GateError("This workflow only supports pull_request events.")
+    base = _mapping(pr.get("base"))
+    head = _mapping(pr.get("head"))
+    base_ref = str(base.get("ref") or "")
+    head_ref = str(head.get("ref") or "")
+    head_sha = str(head.get("sha") or "")
+    base_sha = str(base.get("sha") or "")
+    number = pr.get("number")
+    if not isinstance(number, int) or not head_sha or not base_sha:
+        raise GateError("PR event is missing its number or immutable base/head SHA.")
+
+    author = _mapping(pr.get("user"))
+    author_login = str(author.get("login") or "")
+    author_type = str(author.get("type") or "")
+    is_hotfix = head_ref.startswith("hotfix/")
+    is_release_please = head_ref.startswith("release-please--")
+    is_approved_bot = author_type == "Bot" and author_login in {
+        "github-actions[bot]",
+        "release-please[bot]",
+    }
+
+    if (
+        base_ref == "main"
+        and head_ref != "devel"
+        and not is_hotfix
+        and not is_release_please
+    ):
+        raise GateError(
+            "PRs targeting main must come from 'devel', 'hotfix/*', or "
+            f"'release-please--*'. Current source: '{head_ref}'."
+        )
+    if base_ref == "main" and is_release_please and not is_approved_bot:
+        raise GateError(
+            f"PRs from 'release-please--*' to main must be authored by an approved bot. "
+            f"Current author: '{author_login}' ({author_type or 'unknown'})."
+        )
+    if base_ref == "main" and is_hotfix:
+        comparison = api.compare("main", head_sha)
+        if comparison.get("status") not in {"ahead", "identical"}:
+            raise GateError(
+                f"Hotfix branch '{head_ref}' must be based on 'main'. Create hotfix branches from 'main'."
+            )
+
+    files = api.pull_request_files(number)
+    if not isinstance(files, list) or any(
+        not isinstance(file, dict)
+        or not isinstance(file.get("filename"), str)
+        or file.get("previous_filename") is not None
+        and not isinstance(file.get("previous_filename"), str)
+        for file in files
+    ):
+        raise GateError("GitHub returned a malformed pull request file list.")
+    repository_name = f"{owner}/{repo}"
+    base_repo = _mapping(base.get("repo")).get("full_name")
+    head_repo = _mapping(head.get("repo")).get("full_name")
+    is_sync = (
+        base_ref == "devel"
+        and head_ref == "main"
+        and base_repo == repository_name
+        and head_repo == repository_name
+    )
+    is_promotion = base_ref == "main" and head_ref == "devel"
+    release_please_update = base_ref == "main" and is_release_please
+    changed_paths = {
+        path
+        for file in files
+        for path in (file.get("filename"), file.get("previous_filename"))
+        if isinstance(path, str)
+    }
+    manifest_deleted_or_renamed = any(
+        file.get("filename") == INTEGRATION_MANIFEST
+        and file.get("status") in {"removed", "renamed"}
+        or file.get("previous_filename") == INTEGRATION_MANIFEST
+        for file in files
+    )
+    if manifest_deleted_or_renamed:
+        changed_paths.add(f"{INTEGRATION_MANIFEST} (removed)")
+    try:
+        validate_release_file_changes(
+            changed_paths,
+            base_ref,
+            head_ref,
+            same_repository_sync=is_sync,
+        )
+    except MetadataError as error:
+        raise GateError(str(error)) from error
+
+    manifest_changed = INTEGRATION_MANIFEST in changed_paths
+    if manifest_changed and not (is_sync or is_promotion or release_please_update):
+        if base_repo != repository_name or head_repo != repository_name:
+            raise GateError(
+                "Integration manifest changes from a fork cannot be validated against the base repository."
+            )
+
+    if is_sync or is_promotion or release_please_update or manifest_changed:
+        allow_newer = is_sync or release_please_update
+        try:
+            _validate_release_metadata(api, base_sha, head_sha, allow_newer=allow_newer)
+        except MetadataError as error:
+            raise GateError(f"Release metadata validation failed: {error}") from error
+        current = api.pull_request(number)
+        current_base = _mapping(current.get("base"))
+        current_head = _mapping(current.get("head"))
+        identity_changed = (
+            _mapping(current_base.get("repo")).get("full_name") != base_repo
+            or _mapping(current_head.get("repo")).get("full_name") != head_repo
+        )
+        if (
+            current_base.get("ref") != base_ref
+            or current_head.get("ref") != head_ref
+            or current_base.get("sha") != base_sha
+            or current_head.get("sha") != head_sha
+            or identity_changed
+        ):
+            raise GateError(
+                "PR refs moved during release metadata validation; rerun the merge gate."
+            )
+
+    return pr, files, is_sync, is_promotion
+
+
+def run_gate(
+    event: dict[str, Any],
+    api: GitHubApi,
+    owner: str,
+    repo: str,
+    *,
+    require_hil_stable: bool = False,
+    log: Callable[[str], None] = print,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Validate policy and wait until each required check passes for this PR."""
+    pr, _files, _is_sync, _is_promotion = _check_policy(api, event, owner, repo)
+    if pr.get("draft") is True:
+        log("Draft PR detected. Skipping strict gate until ready for review.")
+        return
+
+    base = _mapping(pr.get("base"))
+    head = _mapping(pr.get("head"))
+    number = int(pr["number"])
+    base_ref = str(base.get("ref") or "")
+    base_sha = str(base.get("sha") or "")
+    head_sha = str(head.get("sha") or "")
+    title_was_edited = "title" in _mapping(event.get("changes"))
+    required = list(REQUIRED_CHECKS)
+    if base_ref == "main" and require_hil_stable:
+        required.append("HIL qualification (opt-in)")
+        log("REQUIRE_HIL_STABLE_GATE=true; enforcing HIL qualification check.")
+
+    started = now()
+    workflow_evidence: dict[int, bool] = {}
+    while True:
+        elapsed = now() - started
+        if elapsed > TIMEOUT_SECONDS:
+            raise GateError("Timeout waiting for required checks to complete.")
+
+        runs = api.check_runs(head_sha)
+        latest = latest_runs_by_name(runs, number, base_sha, head_sha)
+        missing: list[str] = []
+        pending: list[str] = []
+        failed: list[str] = []
+        for name in required:
+            if name == "Validate title" and title_was_edited:
+                continue
+            check = latest.get(name)
+            if check is None or not _has_current_workflow_run(
+                api, check, owner, repo, number, base_sha, head_sha, workflow_evidence
+            ):
+                missing.append(name)
+                continue
+            status = check.get("status")
+            if status not in {"queued", "in_progress", "completed"}:
+                raise GateError(
+                    f"Required check {name} has malformed status {status!r}."
+                )
+            if status != "completed":
+                pending.append(f"{name} ({status})")
+            elif check.get("conclusion") not in ACCEPTED_CONCLUSIONS:
+                failed.append(f"{name} ({check.get('conclusion') or 'unknown'})")
+
+        log(f"PR #{number} base SHA: {base_sha}")
+        log(f"PR #{number} head SHA: {head_sha}")
+        if missing:
+            log("Missing: " + ", ".join(missing))
+        if pending:
+            log("Pending: " + ", ".join(pending))
+        if failed:
+            log("Failed: " + ", ".join(failed))
+            raise GateError("Required checks failed: " + "; ".join(failed))
+        if missing and elapsed >= MISSING_CHECKS_GRACE_SECONDS:
+            discovered = ", ".join(sorted(latest)) or "none"
+            raise GateError(
+                "Missing required checks after 10 minutes: "
+                + ", ".join(missing)
+                + f". Discovered checks: {discovered}. If checks were renamed, update REQUIRED_CHECKS in scripts/merge_gate.py."
+            )
+        if not missing and not pending:
+            current = api.pull_request(number)
+            current_base = _mapping(current.get("base"))
+            current_head = _mapping(current.get("head"))
+            if (
+                current.get("title") != pr.get("title")
+                or current_base.get("ref") != base_ref
+                or current_head.get("ref") != str(head.get("ref") or "")
+                or current_base.get("sha") != base_sha
+                or current_head.get("sha") != head_sha
+                or _mapping(current_base.get("repo")).get("full_name")
+                != _mapping(base.get("repo")).get("full_name")
+                or _mapping(current_head.get("repo")).get("full_name")
+                != _mapping(head.get("repo")).get("full_name")
+            ):
+                raise GateError(
+                    "PR title, refs, repository identity, or base/head commits changed while required checks were being validated; rerun the merge gate."
+                )
+            log("All required checks completed successfully.")
+            return
+        sleep(POLL_INTERVAL_SECONDS)
+
+
+def main() -> int:
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not event_path or "/" not in repository:
+        print("GITHUB_EVENT_PATH and GITHUB_REPOSITORY are required.", file=sys.stderr)
+        return 2
+    owner, repo = repository.split("/", 1)
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        if not isinstance(event, dict):
+            raise GateError("GitHub event payload must be a JSON object.")
+        api = RestGitHubApi(
+            owner,
+            repo,
+            os.environ.get("GITHUB_TOKEN", ""),
+            os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+        )
+        run_gate(
+            event,
+            api,
+            owner,
+            repo,
+            require_hil_stable=os.environ.get(
+                "REQUIRE_HIL_STABLE_GATE", "false"
+            ).lower()
+            == "true",
+        )
+    except (OSError, json.JSONDecodeError, GateError, MetadataError) as error:
+        print(f"Merge gate failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
