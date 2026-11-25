@@ -4756,6 +4756,12 @@ def test_car_charger_output_scenario_requires_integration_opt_in(tmp_path):
             ["mute", "standard", "fast"],
         ),
         (
+            "settings_work_mode",
+            "work_mode",
+            "fast",
+            ["mute", "standard", "fast"],
+        ),
+        (
             "settings_eco_timeout",
             "eco_timeout",
             "six_hours",
