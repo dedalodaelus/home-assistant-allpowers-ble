@@ -1066,6 +1066,7 @@ def test_gate_entry_point_reads_event_file_and_reports_failures(
     event_path.write_text(json.dumps(_event(api)), encoding="utf-8")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
     monkeypatch.setenv("GITHUB_REPOSITORY", f"{OWNER}/{REPO}")
+    monkeypatch.setenv("GITHUB_SHA", TESTED_SHA)
     monkeypatch.setenv("GITHUB_TOKEN", "entrypoint-token-sentinel")
     monkeypatch.setattr(merge_gate, "RestGitHubApi", lambda *_args: api)
 
