@@ -99,7 +99,7 @@ class FakeApi:
             }
             self.workflow_runs[workflow_id] = {
                 "event": "pull_request",
-                "name": REQUIRED_WORKFLOWS[name],
+                "workflow_id": workflow_id,
                 "run_attempt": 1,
                 "head_sha": self.head_sha,
                 "display_title": (
@@ -108,6 +108,13 @@ class FakeApi:
                     f"r={OWNER}/{REPO} b={self.base_sha} h={self.head_sha} "
                     f"s={TESTED_SHA} a=1"
                 ),
+            }
+            if not hasattr(self, "workflows"):
+                self.workflows = {}
+            workflow_name = REQUIRED_WORKFLOWS[name]
+            self.workflows[workflow_id] = {
+                "name": workflow_name,
+                "path": merge_gate.WORKFLOW_PATHS[workflow_name],
             }
             values.append(
                 {
@@ -173,6 +180,9 @@ class FakeApi:
 
     def workflow_run(self, run_id: int) -> dict[str, Any]:
         return self.workflow_runs[run_id]
+
+    def workflow(self, workflow_id: int) -> dict[str, Any]:
+        return self.workflows[workflow_id]
 
 
 def _event(api: FakeApi, *, action: str = "opened") -> dict[str, Any]:
@@ -593,6 +603,28 @@ def test_mutable_associations_cannot_substitute_for_run_title_evidence() -> None
     api.workflow_runs[1010]["display_title"] = "old run with rewritten associations"
     clock = FakeClock()
 
+    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=lambda _message: None,
+            now=clock.now,
+            sleep=clock.sleep_to_missing_grace,
+        )
+
+
+def test_workflow_identity_comes_from_workflow_definition_not_run_name() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    # Actions exposes the evaluated run-name as workflow_run.name. The gate
+    # must use the workflow definition endpoint to identify the actual file.
+    api.workflow_runs[1010]["name"] = "evidence w=ci j=quality ..."
+    assert _run(api)[-1] == "All required checks completed successfully."
+
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.workflows[1010]["path"] = ".github/workflows/attacker.yml"
+    clock = FakeClock()
     with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
         run_gate(
             _event(api),
@@ -1189,13 +1221,19 @@ def test_hil_gate_is_conditional_on_main_and_configuration() -> None:
     }
     api.workflow_runs[hil_id] = {
         "event": "pull_request",
-        "name": REQUIRED_WORKFLOWS["HIL qualification (opt-in)"],
+        "workflow_id": hil_id,
         "run_attempt": 1,
         "head_sha": api.head_sha,
         "display_title": (
             f"evidence w=hil j=qualification pr={PR_NUMBER} r={OWNER}/{REPO} "
             f"b={api.base_sha} h={api.head_sha} s={TESTED_SHA} a=1"
         ),
+    }
+    api.workflows[hil_id] = {
+        "name": REQUIRED_WORKFLOWS["HIL qualification (opt-in)"],
+        "path": merge_gate.WORKFLOW_PATHS[
+            REQUIRED_WORKFLOWS["HIL qualification (opt-in)"]
+        ],
     }
     api.runs.append(
         {

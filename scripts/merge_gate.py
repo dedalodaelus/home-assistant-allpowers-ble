@@ -40,6 +40,15 @@ REQUIRED_WORKFLOWS = {
     "Analyze Python": "CodeQL",
     "HIL qualification (opt-in)": "HIL qualification",
 }
+WORKFLOW_PATHS = {
+    "CI": ".github/workflows/ci.yml",
+    "HACS": ".github/workflows/hacs.yml",
+    "Hassfest": ".github/workflows/hassfest.yml",
+    "Conventional pull request title": ".github/workflows/conventional-commits.yml",
+    "Dependency review": ".github/workflows/dependency-review.yml",
+    "CodeQL": ".github/workflows/codeql.yml",
+    "HIL qualification": ".github/workflows/hil-qualification.yml",
+}
 REQUIRED_EVIDENCE_IDS = {
     "Python, tests, and release validation": ("ci", "quality"),
     "HACS validation": ("hacs", "validate"),
@@ -75,6 +84,8 @@ class GitHubApi(Protocol):
     def check_runs(self, ref: str) -> list[dict[str, Any]]: ...
 
     def workflow_run(self, run_id: int) -> dict[str, Any]: ...
+
+    def workflow(self, workflow_id: int) -> dict[str, Any]: ...
 
 
 class RestGitHubApi:
@@ -203,6 +214,12 @@ class RestGitHubApi:
             raise GateError("GitHub returned an invalid Actions workflow run.")
         return value
 
+    def workflow(self, workflow_id: int) -> dict[str, Any]:
+        value = self._get(f"{self.repository_path}/actions/workflows/{workflow_id}")
+        if not isinstance(value, dict):
+            raise GateError("GitHub returned an invalid Actions workflow.")
+        return value
+
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -248,6 +265,13 @@ def _has_current_workflow_run(
         workflow_run = api.workflow_run(run_id)
         if not isinstance(workflow_run, dict):
             raise GateError("GitHub returned a malformed Actions workflow run.")
+        workflow_id = workflow_run.get("workflow_id")
+        if isinstance(workflow_id, bool) or not isinstance(workflow_id, int):
+            cache[run_id] = False
+            return False
+        workflow = api.workflow(workflow_id)
+        if not isinstance(workflow, dict):
+            raise GateError("GitHub returned a malformed Actions workflow.")
         expected = (
             f"evidence w={evidence_ids[0]} j={evidence_ids[1]} pr={number} "
             f"r={owner}/{repo} b={base_sha} h={head_sha} s={tested_sha} "
@@ -256,7 +280,8 @@ def _has_current_workflow_run(
         cache[run_id] = (
             workflow_run.get("event") == "pull_request"
             and workflow_run.get("display_title") == expected
-            and workflow_run.get("name") == workflow_name
+            and workflow.get("name") == workflow_name
+            and workflow.get("path") == WORKFLOW_PATHS.get(workflow_name)
             and workflow_run.get("head_sha") == head_sha
         )
     return cache[run_id]
