@@ -641,6 +641,8 @@ def validate_branch_workflow_contract(errors: list[str]) -> None:
             'const isMainToDevelSync = baseRef === "devel" && headRef === "main";',
             "await validateReleaseMetadata(pr.base.sha, headSha, isMainToDevelSync)",
             "compareVersion(headVersion, baseVersion) < 0",
+            "current.data.base.sha !== pr.base.sha",
+            "base commit, or head changed while required checks were being validated",
         ):
             if required not in merge_gate:
                 errors.append(

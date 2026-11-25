@@ -373,9 +373,10 @@ jobs:
                 if (
                   current.data.title !== pr.title
                   || current.data.base.ref !== baseRef
+                  || current.data.base.sha !== pr.base.sha
                   || current.data.head.sha !== headSha
                 ) {
-                  core.setFailed("PR title, base, or head changed while required checks were being validated; rerun the merge gate.");
+                  core.setFailed("PR title, base ref, base commit, or head changed while required checks were being validated; rerun the merge gate.");
                   return;
                 }
                 core.info("All required checks completed successfully.");
