@@ -344,6 +344,33 @@ def test_promotion_requires_unchanged_integration_version() -> None:
         promotion_metadata.validate_version_policy("1.2.3", "1.2.4", "main", "devel")
 
 
+def test_main_to_devel_sync_can_import_newer_release_metadata() -> None:
+    promotion_metadata.validate_version_policy("0.3.0", "1.2.0", "devel", "main")
+    promotion_metadata.validate_release_file_changes(
+        {"CHANGELOG.md", ".release-please-manifest.json"},
+        "devel",
+        "main",
+        same_repository_sync=True,
+    )
+    promotion_metadata.validate_release_please_versions({".": "0.3.0"}, {".": "1.2.0"})
+
+
+def test_sync_file_exception_requires_same_repository_evidence() -> None:
+    with pytest.raises(promotion_metadata.MetadataError, match="CHANGELOG.md"):
+        promotion_metadata.validate_release_file_changes(
+            {"CHANGELOG.md"}, "devel", "main"
+        )
+
+
+def test_main_to_devel_sync_rejects_release_metadata_regression() -> None:
+    with pytest.raises(promotion_metadata.MetadataError, match="regressed"):
+        promotion_metadata.validate_version_policy("1.2.0", "0.3.0", "devel", "main")
+    with pytest.raises(promotion_metadata.MetadataError, match="regressed"):
+        promotion_metadata.validate_release_please_versions(
+            {".": "1.2.0"}, {".": "0.3.0"}
+        )
+
+
 def test_release_please_manifest_cannot_drop_history_or_regress() -> None:
     with pytest.raises(promotion_metadata.MetadataError, match="regressed"):
         promotion_metadata.validate_release_please_versions(

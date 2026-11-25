@@ -1,5 +1,7 @@
 name: CI
 
+run-name: evidence w=ci j=quality pr=${{ github.event.pull_request.number }} r=${{ github.repository }} b=${{ github.event.pull_request.base.sha }} h=${{ github.event.pull_request.head.sha }} s=${{ github.sha }}
+
 on:
   push:
     branches:
@@ -57,6 +59,9 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python scripts/validate_repository.py
+
+      - name: Merge gate behavior tests
+        run: pytest tests/test_merge_gate.py
 
       # GitHub waits for every step in this group before continuing.
       # Keep this group at or below GitHub's ten-step parallel limit.

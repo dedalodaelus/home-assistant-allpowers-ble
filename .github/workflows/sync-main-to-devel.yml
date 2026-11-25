@@ -1,0 +1,45 @@
+name: Sync main to devel
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sync-main-to-devel
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out workflow code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Prepare or reuse reviewed sync PR
+        id: sync
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m scripts.sync_main_to_devel
+
+      - name: Summarize result
+        if: steps.sync.outputs['pull-request-url'] != ''
+        env:
+          PR_URL: ${{ steps.sync.outputs['pull-request-url'] }}
+          MAIN_SHA: ${{ steps.sync.outputs['main-sha'] }}
+          DEVEL_SHA: ${{ steps.sync.outputs['devel-sha'] }}
+        run: |
+          echo "Reviewed main-to-devel sync PR: ${PR_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Observed main ref: ${MAIN_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Observed devel ref: ${DEVEL_SHA}" >> "$GITHUB_STEP_SUMMARY"
