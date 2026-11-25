@@ -1833,10 +1833,14 @@ def _execute_tier_suite(
             reconnect_confirmed = bool(
                 action_row.get("action") == "route interruption and restoration"
                 and action_row.get("operator_confirmed") is True
+                and action_row.get("disconnect_observed") is True
+                and action_row.get("observed_connected") is False
+                and action_row.get("restoration_confirmed") is True
                 and type(before_generation) is int
                 and type(after_generation) is int
                 and after_generation != before_generation
                 and reconnect_row.get("connected") is True
+                and reconnect_row.get("disconnect_observed") is True
                 and reconnect_row.get("status_fresh") is True
                 and reconnect_row.get("fresh_status_telemetry") is True
                 and reconnect_row.get("route_verified") is True
@@ -1848,6 +1852,7 @@ def _execute_tier_suite(
                 passed = False
                 reconnect_reason = (
                     "mandatory reconnect requires a confirmed route interruption, "
+                    "observed disconnect, confirmed restoration, "
                     "changed session generation, fresh status, "
                     "verified route, and positive physical confirmation"
                 )

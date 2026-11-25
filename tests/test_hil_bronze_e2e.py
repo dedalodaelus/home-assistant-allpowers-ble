@@ -19,6 +19,94 @@ from scripts import validate_hil_qualification
 from tests.hil.synthetic_bronze import SyntheticBronzeHA
 
 
+def _start_synthetic_capture(fake: SyntheticBronzeHA, scenario_id: str) -> None:
+    fake.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/start",
+                "entry_id": fake.entry_id,
+                "run_id": "synthetic-run",
+                "scenario_id": scenario_id,
+                "requested_route": "auto",
+            }
+        ]
+    )
+
+
+def _stop_synthetic_capture(fake: SyntheticBronzeHA) -> dict[str, object]:
+    return fake.websocket(
+        [
+            {
+                "type": "allpowers_ble/hil/stop",
+                "entry_id": fake.entry_id,
+                "capture_id": fake.capture_id,
+            }
+        ]
+    )[0]
+
+
+def test_synthetic_reconnect_trace_requires_refresh_in_current_capture() -> None:
+    fake = SyntheticBronzeHA(silver=True)
+    _start_synthetic_capture(fake, "recovery_reconnect")
+
+    fake.request_read_only_refresh("button.synthetic_refresh")
+    refreshed = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in refreshed["frames"]] == [
+        "status_request"
+    ]
+
+    _start_synthetic_capture(fake, "recovery_reconnect")
+    missing_refresh = _stop_synthetic_capture(fake)
+    assert missing_refresh["frames"] == []
+    assert not any(
+        row["event"] in {"write_attempt", "write_ok", "notification_decoded"}
+        for row in missing_refresh["events"]
+    )
+
+    _start_synthetic_capture(fake, "recovery_reconnect")
+    with pytest.raises(AssertionError):
+        fake.request_read_only_refresh("button.wrong_entity")
+    fake.request_read_only_refresh("button.synthetic_refresh")
+    refreshed_again = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in refreshed_again["frames"]] == [
+        "status_request"
+    ]
+
+
+def test_synthetic_output_trace_requires_matching_control_in_current_capture() -> None:
+    fake = SyntheticBronzeHA(silver=True)
+    _start_synthetic_capture(fake, "output_ac_cycle")
+
+    fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
+    controlled = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in controlled["frames"]] == [
+        "output_control"
+    ]
+
+    _start_synthetic_capture(fake, "output_ac_cycle")
+    missing_control = _stop_synthetic_capture(fake)
+    assert missing_control["frames"] == []
+    assert not any(
+        row["event"]
+        in {
+            "write_attempt",
+            "write_ok",
+            "transaction_submitted",
+            "transaction_confirmed",
+        }
+        for row in missing_control["events"]
+    )
+
+    _start_synthetic_capture(fake, "output_ac_cycle")
+    with pytest.raises(AssertionError):
+        fake.call_control("ac_output", "switch.wrong_entity", "on")
+    fake.call_control("ac_output", "switch.synthetic_ac_output", "on")
+    controlled_again = _stop_synthetic_capture(fake)
+    assert [frame["command_type"] for frame in controlled_again["frames"]] == [
+        "output_control"
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -271,6 +359,212 @@ def test_onboard_bronze_runs_the_real_pipeline_in_an_empty_matrix(
         assert "TEST GATE: FAILED" in output
         assert "No ZIP export prompt" in output
         assert fake.state_changing_calls == []
+    assert workspace_matrix.read_bytes() == original_workspace_matrix
+    assert repo_root.is_relative_to(tmp_path)
+    assert run_root.is_relative_to(tmp_path)
+
+
+def test_onboard_silver_runs_acquisition_export_review_and_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exercise actual Silver acquisition, public handoff, review and tier evaluation."""
+    repo_root, matrix_path = _temporary_checkout(tmp_path / "silver-checkout")
+    workspace_matrix = (
+        Path(__file__).resolve().parent / "hil" / "qualification_matrix.json"
+    )
+    original_workspace_matrix = workspace_matrix.read_bytes()
+    monkeypatch.setattr(validate_hil_qualification, "ROOT", repo_root)
+    fake = SyntheticBronzeHA(silver=True)
+    monkeypatch.setattr(cli, "HAClient", lambda *_args, **_kwargs: fake)
+    monkeypatch.setenv("HA_HIL_TOKEN", "SYNTHETIC_PRIVATE_TOKEN")
+
+    class TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", TTY())
+
+    def answer(prompt: str = "") -> str:
+        if prompt == "Desired tier: ":
+            return "2"
+        if prompt.startswith("Action [1]"):
+            fake.recovery_requested = True
+            return "1"
+        if "Type 1 after restoring the same BLE route" in prompt:
+            assert any(
+                not restored and not connected
+                for restored, connected in fake.capability_snapshots
+            ), "recovery must return an explicit disconnected HA snapshot first"
+            fake.disconnected_before_restoration = True
+            fake.restore_requested = True
+            return "1"
+        if "Restore the selected route now" in prompt:
+            assert any(
+                not restored and not connected
+                for restored, connected in fake.capability_snapshots
+            ), "recovery must return an explicit disconnected HA snapshot first"
+            fake.disconnected_before_restoration = True
+            fake.restore_requested = True
+            return "1"
+        if "APPLY IMPORT" in prompt:
+            return "APPLY IMPORT"
+        if "APPLY REVIEW" in prompt:
+            return "APPLY REVIEW"
+        if "EXPORT" in prompt:
+            return "EXPORT"
+        if prompt.startswith("Choose assurance") or prompt.startswith("Review route"):
+            return "1"
+        if "public identifier" in prompt:
+            return "Synthetic test operator"
+        if "[inconclusive/pass]" in prompt:
+            return "pass"
+        if prompt.startswith("Type RUN"):
+            return "RUN"
+        if (
+            "Physical plausibility" in prompt
+            or "Physical outcome" in prompt
+            or "Physical result" in prompt
+            or "Outcome [1-3]" in prompt
+        ):
+            return "1"
+        if "[no/yes]" in prompt:
+            return "yes"
+        if "[y/N]" in prompt:
+            return "yes"
+        if "Type 1" in prompt:
+            return "1"
+        return "yes"
+
+    monkeypatch.setattr(builtins, "input", answer)
+    real_import_review = cli._onboard_import_review
+
+    def import_review(archive: Path, output_dir: Path, requested_tier: str) -> bool:
+        return real_import_review(
+            archive,
+            output_dir,
+            requested_tier,
+            repo_root=repo_root,
+            matrix_path=matrix_path,
+        )
+
+    monkeypatch.setattr(cli, "_onboard_import_review", import_review)
+    output_root = tmp_path / "silver-runs"
+    result = cli.main(
+        ["onboard", "--ha-url", fake.origin, "--output-root", str(output_root)]
+    )
+
+    run_root = next(
+        path for path in output_root.iterdir() if path.name.startswith("20")
+    )
+    execution = json.loads((run_root / "private" / "tier-execution.json").read_text())
+    matrix = json.loads(matrix_path.read_text())
+    output = capsys.readouterr().out
+    assert result == 0, output
+    archive = run_root / "hil-evidence.zip"
+    assert archive.is_file()
+    from scripts.hil.evidence import verify_public_archive
+
+    _manifest, public_members, _archive_digest = verify_public_archive(
+        archive, include_contents=True
+    )
+    public_artifacts = json.loads(public_members["tier-artifacts.json"])["artifacts"]
+    assert {
+        item["content"]["step_id"]
+        for item in public_artifacts
+        if item["content"].get("kind") == "guided_step_evidence"
+    } >= {
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+    }
+    public_execution = json.loads(public_members["tier-execution.json"])
+    assert public_execution["requested_tier"] == "silver"
+    reconnect_step = next(
+        row for row in public_execution["steps"] if row["step_id"] == "basic_reconnect"
+    )
+    assert reconnect_step["outcome"] == "pass"
+    assert reconnect_step["machine_evidence"]
+    assert any(
+        item["content"].get("kind") == "gatt_trace_metadata"
+        and item["content"].get("scenario_id") == "recovery_reconnect"
+        for item in public_artifacts
+    )
+    assert "Requested tier: Silver" in output
+    assert execution["requested_tier"] == "silver"
+    assert execution["execution_tier"] == "silver"
+    assert [row["step_id"] for row in execution["steps"]] == [
+        "read_only_probe",
+        "physical_plausibility_observation",
+        "ac_output_cycle",
+        "dc_output_cycle",
+        "light_output_cycle",
+        "basic_reconnect",
+        "minimum_output_requirement",
+    ]
+    assert all(
+        row["outcome"] == "pass"
+        for row in execution["steps"]
+        if row["step_id"] != "minimum_output_requirement"
+    )
+    child_scenarios = {}
+    for child_run in output_root.glob("tier_*"):
+        scenario_path = child_run / "private" / "scenarios.json"
+        if scenario_path.is_file():
+            scenario = json.loads(scenario_path.read_text())
+            child_scenarios[scenario["scenario_id"]] = scenario
+    for scenario_id, target in (
+        ("output_ac_cycle", "ac_output"),
+        ("output_dc_cycle", "dc_output"),
+        ("output_light_cycle", "light"),
+    ):
+        rows = child_scenarios[scenario_id]["steps"]
+        assert [row["target"] for row in rows] == [target] * 4
+        assert [row["expected"] for row in rows] == ["on", "off", "on", "off"]
+        assert all(isinstance(row.get("transaction"), dict) for row in rows)
+    recovery = child_scenarios["recovery_reconnect"]["steps"]
+    recovered_session = next(
+        row for row in recovery if row["step_id"] == "recovered_session"
+    )
+    assert recovered_session["disconnect_observed"] is True
+    assert recovered_session["session_generation_before"] == 7
+    assert recovered_session["session_generation_after"] == 8
+    assert recovered_session["fresh_status_telemetry"] is True
+    assert recovered_session["route"] == "active_proxy"
+    assert fake.disconnected_before_restoration is True
+    assert all(
+        row["authorization_context"] == "production"
+        and row["authorization_context_source"] == "runtime_production_authorized"
+        for row in execution["steps"][2:5]
+    )
+    assert "experimental_hil_grant" not in json.dumps(execution)
+    assert fake.output_states == {
+        "ac_output": "off",
+        "dc_output": "off",
+        "light": "off",
+    }
+    assert fake.state_changing_calls == [
+        ("call_control", target, value)
+        for target in ("ac_output", "dc_output", "light")
+        for value in ("on", "off", "on", "off")
+    ]
+    assert not any(
+        call[0] == "experimental_output" for call in fake.state_changing_calls
+    )
+
+    imported = matrix["revisions"][0]["runs"][0]
+    errors, _ = validate_hil_qualification.validate_matrix(
+        matrix, matrix_path=matrix_path, require_pass=False, max_age_days=None
+    )
+    assert errors == []
+    assert imported["scenarios"]["reconnect_failover"]["status"] == "pass"
+    tier = evaluate_tiers(matrix)["tiers"][0]
+    assert tier["tier"] == "silver"
+    assert tier["assurance"]["silver"] == "operator_attested"
+    assert "POST-REVIEW QUALIFICATION: attained silver" in output
+    assert fake.state_changing_calls
     assert workspace_matrix.read_bytes() == original_workspace_matrix
     assert repo_root.is_relative_to(tmp_path)
     assert run_root.is_relative_to(tmp_path)
