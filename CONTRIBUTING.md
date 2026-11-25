@@ -149,8 +149,10 @@ The repository uses an explicit promotion model:
   first. The Merge gate accepts required checks only when their Actions run is
   from a `pull_request` event and its immutable run display title records
   workflow/job identity, PR number, repository, base/head SHAs, the checked-out
-  `github.sha` merge revision, and run attempt. Check
-  associations are treated as mutable metadata, not evidence. A base update alone
+  `github.sha` merge revision. The gate reads the latest run attempt from
+  Actions and matches that attempt's required job to its check-run ID; the
+  display title is not used to identify a rerun attempt. Check associations are
+  treated as mutable metadata, not evidence. A base update alone
   may not start every required workflow. Before merging a return PR after `devel`
   advances, a maintainer must close and reopen the PR to trigger fresh
   `reopened` runs, then verify each required check links to a successful workflow

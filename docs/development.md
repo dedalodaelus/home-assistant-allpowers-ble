@@ -315,8 +315,11 @@ ready for deployment until a maintainer approves an ancestry-preserving merge
 policy and a procedure for revalidating against the current base. The Merge gate
 requires each check's Actions workflow run to carry an immutable display title
 that records workflow/job identity, PR number, repository, base/head SHAs, the
-tested `github.sha` merge revision, and run attempt. PR association fields are
-mutable and are not accepted as proof.
+tested `github.sha` merge revision. The gate reads the latest `run_attempt` from
+Actions, fetches jobs for that exact attempt, and matches the required job's
+check-run ID to the check being evaluated. It does not infer a rerun attempt
+from the immutable display title, which can retain the original run name.
+PR association fields are mutable and are not accepted as proof.
 A base update alone may not trigger every required workflow. If `devel` advances,
 a maintainer must close and reopen the PR to trigger fresh `reopened` runs, then
 verify every required check links to a successful run whose display title

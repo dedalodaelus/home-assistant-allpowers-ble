@@ -90,6 +90,8 @@ class FakeApi:
     def _success_runs(self) -> list[dict[str, Any]]:
         values = []
         self.workflow_runs = {}
+        self.workflows = {}
+        self.workflow_jobs = {}
         for index, name in enumerate(REQUIRED_CHECKS, start=10):
             workflow_id = index + 1000
             association = {
@@ -99,18 +101,19 @@ class FakeApi:
             }
             self.workflow_runs[workflow_id] = {
                 "event": "pull_request",
+                "id": workflow_id,
                 "workflow_id": workflow_id,
+                "run_number": index,
                 "run_attempt": 1,
+                "status": "completed",
                 "head_sha": self.head_sha,
                 "display_title": (
                     f"evidence w={REQUIRED_EVIDENCE_IDS[name][0]} "
                     f"j={REQUIRED_EVIDENCE_IDS[name][1]} pr={PR_NUMBER} "
                     f"r={OWNER}/{REPO} b={self.base_sha} h={self.head_sha} "
-                    f"s={TESTED_SHA} a=1"
+                    f"s={TESTED_SHA}"
                 ),
             }
-            if not hasattr(self, "workflows"):
-                self.workflows = {}
             workflow_name = REQUIRED_WORKFLOWS[name]
             self.workflows[workflow_id] = {
                 "name": workflow_name,
@@ -130,6 +133,18 @@ class FakeApi:
                     ),
                 }
             )
+            self.workflow_jobs[(workflow_id, 1)] = [
+                {
+                    "id": workflow_id + 10000,
+                    "run_id": workflow_id,
+                    "name": name,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "check_run_url": (
+                        f"https://api.github.com/repos/{OWNER}/{REPO}/check-runs/{index}"
+                    ),
+                }
+            ]
         return values
 
     def pull_request(self, number: int) -> dict[str, Any]:
@@ -183,6 +198,11 @@ class FakeApi:
 
     def workflow(self, workflow_id: int) -> dict[str, Any]:
         return self.workflows[workflow_id]
+
+    def workflow_run_attempt_jobs(
+        self, run_id: int, attempt: int
+    ) -> list[dict[str, Any]]:
+        return self.workflow_jobs.get((run_id, attempt), [])
 
 
 def _event(api: FakeApi, *, action: str = "opened") -> dict[str, Any]:
@@ -769,7 +789,7 @@ def test_api_failure_and_malformed_check_response_fail_closed() -> None:
         _run(api)
 
     api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
-    api.runs[0]["status"] = "mystery"
+    api.workflow_jobs[(1010, 1)][0]["status"] = "mystery"
     with pytest.raises(GateError, match="malformed status"):
         _run(api)
 
@@ -824,6 +844,60 @@ def test_rest_api_paginates_check_runs_and_uses_read_only_get_requests(
         parse_qs(urlparse(request.full_url).query)["filter"] == ["all"]
         for request in requests
     )
+
+
+def test_rest_api_reads_jobs_for_the_exact_workflow_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        {"jobs": [{"id": index} for index in range(100)]},
+        {"jobs": [{"id": 100}]},
+    ]
+    requests: list[Any] = []
+
+    class Response:
+        headers: dict[str, str] = {}
+
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode()
+
+    def fake_urlopen(request: Any, timeout: int) -> Response:
+        assert timeout == 30
+        requests.append(request)
+        return Response(responses.pop(0))
+
+    monkeypatch.setattr(merge_gate, "urlopen", fake_urlopen)
+    api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
+
+    jobs = api.workflow_run_attempt_jobs(1010, 2)
+
+    assert len(jobs) == 101
+    assert [urlparse(request.full_url).path for request in requests] == [
+        "/repos/owner/repo/actions/runs/1010/attempts/2/jobs",
+        "/repos/owner/repo/actions/runs/1010/attempts/2/jobs",
+    ]
+    assert [
+        parse_qs(urlparse(request.full_url).query)["page"] for request in requests
+    ] == [
+        ["1"],
+        ["2"],
+    ]
+    assert all(request.get_method() == "GET" for request in requests)
+    assert all(
+        request.get_header("Authorization") == "Bearer read-only-test-token"
+        for request in requests
+    )
+    with pytest.raises(GateError, match="must be positive"):
+        api.workflow_run_attempt_jobs(1010, 0)
 
 
 def test_rest_api_paginates_pull_request_files(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1001,8 +1075,25 @@ def test_newer_pending_or_failed_current_run_cannot_be_hidden(
         "conclusion": conclusion,
         "details_url": "https://github.com/owner/repo/actions/runs/9999/job/1",
     }
-    api.runs = [old, newer]
-    api.workflow_runs[9999] = api.workflow_runs[old["id"] + 1000]
+    api.runs = [*api.runs, newer]
+    api.workflow_runs[9999] = {
+        **api.workflow_runs[old["id"] + 1000],
+        "id": 9999,
+        "workflow_id": api.workflow_runs[old["id"] + 1000]["workflow_id"],
+        "run_number": 999,
+    }
+    api.workflows[9999] = api.workflows[old["id"] + 1000]
+    api.workflow_jobs[(9999, 1)] = [
+        {
+            **api.workflow_jobs[(old["id"] + 1000, 1)][0],
+            "id": 10999,
+            "run_id": 9999,
+            "status": status,
+            "conclusion": conclusion,
+            "check_run_url": "https://api.github.com/repos/owner/repo/check-runs/510",
+        }
+    ]
+    newer["id"] = 510
 
     if conclusion is not None:
         with pytest.raises(GateError, match="Required checks failed"):
@@ -1021,6 +1112,330 @@ def test_newer_pending_or_failed_current_run_cannot_be_hidden(
                 sleep=sleeps.append,
             )
         assert sleeps == [15]
+
+
+def _add_ci_attempt(
+    api: FakeApi,
+    *,
+    attempt: int,
+    status: str,
+    conclusion: str | None,
+    add_check_run: bool = True,
+) -> dict[str, Any]:
+    run_id = 1010
+    check_id = 510 + attempt
+    workflow_run = api.workflow_runs[run_id]
+    workflow_run["run_attempt"] = attempt
+    workflow_run["status"] = "completed" if status == "completed" else "in_progress"
+    candidate = {
+        **next(run for run in api.runs if run["name"] == REQUIRED_CHECKS[0]),
+        "id": check_id,
+        "status": status,
+        "conclusion": conclusion,
+        "details_url": f"https://github.com/{OWNER}/{REPO}/actions/runs/{run_id}/job/{attempt}",
+    }
+    if add_check_run:
+        api.runs.append(candidate)
+    api.workflow_jobs[(run_id, attempt)] = [
+        {
+            "id": 20000 + attempt,
+            "run_id": run_id,
+            "name": REQUIRED_CHECKS[0],
+            "status": status,
+            "conclusion": conclusion,
+            "check_run_url": (
+                f"https://api.github.com/repos/{OWNER}/{REPO}/check-runs/{check_id}"
+            ),
+        }
+    ]
+    return candidate
+
+
+def test_same_workflow_run_retry_without_job_does_not_reuse_attempt_one_success() -> (
+    None
+):
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.workflow_runs[1010]["run_attempt"] = 2
+    api.workflow_runs[1010]["status"] = "in_progress"
+    messages: list[str] = []
+    sleeps: list[float] = []
+    clock = FakeClock()
+
+    with pytest.raises(GateError, match="Timeout waiting"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=messages.append,
+            now=clock.now,
+            sleep=lambda seconds: (
+                sleeps.append(seconds),
+                clock.sleep_to_timeout(seconds),
+            ),
+        )
+
+    assert sleeps == [15]
+    assert any(
+        "Python, tests, and release validation (current attempt job not yet available)"
+        in message
+        for message in messages
+    )
+    assert not any(
+        "All required checks completed successfully." in message for message in messages
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "conclusion"),
+    [
+        ("in_progress", None),
+        ("completed", "failure"),
+        ("completed", "cancelled"),
+        ("completed", "timed_out"),
+    ],
+)
+def test_current_retry_job_controls_gate_when_all_other_checks_are_green(
+    status: str, conclusion: str | None
+) -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    _add_ci_attempt(api, attempt=2, status=status, conclusion=conclusion)
+    messages: list[str] = []
+    clock = FakeClock()
+
+    if conclusion is not None:
+        with pytest.raises(GateError, match="Python, tests, and release validation"):
+            run_gate(
+                _event(api),
+                api,
+                OWNER,
+                REPO,
+                log=messages.append,
+            )
+        assert any(
+            "Failed: Python, tests, and release validation" in msg for msg in messages
+        )
+    else:
+        sleeps: list[float] = []
+        with pytest.raises(GateError, match="Timeout waiting"):
+            run_gate(
+                _event(api),
+                api,
+                OWNER,
+                REPO,
+                log=messages.append,
+                now=clock.now,
+                sleep=lambda seconds: (
+                    sleeps.append(seconds),
+                    clock.sleep_to_timeout(seconds),
+                ),
+            )
+        assert sleeps == [15]
+        assert any(
+            "Pending: Python, tests, and release validation" in msg for msg in messages
+        )
+    assert not any(
+        "All required checks completed successfully." in msg for msg in messages
+    )
+
+
+def test_current_retry_job_can_transition_from_pending_to_success() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    _add_ci_attempt(api, attempt=2, status="in_progress", conclusion=None)
+    success_job = {
+        **api.workflow_jobs[(1010, 2)][0],
+        "status": "completed",
+        "conclusion": "success",
+    }
+    reads = 0
+
+    def jobs_for_attempt(run_id: int, attempt: int) -> list[dict[str, Any]]:
+        nonlocal reads
+        if (run_id, attempt) != (1010, 2):
+            return api.workflow_jobs[(run_id, attempt)]
+        reads += 1
+        if reads == 1:
+            return []
+        api.workflow_runs[1010]["status"] = "completed"
+        return [success_job]
+
+    api.workflow_run_attempt_jobs = jobs_for_attempt  # type: ignore[method-assign]
+    clock = FakeClock()
+    messages: list[str] = []
+
+    run_gate(
+        _event(api),
+        api,
+        OWNER,
+        REPO,
+        log=messages.append,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert reads == 2
+    assert clock.value == 15
+    assert any(
+        "Pending: Python, tests, and release validation" in msg for msg in messages
+    )
+    assert messages[-1] == "All required checks completed successfully."
+
+
+def test_attempt_advance_during_final_recheck_invalidates_cached_success() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.workflow_jobs[(1010, 1)][0]["status"] = "completed"
+    api.workflow_jobs[(1010, 1)][0]["conclusion"] = "success"
+    run_reads: dict[int, int] = {}
+    check_reads = 0
+    original_workflow_run = api.workflow_run
+
+    def workflow_run(run_id: int) -> dict[str, Any]:
+        run_reads[run_id] = run_reads.get(run_id, 0) + 1
+        if run_id == 1010 and run_reads[run_id] == 2:
+            api.workflow_runs[1010]["run_attempt"] = 2
+            api.workflow_runs[1010]["status"] = "in_progress"
+        return original_workflow_run(run_id)
+
+    def check_runs(ref: str) -> list[dict[str, Any]]:
+        nonlocal check_reads
+        check_reads += 1
+        return api.runs
+
+    api.workflow_run = workflow_run  # type: ignore[method-assign]
+    api.check_runs = check_runs  # type: ignore[method-assign]
+    messages: list[str] = []
+    clock = FakeClock()
+    sleeps: list[float] = []
+
+    def advance_clock(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            clock.sleep(seconds)
+        else:
+            clock.sleep_to_timeout(seconds)
+
+    with pytest.raises(GateError, match="Timeout waiting"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=messages.append,
+            now=clock.now,
+            sleep=advance_clock,
+        )
+
+    assert check_reads == 2
+    assert sleeps == [15, 15]
+    assert any("attempt/evidence changed from 1 to 2" in msg for msg in messages)
+    assert any("current attempt job not yet available" in msg for msg in messages)
+    assert not any(
+        "All required checks completed successfully." in msg for msg in messages
+    )
+
+
+def test_latest_workflow_run_with_pending_retry_blocks_older_run_success() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    old_ci = next(run for run in api.runs if run["name"] == REQUIRED_CHECKS[0])
+    newer_run_id = 9999
+    newer_check_id = 900
+    api.workflow_runs[newer_run_id] = {
+        **api.workflow_runs[1010],
+        "id": newer_run_id,
+        "run_number": 20,
+        "run_attempt": 2,
+        "status": "in_progress",
+    }
+    newer = {
+        **old_ci,
+        "id": newer_check_id,
+        "status": "completed",
+        "conclusion": "success",
+        "details_url": (
+            f"https://github.com/{OWNER}/{REPO}/actions/runs/{newer_run_id}/job/1"
+        ),
+    }
+    api.runs.append(newer)
+    api.workflow_jobs[(newer_run_id, 2)] = []
+    messages: list[str] = []
+    clock = FakeClock()
+
+    with pytest.raises(GateError, match="Timeout waiting"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=messages.append,
+            now=clock.now,
+            sleep=clock.sleep_to_timeout,
+        )
+
+    assert any(
+        "Pending: Python, tests, and release validation (current attempt job not yet available)"
+        in message
+        for message in messages
+    )
+    assert not any(
+        "All required checks completed successfully." in msg for msg in messages
+    )
+
+
+@pytest.mark.parametrize("attempt", [None, 0, True, "2"])
+def test_malformed_current_run_attempt_cannot_satisfy_gate(attempt: Any) -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.workflow_runs[1010]["run_attempt"] = attempt
+    clock = FakeClock()
+
+    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=lambda _message: None,
+            now=clock.now,
+            sleep=clock.sleep_to_missing_grace,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("name", "unrelated job"),
+        ("run_id", 9999),
+        ("check_run_url", "https://api.github.com/repos/owner/repo/check-runs/9999"),
+        ("id", 0),
+    ],
+)
+def test_job_identity_must_match_the_selected_run_attempt_and_check(
+    field: str, value: Any
+) -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    _add_ci_attempt(api, attempt=2, status="completed", conclusion="success")
+    api.workflow_jobs[(1010, 2)][0][field] = value
+    clock = FakeClock()
+
+    with pytest.raises(GateError, match="Missing required checks after 10 minutes"):
+        run_gate(
+            _event(api),
+            api,
+            OWNER,
+            REPO,
+            log=lambda _message: None,
+            now=clock.now,
+            sleep=clock.sleep_to_missing_grace,
+        )
+
+
+def test_attempt_jobs_api_error_fails_closed() -> None:
+    api = FakeApi(head_ref="feature/docs", files=[{"filename": "README.md"}])
+    api.workflow_run_attempt_jobs = lambda *_args: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        GateError("Actions attempt endpoint unavailable")
+    )
+
+    with pytest.raises(GateError, match="attempt endpoint unavailable"):
+        _run(api)
 
 
 class FakeClock:
@@ -1221,12 +1636,15 @@ def test_hil_gate_is_conditional_on_main_and_configuration() -> None:
     }
     api.workflow_runs[hil_id] = {
         "event": "pull_request",
+        "id": hil_id,
         "workflow_id": hil_id,
+        "run_number": 999,
         "run_attempt": 1,
+        "status": "completed",
         "head_sha": api.head_sha,
         "display_title": (
             f"evidence w=hil j=qualification pr={PR_NUMBER} r={OWNER}/{REPO} "
-            f"b={api.base_sha} h={api.head_sha} s={TESTED_SHA} a=1"
+            f"b={api.base_sha} h={api.head_sha} s={TESTED_SHA}"
         ),
     }
     api.workflows[hil_id] = {
@@ -1235,6 +1653,16 @@ def test_hil_gate_is_conditional_on_main_and_configuration() -> None:
             REQUIRED_WORKFLOWS["HIL qualification (opt-in)"]
         ],
     }
+    api.workflow_jobs[(hil_id, 1)] = [
+        {
+            "id": 10999,
+            "run_id": hil_id,
+            "name": "HIL qualification (opt-in)",
+            "status": "completed",
+            "conclusion": "success",
+            "check_run_url": f"https://api.github.com/repos/{OWNER}/{REPO}/check-runs/{hil_id}",
+        }
+    ]
     api.runs.append(
         {
             "id": hil_id,
@@ -1304,7 +1732,7 @@ def test_workflow_wiring_preserves_gate_contract_without_privileged_checkout() -
             f"evidence w={evidence_id[0]} j={evidence_id[1]} "
         )
         assert "${{ github.sha }}" in evidence_workflow["run-name"]
-        assert "${{ github.run_attempt }}" in evidence_workflow["run-name"]
+        assert "github.run_attempt" not in evidence_workflow["run-name"]
         if name != "hil-qualification":
             pr_config = evidence_workflow["on"]["pull_request"]
             types = (

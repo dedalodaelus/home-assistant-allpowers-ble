@@ -41,8 +41,10 @@
   merge policy and current-base revalidation procedure. The Merge gate requires
   an Actions run display title that binds each required check to its workflow/job
   identity, PR number, repository, exact base/head SHAs, tested `github.sha`
-  merge revision, and run attempt. Mutable PR association fields do not establish
-  this evidence. If `devel` advances, close and reopen the PR to trigger fresh
+  merge revision. The latest run attempt is read from Actions and tied to the
+  named job through that attempt's jobs endpoint and matching check-run ID;
+  the display title does not claim to identify a rerun attempt. Mutable PR
+  association fields do not establish this evidence. If `devel` advances, close and reopen the PR to trigger fresh
   `reopened` runs; verify each required check links to a successful run with the
   current revision evidence and confirm the Merge gate completed for that merge
   revision. This manual procedure is not enforced by branch protection.

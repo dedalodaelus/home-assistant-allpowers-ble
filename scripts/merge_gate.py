@@ -87,6 +87,10 @@ class GitHubApi(Protocol):
 
     def workflow(self, workflow_id: int) -> dict[str, Any]: ...
 
+    def workflow_run_attempt_jobs(
+        self, run_id: int, attempt: int
+    ) -> list[dict[str, Any]]: ...
+
 
 class RestGitHubApi:
     """GitHub REST client using only Python's standard library."""
@@ -220,6 +224,16 @@ class RestGitHubApi:
             raise GateError("GitHub returned an invalid Actions workflow.")
         return value
 
+    def workflow_run_attempt_jobs(
+        self, run_id: int, attempt: int
+    ) -> list[dict[str, Any]]:
+        if run_id <= 0 or attempt <= 0:
+            raise GateError("Actions run ID and attempt must be positive integers.")
+        return self._all_pages(
+            f"{self.repository_path}/actions/runs/{run_id}/attempts/{attempt}/jobs",
+            "jobs",
+        )
+
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -242,7 +256,7 @@ def _workflow_run_id(details_url: Any, owner: str, repo: str) -> int | None:
         return None
 
 
-def _has_current_workflow_run(
+def _current_workflow_run(
     api: GitHubApi,
     run: dict[str, Any],
     owner: str,
@@ -252,39 +266,106 @@ def _has_current_workflow_run(
     head_sha: str,
     tested_sha: str,
     check_name: str,
-    cache: dict[int, bool],
-) -> bool:
+    workflow_cache: dict[int, dict[str, Any]],
+) -> dict[str, Any] | None:
     workflow_name = REQUIRED_WORKFLOWS.get(check_name)
     evidence_ids = REQUIRED_EVIDENCE_IDS.get(check_name)
     if workflow_name is None or evidence_ids is None:
-        return False
+        return None
     run_id = _workflow_run_id(run.get("details_url"), owner, repo)
     if run_id is None:
-        return False
-    if run_id not in cache:
-        workflow_run = api.workflow_run(run_id)
-        if not isinstance(workflow_run, dict):
-            raise GateError("GitHub returned a malformed Actions workflow run.")
-        workflow_id = workflow_run.get("workflow_id")
-        if isinstance(workflow_id, bool) or not isinstance(workflow_id, int):
-            cache[run_id] = False
-            return False
+        return None
+    workflow_run = api.workflow_run(run_id)
+    if not isinstance(workflow_run, dict):
+        raise GateError("GitHub returned a malformed Actions workflow run.")
+    if workflow_run.get("id") != run_id:
+        return None
+    workflow_id = workflow_run.get("workflow_id")
+    if isinstance(workflow_id, bool) or not isinstance(workflow_id, int):
+        return None
+    workflow = workflow_cache.get(workflow_id)
+    if workflow is None:
         workflow = api.workflow(workflow_id)
         if not isinstance(workflow, dict):
             raise GateError("GitHub returned a malformed Actions workflow.")
-        expected = (
-            f"evidence w={evidence_ids[0]} j={evidence_ids[1]} pr={number} "
-            f"r={owner}/{repo} b={base_sha} h={head_sha} s={tested_sha} "
-            f"a={workflow_run.get('run_attempt')}"
+        workflow_cache[workflow_id] = workflow
+    attempt = workflow_run.get("run_attempt")
+    run_number = workflow_run.get("run_number")
+    if (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt <= 0
+        or isinstance(run_number, bool)
+        or not isinstance(run_number, int)
+        or run_number <= 0
+    ):
+        return None
+    if workflow_run.get("status") not in {"queued", "in_progress", "completed"}:
+        return None
+    expected = (
+        f"evidence w={evidence_ids[0]} j={evidence_ids[1]} pr={number} "
+        f"r={owner}/{repo} b={base_sha} h={head_sha} s={tested_sha}"
+    )
+    if not (
+        workflow_run.get("event") == "pull_request"
+        and workflow_run.get("display_title") == expected
+        and workflow.get("name") == workflow_name
+        and workflow.get("path") == WORKFLOW_PATHS.get(workflow_name)
+        and workflow_run.get("head_sha") == head_sha
+    ):
+        return None
+    return workflow_run
+
+
+def _check_run_id_from_url(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.search(r"/check-runs/(\d+)$", urlparse(value).path)
+    return int(match.group(1)) if match else None
+
+
+def _job_for_current_attempt(
+    api: GitHubApi,
+    owner: str,
+    repo: str,
+    run_id: int,
+    attempt: int,
+    check_name: str,
+    check_runs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    jobs = api.workflow_run_attempt_jobs(run_id, attempt)
+    if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
+        raise GateError(
+            f"GitHub returned malformed jobs for workflow run {run_id} attempt {attempt}."
         )
-        cache[run_id] = (
-            workflow_run.get("event") == "pull_request"
-            and workflow_run.get("display_title") == expected
-            and workflow.get("name") == workflow_name
-            and workflow.get("path") == WORKFLOW_PATHS.get(workflow_name)
-            and workflow_run.get("head_sha") == head_sha
+    candidates = {
+        check.get("id")
+        for check in check_runs
+        if _workflow_run_id(check.get("details_url"), owner, repo) == run_id
+    }
+    matching = [job for job in jobs if job.get("name") == check_name]
+    if len(matching) > 1:
+        raise GateError(
+            f"Workflow run {run_id} attempt {attempt} has multiple {check_name!r} jobs."
         )
-    return cache[run_id]
+    if not matching:
+        return None
+    job = matching[0]
+    job_id = job.get("id")
+    job_run_id = job.get("run_id")
+    check_run_id = _check_run_id_from_url(job.get("check_run_url"))
+    if (
+        isinstance(job_id, bool)
+        or not isinstance(job_id, int)
+        or job_id <= 0
+        or isinstance(job_run_id, bool)
+        or not isinstance(job_run_id, int)
+        or job_run_id != run_id
+        or check_run_id is None
+        or check_run_id not in candidates
+    ):
+        return None
+    return job
 
 
 def _validate_release_metadata(
@@ -488,14 +569,17 @@ def run_gate(
         log("REQUIRE_HIL_STABLE_GATE=true; enforcing HIL qualification check.")
 
     started = now()
-    workflow_evidence: dict[int, bool] = {}
     while True:
         elapsed = now() - started
         if elapsed > TIMEOUT_SECONDS:
             raise GateError("Timeout waiting for required checks to complete.")
 
         runs = api.check_runs(head_sha)
-        latest: dict[str, dict[str, Any]] = {}
+        if not isinstance(runs, list):
+            raise GateError("GitHub returned a malformed check-run list.")
+        workflow_cache: dict[int, dict[str, Any]] = {}
+        workflow_runs: dict[int, dict[str, Any]] = {}
+        applicable: dict[str, dict[int, list[dict[str, Any]]]] = {}
         for candidate in runs:
             if not isinstance(candidate, dict):
                 raise GateError("GitHub returned a malformed check-run entry.")
@@ -504,7 +588,20 @@ def run_gate(
                 candidate.get("head_sha") != head_sha
                 or not isinstance(name, str)
                 or name not in REQUIRED_WORKFLOWS
-                or not _has_current_workflow_run(
+            ):
+                continue
+            candidate_id = candidate.get("id")
+            if (
+                isinstance(candidate_id, bool)
+                or not isinstance(candidate_id, int)
+                or candidate_id <= 0
+            ):
+                raise GateError(f"Check run {name!r} has a missing or invalid ID.")
+            run_id = _workflow_run_id(candidate.get("details_url"), owner, repo)
+            if run_id is None:
+                continue
+            if run_id not in workflow_runs:
+                revision = _current_workflow_run(
                     api,
                     candidate,
                     owner,
@@ -514,16 +611,66 @@ def run_gate(
                     head_sha,
                     tested_sha,
                     name,
-                    workflow_evidence,
+                    workflow_cache,
                 )
+                if revision is None:
+                    continue
+                workflow_runs[run_id] = revision
+            applicable.setdefault(name, {}).setdefault(run_id, []).append(candidate)
+
+        latest: dict[str, dict[str, Any]] = {}
+        selected_attempts: dict[str, tuple[int, int]] = {}
+        selected_runs: dict[str, dict[str, Any]] = {}
+        for name, runs_by_id in applicable.items():
+            selected_run_id = max(
+                runs_by_id,
+                key=lambda run_id: (
+                    workflow_runs[run_id]["run_number"],
+                    run_id,
+                ),
+            )
+            run_metadata = workflow_runs[selected_run_id]
+            attempt = run_metadata["run_attempt"]
+            selected_attempts[name] = (selected_run_id, attempt)
+            selected_runs[name] = run_metadata
+            job = _job_for_current_attempt(
+                api,
+                owner,
+                repo,
+                selected_run_id,
+                attempt,
+                name,
+                runs_by_id[selected_run_id],
+            )
+            if job is not None:
+                latest[name] = job
+
+        changed_attempts: list[str] = []
+        for name, (run_id, attempt) in selected_attempts.items():
+            current_run = api.workflow_run(run_id)
+            if not isinstance(current_run, dict):
+                raise GateError("GitHub returned a malformed Actions workflow run.")
+            current_attempt = current_run.get("run_attempt")
+            selected_run = selected_runs[name]
+            if (
+                isinstance(current_attempt, bool)
+                or not isinstance(current_attempt, int)
+                or current_attempt <= 0
+                or current_attempt != attempt
+                or current_run.get("id") != run_id
+                or current_run.get("workflow_id") != selected_run.get("workflow_id")
+                or current_run.get("head_sha") != head_sha
+                or current_run.get("display_title") != selected_run.get("display_title")
             ):
-                continue
-            candidate_id = candidate.get("id")
-            if isinstance(candidate_id, bool) or not isinstance(candidate_id, int):
-                raise GateError(f"Check run {name!r} has a missing or invalid ID.")
-            previous = latest.get(name)
-            if previous is None or candidate_id > previous["id"]:
-                latest[name] = candidate
+                changed_attempts.append(
+                    f"{name} (workflow run {run_id} attempt/evidence changed "
+                    f"from {attempt} to {current_attempt!r})"
+                )
+        if changed_attempts:
+            log("Pending: " + ", ".join(changed_attempts))
+            sleep(POLL_INTERVAL_SECONDS)
+            continue
+
         missing: list[str] = []
         pending: list[str] = []
         failed: list[str] = []
@@ -532,7 +679,14 @@ def run_gate(
                 continue
             check = latest.get(name)
             if check is None:
-                missing.append(name)
+                selected = selected_runs.get(name)
+                if selected is not None and selected.get("status") in {
+                    "queued",
+                    "in_progress",
+                }:
+                    pending.append(f"{name} (current attempt job not yet available)")
+                else:
+                    missing.append(name)
                 continue
             status = check.get("status")
             if status not in {"queued", "in_progress", "completed"}:
