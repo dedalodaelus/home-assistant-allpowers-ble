@@ -338,7 +338,7 @@ jobs:
               ) {
                 return false;
               }
-              const runId = /^\/(\d+)(?:\/|$)/.exec(
+              const runId = /^(\d+)(?:\/|$)/.exec(
                 detailsUrl.pathname.slice(expectedRepositoryPath.length)
               )?.[1];
               if (!runId) return false;
