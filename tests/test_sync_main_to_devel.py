@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from unittest.mock import patch
 
 import pytest
@@ -231,6 +233,73 @@ def test_sync_pr_creation_has_correct_direction_and_traceable_refs(
     assert divergent_repo["devel_sha"] in body
     assert "preserving both branch histories" in body
     assert "not CI or merge-validation results" in body
+
+
+@pytest.mark.parametrize("pr_survives_interrupted_post", [True, False])
+def test_interrupted_post_uses_real_rest_client_and_reconciles_once(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    pr_survives_interrupted_post: bool,
+) -> None:
+    """An interrupted POST is reconciled through real REST and local Git."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    url = "https://github.com/owner/repo/pull/42"
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    created: list[bool] = []
+    posts: list[dict[str, object]] = []
+
+    class JsonResponse:
+        headers: dict[str, str] = {}
+
+        def __init__(self, value: object, *, interrupted: bool = False) -> None:
+            self.value = value
+            self.interrupted = interrupted
+
+        def __enter__(self) -> JsonResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            if self.interrupted:
+                raise IncompleteRead(b"partial-json", 100)
+            return json.dumps(self.value).encode()
+
+    def open_request(request: Any, timeout: float) -> JsonResponse:
+        assert timeout == 30
+        method = request.get_method()
+        path = urlparse(request.full_url).path
+        if method == "GET" and path.endswith("/pulls"):
+            values = [pr] if created and pr_survives_interrupted_post else []
+            return JsonResponse(values)
+        if method == "GET" and path.endswith("/pulls/42"):
+            if pr_survives_interrupted_post and created:
+                return JsonResponse(pr)
+            raise AssertionError("detail lookup must not occur without a candidate")
+        if method == "POST" and path.endswith("/pulls"):
+            posts.append(json.loads(request.data))
+            created.append(True)
+            return JsonResponse({}, interrupted=True)
+        raise AssertionError(f"Unexpected GitHub request: {method} {path}")
+
+    monkeypatch.setattr(github_api, "urlopen", open_request)
+    remote_before = _remote_shas(divergent_repo["repo"])
+
+    if pr_survives_interrupted_post:
+        result = sync_main_to_devel.prepare_sync()
+        assert result.url == url
+        assert result.main_sha == divergent_repo["main_sha"]
+        assert result.devel_sha == divergent_repo["devel_sha"]
+    else:
+        with pytest.raises(SyncError, match="IncompleteRead"):
+            sync_main_to_devel.prepare_sync()
+
+    assert len(posts) == 1
+    assert posts[0]["base"] == "devel"
+    assert posts[0]["head"] == "main"
+    assert posts[0]["draft"] is False
+    assert _remote_shas(divergent_repo["repo"]) == remote_before
 
 
 def test_real_merge_preserves_main_ancestry_release_data_and_devel_fields(

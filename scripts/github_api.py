@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from http.client import HTTPException
 import json
 from typing import Any, Literal, overload
 from urllib.error import HTTPError, URLError
@@ -93,7 +94,15 @@ class GitHubApiClient:
             json.JSONDecodeError,
         ) as error:
             raise GitHubApiError(
-                f"GitHub API request failed for {path}: {type(error).__name__}."
+                f"GitHub API request failed for {path} ({method}): "
+                f"{type(error).__name__}."
+            ) from error
+        except (HTTPException, OSError) as error:
+            # Interrupted reads and disconnected sockets make POST outcomes
+            # ambiguous; normalize them so callers can reconcile with GETs.
+            raise GitHubApiError(
+                f"GitHub API request failed for {path} ({method}): "
+                f"{type(error).__name__}."
             ) from error
 
     def _get(self, path: str, **query: str | int) -> Any:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from http.client import IncompleteRead, RemoteDisconnected
 import json
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -168,6 +169,48 @@ def test_api_failure_and_timeout_do_not_expose_token(
     monkeypatch.setattr(github_api, "urlopen", timeout)
     with pytest.raises(GitHubApiError, match="URLError"):
         api.pull_request(1)
+
+
+def test_interrupted_response_body_is_normalized_without_partial_data_or_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "secret-token-sentinel"
+    api = GitHubApiClient("owner", "repo", token, "https://api.github.com")
+
+    class InterruptedBody(Response):
+        def read(self) -> bytes:
+            raise IncompleteRead(b"partial-secret-response", 100)
+
+    monkeypatch.setattr(
+        github_api, "urlopen", lambda *_args, **_kwargs: InterruptedBody({})
+    )
+    with pytest.raises(GitHubApiError, match="request failed.*IncompleteRead") as error:
+        api.pull_request(42)
+
+    assert token not in str(error.value)
+    assert "partial-secret-response" not in str(error.value)
+    assert "(GET)" in str(error.value)
+    assert "/repos/owner/repo/pulls/42" in str(error.value)
+
+
+def test_disconnected_response_is_normalized_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "secret-token-sentinel"
+    api = GitHubApiClient("owner", "repo", token, "https://api.github.com")
+
+    def disconnected(*_args: object, **_kwargs: object) -> None:
+        raise RemoteDisconnected("peer disconnected")
+
+    monkeypatch.setattr(github_api, "urlopen", disconnected)
+    with pytest.raises(
+        GitHubApiError, match="request failed.*RemoteDisconnected"
+    ) as error:
+        api.pull_request(42)
+
+    assert token not in str(error.value)
+    assert "peer disconnected" not in str(error.value)
+    assert "(GET)" in str(error.value)
 
 
 def test_client_uses_existing_actions_and_local_cli_token_names(

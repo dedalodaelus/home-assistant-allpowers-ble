@@ -62,6 +62,7 @@ class FakeGitHubApi:
         self.pulls = pulls or []
         self.created: dict[str, object] | None = None
         self.create_args: dict[str, object] | None = None
+        self.create_call_count = 0
         self.detail: dict[str, object] | None = None
         self.create_error: Exception | None = None
 
@@ -69,6 +70,7 @@ class FakeGitHubApi:
         return self.pulls
 
     def create_pull_request(self, **kwargs: object) -> dict[str, object]:
+        self.create_call_count += 1
         self.create_args = kwargs
         if self.create_error is not None:
             raise self.create_error
@@ -297,11 +299,17 @@ def test_prepare_promotion_rejects_refs_moving_before_pr_creation() -> None:
         promote_devel.prepare_promotion(TEMPLATE)
 
 
-def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
+@pytest.mark.parametrize("changed_sha", ["none", "head", "base"])
+def test_prepare_promotion_checks_each_sha_independently(changed_sha: str) -> None:
     opened = iter([None, None])
     api = FakeGitHubApi()
-    api.created = _rest_pr(3, True, "head", "base")
-    api.detail = _rest_pr(3, True, "new-head", "base")
+    api.created = _rest_pr(3, True, "devel", "main")
+    api.detail = _rest_pr(
+        3,
+        True,
+        "new-head" if changed_sha == "head" else "devel",
+        "new-base" if changed_sha == "base" else "main",
+    )
     with (
         patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
         patch.object(
@@ -318,9 +326,13 @@ def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
         patch.object(promote_devel, "client_from_env", return_value=api),
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
-        pytest.raises(PromotionError, match="validated revisions"),
     ):
-        promote_devel.prepare_promotion(TEMPLATE)
+        if changed_sha == "none":
+            assert promote_devel.prepare_promotion(TEMPLATE) == api.created["html_url"]
+        else:
+            with pytest.raises(PromotionError, match="validated revisions"):
+                promote_devel.prepare_promotion(TEMPLATE)
+    assert api.create_call_count == 1
 
 
 @pytest.mark.parametrize(
