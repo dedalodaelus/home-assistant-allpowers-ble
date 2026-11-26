@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import re
-import subprocess
 import sys
 from typing import Any
+
+from scripts.git import (
+    GIT_COMMAND_TIMEOUT_SECONDS,
+    GitExecutionError,
+    decode_git_output,
+    require_success,
+    run_git,
+)
 
 SEMVER = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
@@ -180,26 +188,22 @@ def validate_release_file_changes(
 
 
 def _git_text(revision: str, path: str) -> str:
-    result = subprocess.run(
-        ["git", "show", f"{revision}:{path}"],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    return result.stdout
+    args = ["show", f"{revision}:{path}"]
+    result = run_git(args, cwd=Path.cwd(), timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+    return decode_git_output(require_success(result, args))
 
 
 def _changed_paths(base_sha: str, head_sha: str) -> set[str]:
-    result = subprocess.run(
-        ["git", "diff", "--name-status", "-M", "-z", base_sha, head_sha, "--"],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    args = ["diff", "--name-status", "-M", "-z", base_sha, head_sha, "--"]
+    result = run_git(args, cwd=Path.cwd(), timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+    output = require_success(result, args).split(b"\0")
     paths: set[str] = set()
-    fields = result.stdout.split("\0")
+    try:
+        fields = [field.decode("utf-8") for field in output]
+    except UnicodeDecodeError as error:
+        raise MetadataError(
+            "Git returned a non-UTF-8 path during release validation."
+        ) from error
     index = 0
     while index < len(fields) - 1:
         status = fields[index]
@@ -228,7 +232,7 @@ def validate_revisions(
         head_release_versions = json.loads(_git_text(head_sha, RELEASE_MANIFEST))
         base_changelog = _git_text(base_sha, CHANGELOG)
         head_changelog = _git_text(head_sha, CHANGELOG)
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as error:
+    except (GitExecutionError, json.JSONDecodeError) as error:
         raise MetadataError(
             f"Cannot read integration manifest at PR base/head revisions: {error}"
         ) from error

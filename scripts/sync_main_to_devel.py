@@ -4,12 +4,19 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from scripts.git import (
+    GIT_COMMAND_TIMEOUT_SECONDS,
+    GIT_NETWORK_TIMEOUT_SECONDS,
+    GitExecutionError,
+    decode_git_output,
+    require_success,
+    run_git,
+)
 from scripts.github_api import GitHubApiError, client_from_env
 
 REMOTE = "origin"
@@ -32,13 +39,18 @@ def run(command: list[str], *, check: bool = True) -> str:
     """Run a command and return stdout with useful error details."""
     if not command or command[0] != "git":
         raise SyncError("Only native Git commands are supported here.")
-    result = subprocess.run(
-        command, capture_output=True, text=True, check=False, cwd=Path.cwd()
-    )
-    if check and result.returncode:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise SyncError(f"{' '.join(command)} failed: {message}")
-    return result.stdout.strip()
+    args = command[1:]
+    try:
+        timeout = (
+            GIT_NETWORK_TIMEOUT_SECONDS
+            if args and args[0] == "fetch"
+            else GIT_COMMAND_TIMEOUT_SECONDS
+        )
+        result = run_git(args, cwd=Path.cwd(), timeout=timeout)
+        output = require_success(result, args) if check else result.stdout
+        return decode_git_output(output).strip()
+    except GitExecutionError as error:
+        raise SyncError(str(error)) from error
 
 
 def fetch_refs() -> tuple[str, str]:
@@ -63,17 +75,15 @@ def fetch_refs() -> tuple[str, str]:
 
 def is_ancestor(main_sha: str, devel_sha: str) -> bool:
     """Return whether main is already included in devel."""
-    result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", main_sha, devel_sha],
-        capture_output=True,
-        check=False,
-        cwd=Path.cwd(),
-    )
-    if result.returncode == 1:
-        return False
-    if result.returncode:
-        raise SyncError("Could not check branch ancestry.")
-    return True
+    try:
+        result = run_git(
+            ["merge-base", "--is-ancestor", main_sha, devel_sha], cwd=Path.cwd()
+        )
+    except GitExecutionError as error:
+        if error.returncode == 1:
+            return False
+        raise SyncError(f"Could not check branch ancestry: {error}") from error
+    return result.returncode == 0
 
 
 def _same_repository(pr: dict[str, object], repository: str) -> bool:

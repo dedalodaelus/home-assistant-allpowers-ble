@@ -5,9 +5,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 
+from scripts.git import (
+    GIT_COMMAND_TIMEOUT_SECONDS,
+    GIT_NETWORK_TIMEOUT_SECONDS,
+    GitExecutionError,
+    decode_git_output,
+    require_success,
+    run_git,
+)
 from scripts.github_api import GitHubApiError, client_from_env
 from scripts.promotion_metadata import validate_revisions
 
@@ -22,13 +29,18 @@ def run(command: list[str], *, check: bool = True) -> str:
     """Run a command and return stdout with useful error details."""
     if not command or command[0] != "git":
         raise PromotionError("Only native Git commands are supported here.")
-    result = subprocess.run(
-        command, capture_output=True, text=True, check=False, cwd=Path.cwd()
-    )
-    if check and result.returncode:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise PromotionError(f"{' '.join(command)} failed: {message}")
-    return result.stdout.strip()
+    args = command[1:]
+    try:
+        timeout = (
+            GIT_NETWORK_TIMEOUT_SECONDS
+            if args and args[0] in {"fetch", "ls-remote"}
+            else GIT_COMMAND_TIMEOUT_SECONDS
+        )
+        result = run_git(args, cwd=Path.cwd(), timeout=timeout)
+        output = require_success(result, args) if check else result.stdout
+        return decode_git_output(output).strip()
+    except GitExecutionError as error:
+        raise PromotionError(str(error)) from error
 
 
 def remote_refs() -> tuple[str, str]:
@@ -112,15 +124,10 @@ def render_body(template: str, base_sha: str, head_sha: str) -> str:
             f"* {subject} ([`{sha[:7]}`](https://github.com/{repo}/commit/{sha}))"
         )
     diff_args = ["diff", "--name-only", "-z", base_sha, head_sha]
-    result = subprocess.run(
-        ["git", *diff_args], capture_output=True, check=False, cwd=Path.cwd()
-    )
-    if result.returncode:
-        message = result.stderr.decode("utf-8", errors="replace").strip()
-        raise PromotionError(f"git diff failed: {message}")
     try:
-        changed = [path.decode("utf-8") for path in result.stdout.split(b"\0") if path]
-    except UnicodeDecodeError as error:
+        raw_paths = require_success(run_git(diff_args, cwd=Path.cwd()), diff_args)
+        changed = [path.decode("utf-8") for path in raw_paths.split(b"\0") if path]
+    except (GitExecutionError, UnicodeDecodeError) as error:
         raise PromotionError("Could not decode changed paths from Git.") from error
     tests = [path for path in changed if path.startswith("tests/")]
     test_summary = (
@@ -151,11 +158,8 @@ def prepare_promotion(template: str) -> str | None:
     base_sha, head_sha = remote_refs()
     run(["git", "cat-file", "-e", f"{base_sha}^{{commit}}"])
     run(["git", "cat-file", "-e", f"{head_sha}^{{commit}}"])
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-        capture_output=True,
-        check=False,
-        cwd=Path.cwd(),
+    ancestry = run_git(
+        ["merge-base", "--is-ancestor", base_sha, head_sha], cwd=Path.cwd()
     )
     if ancestry.returncode not in (0, 1):
         raise PromotionError("Could not check branch ancestry.")

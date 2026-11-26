@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import subprocess
+from types import SimpleNamespace
 
 import pytest
 
+from scripts.git import GitExecutionError
 from scripts.hil import cli
 
 
@@ -39,11 +40,9 @@ def test_current_feature_branch_requires_clean_nonprotected_checkout(
 ):
     outputs = iter(("feat/issue-330\n", ""))
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=next(outputs)
-        ),
+        cli,
+        "run_git_process",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=next(outputs)),
     )
 
     assert cli._current_feature_branch(tmp_path) == "feat/issue-330"
@@ -58,11 +57,9 @@ def test_current_feature_branch_rejects_protected_or_dirty_checkout(
 ):
     outputs = iter((branch, status))
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=next(outputs)
-        ),
+        cli,
+        "run_git_process",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=next(outputs)),
     )
 
     assert cli._current_feature_branch(tmp_path) is expected
@@ -70,10 +67,10 @@ def test_current_feature_branch_rejects_protected_or_dirty_checkout(
 
 def test_current_feature_branch_fails_closed_on_git_error(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        cli.subprocess,
-        "run",
+        cli,
+        "run_git_process",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            subprocess.TimeoutExpired("git", 3)
+            GitExecutionError(["status"], "timed out after 3 seconds")
         ),
     )
 

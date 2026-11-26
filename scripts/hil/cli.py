@@ -25,6 +25,7 @@ from .evidence import export_archive, write_report
 from . import importer
 from .importer import DEFAULT_MATRIX, import_archive
 from .discovery import Device, choose_device, find_devices
+from scripts.git import run_git_process
 from .environment import (
     build_environment,
     build_session,
@@ -3614,16 +3615,16 @@ def _onboard_export(
 def _current_feature_branch(repo_root: Path) -> str | None:
     """Return a current safe branch name from a clean checkout, if available."""
     try:
-        branch = subprocess.run(
-            ["git", "-C", str(repo_root), "branch", "--show-current"],
-            capture_output=True,
+        branch = run_git_process(
+            ["branch", "--show-current"],
+            cwd=repo_root,
             text=True,
             check=True,
             timeout=3,
         ).stdout.strip()
-        status = subprocess.run(
-            ["git", "-C", str(repo_root), "status", "--porcelain"],
-            capture_output=True,
+        status = run_git_process(
+            ["status", "--porcelain"],
+            cwd=repo_root,
             text=True,
             check=True,
             timeout=3,
@@ -3644,26 +3645,19 @@ def _review_checkout_safe(
         if any(not isinstance(path, str) for path in evidence_paths):
             return False
         allowed.update(evidence_paths)
-        branch = subprocess.run(
-            ["git", "-C", str(repo_root), "branch", "--show-current"],
-            capture_output=True,
+        branch = run_git_process(
+            ["branch", "--show-current"],
+            cwd=repo_root,
             text=True,
             check=True,
             timeout=3,
         ).stdout.strip()
-        status = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-                "-z",
-            ],
-            capture_output=True,
+        status = run_git_process(
+            ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
+            cwd=repo_root,
             check=True,
             timeout=3,
+            text=False,
         ).stdout
     except OSError, subprocess.SubprocessError, ValueError:
         return False
@@ -3693,9 +3687,9 @@ def _matrix_repo_root(matrix_path: Path) -> Path:
     """Resolve the repository root that owns the selected HIL matrix."""
     matrix = matrix_path.resolve()
     try:
-        root = subprocess.run(
-            ["git", "-C", str(matrix.parent), "rev-parse", "--show-toplevel"],
-            capture_output=True,
+        root = run_git_process(
+            ["rev-parse", "--show-toplevel"],
+            cwd=matrix.parent,
             text=True,
             check=True,
             timeout=3,
@@ -4417,9 +4411,9 @@ def _onboard_import_review(
         print("  git status --short")
         return False
     try:
-        branch = subprocess.run(
-            ["git", "-C", str(repo_root), "branch", "--show-current"],
-            capture_output=True,
+        branch = run_git_process(
+            ["branch", "--show-current"],
+            cwd=repo_root,
             text=True,
             check=True,
             timeout=3,

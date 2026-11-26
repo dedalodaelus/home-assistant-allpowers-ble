@@ -29,8 +29,8 @@ def test_render_body_links_actual_commits_and_lists_changed_tests() -> None:
             return_value="0123456789abcdef\tfeat: add support\n",
         ),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess(
                 [], 0, b"tests/test_feature.py\0README.md\0", b""
             ),
@@ -212,8 +212,8 @@ def test_prepare_promotion_fails_closed_for_diverged_refs() -> None:
         patch.object(promote_devel, "run", return_value="") as command,
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess([], 1, b"", b""),
         ),
         pytest.raises(PromotionError, match="diverged"),
@@ -228,8 +228,8 @@ def test_prepare_promotion_identical_trees_are_a_noop() -> None:
         patch.object(promote_devel, "run", side_effect=["", "", "", "tree", "tree"]),
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
     ):
@@ -248,8 +248,8 @@ def test_prepare_promotion_rejects_refs_moving_before_pr_creation() -> None:
             side_effect=[("main", "devel"), ("new-main", "devel")],
         ),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
         patch.object(promote_devel, "validate_revisions"),
@@ -273,8 +273,8 @@ def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
         ),
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
         patch.object(promote_devel, "client_from_env", return_value=api),
@@ -316,8 +316,8 @@ def test_prepare_promotion_reuses_pr_won_by_concurrent_invocation() -> None:
         ),
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
-            promote_devel.subprocess,
-            "run",
+            promote_devel,
+            "run_git",
             return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
         patch.object(promote_devel, "client_from_env", return_value=api),
@@ -406,15 +406,15 @@ def test_release_files_are_protected_in_promotion() -> None:
 def test_renamed_manifest_source_is_treated_as_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class Completed:
+        returncode = 0
+        stdout = (
+            b"R100\0custom_components/allpowers_ble/manifest.json\0docs/manifest.json\0"
+        )
+        stderr = b""
+
     monkeypatch.setattr(
-        promotion_metadata.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args,
-            0,
-            "R100\0custom_components/allpowers_ble/manifest.json\0docs/manifest.json\0",
-            "",
-        ),
+        promotion_metadata, "run_git", lambda *args, **kwargs: Completed()
     )
     paths = promotion_metadata._changed_paths("base", "head")
     with pytest.raises(promotion_metadata.MetadataError, match="deleted or renamed"):
