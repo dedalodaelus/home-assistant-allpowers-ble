@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 from collections.abc import Callable
 import json
 import os
@@ -12,10 +11,12 @@ import re
 import sys
 import time
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
+from scripts.github_api import (
+    GitHubApiClient as RestGitHubApi,
+    GitHubApiError as GateError,
+)
 from scripts.promotion_metadata import (
     INTEGRATION_MANIFEST,
     MetadataError,
@@ -68,10 +69,6 @@ TIMEOUT_SECONDS = 30 * 60
 MISSING_CHECKS_GRACE_SECONDS = 10 * 60
 
 
-class GateError(RuntimeError):
-    """A policy violation or incomplete required-check set."""
-
-
 class GitHubApi(Protocol):
     """Small API surface used by the gate and its focused tests."""
 
@@ -94,149 +91,6 @@ class GitHubApi(Protocol):
     def workflow_run_attempt_jobs(
         self, run_id: int, attempt: int
     ) -> list[dict[str, Any]]: ...
-
-
-class RestGitHubApi:
-    """GitHub REST client using only Python's standard library."""
-
-    def __init__(self, owner: str, repo: str, token: str, api_url: str) -> None:
-        if not token:
-            raise GateError("GITHUB_TOKEN is required to inspect PR checks.")
-        self.owner = owner
-        self.repo = repo
-        self.token = token
-        self.api_url = api_url.rstrip("/")
-        self.repository_path = f"/repos/{quote(owner)}/{quote(repo)}"
-
-    def _request(self, path: str) -> tuple[Any, dict[str, str]]:
-        url = f"{self.api_url}{path}"
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.token}",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "home-assistant-allpowers-ble-merge-gate",
-            },
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                return json.loads(response.read()), dict(response.headers.items())
-        except (
-            HTTPError,
-            URLError,
-            TimeoutError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-        ) as error:
-            raise GateError(f"GitHub API request failed for {path}: {error}") from error
-
-    def _get(self, path: str, **query: str | int) -> Any:
-        suffix = f"?{urlencode(query)}" if query else ""
-        return self._request(f"{path}{suffix}")[0]
-
-    def _all_pages(self, path: str, key: str, **query: str | int) -> list[Any]:
-        page = 1
-        results: list[Any] = []
-        while True:
-            payload = self._get(path, per_page=100, page=page, **query)
-            if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
-                raise GateError(f"Unexpected GitHub API response while reading {path}.")
-            batch = payload[key]
-            if any(not isinstance(item, dict) for item in batch):
-                raise GateError(f"Malformed GitHub API entries while reading {path}.")
-            results.extend(batch)
-            if len(batch) < 100:
-                return results
-            page += 1
-
-    def pull_request(self, number: int) -> dict[str, Any]:
-        value = self._get(f"{self.repository_path}/pulls/{number}")
-        if not isinstance(value, dict):
-            raise GateError("GitHub returned an invalid pull request object.")
-        return value
-
-    def pull_request_files(self, number: int) -> list[dict[str, Any]]:
-        page = 1
-        files: list[dict[str, Any]] = []
-        while True:
-            values = self._get(
-                f"{self.repository_path}/pulls/{number}/files",
-                per_page=100,
-                page=page,
-            )
-            if not isinstance(values, list) or any(
-                not isinstance(value, dict) for value in values
-            ):
-                raise GateError("GitHub returned an invalid pull request file list.")
-            files.extend(values)
-            if len(values) < 100:
-                return files
-            page += 1
-
-    def compare(self, base: str, head: str) -> dict[str, Any]:
-        value = self._get(
-            f"{self.repository_path}/compare/{quote(base, safe='')}...{quote(head, safe='')}"
-        )
-        if not isinstance(value, dict):
-            raise GateError("GitHub returned an invalid commit comparison.")
-        return value
-
-    def content(
-        self, path: str, ref: str, repository_full_name: str | None = None
-    ) -> str:
-        repository_path = self.repository_path
-        if repository_full_name is not None:
-            parts = repository_full_name.split("/")
-            if len(parts) != 2 or not all(parts):
-                raise GateError("GitHub returned an invalid head repository identity.")
-            repository_path = f"/repos/{quote(parts[0])}/{quote(parts[1])}"
-        value = self._get(
-            f"{repository_path}/contents/{quote(path, safe='/')}", ref=ref
-        )
-        if not isinstance(value, dict) or value.get("type") != "file":
-            raise GateError(f"Expected a file at {path} for {ref}.")
-        encoded = value.get("content")
-        if value.get("encoding") != "base64" or not isinstance(encoded, str):
-            raise GateError(
-                f"GitHub returned missing or unsupported content encoding for {path} at {ref}."
-            )
-        try:
-            # The Contents API may line-wrap base64, but invalid characters must
-            # not be silently discarded (notably for changelog history checks).
-            compact = encoded.replace("\r", "").replace("\n", "")
-            return base64.b64decode(compact, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as error:
-            raise GateError(f"Could not decode {path} at {ref}: {error}") from error
-
-    def check_runs(self, ref: str) -> list[dict[str, Any]]:
-        return self._all_pages(
-            f"{self.repository_path}/commits/{quote(ref, safe='')}/check-runs",
-            "check_runs",
-            filter="all",
-        )
-
-    def workflow_run(self, run_id: int) -> dict[str, Any]:
-        value = self._get(f"{self.repository_path}/actions/runs/{run_id}")
-        if not isinstance(value, dict):
-            raise GateError("GitHub returned an invalid Actions workflow run.")
-        return value
-
-    def workflow(self, workflow_id: int) -> dict[str, Any]:
-        value = self._get(f"{self.repository_path}/actions/workflows/{workflow_id}")
-        if not isinstance(value, dict):
-            raise GateError("GitHub returned an invalid Actions workflow.")
-        return value
-
-    def workflow_run_attempt_jobs(
-        self, run_id: int, attempt: int
-    ) -> list[dict[str, Any]]:
-        if run_id <= 0 or attempt <= 0:
-            raise GateError("Actions run ID and attempt must be positive integers.")
-        return self._all_pages(
-            f"{self.repository_path}/actions/runs/{run_id}/attempts/{attempt}/jobs",
-            "jobs",
-        )
 
 
 def _mapping(value: Any) -> dict[str, Any]:

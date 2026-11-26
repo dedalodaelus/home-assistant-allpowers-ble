@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import subprocess
 import sys
 
 import yaml
@@ -18,6 +17,7 @@ from scripts.sync_ha_test_deps import (  # noqa: E402
     HA_DISTRIBUTION,
     selected_versions_from_requirements,
 )
+from scripts.git import GitExecutionError, run_git_process  # noqa: E402
 
 ACTIVE_REQUIREMENTS = ROOT / "requirements_test.txt"
 CANDIDATE_REQUIREMENTS = ROOT / "requirements/ha-candidate/requirements.txt"
@@ -175,13 +175,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.check_upgrade_paths:
         try:
-            status = subprocess.run(
-                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            status = run_git_process(
+                ["status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=ROOT,
                 check=True,
-                capture_output=True,
                 text=True,
+                timeout=3,
             )
-        except (OSError, subprocess.CalledProcessError) as err:
+        except GitExecutionError as err:
             print(
                 f"error: cannot inspect generated upgrade files: {err}", file=sys.stderr
             )

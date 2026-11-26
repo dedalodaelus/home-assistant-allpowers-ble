@@ -60,17 +60,21 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python scripts/validate_repository.py
 
-      - name: Merge gate behavior tests
-        run: pytest tests/test_merge_gate.py
-
       # GitHub waits for every step in this group before continuing.
       # Keep this group at or below GitHub's ten-step parallel limit.
       - parallel:
-          - name: Ruff format
-            run: ruff format --check custom_components scripts tests
+          - name: Ruff format and lint
+            run: |
+              ruff format --check custom_components scripts tests
+              ruff check custom_components scripts tests
 
-          - name: Ruff lint
-            run: ruff check custom_components scripts tests
+          - name: Merge gate behavior tests
+            env:
+              USE_REAL_HOMEASSISTANT: "0"
+            run: >-
+              pytest tests/test_merge_gate.py
+              --basetemp=.pytest-tmp-merge-gate
+              -o cache_dir=.pytest_cache-merge-gate
 
           - name: Mypy
             run: mypy custom_components/allpowers_ble

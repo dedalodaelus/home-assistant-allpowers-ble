@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from unittest.mock import patch
 
 import pytest
 
-from scripts import sync_main_to_devel
+from scripts import github_api, sync_main_to_devel
+from scripts.git import GitExecutionError
 from scripts.sync_main_to_devel import SyncError
 
 
@@ -141,56 +144,162 @@ def ancestry_only_repo(
 def _pr(
     url: str, main_sha: str, devel_sha: str, *, mergeable: str = "MERGEABLE"
 ) -> dict[str, object]:
+    is_conflict = mergeable == "CONFLICTING"
     return {
-        "url": url,
-        "headRefName": "main",
-        "baseRefName": "devel",
-        "isCrossRepository": False,
-        "headRefOid": main_sha,
-        "baseRefOid": devel_sha,
-        "mergeable": mergeable,
-        "mergeStateStatus": "CLEAN" if mergeable == "MERGEABLE" else "DIRTY",
+        "number": int(url.rstrip("/").split("/")[-1]),
+        "html_url": url,
+        "state": "open",
+        "draft": False,
+        "base": {"ref": "devel", "sha": devel_sha, "repo": {"full_name": "owner/repo"}},
+        "head": {"ref": "main", "sha": main_sha, "repo": {"full_name": "owner/repo"}},
+        "mergeable": False if is_conflict else True,
+        "mergeable_state": "dirty" if is_conflict else "clean",
     }
+
+
+class FakeRestApi:
+    owner = "owner"
+    repo = "repo"
+    api_url = "https://api.github.com"
+
+    def __init__(self) -> None:
+        self.pulls: list[dict[str, object]] = []
+        self.details: dict[int, dict[str, object]] = {}
+        self.create_error: Exception | None = None
+        self.list_error: Exception | None = None
+        self.create_calls: list[dict[str, object]] = []
+        self.list_calls = 0
+        self.on_list: Any = None
+        self.on_pull_request: Any = None
+        self.create_response: dict[str, object] | None = None
+        self.create_result: dict[str, object] | None = None
+        self.create_url = "https://github.com/owner/repo/pull/42"
+        self.viewed: list[tuple[str, str]] = []
+
+    def list_pull_requests(self, **_kwargs: object) -> list[dict[str, object]]:
+        self.list_calls += 1
+        if self.list_error:
+            raise self.list_error
+        if self.on_list:
+            self.on_list()
+        return self.pulls
+
+    def create_pull_request(self, **kwargs: object) -> dict[str, object]:
+        self.create_calls.append(kwargs)
+        if self.create_error:
+            raise self.create_error
+        number = int(self.create_url.rstrip("/").split("/")[-1])
+        self.details[number] = self.create_response or _pr(
+            self.create_url, "head", "base"
+        )
+        self.details[number].setdefault("draft", kwargs.get("draft", False))
+        return self.create_result or {"number": number, "html_url": self.create_url}
+
+    def pull_request(self, number: int) -> dict[str, object]:
+        if self.on_pull_request:
+            self.on_pull_request()
+        pull = self.details[number]
+        base, head = pull["base"], pull["head"]
+        self.viewed.append((str(head["sha"]), str(base["sha"])))  # type: ignore[index]
+        return pull
+
+
+def _install_api(monkeypatch: pytest.MonkeyPatch, api: FakeRestApi) -> None:
+    monkeypatch.setattr(sync_main_to_devel, "client_from_env", lambda **_kwargs: api)
 
 
 def test_sync_pr_creation_has_correct_direction_and_traceable_refs(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://github.com/owner/repo/pull/42"
-    real_run = sync_main_to_devel.run
-    calls: list[list[str]] = []
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        calls.append(command)
-        if command[1:3] == ["pr", "list"]:
-            return "[]"
-        if command[1:3] == ["pr", "create"]:
-            return url
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(
-                _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
-            )
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_response = _pr(
+        url, divergent_repo["main_sha"], divergent_repo["devel_sha"]
+    )
+    _install_api(monkeypatch, api)
     result = sync_main_to_devel.prepare_sync()
     assert result.url == url
     assert result.main_sha == divergent_repo["main_sha"]
     assert result.devel_sha == divergent_repo["devel_sha"]
 
-    create = next(call for call in calls if call[1:3] == ["pr", "create"])
-    assert create[create.index("--base") + 1] == "devel"
-    assert create[create.index("--head") + 1] == "main"
-    assert (
-        create[create.index("--title") + 1] == "chore(ci): synchronize main into devel"
-    )
-    body = create[create.index("--body") + 1]
+    assert len(api.create_calls) == 1
+    create = api.create_calls[0]
+    assert create["base"] == "devel"
+    assert create["head"] == "main"
+    assert create["title"] == "chore(ci): synchronize main into devel"
+    body = str(create["body"])
     assert divergent_repo["main_sha"] in body
     assert divergent_repo["devel_sha"] in body
     assert "preserving both branch histories" in body
     assert "not CI or merge-validation results" in body
+
+
+@pytest.mark.parametrize("pr_survives_interrupted_post", [True, False])
+def test_interrupted_post_uses_real_rest_client_and_reconciles_once(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    pr_survives_interrupted_post: bool,
+) -> None:
+    """An interrupted POST is reconciled through real REST and local Git."""
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    url = "https://github.com/owner/repo/pull/42"
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    created: list[bool] = []
+    posts: list[dict[str, object]] = []
+
+    class JsonResponse:
+        headers: dict[str, str] = {}
+
+        def __init__(self, value: object, *, interrupted: bool = False) -> None:
+            self.value = value
+            self.interrupted = interrupted
+
+        def __enter__(self) -> JsonResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            if self.interrupted:
+                raise IncompleteRead(b"partial-json", 100)
+            return json.dumps(self.value).encode()
+
+    def open_request(request: Any, timeout: float) -> JsonResponse:
+        assert timeout == 30
+        method = request.get_method()
+        path = urlparse(request.full_url).path
+        if method == "GET" and path.endswith("/pulls"):
+            values = [pr] if created and pr_survives_interrupted_post else []
+            return JsonResponse(values)
+        if method == "GET" and path.endswith("/pulls/42"):
+            if pr_survives_interrupted_post and created:
+                return JsonResponse(pr)
+            raise AssertionError("detail lookup must not occur without a candidate")
+        if method == "POST" and path.endswith("/pulls"):
+            posts.append(json.loads(request.data))
+            created.append(True)
+            return JsonResponse({}, interrupted=True)
+        raise AssertionError(f"Unexpected GitHub request: {method} {path}")
+
+    monkeypatch.setattr(github_api, "urlopen", open_request)
+    remote_before = _remote_shas(divergent_repo["repo"])
+
+    if pr_survives_interrupted_post:
+        result = sync_main_to_devel.prepare_sync()
+        assert result.url == url
+        assert result.main_sha == divergent_repo["main_sha"]
+        assert result.devel_sha == divergent_repo["devel_sha"]
+    else:
+        with pytest.raises(SyncError, match="IncompleteRead"):
+            sync_main_to_devel.prepare_sync()
+
+    assert len(posts) == 1
+    assert posts[0]["base"] == "devel"
+    assert posts[0]["head"] == "main"
+    assert posts[0]["draft"] is False
+    assert _remote_shas(divergent_repo["repo"]) == remote_before
 
 
 def test_real_merge_preserves_main_ancestry_release_data_and_devel_fields(
@@ -235,142 +344,88 @@ def test_reuses_only_same_repository_main_to_devel_pr(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://github.com/owner/repo/pull/9"
-    fork = {
-        "url": "https://github.com/fork/repo/pull/8",
-        "headRefName": "main",
-        "baseRefName": "devel",
-        "isCrossRepository": True,
-    }
-    own = {**fork, "url": url, "isCrossRepository": False}
-    real_run = sync_main_to_devel.run
-    commands: list[list[str]] = []
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        commands.append(command)
-        if command[1:3] == ["pr", "list"]:
-            return json.dumps([fork, own])
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(
-                _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
-            )
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    fork = _pr("https://github.com/owner/repo/pull/8", "fork-main", "devel")
+    fork["head"]["repo"] = {"full_name": "fork/repo"}  # type: ignore[index]
+    own = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.pulls = [fork, own]
+    api.details[9] = own
+    _install_api(monkeypatch, api)
     assert sync_main_to_devel.prepare_sync().url == url
-    assert not any(call[1:3] == ["pr", "create"] for call in commands)
+    assert not api.create_calls
+
+
+def test_open_sync_pr_rejects_incomplete_repository_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeRestApi()
+    candidate = _pr("https://github.com/owner/repo/pull/16", "main-sha", "devel-sha")
+    candidate["head"]["repo"] = None  # type: ignore[index]
+    api.pulls = [candidate]
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="incomplete repository identity"):
+        sync_main_to_devel.open_sync_pr()
 
 
 def test_duplicate_creation_race_reuses_winning_sync_pr(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://github.com/owner/repo/pull/10"
-    real_run = sync_main_to_devel.run
-    list_calls = 0
-    create_calls = 0
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        nonlocal list_calls, create_calls
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            list_calls += 1
-            if list_calls == 1:
-                return "[]"
-            return json.dumps(
-                [
-                    {
-                        "url": url,
-                        "headRefName": "main",
-                        "baseRefName": "devel",
-                        "isCrossRepository": False,
-                    }
-                ]
-            )
-        if command[1:3] == ["pr", "create"]:
-            create_calls += 1
-            raise SyncError("a concurrent workflow created the PR")
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(
-                _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
-            )
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_error = github_api.GitHubApiError("request timed out")
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.details[10] = pr
+    api.on_list = lambda: setattr(api, "pulls", [pr]) if api.list_calls == 2 else None
+    _install_api(monkeypatch, api)
     assert sync_main_to_devel.prepare_sync().url == url
-    assert create_calls == 1
-    assert list_calls == 2
+    assert len(api.create_calls) == 1
+    assert api.list_calls == 2
 
 
 def test_pr_creation_permission_error_leaves_both_branch_heads_unchanged(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_run = sync_main_to_devel.run
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError("HTTP 403 permission denied")
+    _install_api(monkeypatch, api)
     remote_before = _remote_shas(divergent_repo["repo"])
-    list_calls = 0
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        nonlocal list_calls
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            list_calls += 1
-            return "[]"
-        if command[1:3] == ["pr", "create"]:
-            raise SyncError("permission denied: pull requests are disabled")
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
     with pytest.raises(SyncError, match="permission denied"):
         sync_main_to_devel.prepare_sync()
-    assert list_calls == 2
+    assert api.list_calls == 2
     assert _remote_shas(divergent_repo["repo"]) == remote_before
 
 
-def test_unrelated_or_wrong_direction_pr_is_ignored() -> None:
-    wrong = {
-        "url": "https://github.com/owner/repo/pull/3",
-        "headRefName": "devel",
-        "baseRefName": "main",
-        "isCrossRepository": False,
-    }
-    with patch.object(sync_main_to_devel, "run", return_value=json.dumps([wrong])):
-        assert sync_main_to_devel.open_sync_pr() is None
+def test_unrelated_or_wrong_direction_pr_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeRestApi()
+    api.pulls = [
+        {
+            "html_url": "https://github.com/owner/repo/pull/3",
+            "base": {"ref": "main", "repo": {"full_name": "owner/repo"}},
+            "head": {"ref": "devel", "repo": {"full_name": "owner/repo"}},
+        }
+    ]
+    _install_api(monkeypatch, api)
+    assert sync_main_to_devel.open_sync_pr() is None
 
 
 def test_conflicting_existing_pr_is_reported_without_resolution(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://github.com/owner/repo/pull/11"
-    real_run = sync_main_to_devel.run
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            return json.dumps(
-                [
-                    {
-                        "url": url,
-                        "headRefName": "main",
-                        "baseRefName": "devel",
-                        "isCrossRepository": False,
-                    }
-                ]
-            )
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(
-                _pr(
-                    url,
-                    divergent_repo["main_sha"],
-                    divergent_repo["devel_sha"],
-                    mergeable="CONFLICTING",
-                )
-            )
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    pr = _pr(
+        url,
+        divergent_repo["main_sha"],
+        divergent_repo["devel_sha"],
+        mergeable="CONFLICTING",
+    )
+    api.pulls = [pr]
+    api.details[11] = pr
+    _install_api(monkeypatch, api)
     with pytest.raises(SyncError, match="merge conflicts"):
         sync_main_to_devel.prepare_sync()
 
@@ -378,25 +433,241 @@ def test_conflicting_existing_pr_is_reported_without_resolution(
 def test_pr_ref_movement_fails_closed() -> None:
     with pytest.raises(SyncError, match="refs moved"):
         sync_main_to_devel.validate_current_pr(
-            _pr("https://github.com/owner/repo/pull/12", "new-main", "devel"),
+            {"headRefOid": "new-main", "baseRefOid": "devel"},
             "old-main",
             "devel",
             url="https://github.com/owner/repo/pull/12",
         )
 
 
-def test_pr_inspection_rejects_cross_repository_or_wrong_direction() -> None:
-    wrong = {
-        "url": "https://github.com/fork/repo/pull/2",
-        "headRefName": "main",
-        "baseRefName": "devel",
-        "isCrossRepository": True,
-    }
-    with (
-        patch.object(sync_main_to_devel, "run", return_value=json.dumps(wrong)),
-        pytest.raises(SyncError, match="unrelated or cross-repository"),
-    ):
-        sync_main_to_devel.inspect_pr(str(wrong["url"]))
+@pytest.mark.parametrize("changed_ref", ["head", "base"])
+def test_prepare_sync_rejects_stale_pr_sha_from_detail(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    changed_ref: str,
+) -> None:
+    repo = divergent_repo["repo"]
+    url = "https://github.com/owner/repo/pull/17"
+    api = FakeRestApi()
+    listed = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale_detail = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale_detail[changed_ref]["sha"] = "stale-sha"  # type: ignore[index]
+    api.pulls = [listed]
+    api.details[17] = stale_detail
+    _install_api(monkeypatch, api)
+    remote_before = _remote_shas(repo)
+
+    with pytest.raises(SyncError, match="refs moved"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.create_calls == []
+    assert _remote_shas(repo) == remote_before
+
+
+def test_prepare_sync_rejects_remote_ref_movement_during_inspection(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = divergent_repo["repo"]
+    url = "https://github.com/owner/repo/pull/18"
+    api = FakeRestApi()
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.pulls = [pr]
+    api.details[18] = pr
+    _install_api(monkeypatch, api)
+    original_remote = _remote_shas(repo)
+    advanced_main: list[str] = []
+
+    def advance_main_once() -> None:
+        if advanced_main:
+            return
+        _git(repo, "switch", "main")
+        (repo / "hotfix-race.txt").write_text("intentional race\n", encoding="utf-8")
+        advanced_main.append(_commit(repo, "fix: advance main during PR inspection"))
+        _git(repo, "push", "origin", "main")
+        _git(repo, "switch", "devel")
+
+    api.on_pull_request = advance_main_once
+    with pytest.raises(SyncError, match="moved during preflight"):
+        sync_main_to_devel.prepare_sync()
+
+    after = _remote_shas(repo)
+    assert after == (advanced_main[0], original_remote[1])
+    assert api.create_calls == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        subprocess.CompletedProcess([], 128, b"", b"fatal: invalid object"),
+        GitExecutionError(["merge-base"], "timed out after 10 seconds"),
+    ],
+    ids=["unexpected-exit", "execution-error"],
+)
+def test_prepare_sync_fails_closed_when_ancestry_is_unknown(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: subprocess.CompletedProcess[bytes] | GitExecutionError,
+) -> None:
+    original_run_git = sync_main_to_devel.run_git
+
+    def intercept_ancestry(args: list[str], **kwargs: object) -> Any:
+        if args and args[0] == "merge-base":
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return original_run_git(args, **kwargs)
+
+    monkeypatch.setattr(sync_main_to_devel, "run_git", intercept_ancestry)
+    api = FakeRestApi()
+    _install_api(monkeypatch, api)
+    before = _remote_shas(divergent_repo["repo"])
+
+    with pytest.raises(SyncError, match="ancestry"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.list_calls == 0
+    assert api.create_calls == []
+    assert _remote_shas(divergent_repo["repo"]) == before
+
+
+def test_unknown_mergeability_remains_an_incomplete_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://github.com/owner/repo/pull/15"
+    pr = _pr(url, "main-sha", "devel-sha")
+    pr["mergeable"] = None
+    pr["mergeable_state"] = "unknown"
+    api = FakeRestApi()
+    api.details[15] = pr
+    _install_api(monkeypatch, api)
+
+    inspected = sync_main_to_devel.inspect_pr(url)
+
+    assert inspected["mergeable"] == "UNKNOWN"
+    assert inspected["mergeStateStatus"] == "UNKNOWN"
+
+
+def test_pr_inspection_rejects_cross_repository_or_wrong_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://github.com/owner/repo/pull/2"
+    wrong = _pr(url, "main", "devel")
+    wrong["head"]["repo"] = {"full_name": "fork/repo"}  # type: ignore[index]
+    api = FakeRestApi()
+    api.details[2] = wrong
+    _install_api(monkeypatch, api)
+    with pytest.raises(SyncError, match="unrelated or cross-repository"):
+        sync_main_to_devel.inspect_pr(url)
+
+
+def test_pr_inspection_rejects_url_for_another_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeRestApi()
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="mismatched identity"):
+        sync_main_to_devel.inspect_pr("https://github.com/fork/repo/pull/2")
+
+
+@pytest.mark.parametrize(
+    ("state", "draft"),
+    [("closed", False), ("open", True)],
+    ids=["closed-detail", "unexpected-draft"],
+)
+def test_prepare_sync_rejects_closed_or_draft_created_pr(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    draft: bool,
+) -> None:
+    url = "https://github.com/owner/repo/pull/19"
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_response = _pr(
+        url, divergent_repo["main_sha"], divergent_repo["devel_sha"]
+    )
+    api.create_response["state"] = state
+    api.create_response["draft"] = draft
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="closed|non-draft"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.create_calls[0]["draft"] is False
+    assert len(api.create_calls) == 1
+
+
+def test_prepare_sync_rejects_post_number_url_mismatch_without_retry(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeRestApi()
+    api.create_url = "https://github.com/owner/repo/pull/43"
+    api.create_result = {"number": 42, "html_url": api.create_url}
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="mismatched identity"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
+    assert api.list_calls == 2
+
+
+def test_prepare_sync_reconciles_ambiguous_create_with_fresh_open_non_draft_detail(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/20"
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_error = github_api.GitHubApiError("request timed out")
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.details[20] = pr
+    api.on_list = lambda: setattr(api, "pulls", [pr]) if api.list_calls == 2 else None
+    _install_api(monkeypatch, api)
+
+    assert sync_main_to_devel.prepare_sync().url == url
+    assert api.create_calls[0]["draft"] is False
+    assert len(api.create_calls) == 1
+
+
+def test_prepare_sync_rejects_draft_candidate_after_ambiguous_create(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/21"
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError("request timed out")
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    pr["draft"] = True
+    api.details[21] = pr
+    api.on_list = lambda: setattr(api, "pulls", [pr]) if api.list_calls == 2 else None
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="non-draft"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
+
+
+def test_prepare_sync_rejects_stale_candidate_after_ambiguous_create(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/22"
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError("request timed out")
+    stale = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale["head"]["sha"] = "stale-main"  # type: ignore[index]
+    api.details[22] = stale
+    api.on_list = lambda: (
+        setattr(api, "pulls", [stale]) if api.list_calls == 2 else None
+    )
+    _install_api(monkeypatch, api)
+    remote_before = _remote_shas(divergent_repo["repo"])
+
+    with pytest.raises(SyncError, match="refs moved"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
+    assert _remote_shas(divergent_repo["repo"]) == remote_before
 
 
 def test_identical_tree_divergence_still_attempts_review_pr(
@@ -412,68 +683,37 @@ def test_identical_tree_divergence_still_attempts_review_pr(
     assert not sync_main_to_devel.is_ancestor(main_sha, devel_sha)
 
     url = "https://github.com/owner/repo/pull/13"
-    real_run = sync_main_to_devel.run
-    create_seen = False
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        nonlocal create_seen
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            return "[]"
-        if command[1:3] == ["pr", "create"]:
-            create_seen = True
-            assert "main ancestry marker" in command[command.index("--body") + 1]
-            return url
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(_pr(url, main_sha, devel_sha))
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_response = _pr(url, main_sha, devel_sha)
+    _install_api(monkeypatch, api)
     assert sync_main_to_devel.prepare_sync().url == url
-    assert create_seen
+    assert "main ancestry marker" in str(api.create_calls[0]["body"])
 
 
 def test_ancestry_only_pr_creation_failure_gives_safe_recovery(
     ancestry_only_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_run = sync_main_to_devel.run
-    list_calls = 0
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        nonlocal list_calls
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            list_calls += 1
-            return "[]"
-        if command[1:3] == ["pr", "create"]:
-            raise SyncError("GitHub cannot create an empty diff PR")
-        raise AssertionError(f"Unexpected gh command: {command}")
-
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError(
+        "GitHub cannot create an empty diff PR"
+    )
+    _install_api(monkeypatch, api)
     with pytest.raises(SyncError, match="identical.*No branch was changed"):
         sync_main_to_devel.prepare_sync()
-    assert list_calls == 2
+    assert api.list_calls == 2
 
 
 def test_github_api_errors_are_reported_and_no_protected_branch_is_written(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_run = sync_main_to_devel.run
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            raise SyncError("permission denied")
-        raise AssertionError(f"Unexpected gh command: {command}")
-
+    api = FakeRestApi()
+    api.list_error = github_api.GitHubApiError("HTTP 403 permission denied")
     before = (
         _git(divergent_repo["repo"], "ls-remote", "origin", "refs/heads/main"),
         _git(divergent_repo["repo"], "ls-remote", "origin", "refs/heads/devel"),
     )
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    _install_api(monkeypatch, api)
     with pytest.raises(SyncError, match="permission denied"):
         sync_main_to_devel.prepare_sync()
     after = (
@@ -489,41 +729,21 @@ def test_repeated_prepare_reuses_pr_after_remote_refs_advance(
     """A second real preflight observes new tips without editing branches or PR."""
     repo = divergent_repo["repo"]
     url = "https://github.com/owner/repo/pull/14"
-    real_run = sync_main_to_devel.run
-    created: list[str] = []
-    viewed: list[tuple[str, str]] = []
-    pr_exists = False
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_response = _pr(
+        url, divergent_repo["main_sha"], divergent_repo["devel_sha"]
+    )
 
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        nonlocal pr_exists
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        if command[1:3] == ["pr", "list"]:
-            return (
-                json.dumps(
-                    [
-                        {
-                            "url": url,
-                            "headRefName": "main",
-                            "baseRefName": "devel",
-                            "isCrossRepository": False,
-                        }
-                    ]
-                )
-                if pr_exists
-                else "[]"
-            )
-        if command[1:3] == ["pr", "create"]:
-            created.append(command[command.index("--head") + 1])
-            pr_exists = True
-            return url
-        if command[1:3] == ["pr", "view"]:
+    def refresh_existing_pr() -> None:
+        if api.list_calls > 1:
             main_sha, devel_sha = sync_main_to_devel.fetch_refs()
-            viewed.append((main_sha, devel_sha))
-            return json.dumps(_pr(url, main_sha, devel_sha))
-        raise AssertionError(f"Unexpected gh command: {command}")
+            current = _pr(url, main_sha, devel_sha)
+            api.pulls = [current]
+            api.details[14] = current
 
-    monkeypatch.setattr(sync_main_to_devel, "run", gh_boundary)
+    api.on_list = refresh_existing_pr
+    _install_api(monkeypatch, api)
     initial_remote = _remote_shas(repo)
     first = sync_main_to_devel.prepare_sync()
     assert first.url == url
@@ -547,8 +767,8 @@ def test_repeated_prepare_reuses_pr_after_remote_refs_advance(
     assert second.url == url
     assert second.main_sha != first.main_sha
     assert second.devel_sha != first.devel_sha
-    assert created == ["main"]
-    assert viewed == [
+    assert [call["head"] for call in api.create_calls] == ["main"]
+    assert api.viewed == [
         (first.main_sha, first.devel_sha),
         (second.main_sha, second.devel_sha),
     ]

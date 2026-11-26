@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 import yaml
 
-from scripts import merge_gate, promotion_metadata
+from scripts import github_api, merge_gate, promotion_metadata
 from scripts.merge_gate import (
     GateError,
     REQUIRED_CHECKS,
@@ -851,7 +851,7 @@ def test_rest_api_paginates_check_runs_and_uses_read_only_get_requests(
         requests.append(request)
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(merge_gate, "urlopen", fake_urlopen)
+    monkeypatch.setattr(github_api, "urlopen", fake_urlopen)
     api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
 
     runs = api.check_runs(HEAD_SHA)
@@ -903,7 +903,7 @@ def test_rest_api_reads_jobs_for_the_exact_workflow_attempt(
         requests.append(request)
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(merge_gate, "urlopen", fake_urlopen)
+    monkeypatch.setattr(github_api, "urlopen", fake_urlopen)
     api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
 
     jobs = api.workflow_run_attempt_jobs(1010, 2)
@@ -963,7 +963,7 @@ def test_rest_api_malformed_response_and_permission_failure_are_actionable(
         def read(self) -> bytes:
             return b'{"not_check_runs": []}'
 
-    monkeypatch.setattr(merge_gate, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(github_api, "urlopen", lambda *_args, **_kwargs: Response())
     api = RestGitHubApi(OWNER, REPO, "secret-token-sentinel", "https://api.github.com")
     with pytest.raises(GateError, match="Unexpected GitHub API response") as error:
         api.check_runs(HEAD_SHA)
@@ -972,7 +972,7 @@ def test_rest_api_malformed_response_and_permission_failure_are_actionable(
     def denied(request: Any, timeout: int) -> Any:
         raise HTTPError(request.full_url, 403, "Forbidden", {}, None)
 
-    monkeypatch.setattr(merge_gate, "urlopen", denied)
+    monkeypatch.setattr(github_api, "urlopen", denied)
     with pytest.raises(GateError, match="GitHub API request failed") as error:
         api.check_runs(HEAD_SHA)
     assert "secret-token-sentinel" not in str(error.value)
@@ -982,7 +982,7 @@ def test_rest_api_malformed_response_and_permission_failure_are_actionable(
             return b"not-json"
 
     monkeypatch.setattr(
-        merge_gate,
+        github_api,
         "urlopen",
         lambda *_args, **_kwargs: InvalidJsonResponse(),
     )
@@ -1018,7 +1018,7 @@ def test_rest_api_rejects_unsupported_or_malformed_file_content(
                 {"type": "file", "encoding": encoding, "content": content}
             ).encode()
 
-    monkeypatch.setattr(merge_gate, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(github_api, "urlopen", lambda *_args, **_kwargs: Response())
     api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
 
     with pytest.raises(GateError, match=message):
@@ -1046,7 +1046,7 @@ def test_rest_api_content_decodes_line_wrapped_base64(
                 {"type": "file", "encoding": "base64", "content": content}
             ).encode()
 
-    monkeypatch.setattr(merge_gate, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(github_api, "urlopen", lambda *_args, **_kwargs: Response())
     api = RestGitHubApi(OWNER, REPO, "read-only-test-token", "https://api.github.com")
 
     assert api.content("CHANGELOG.md", HEAD_SHA) == expected
@@ -2032,11 +2032,24 @@ def test_workflow_wiring_preserves_gate_contract_without_privileged_checkout() -
         Path(".github/workflows/ci.yml").read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
-    assert any(
-        step.get("name") == "Merge gate behavior tests"
-        and step.get("run") == "pytest tests/test_merge_gate.py"
-        for step in ci["jobs"]["quality"]["steps"]
+    ci_steps = ci["jobs"]["quality"]["steps"]
+    parallel = next(step["parallel"] for step in ci_steps if "parallel" in step)
+    assert len(parallel) == 10
+    gate_branch = next(
+        step for step in parallel if step.get("name") == "Merge gate behavior tests"
     )
+    assert "pytest tests/test_merge_gate.py" in gate_branch["run"]
+    assert "--basetemp=.pytest-tmp-merge-gate" in gate_branch["run"]
+    assert "cache_dir=.pytest_cache-merge-gate" in gate_branch["run"]
+    assert gate_branch["env"]["USE_REAL_HOMEASSISTANT"] == "0"
+    ruff_branch = next(
+        step for step in parallel if step.get("name") == "Ruff format and lint"
+    )
+    assert "ruff format --check" in ruff_branch["run"]
+    assert "ruff check" in ruff_branch["run"]
+    assert ci_steps.index(
+        next(step for step in ci_steps if step.get("name") == "Validate repository")
+    ) < ci_steps.index(next(step for step in ci_steps if "parallel" in step))
 
 
 def test_title_edit_does_not_wait_for_old_title_check() -> None:

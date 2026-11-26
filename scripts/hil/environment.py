@@ -11,12 +11,12 @@ import platform
 import re
 import secrets
 import stat
-import subprocess
 from typing import Any
 
 from . import SCHEMA_VERSION
 from .api import HAAPIError, HAClient
 from .discovery import BINARY_KEYS, SENSOR_KEYS, Device, safe_version
+from scripts.git import GitExecutionError, run_git_process
 
 ROOT = Path(__file__).resolve().parents[2]
 VALUE_LIMIT = 200
@@ -49,15 +49,14 @@ def _safe_label(value: Any) -> str | None:
 def local_commit() -> dict[str, Any]:
     """An optional *runner checkout* SHA is never an installed-build proof."""
     try:
-        result = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+        result = run_git_process(
+            ["rev-parse", "HEAD"],
+            cwd=ROOT,
             text=True,
             timeout=2,
             check=True,
         )
-    except OSError, subprocess.SubprocessError:
+    except GitExecutionError:
         return unknown("checkout Git commit unavailable")
     sha = result.stdout.strip()
     if not re.fullmatch(r"[a-f0-9]{40}", sha):
@@ -189,38 +188,21 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
 
 def _checkout_clean(paths: list[Path]) -> bool:
     try:
-        tracked = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(ROOT),
-                "ls-files",
-                "--",
-                "custom_components/allpowers_ble",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+        tracked = run_git_process(
+            ["ls-files", "--", "custom_components/allpowers_ble"],
+            cwd=ROOT,
             text=True,
             timeout=2,
             check=True,
         )
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(ROOT),
-                "status",
-                "--porcelain",
-                "--",
-                "custom_components/allpowers_ble",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+        result = run_git_process(
+            ["status", "--porcelain", "--", "custom_components/allpowers_ble"],
+            cwd=ROOT,
             text=True,
             timeout=2,
             check=True,
         )
-    except OSError, subprocess.SubprocessError:
+    except GitExecutionError:
         return False
     expected = {path.relative_to(ROOT).as_posix() for path in paths}
     return not result.stdout.strip() and set(tracked.stdout.splitlines()) == expected

@@ -1,30 +1,51 @@
 #!/usr/bin/env python3
-"""Prepare a safe draft promotion PR from devel to main using Git and gh."""
+"""Prepare a safe draft promotion PR from devel to main."""
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
-import subprocess
 import sys
+from typing import Any
 
+from scripts.git import (
+    GIT_COMMAND_TIMEOUT_SECONDS,
+    GIT_NETWORK_TIMEOUT_SECONDS,
+    GitExecutionError,
+    decode_git_output,
+    require_success,
+    run_git,
+)
+from scripts.github_api import (
+    GitHubApiError,
+    client_from_env,
+    validate_pull_request_url,
+)
 from scripts.promotion_metadata import validate_revisions
 
 REMOTE = "origin"
 
 
 class PromotionError(RuntimeError):
-    """A preflight or GitHub CLI failure that must stop PR creation."""
+    """A preflight or GitHub API failure that must stop PR creation."""
 
 
 def run(command: list[str], *, check: bool = True) -> str:
     """Run a command and return stdout with useful error details."""
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if check and result.returncode:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise PromotionError(f"{' '.join(command)} failed: {message}")
-    return result.stdout.strip()
+    if not command or command[0] != "git":
+        raise PromotionError("Only native Git commands are supported here.")
+    args = command[1:]
+    try:
+        timeout = (
+            GIT_NETWORK_TIMEOUT_SECONDS
+            if args and args[0] in {"fetch", "ls-remote"}
+            else GIT_COMMAND_TIMEOUT_SECONDS
+        )
+        result = run_git(args, cwd=Path.cwd(), timeout=timeout)
+        output = require_success(result, args) if check else result.stdout
+        return decode_git_output(output).strip()
+    except GitExecutionError as error:
+        raise PromotionError(str(error)) from error
 
 
 def remote_refs() -> tuple[str, str]:
@@ -39,39 +60,131 @@ def remote_refs() -> tuple[str, str]:
         ) from error
 
 
+def _same_repo_pr(pr: dict[str, object], owner: str, repo: str) -> bool:
+    base = pr.get("base")
+    head = pr.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise PromotionError("GitHub returned a PR without base/head refs.")
+    repositories: list[str] = []
+    for ref in (base, head):
+        repository = ref.get("repo")
+        full_name = (
+            repository.get("full_name") if isinstance(repository, dict) else None
+        )
+        if not isinstance(full_name, str):
+            raise PromotionError(
+                "GitHub returned a PR with incomplete repository identity."
+            )
+        parts = full_name.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise PromotionError(
+                "GitHub returned a PR with incomplete repository identity."
+            )
+        repositories.append(full_name)
+    expected = f"{owner}/{repo}"
+    return all(repository == expected for repository in repositories)
+
+
 def open_promotion() -> dict[str, object] | None:
-    """Return an existing open devel-to-main PR, including drafts."""
-    result = run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--base",
-            "main",
-            "--head",
-            "devel",
-            "--json",
-            "url,headRefName,baseRefName,isDraft,isCrossRepository",
-        ]
-    )
+    """Return an existing open same-repository devel-to-main PR, including drafts."""
     try:
-        pulls = json.loads(result)
-    except json.JSONDecodeError as error:
-        raise PromotionError("GitHub CLI returned invalid PR data.") from error
-    if not isinstance(pulls, list) or any(not isinstance(pull, dict) for pull in pulls):
-        raise PromotionError("GitHub CLI returned an unexpected PR list shape.")
-    for pull in pulls:
-        if (
-            pull.get("baseRefName") == "main"
-            and pull.get("headRefName") == "devel"
-            and isinstance(pull.get("isDraft"), bool)
-            and pull.get("isCrossRepository") is False
-            and isinstance(pull.get("url"), str)
-        ):
-            return pull
-    return None
+        api = client_from_env()
+        pulls = api.list_pull_requests(state="open", base="main", head="devel")
+        for pr in pulls:
+            base, head = pr.get("base"), pr.get("head")
+            if not isinstance(base, dict) or not isinstance(head, dict):
+                raise PromotionError("GitHub returned a PR without base/head refs.")
+            if (
+                base.get("ref") == "main"
+                and head.get("ref") == "devel"
+                and _same_repo_pr(pr, api.owner, api.repo)
+            ):
+                url = pr.get("html_url")
+                draft = pr.get("draft")
+                base_sha, head_sha = base.get("sha"), head.get("sha")
+                number = pr.get("number")
+                url = validate_pull_request_url(
+                    url,
+                    number,
+                    owner=api.owner,
+                    repo=api.repo,
+                    api_url=api.api_url,
+                )
+                if (
+                    not isinstance(draft, bool)
+                    or not isinstance(base_sha, str)
+                    or not base_sha
+                    or not isinstance(head_sha, str)
+                    or not head_sha
+                ):
+                    raise PromotionError(
+                        "GitHub returned incomplete promotion PR details."
+                    )
+                return {
+                    "url": url,
+                    "number": number,
+                    "isDraft": draft,
+                    "baseSha": base_sha,
+                    "headSha": head_sha,
+                }
+        return None
+    except GitHubApiError as error:
+        raise PromotionError(str(error)) from error
+
+
+def inspect_promotion(
+    url: str, number: int, *, api: Any | None = None
+) -> dict[str, object]:
+    """Fetch and validate the exact open promotion PR represented by a URL."""
+    try:
+        client = api or client_from_env()
+        validate_pull_request_url(
+            url,
+            number,
+            owner=client.owner,
+            repo=client.repo,
+            api_url=client.api_url,
+        )
+        pull = client.pull_request(number)
+        detail_url = validate_pull_request_url(
+            pull.get("html_url"),
+            pull.get("number"),
+            owner=client.owner,
+            repo=client.repo,
+            api_url=client.api_url,
+        )
+    except GitHubApiError as error:
+        raise PromotionError(str(error)) from error
+    base, head = pull.get("base"), pull.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise PromotionError("GitHub returned a promotion PR without base/head refs.")
+    if (
+        pull.get("number") != number
+        or detail_url != url
+        or base.get("ref") != "main"
+        or head.get("ref") != "devel"
+        or not _same_repo_pr(pull, client.owner, client.repo)
+    ):
+        raise PromotionError(f"Refusing unrelated or mismatched PR: {url}")
+    if pull.get("state") != "open":
+        raise PromotionError(f"Refusing closed promotion PR: {url}")
+    base_sha, head_sha = base.get("sha"), head.get("sha")
+    draft = pull.get("draft")
+    if (
+        not isinstance(base_sha, str)
+        or not base_sha
+        or not isinstance(head_sha, str)
+        or not head_sha
+        or not isinstance(draft, bool)
+    ):
+        raise PromotionError("GitHub returned incomplete promotion PR details.")
+    return {
+        "url": url,
+        "number": number,
+        "isDraft": draft,
+        "baseSha": base_sha,
+        "headSha": head_sha,
+    }
 
 
 def render_body(template: str, base_sha: str, head_sha: str) -> str:
@@ -90,7 +203,12 @@ def render_body(template: str, base_sha: str, head_sha: str) -> str:
         commits.append(
             f"* {subject} ([`{sha[:7]}`](https://github.com/{repo}/commit/{sha}))"
         )
-    changed = run(["git", "diff", "--name-only", "-z", base_sha, head_sha]).split("\0")
+    diff_args = ["diff", "--name-only", "-z", base_sha, head_sha]
+    try:
+        raw_paths = require_success(run_git(diff_args, cwd=Path.cwd()), diff_args)
+        changed = [path.decode("utf-8") for path in raw_paths.split(b"\0") if path]
+    except (GitExecutionError, UnicodeDecodeError) as error:
+        raise PromotionError("Could not decode changed paths from Git.") from error
     tests = [path for path in changed if path.startswith("tests/")]
     test_summary = (
         "\n".join(f"* `{path}`" for path in tests)
@@ -114,18 +232,19 @@ def prepare_promotion(template: str) -> str | None:
     """Preflight current refs and create or reuse a draft promotion PR."""
     existing = open_promotion()
     if existing:
-        return str(existing["url"])
+        inspected = inspect_promotion(str(existing["url"]), int(existing["number"]))
+        return str(inspected["url"])
 
     run(["git", "fetch", "--no-tags", REMOTE, "main", "devel"])
     base_sha, head_sha = remote_refs()
     run(["git", "cat-file", "-e", f"{base_sha}^{{commit}}"])
     run(["git", "cat-file", "-e", f"{head_sha}^{{commit}}"])
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-        capture_output=True,
-        check=False,
+    ancestry = run_git(
+        ["merge-base", "--is-ancestor", base_sha, head_sha], cwd=Path.cwd()
     )
-    if ancestry.returncode != 0:
+    if ancestry.returncode not in (0, 1):
+        raise PromotionError("Could not check branch ancestry.")
+    if ancestry.returncode == 1:
         if base_sha == head_sha:
             return None
         raise PromotionError(
@@ -149,35 +268,51 @@ def prepare_promotion(template: str) -> str | None:
         )
     existing = open_promotion()
     if existing:
-        return str(existing["url"])
+        inspected = inspect_promotion(str(existing["url"]), int(existing["number"]))
+        return str(inspected["url"])
     try:
-        url = run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--draft",
-                "--base",
-                "main",
-                "--head",
-                "devel",
-                "--title",
-                "chore: promote devel to main",
-                "--body",
-                body,
-            ]
+        api = client_from_env(allow_pull_request_creation=True)
+        created = api.create_pull_request(
+            base="main",
+            head="devel",
+            title="chore: promote devel to main",
+            body=body,
+            draft=True,
         )
-    except PromotionError:
+        url = created.get("html_url")
+        number = created.get("number")
+        if not isinstance(number, int) or isinstance(number, bool):
+            raise PromotionError(
+                "GitHub returned incomplete created promotion PR details."
+            )
+        url = validate_pull_request_url(
+            url,
+            number,
+            owner=api.owner,
+            repo=api.repo,
+            api_url=api.api_url,
+        )
+    except (PromotionError, GitHubApiError) as create_error:
         existing = open_promotion()
         if existing:
-            return str(existing["url"])
-        raise
-    pull = json.loads(
-        run(["gh", "pr", "view", url, "--json", "url,isDraft,headRefOid,baseRefOid"])
-    )
-    if pull.get("isDraft") is not True or (
-        pull.get("headRefOid"),
-        pull.get("baseRefOid"),
+            inspected = inspect_promotion(str(existing["url"]), int(existing["number"]))
+            if (
+                inspected.get("isDraft") is True
+                and inspected.get("baseSha") == base_sha
+                and inspected.get("headSha") == head_sha
+            ):
+                return str(inspected["url"])
+            raise PromotionError(
+                "A promotion PR exists after the ambiguous create, but its draft or "
+                "validated refs do not match this run; inspect it before retrying."
+            ) from create_error
+        if isinstance(create_error, PromotionError):
+            raise
+        raise PromotionError(str(create_error)) from create_error
+    inspected = inspect_promotion(url, number, api=api)
+    if inspected.get("isDraft") is not True or (
+        inspected.get("headSha"),
+        inspected.get("baseSha"),
     ) != (head_sha, base_sha):
         raise PromotionError(
             f"Draft {url} was not created as a draft at the validated revisions. "
