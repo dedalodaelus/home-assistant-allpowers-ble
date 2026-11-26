@@ -155,6 +155,7 @@ def _pr(
 class FakeRestApi:
     owner = "owner"
     repo = "repo"
+    api_url = "https://api.github.com"
 
     def __init__(self) -> None:
         self.pulls: list[dict[str, object]] = []
@@ -391,6 +392,16 @@ def test_pr_inspection_rejects_cross_repository_or_wrong_direction(
     _install_api(monkeypatch, api)
     with pytest.raises(SyncError, match="unrelated or cross-repository"):
         sync_main_to_devel.inspect_pr(url)
+
+
+def test_pr_inspection_rejects_url_for_another_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeRestApi()
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="mismatched identity"):
+        sync_main_to_devel.inspect_pr("https://github.com/fork/repo/pull/2")
 
 
 def test_identical_tree_divergence_still_attempts_review_pr(

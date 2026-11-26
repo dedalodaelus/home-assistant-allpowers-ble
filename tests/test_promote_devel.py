@@ -55,6 +55,8 @@ def test_render_body_fails_when_no_commits_exist() -> None:
 class FakeGitHubApi:
     owner = "owner"
     repo = "repo"
+    api_url = "https://api.github.com"
+    api_url = "https://api.github.com"
 
     def __init__(self, pulls: list[dict[str, object]] | None = None) -> None:
         self.pulls = pulls or []
@@ -101,6 +103,7 @@ def test_open_promotion_selects_same_repository_pr_after_fork_pr(
     monkeypatch.setattr(promote_devel, "client_from_env", lambda **_kwargs: api)
     assert promote_devel.open_promotion() == {
         "url": own["html_url"],
+        "number": 5,
         "isDraft": True,
         "baseSha": "base",
         "headSha": "head",
@@ -128,6 +131,21 @@ def test_open_promotion_rejects_incomplete_repository_identity(
     )
 
     with pytest.raises(PromotionError, match="incomplete repository identity"):
+        promote_devel.open_promotion()
+
+
+def test_open_promotion_rejects_url_for_another_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _rest_pr(7, True, "head", "base")
+    candidate["html_url"] = "https://github.com/other/repo/pull/7"
+    monkeypatch.setattr(
+        promote_devel,
+        "client_from_env",
+        lambda **_kwargs: FakeGitHubApi([candidate]),
+    )
+
+    with pytest.raises(PromotionError, match="mismatched identity"):
         promote_devel.open_promotion()
 
 
@@ -296,6 +314,32 @@ def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
         pytest.raises(PromotionError, match="validated revisions"),
+    ):
+        promote_devel.prepare_promotion(TEMPLATE)
+
+
+def test_prepare_promotion_rejects_inconsistent_created_pr_url() -> None:
+    opened = iter([None, None])
+    api = FakeGitHubApi()
+    api.created = _rest_pr(42, True, "head", "base")
+    api.detail = _rest_pr(43, True, "head", "base")
+    with (
+        patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
+        patch.object(
+            promote_devel,
+            "run",
+            side_effect=["", "", "", "base-tree", "head-tree"],
+        ),
+        patch.object(promote_devel, "remote_refs", return_value=("base", "head")),
+        patch.object(
+            promote_devel,
+            "run_git",
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
+        ),
+        patch.object(promote_devel, "client_from_env", return_value=api),
+        patch.object(promote_devel, "validate_revisions"),
+        patch.object(promote_devel, "render_body", return_value="body"),
+        pytest.raises(PromotionError, match="inconsistent PR URL/number"),
     ):
         promote_devel.prepare_promotion(TEMPLATE)
 

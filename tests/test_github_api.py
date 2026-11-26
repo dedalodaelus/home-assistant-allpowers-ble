@@ -102,6 +102,38 @@ def test_pull_creation_posts_expected_body_and_write_api_is_separate(
     }
 
 
+def test_pull_request_url_validation_covers_github_and_enterprise_hosts() -> None:
+    assert (
+        github_api.validate_pull_request_url(
+            "https://github.com/owner/repo/pull/8",
+            8,
+            owner="owner",
+            repo="repo",
+            api_url="https://api.github.com",
+        )
+        == "https://github.com/owner/repo/pull/8"
+    )
+    assert (
+        github_api.validate_pull_request_url(
+            "https://ghe.example/owner/repo/pull/9",
+            9,
+            owner="owner",
+            repo="repo",
+            api_url="https://ghe.example/api/v3",
+        )
+        == "https://ghe.example/owner/repo/pull/9"
+    )
+
+    with pytest.raises(GitHubApiError, match="mismatched identity"):
+        github_api.validate_pull_request_url(
+            "https://github.com/fork/repo/pull/8",
+            8,
+            owner="owner",
+            repo="repo",
+            api_url="https://api.github.com",
+        )
+
+
 def test_malformed_lists_and_objects_fail_at_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

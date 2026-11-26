@@ -17,7 +17,11 @@ from scripts.git import (
     require_success,
     run_git,
 )
-from scripts.github_api import GitHubApiError, client_from_env
+from scripts.github_api import (
+    GitHubApiError,
+    client_from_env,
+    validate_pull_request_url,
+)
 
 REMOTE = "origin"
 
@@ -132,8 +136,13 @@ def open_sync_pr() -> dict[str, object] | None:
                 and _same_repository(pr, repository)
             ):
                 url = pr.get("html_url")
-                if not isinstance(url, str):
-                    raise SyncError("GitHub returned a sync PR without a URL.")
+                validate_pull_request_url(
+                    url,
+                    pr.get("number"),
+                    owner=api.owner,
+                    repo=api.repo,
+                    api_url=api.api_url,
+                )
                 return {"url": url}
         return None
     except GitHubApiError as error:
@@ -144,7 +153,22 @@ def inspect_pr(url: str) -> dict[str, object]:
     """Read refs and mergeability for a PR URL without changing it."""
     try:
         api = client_from_env()
-        pr = api.pull_request(_pr_number(url))
+        number = _pr_number(url)
+        validate_pull_request_url(
+            url,
+            number,
+            owner=api.owner,
+            repo=api.repo,
+            api_url=api.api_url,
+        )
+        pr = api.pull_request(number)
+        inspected_url = validate_pull_request_url(
+            pr.get("html_url"),
+            pr.get("number"),
+            owner=api.owner,
+            repo=api.repo,
+            api_url=api.api_url,
+        )
     except GitHubApiError as error:
         raise SyncError(str(error)) from error
     base, head = pr.get("base"), pr.get("head")
@@ -155,7 +179,8 @@ def inspect_pr(url: str) -> dict[str, object]:
         base.get("ref") != "devel"
         or head.get("ref") != "main"
         or not _same_repository(pr, repository)
-        or pr.get("html_url") != url
+        or pr.get("number") != number
+        or inspected_url != url
     ):
         raise SyncError(f"Refusing unrelated or cross-repository PR: {url}")
     for name, ref in (("base", base), ("head", head)):

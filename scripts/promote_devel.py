@@ -15,14 +15,18 @@ from scripts.git import (
     require_success,
     run_git,
 )
-from scripts.github_api import GitHubApiError, client_from_env
+from scripts.github_api import (
+    GitHubApiError,
+    client_from_env,
+    validate_pull_request_url,
+)
 from scripts.promotion_metadata import validate_revisions
 
 REMOTE = "origin"
 
 
 class PromotionError(RuntimeError):
-    """A preflight or GitHub CLI failure that must stop PR creation."""
+    """A preflight or GitHub API failure that must stop PR creation."""
 
 
 def run(command: list[str], *, check: bool = True) -> str:
@@ -97,9 +101,16 @@ def open_promotion() -> dict[str, object] | None:
                 url = pr.get("html_url")
                 draft = pr.get("draft")
                 base_sha, head_sha = base.get("sha"), head.get("sha")
+                number = pr.get("number")
+                url = validate_pull_request_url(
+                    url,
+                    number,
+                    owner=api.owner,
+                    repo=api.repo,
+                    api_url=api.api_url,
+                )
                 if (
-                    not isinstance(url, str)
-                    or not isinstance(draft, bool)
+                    not isinstance(draft, bool)
                     or not isinstance(base_sha, str)
                     or not base_sha
                     or not isinstance(head_sha, str)
@@ -110,6 +121,7 @@ def open_promotion() -> dict[str, object] | None:
                     )
                 return {
                     "url": url,
+                    "number": number,
                     "isDraft": draft,
                     "baseSha": base_sha,
                     "headSha": head_sha,
@@ -211,14 +223,17 @@ def prepare_promotion(template: str) -> str | None:
         )
         url = created.get("html_url")
         number = created.get("number")
-        if (
-            not isinstance(url, str)
-            or not isinstance(number, int)
-            or isinstance(number, bool)
-        ):
+        if not isinstance(number, int) or isinstance(number, bool):
             raise PromotionError(
                 "GitHub returned incomplete created promotion PR details."
             )
+        url = validate_pull_request_url(
+            url,
+            number,
+            owner=api.owner,
+            repo=api.repo,
+            api_url=api.api_url,
+        )
         pull = api.pull_request(number)
     except (PromotionError, GitHubApiError) as create_error:
         existing = open_promotion()
@@ -236,6 +251,15 @@ def prepare_promotion(template: str) -> str | None:
         if isinstance(create_error, PromotionError):
             raise
         raise PromotionError(str(create_error)) from create_error
+    detail_url = validate_pull_request_url(
+        pull.get("html_url"),
+        pull.get("number"),
+        owner=api.owner,
+        repo=api.repo,
+        api_url=api.api_url,
+    )
+    if pull.get("number") != number or detail_url != url:
+        raise PromotionError("GitHub returned inconsistent PR URL/number details.")
     base, head = pull.get("base"), pull.get("head")
     if not isinstance(base, dict) or not isinstance(head, dict):
         raise PromotionError("GitHub returned a promotion PR without base/head refs.")

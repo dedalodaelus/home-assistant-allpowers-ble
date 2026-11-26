@@ -6,12 +6,43 @@ import base64
 import json
 from typing import Any, Literal, overload
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
 class GitHubApiError(RuntimeError):
     """A GitHub request or response could not be safely used."""
+
+
+def validate_pull_request_url(
+    value: object,
+    number: object,
+    *,
+    owner: str,
+    repo: str,
+    api_url: str,
+) -> str:
+    """Validate a PR HTML URL against its API repository and numeric identity."""
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        raise GitHubApiError("GitHub returned an invalid pull request number.")
+    if not isinstance(value, str):
+        raise GitHubApiError("GitHub returned an invalid pull request URL.")
+    parsed = urlparse(value)
+    api_host = urlparse(api_url).hostname
+    expected_host = "github.com" if api_host == "api.github.com" else api_host
+    expected_path = f"/{quote(owner, safe='')}/{quote(repo, safe='')}/pull/{number}"
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname != expected_host
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") != expected_path
+    ):
+        raise GitHubApiError("GitHub returned a PR URL with mismatched identity.")
+    return value
 
 
 class GitHubApiClient:
