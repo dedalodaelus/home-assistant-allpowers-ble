@@ -1,2 +1,2 @@
 # Advisory only; requirements_test.txt remains the selected HA baseline.
-homeassistant==2026.10.4
+homeassistant==2026.11.1
