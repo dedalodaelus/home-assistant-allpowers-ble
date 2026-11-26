@@ -579,6 +579,28 @@ def test_prepare_sync_rejects_draft_candidate_after_ambiguous_create(
     assert len(api.create_calls) == 1
 
 
+def test_prepare_sync_rejects_stale_candidate_after_ambiguous_create(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/22"
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError("request timed out")
+    stale = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale["head"]["sha"] = "stale-main"  # type: ignore[index]
+    api.details[22] = stale
+    api.on_list = lambda: (
+        setattr(api, "pulls", [stale]) if api.list_calls == 2 else None
+    )
+    _install_api(monkeypatch, api)
+    remote_before = _remote_shas(divergent_repo["repo"])
+
+    with pytest.raises(SyncError, match="refs moved"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
+    assert _remote_shas(divergent_repo["repo"]) == remote_before
+
+
 def test_identical_tree_divergence_still_attempts_review_pr(
     ancestry_only_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -401,6 +401,41 @@ def test_prepare_promotion_reuses_pr_won_by_concurrent_invocation() -> None:
         assert promote_devel.prepare_promotion(TEMPLATE) == existing["url"]
 
 
+def test_prepare_promotion_rejects_stale_pr_won_by_ambiguous_create() -> None:
+    candidate = {
+        "url": "https://github.com/owner/repo/pull/12",
+        "number": 12,
+        "isDraft": True,
+        "baseSha": "main",
+        "headSha": "stale-head",
+    }
+    opened = iter([None, None, candidate])
+    api = FakeGitHubApi()
+    api.create_error = github_api.GitHubApiError("request timed out")
+    api.detail = _rest_pr(12, True, "stale-head", "main")
+
+    with (
+        patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
+        patch.object(
+            promote_devel, "run", side_effect=["", "", "", "main-tree", "devel-tree"]
+        ),
+        patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
+        patch.object(
+            promote_devel,
+            "run_git",
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
+        ),
+        patch.object(promote_devel, "client_from_env", return_value=api),
+        patch.object(promote_devel, "validate_revisions"),
+        patch.object(promote_devel, "render_body", return_value="body"),
+        pytest.raises(PromotionError, match="validated refs do not match"),
+    ):
+        promote_devel.prepare_promotion(TEMPLATE)
+
+    assert api.create_args is not None
+    assert api.create_args["draft"] is True
+
+
 @pytest.mark.parametrize(
     ("base", "head", "regresses"),
     [
