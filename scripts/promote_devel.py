@@ -58,14 +58,26 @@ def remote_refs() -> tuple[str, str]:
 def _same_repo_pr(pr: dict[str, object], owner: str, repo: str) -> bool:
     base = pr.get("base")
     head = pr.get("head")
-    return (
-        isinstance(base, dict)
-        and isinstance(head, dict)
-        and isinstance(base.get("repo"), dict)
-        and isinstance(head.get("repo"), dict)
-        and base["repo"].get("full_name") == f"{owner}/{repo}"
-        and head["repo"].get("full_name") == f"{owner}/{repo}"
-    )
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise PromotionError("GitHub returned a PR without base/head refs.")
+    repositories: list[str] = []
+    for ref in (base, head):
+        repository = ref.get("repo")
+        full_name = (
+            repository.get("full_name") if isinstance(repository, dict) else None
+        )
+        if not isinstance(full_name, str):
+            raise PromotionError(
+                "GitHub returned a PR with incomplete repository identity."
+            )
+        parts = full_name.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise PromotionError(
+                "GitHub returned a PR with incomplete repository identity."
+            )
+        repositories.append(full_name)
+    expected = f"{owner}/{repo}"
+    return all(repository == expected for repository in repositories)
 
 
 def open_promotion() -> dict[str, object] | None:

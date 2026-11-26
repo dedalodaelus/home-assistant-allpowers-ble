@@ -116,6 +116,21 @@ def test_open_promotion_ignores_fork_only_pr(monkeypatch: pytest.MonkeyPatch) ->
     assert promote_devel.open_promotion() is None
 
 
+def test_open_promotion_rejects_incomplete_repository_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _rest_pr(6, True, "head", "base")
+    candidate["head"]["repo"] = None  # type: ignore[index]
+    monkeypatch.setattr(
+        promote_devel,
+        "client_from_env",
+        lambda **_kwargs: FakeGitHubApi([candidate]),
+    )
+
+    with pytest.raises(PromotionError, match="incomplete repository identity"):
+        promote_devel.open_promotion()
+
+
 def test_open_promotion_returns_none_when_no_pr_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

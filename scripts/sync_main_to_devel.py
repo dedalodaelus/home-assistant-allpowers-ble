@@ -88,14 +88,23 @@ def is_ancestor(main_sha: str, devel_sha: str) -> bool:
 
 def _same_repository(pr: dict[str, object], repository: str) -> bool:
     base, head = pr.get("base"), pr.get("head")
-    return (
-        isinstance(base, dict)
-        and isinstance(head, dict)
-        and isinstance(base.get("repo"), dict)
-        and isinstance(head.get("repo"), dict)
-        and base["repo"].get("full_name") == repository
-        and head["repo"].get("full_name") == repository
-    )
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise SyncError("GitHub returned a PR without base/head refs.")
+    repositories: list[str] = []
+    for ref in (base, head):
+        pull_repository = ref.get("repo")
+        full_name = (
+            pull_repository.get("full_name")
+            if isinstance(pull_repository, dict)
+            else None
+        )
+        if not isinstance(full_name, str):
+            raise SyncError("GitHub returned a PR with incomplete repository identity.")
+        parts = full_name.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise SyncError("GitHub returned a PR with incomplete repository identity.")
+        repositories.append(full_name)
+    return all(full_name == repository for full_name in repositories)
 
 
 def _pr_number(url: str) -> int:

@@ -278,6 +278,19 @@ def test_reuses_only_same_repository_main_to_devel_pr(
     assert not api.create_calls
 
 
+def test_open_sync_pr_rejects_incomplete_repository_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeRestApi()
+    candidate = _pr("https://github.com/owner/repo/pull/16", "main-sha", "devel-sha")
+    candidate["head"]["repo"] = None  # type: ignore[index]
+    api.pulls = [candidate]
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="incomplete repository identity"):
+        sync_main_to_devel.open_sync_pr()
+
+
 def test_duplicate_creation_race_reuses_winning_sync_pr(
     divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
