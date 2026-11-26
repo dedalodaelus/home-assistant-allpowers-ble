@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from scripts import github_api, sync_main_to_devel
+from scripts.git import GitExecutionError
 from scripts.sync_main_to_devel import SyncError
 
 
@@ -145,6 +146,8 @@ def _pr(
     return {
         "number": int(url.rstrip("/").split("/")[-1]),
         "html_url": url,
+        "state": "open",
+        "draft": False,
         "base": {"ref": "devel", "sha": devel_sha, "repo": {"full_name": "owner/repo"}},
         "head": {"ref": "main", "sha": main_sha, "repo": {"full_name": "owner/repo"}},
         "mergeable": False if is_conflict else True,
@@ -165,7 +168,9 @@ class FakeRestApi:
         self.create_calls: list[dict[str, object]] = []
         self.list_calls = 0
         self.on_list: Any = None
+        self.on_pull_request: Any = None
         self.create_response: dict[str, object] | None = None
+        self.create_result: dict[str, object] | None = None
         self.create_url = "https://github.com/owner/repo/pull/42"
         self.viewed: list[tuple[str, str]] = []
 
@@ -186,9 +191,11 @@ class FakeRestApi:
             self.create_url, "head", "base"
         )
         self.details[number].setdefault("draft", kwargs.get("draft", False))
-        return {"number": number, "html_url": self.create_url}
+        return self.create_result or {"number": number, "html_url": self.create_url}
 
     def pull_request(self, number: int) -> dict[str, object]:
+        if self.on_pull_request:
+            self.on_pull_request()
         pull = self.details[number]
         base, head = pull["base"], pull["head"]
         self.viewed.append((str(head["sha"]), str(base["sha"])))  # type: ignore[index]
@@ -357,11 +364,101 @@ def test_conflicting_existing_pr_is_reported_without_resolution(
 def test_pr_ref_movement_fails_closed() -> None:
     with pytest.raises(SyncError, match="refs moved"):
         sync_main_to_devel.validate_current_pr(
-            _pr("https://github.com/owner/repo/pull/12", "new-main", "devel"),
+            {"headRefOid": "new-main", "baseRefOid": "devel"},
             "old-main",
             "devel",
             url="https://github.com/owner/repo/pull/12",
         )
+
+
+@pytest.mark.parametrize("changed_ref", ["head", "base"])
+def test_prepare_sync_rejects_stale_pr_sha_from_detail(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    changed_ref: str,
+) -> None:
+    repo = divergent_repo["repo"]
+    url = "https://github.com/owner/repo/pull/17"
+    api = FakeRestApi()
+    listed = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale_detail = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    stale_detail[changed_ref]["sha"] = "stale-sha"  # type: ignore[index]
+    api.pulls = [listed]
+    api.details[17] = stale_detail
+    _install_api(monkeypatch, api)
+    remote_before = _remote_shas(repo)
+
+    with pytest.raises(SyncError, match="refs moved"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.create_calls == []
+    assert _remote_shas(repo) == remote_before
+
+
+def test_prepare_sync_rejects_remote_ref_movement_during_inspection(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = divergent_repo["repo"]
+    url = "https://github.com/owner/repo/pull/18"
+    api = FakeRestApi()
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.pulls = [pr]
+    api.details[18] = pr
+    _install_api(monkeypatch, api)
+    original_remote = _remote_shas(repo)
+    advanced_main: list[str] = []
+
+    def advance_main_once() -> None:
+        if advanced_main:
+            return
+        _git(repo, "switch", "main")
+        (repo / "hotfix-race.txt").write_text("intentional race\n", encoding="utf-8")
+        advanced_main.append(_commit(repo, "fix: advance main during PR inspection"))
+        _git(repo, "push", "origin", "main")
+        _git(repo, "switch", "devel")
+
+    api.on_pull_request = advance_main_once
+    with pytest.raises(SyncError, match="moved during preflight"):
+        sync_main_to_devel.prepare_sync()
+
+    after = _remote_shas(repo)
+    assert after == (advanced_main[0], original_remote[1])
+    assert api.create_calls == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        subprocess.CompletedProcess([], 128, b"", b"fatal: invalid object"),
+        GitExecutionError(["merge-base"], "timed out after 10 seconds"),
+    ],
+    ids=["unexpected-exit", "execution-error"],
+)
+def test_prepare_sync_fails_closed_when_ancestry_is_unknown(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: subprocess.CompletedProcess[bytes] | GitExecutionError,
+) -> None:
+    original_run_git = sync_main_to_devel.run_git
+
+    def intercept_ancestry(args: list[str], **kwargs: object) -> Any:
+        if args and args[0] == "merge-base":
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return original_run_git(args, **kwargs)
+
+    monkeypatch.setattr(sync_main_to_devel, "run_git", intercept_ancestry)
+    api = FakeRestApi()
+    _install_api(monkeypatch, api)
+    before = _remote_shas(divergent_repo["repo"])
+
+    with pytest.raises(SyncError, match="ancestry"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.list_calls == 0
+    assert api.create_calls == []
+    assert _remote_shas(divergent_repo["repo"]) == before
 
 
 def test_unknown_mergeability_remains_an_incomplete_observation(
@@ -402,6 +499,84 @@ def test_pr_inspection_rejects_url_for_another_repository(
 
     with pytest.raises(SyncError, match="mismatched identity"):
         sync_main_to_devel.inspect_pr("https://github.com/fork/repo/pull/2")
+
+
+@pytest.mark.parametrize(
+    ("state", "draft"),
+    [("closed", False), ("open", True)],
+    ids=["closed-detail", "unexpected-draft"],
+)
+def test_prepare_sync_rejects_closed_or_draft_created_pr(
+    divergent_repo: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    draft: bool,
+) -> None:
+    url = "https://github.com/owner/repo/pull/19"
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_response = _pr(
+        url, divergent_repo["main_sha"], divergent_repo["devel_sha"]
+    )
+    api.create_response["state"] = state
+    api.create_response["draft"] = draft
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="closed|non-draft"):
+        sync_main_to_devel.prepare_sync()
+
+    assert api.create_calls[0]["draft"] is False
+    assert len(api.create_calls) == 1
+
+
+def test_prepare_sync_rejects_post_number_url_mismatch_without_retry(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeRestApi()
+    api.create_url = "https://github.com/owner/repo/pull/43"
+    api.create_result = {"number": 42, "html_url": api.create_url}
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="mismatched identity"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
+    assert api.list_calls == 2
+
+
+def test_prepare_sync_reconciles_ambiguous_create_with_fresh_open_non_draft_detail(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/20"
+    api = FakeRestApi()
+    api.create_url = url
+    api.create_error = github_api.GitHubApiError("request timed out")
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    api.details[20] = pr
+    api.on_list = lambda: setattr(api, "pulls", [pr]) if api.list_calls == 2 else None
+    _install_api(monkeypatch, api)
+
+    assert sync_main_to_devel.prepare_sync().url == url
+    assert api.create_calls[0]["draft"] is False
+    assert len(api.create_calls) == 1
+
+
+def test_prepare_sync_rejects_draft_candidate_after_ambiguous_create(
+    divergent_repo: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://github.com/owner/repo/pull/21"
+    api = FakeRestApi()
+    api.create_error = github_api.GitHubApiError("request timed out")
+    pr = _pr(url, divergent_repo["main_sha"], divergent_repo["devel_sha"])
+    pr["draft"] = True
+    api.details[21] = pr
+    api.on_list = lambda: setattr(api, "pulls", [pr]) if api.list_calls == 2 else None
+    _install_api(monkeypatch, api)
+
+    with pytest.raises(SyncError, match="non-draft"):
+        sync_main_to_devel.prepare_sync()
+
+    assert len(api.create_calls) == 1
 
 
 def test_identical_tree_divergence_still_attempts_review_pr(

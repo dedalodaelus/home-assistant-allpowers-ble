@@ -86,6 +86,7 @@ def _rest_pr(
     return {
         "number": number,
         "html_url": f"https://github.com/owner/repo/pull/{number}",
+        "state": "open",
         "draft": draft,
         "base": {"ref": "main", "sha": base_sha, "repo": {"full_name": "owner/repo"}},
         "head": {"ref": "devel", "sha": head_sha, "repo": {"full_name": "owner/repo"}},
@@ -233,9 +234,13 @@ def test_prepare_promotion_creates_draft_from_real_local_git_history(
 def test_prepare_promotion_reuses_open_draft_without_fetching() -> None:
     existing = {
         "url": "https://github.com/owner/repo/pull/9",
+        "number": 9,
         "isDraft": True,
     }
-    with patch.object(promote_devel, "open_promotion", return_value=existing):
+    with (
+        patch.object(promote_devel, "open_promotion", return_value=existing),
+        patch.object(promote_devel, "inspect_promotion", return_value=existing),
+    ):
         assert promote_devel.prepare_promotion(TEMPLATE) == existing["url"]
 
 
@@ -318,11 +323,19 @@ def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
         promote_devel.prepare_promotion(TEMPLATE)
 
 
-def test_prepare_promotion_rejects_inconsistent_created_pr_url() -> None:
-    opened = iter([None, None])
+@pytest.mark.parametrize(
+    ("mismatch", "error_match"),
+    [("post", "mismatched identity"), ("detail", "mismatched PR")],
+)
+def test_prepare_promotion_rejects_inconsistent_created_pr_identity(
+    mismatch: str, error_match: str
+) -> None:
+    opened = iter([None, None, None])
     api = FakeGitHubApi()
     api.created = _rest_pr(42, True, "head", "base")
-    api.detail = _rest_pr(43, True, "head", "base")
+    api.detail = _rest_pr(43 if mismatch == "detail" else 42, True, "head", "base")
+    if mismatch == "post":
+        api.created["html_url"] = "https://github.com/owner/repo/pull/43"
     with (
         patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
         patch.object(
@@ -339,7 +352,7 @@ def test_prepare_promotion_rejects_inconsistent_created_pr_url() -> None:
         patch.object(promote_devel, "client_from_env", return_value=api),
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
-        pytest.raises(PromotionError, match="inconsistent PR URL/number"),
+        pytest.raises(PromotionError, match=error_match),
     ):
         promote_devel.prepare_promotion(TEMPLATE)
 
@@ -360,6 +373,7 @@ def test_prepare_promotion_surfaces_git_errors() -> None:
 def test_prepare_promotion_reuses_pr_won_by_concurrent_invocation() -> None:
     existing = {
         "url": "https://github.com/owner/repo/pull/12",
+        "number": 12,
         "isDraft": True,
         "baseSha": "main",
         "headSha": "devel",
@@ -367,6 +381,7 @@ def test_prepare_promotion_reuses_pr_won_by_concurrent_invocation() -> None:
     opened = iter([None, None, existing])
     api = FakeGitHubApi()
     api.create_error = github_api.GitHubApiError("already exists")
+    api.detail = _rest_pr(12, True, "devel", "main")
 
     with (
         patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),

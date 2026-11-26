@@ -87,7 +87,13 @@ def is_ancestor(main_sha: str, devel_sha: str) -> bool:
         if error.returncode == 1:
             return False
         raise SyncError(f"Could not check branch ancestry: {error}") from error
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise SyncError(
+        f"Could not check branch ancestry: git merge-base exited {result.returncode}."
+    )
 
 
 def _same_repository(pr: dict[str, object], repository: str) -> bool:
@@ -175,6 +181,8 @@ def inspect_pr(url: str) -> dict[str, object]:
     repository = f"{api.owner}/{api.repo}"
     if not isinstance(base, dict) or not isinstance(head, dict):
         raise SyncError("GitHub returned a PR without base/head refs.")
+    if pr.get("state") != "open":
+        raise SyncError(f"Refusing closed sync PR: {url}")
     if (
         base.get("ref") != "devel"
         or head.get("ref") != "main"
@@ -201,6 +209,7 @@ def inspect_pr(url: str) -> dict[str, object]:
         "mergeStateStatus": "UNKNOWN"
         if merge_state in (None, "unknown")
         else str(merge_state).upper(),
+        "isDraft": pr.get("draft"),
     }
 
 
@@ -283,15 +292,17 @@ def prepare_sync() -> SyncResult:
             head="main",
             title="chore(ci): synchronize main into devel",
             body=body,
+            draft=False,
         )
         url = created.get("html_url")
         number = created.get("number")
-        if (
-            not isinstance(url, str)
-            or not isinstance(number, int)
-            or isinstance(number, bool)
-        ):
-            raise SyncError("GitHub returned incomplete created sync PR details.")
+        url = validate_pull_request_url(
+            url,
+            number,
+            owner=api.owner,
+            repo=api.repo,
+            api_url=api.api_url,
+        )
     except (SyncError, GitHubApiError) as create_error:
         # A timed-out create is ambiguous; reuse only the exact same-repository PR.
         existing = open_sync_pr()
@@ -317,6 +328,8 @@ def prepare_sync() -> SyncResult:
             "the PR tracks current branch tips, rerun to verify them."
         )
     validate_current_pr(pr, main_sha, devel_sha, url=url)
+    if pr["isDraft"] is not False:
+        raise SyncError(f"Sync PR {url} is not open as a non-draft PR.")
     return SyncResult(url, main_sha, devel_sha)
 
 
