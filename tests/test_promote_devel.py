@@ -1,15 +1,14 @@
-"""Tests for the Git and GitHub CLI promotion preflight."""
+"""Tests for Git and REST-based promotion preparation."""
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from scripts import promote_devel
+from scripts import github_api, promote_devel
 from scripts import promotion_metadata
 from scripts.promote_devel import PromotionError
 
@@ -27,10 +26,14 @@ def test_render_body_links_actual_commits_and_lists_changed_tests() -> None:
         patch.object(
             promote_devel,
             "run",
-            side_effect=[
-                "0123456789abcdef\tfeat: add support\n",
-                "tests/test_feature.py\0README.md",
-            ],
+            return_value="0123456789abcdef\tfeat: add support\n",
+        ),
+        patch.object(
+            promote_devel.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, b"tests/test_feature.py\0README.md\0", b""
+            ),
         ),
     ):
         body = promote_devel.render_body(TEMPLATE, "base", "head")
@@ -49,55 +52,86 @@ def test_render_body_fails_when_no_commits_exist() -> None:
         promote_devel.render_body(TEMPLATE, "base", "head")
 
 
-def test_open_promotion_selects_same_repository_pr_after_fork_pr() -> None:
-    fork = {
-        "url": "https://github.com/fork/repo/pull/4",
-        "baseRefName": "main",
-        "headRefName": "devel",
-        "isDraft": True,
-        "isCrossRepository": True,
-    }
-    own = {
-        "url": "https://github.com/owner/repo/pull/5",
-        "baseRefName": "main",
-        "headRefName": "devel",
-        "isDraft": True,
-        "isCrossRepository": False,
-    }
-    expected_fields = "url,headRefName,baseRefName,isDraft,isCrossRepository"
-    with patch.object(
-        promote_devel, "run", return_value=json.dumps([fork, own])
-    ) as run:
-        assert promote_devel.open_promotion() == own
-    command = run.call_args.args[0]
-    assert command[command.index("--json") + 1] == expected_fields
+class FakeGitHubApi:
+    owner = "owner"
+    repo = "repo"
+
+    def __init__(self, pulls: list[dict[str, object]] | None = None) -> None:
+        self.pulls = pulls or []
+        self.created: dict[str, object] | None = None
+        self.create_args: dict[str, object] | None = None
+        self.detail: dict[str, object] | None = None
+        self.create_error: Exception | None = None
+
+    def list_pull_requests(self, **_kwargs: object) -> list[dict[str, object]]:
+        return self.pulls
+
+    def create_pull_request(self, **kwargs: object) -> dict[str, object]:
+        self.create_args = kwargs
+        if self.create_error is not None:
+            raise self.create_error
+        if self.created is None:
+            self.created = _rest_pr(42, kwargs.get("draft", False), "head", "base")
+        return self.created
+
+    def pull_request(self, _number: int) -> dict[str, object]:
+        return self.detail or self.created or {}
 
 
-def test_open_promotion_ignores_fork_only_pr() -> None:
-    fork = {
-        "url": "https://github.com/fork/repo/pull/4",
-        "baseRefName": "main",
-        "headRefName": "devel",
-        "isDraft": True,
-        "isCrossRepository": True,
+def _rest_pr(
+    number: int, draft: object, head_sha: str, base_sha: str
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "html_url": f"https://github.com/owner/repo/pull/{number}",
+        "draft": draft,
+        "base": {"ref": "main", "sha": base_sha, "repo": {"full_name": "owner/repo"}},
+        "head": {"ref": "devel", "sha": head_sha, "repo": {"full_name": "owner/repo"}},
     }
-    with patch.object(promote_devel, "run", return_value=json.dumps([fork])) as run:
-        assert promote_devel.open_promotion() is None
-    command = run.call_args.args[0]
-    assert command[command.index("--json") + 1] == (
-        "url,headRefName,baseRefName,isDraft,isCrossRepository"
+
+
+def test_open_promotion_selects_same_repository_pr_after_fork_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fork = _rest_pr(4, True, "head", "base")
+    fork["html_url"] = "https://github.com/fork/repo/pull/4"
+    fork["head"]["repo"] = {"full_name": "fork/repo"}  # type: ignore[index]
+    own = _rest_pr(5, True, "head", "base")
+    api = FakeGitHubApi([fork, own])
+    monkeypatch.setattr(promote_devel, "client_from_env", lambda **_kwargs: api)
+    assert promote_devel.open_promotion() == {
+        "url": own["html_url"],
+        "isDraft": True,
+        "baseSha": "base",
+        "headSha": "head",
+    }
+
+
+def test_open_promotion_ignores_fork_only_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    fork = _rest_pr(4, True, "head", "base")
+    fork["head"]["repo"] = {"full_name": "fork/repo"}  # type: ignore[index]
+    monkeypatch.setattr(
+        promote_devel, "client_from_env", lambda **_kwargs: FakeGitHubApi([fork])
     )
+    assert promote_devel.open_promotion() is None
 
 
-def test_open_promotion_returns_none_when_no_pr_exists() -> None:
-    with patch.object(promote_devel, "run", return_value="[]"):
-        assert promote_devel.open_promotion() is None
+def test_open_promotion_returns_none_when_no_pr_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        promote_devel, "client_from_env", lambda **_kwargs: FakeGitHubApi()
+    )
+    assert promote_devel.open_promotion() is None
 
 
-def test_open_promotion_rejects_invalid_cli_json() -> None:
-    with patch.object(promote_devel, "run", return_value="not json"):
-        with pytest.raises(PromotionError, match="invalid PR data"):
-            promote_devel.open_promotion()
+def test_open_promotion_rejects_invalid_rest_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeGitHubApi([{"base": None, "head": None}])
+    monkeypatch.setattr(promote_devel, "client_from_env", lambda **_kwargs: api)
+    with pytest.raises(PromotionError, match="without base/head"):
+        promote_devel.open_promotion()
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -148,44 +182,25 @@ def test_prepare_promotion_creates_draft_from_real_local_git_history(
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
 
     url = "https://github.com/owner/repo/pull/42"
-    gh_calls: list[list[str]] = []
-    real_run = promote_devel.run
-
-    def gh_boundary(command: list[str], *, check: bool = True) -> str:
-        if command[0] != "gh":
-            return real_run(command, check=check)
-        gh_calls.append(command)
-        if command[1:3] == ["pr", "list"]:
-            return "[]"
-        if command[1:3] == ["pr", "create"]:
-            return url
-        if command[1:3] == ["pr", "view"]:
-            return json.dumps(
-                {"isDraft": True, "headRefOid": head_sha, "baseRefOid": base_sha}
-            )
-        raise AssertionError(f"Unexpected GitHub CLI command: {command}")
-
-    monkeypatch.setattr(promote_devel, "run", gh_boundary)
+    api = FakeGitHubApi()
+    api.created = _rest_pr(42, True, head_sha, base_sha)
+    api.detail = api.created
+    monkeypatch.setattr(promote_devel, "client_from_env", lambda **_kwargs: api)
 
     assert promote_devel.prepare_promotion(TEMPLATE) == url
-    create = next(command for command in gh_calls if command[1:3] == ["pr", "create"])
-    assert "--draft" in create
-    assert create[create.index("--base") + 1] == "main"
-    assert create[create.index("--head") + 1] == "devel"
-    body = create[create.index("--body") + 1]
+    assert api.create_args is not None
+    assert api.create_args["draft"] is True
+    assert api.create_args["base"] == "main"
+    assert api.create_args["head"] == "devel"
+    body = str(api.create_args["body"])
     assert f"https://github.com/owner/repo/commit/{head_sha}" in body
     assert "tests/test_promotion_smoke.py" in body
-    view = next(command for command in gh_calls if command[1:3] == ["pr", "view"])
-    assert view[view.index("--json") + 1] == "url,isDraft,headRefOid,baseRefOid"
 
 
 def test_prepare_promotion_reuses_open_draft_without_fetching() -> None:
     existing = {
         "url": "https://github.com/owner/repo/pull/9",
-        "baseRefName": "main",
-        "headRefName": "devel",
         "isDraft": True,
-        "isCrossRepository": False,
     }
     with patch.object(promote_devel, "open_promotion", return_value=existing):
         assert promote_devel.prepare_promotion(TEMPLATE) == existing["url"]
@@ -199,7 +214,7 @@ def test_prepare_promotion_fails_closed_for_diverged_refs() -> None:
         patch.object(
             promote_devel.subprocess,
             "run",
-            return_value=type("Result", (), {"returncode": 1})(),
+            return_value=subprocess.CompletedProcess([], 1, b"", b""),
         ),
         pytest.raises(PromotionError, match="diverged"),
     ):
@@ -215,7 +230,7 @@ def test_prepare_promotion_identical_trees_are_a_noop() -> None:
         patch.object(
             promote_devel.subprocess,
             "run",
-            return_value=type("Result", (), {"returncode": 0})(),
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
     ):
         assert promote_devel.prepare_promotion(TEMPLATE) is None
@@ -235,7 +250,7 @@ def test_prepare_promotion_rejects_refs_moving_before_pr_creation() -> None:
         patch.object(
             promote_devel.subprocess,
             "run",
-            return_value=type("Result", (), {"returncode": 0})(),
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
@@ -246,27 +261,23 @@ def test_prepare_promotion_rejects_refs_moving_before_pr_creation() -> None:
 
 def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
     opened = iter([None, None])
+    api = FakeGitHubApi()
+    api.created = _rest_pr(3, True, "head", "base")
+    api.detail = _rest_pr(3, True, "new-head", "base")
     with (
         patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
         patch.object(
             promote_devel,
             "run",
-            side_effect=[
-                "",
-                "",
-                "",
-                "main-tree",
-                "devel-tree",
-                "https://github.com/owner/repo/pull/3",
-                json.dumps({"headRefOid": "new-head", "baseRefOid": "main"}),
-            ],
+            side_effect=["", "", "", "main-tree", "devel-tree"],
         ),
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
             promote_devel.subprocess,
             "run",
-            return_value=type("Result", (), {"returncode": 0})(),
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
+        patch.object(promote_devel, "client_from_env", return_value=api),
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
         pytest.raises(PromotionError, match="validated revisions"),
@@ -274,13 +285,13 @@ def test_prepare_promotion_rejects_draft_for_moved_revisions() -> None:
         promote_devel.prepare_promotion(TEMPLATE)
 
 
-def test_prepare_promotion_surfaces_git_or_github_cli_errors() -> None:
+def test_prepare_promotion_surfaces_git_errors() -> None:
     with (
         patch.object(promote_devel, "open_promotion", return_value=None),
         patch.object(
             promote_devel,
             "run",
-            side_effect=PromotionError("gh: permission denied"),
+            side_effect=PromotionError("git fetch permission denied"),
         ),
         pytest.raises(PromotionError, match="permission denied"),
     ):
@@ -290,29 +301,26 @@ def test_prepare_promotion_surfaces_git_or_github_cli_errors() -> None:
 def test_prepare_promotion_reuses_pr_won_by_concurrent_invocation() -> None:
     existing = {
         "url": "https://github.com/owner/repo/pull/12",
-        "baseRefName": "main",
-        "headRefName": "devel",
         "isDraft": True,
-        "isCrossRepository": False,
+        "baseSha": "main",
+        "headSha": "devel",
     }
     opened = iter([None, None, existing])
-    commands = ["", "", "", "main-tree", "devel-tree", PromotionError("already exists")]
-
-    def fake_run(_command: list[str]) -> str:
-        result = commands.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
+    api = FakeGitHubApi()
+    api.create_error = github_api.GitHubApiError("already exists")
 
     with (
         patch.object(promote_devel, "open_promotion", side_effect=lambda: next(opened)),
-        patch.object(promote_devel, "run", side_effect=fake_run),
+        patch.object(
+            promote_devel, "run", side_effect=["", "", "", "main-tree", "devel-tree"]
+        ),
         patch.object(promote_devel, "remote_refs", return_value=("main", "devel")),
         patch.object(
             promote_devel.subprocess,
             "run",
-            return_value=type("Result", (), {"returncode": 0})(),
+            return_value=subprocess.CompletedProcess([], 0, b"", b""),
         ),
+        patch.object(promote_devel, "client_from_env", return_value=api),
         patch.object(promote_devel, "validate_revisions"),
         patch.object(promote_devel, "render_body", return_value="body"),
     ):
@@ -398,13 +406,15 @@ def test_release_files_are_protected_in_promotion() -> None:
 def test_renamed_manifest_source_is_treated_as_removal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Completed:
-        stdout = (
-            "R100\0custom_components/allpowers_ble/manifest.json\0docs/manifest.json\0"
-        )
-
     monkeypatch.setattr(
-        promotion_metadata.subprocess, "run", lambda *args, **kwargs: Completed()
+        promotion_metadata.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args,
+            0,
+            "R100\0custom_components/allpowers_ble/manifest.json\0docs/manifest.json\0",
+            "",
+        ),
     )
     paths = promotion_metadata._changed_paths("base", "head")
     with pytest.raises(promotion_metadata.MetadataError, match="deleted or renamed"):

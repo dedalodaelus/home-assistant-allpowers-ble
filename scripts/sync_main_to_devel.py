@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+from scripts.github_api import GitHubApiError, client_from_env
 
 REMOTE = "origin"
 
@@ -27,7 +30,11 @@ class SyncResult:
 
 def run(command: list[str], *, check: bool = True) -> str:
     """Run a command and return stdout with useful error details."""
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if not command or command[0] != "git":
+        raise SyncError("Only native Git commands are supported here.")
+    result = subprocess.run(
+        command, capture_output=True, text=True, check=False, cwd=Path.cwd()
+    )
     if check and result.returncode:
         message = result.stderr.strip() or result.stdout.strip()
         raise SyncError(f"{' '.join(command)} failed: {message}")
@@ -60,71 +67,97 @@ def is_ancestor(main_sha: str, devel_sha: str) -> bool:
         ["git", "merge-base", "--is-ancestor", main_sha, devel_sha],
         capture_output=True,
         check=False,
+        cwd=Path.cwd(),
     )
-    if result.returncode not in (0, 1):
-        message = result.stderr.decode(errors="replace").strip()
-        raise SyncError(f"Could not check branch ancestry: {message}")
-    return result.returncode == 0
+    if result.returncode == 1:
+        return False
+    if result.returncode:
+        raise SyncError("Could not check branch ancestry.")
+    return True
+
+
+def _same_repository(pr: dict[str, object], repository: str) -> bool:
+    base, head = pr.get("base"), pr.get("head")
+    return (
+        isinstance(base, dict)
+        and isinstance(head, dict)
+        and isinstance(base.get("repo"), dict)
+        and isinstance(head.get("repo"), dict)
+        and base["repo"].get("full_name") == repository
+        and head["repo"].get("full_name") == repository
+    )
+
+
+def _pr_number(url: str) -> int:
+    try:
+        number = int(urlparse(url).path.rstrip("/").split("/")[-1])
+    except (ValueError, IndexError) as error:
+        raise SyncError("GitHub returned an invalid pull request URL.") from error
+    if number <= 0:
+        raise SyncError("GitHub returned an invalid pull request URL.")
+    return number
 
 
 def open_sync_pr() -> dict[str, object] | None:
     """Find an open same-repository PR with exactly main → devel direction."""
-    output = run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--base",
-            "devel",
-            "--json",
-            "url,headRefName,baseRefName,isCrossRepository",
-        ]
-    )
     try:
-        pulls = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise SyncError("GitHub CLI returned invalid PR data.") from error
-    if not isinstance(pulls, list) or any(not isinstance(pr, dict) for pr in pulls):
-        raise SyncError("GitHub CLI returned an unexpected PR list shape.")
-    for pr in pulls:
-        if (
-            pr.get("headRefName") == "main"
-            and pr.get("baseRefName") == "devel"
-            and pr.get("isCrossRepository") is False
-            and isinstance(pr.get("url"), str)
-        ):
-            return pr
-    return None
+        api = client_from_env()
+        repository = f"{api.owner}/{api.repo}"
+        for pr in api.list_pull_requests(state="open", base="devel", head="main"):
+            base, head = pr.get("base"), pr.get("head")
+            if not isinstance(base, dict) or not isinstance(head, dict):
+                raise SyncError("GitHub returned a PR without base/head refs.")
+            if (
+                base.get("ref") == "devel"
+                and head.get("ref") == "main"
+                and _same_repository(pr, repository)
+            ):
+                url = pr.get("html_url")
+                if not isinstance(url, str):
+                    raise SyncError("GitHub returned a sync PR without a URL.")
+                return {"url": url}
+        return None
+    except GitHubApiError as error:
+        raise SyncError(str(error)) from error
 
 
 def inspect_pr(url: str) -> dict[str, object]:
-    """Read refs and mergeability without changing the PR or its metadata."""
-    output = run(
-        [
-            "gh",
-            "pr",
-            "view",
-            url,
-            "--json",
-            "url,headRefName,baseRefName,isCrossRepository,headRefOid,baseRefOid,mergeable,mergeStateStatus",
-        ]
-    )
+    """Read refs and mergeability for a PR URL without changing it."""
     try:
-        pr = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise SyncError("GitHub CLI returned invalid PR details.") from error
-    if not isinstance(pr, dict):
-        raise SyncError("GitHub CLI returned an unexpected PR detail shape.")
+        api = client_from_env()
+        pr = api.pull_request(_pr_number(url))
+    except GitHubApiError as error:
+        raise SyncError(str(error)) from error
+    base, head = pr.get("base"), pr.get("head")
+    repository = f"{api.owner}/{api.repo}"
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise SyncError("GitHub returned a PR without base/head refs.")
     if (
-        pr.get("headRefName") != "main"
-        or pr.get("baseRefName") != "devel"
-        or pr.get("isCrossRepository") is not False
-        or pr.get("url") != url
+        base.get("ref") != "devel"
+        or head.get("ref") != "main"
+        or not _same_repository(pr, repository)
+        or pr.get("html_url") != url
     ):
         raise SyncError(f"Refusing unrelated or cross-repository PR: {url}")
-    return pr
+    for name, ref in (("base", base), ("head", head)):
+        if not isinstance(ref.get("sha"), str) or not ref.get("sha"):
+            raise SyncError(f"GitHub returned a PR with missing {name}.sha.")
+    mergeable = pr.get("mergeable")
+    if mergeable is not None and not isinstance(mergeable, bool):
+        raise SyncError("GitHub returned an invalid mergeable value.")
+    merge_state = pr.get("mergeable_state")
+    if merge_state is not None and not isinstance(merge_state, str):
+        raise SyncError("GitHub returned an invalid mergeable_state value.")
+    return {
+        "headRefOid": head["sha"],
+        "baseRefOid": base["sha"],
+        "mergeable": "UNKNOWN"
+        if mergeable is None
+        else ("MERGEABLE" if mergeable else "CONFLICTING"),
+        "mergeStateStatus": "UNKNOWN"
+        if merge_state in (None, "unknown")
+        else str(merge_state).upper(),
+    }
 
 
 def render_body(main_sha: str, devel_sha: str) -> str:
@@ -200,23 +233,23 @@ def prepare_sync() -> SyncResult:
         raise SyncError("main or devel moved during preflight; rerun the workflow.")
 
     try:
-        url = run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--base",
-                "devel",
-                "--head",
-                "main",
-                "--title",
-                "chore(ci): synchronize main into devel",
-                "--body",
-                body,
-            ]
+        api = client_from_env(allow_pull_request_creation=True)
+        created = api.create_pull_request(
+            base="devel",
+            head="main",
+            title="chore(ci): synchronize main into devel",
+            body=body,
         )
-    except SyncError:
-        # Another run may have won the create race. Reuse only the exact same-repo PR.
+        url = created.get("html_url")
+        number = created.get("number")
+        if (
+            not isinstance(url, str)
+            or not isinstance(number, int)
+            or isinstance(number, bool)
+        ):
+            raise SyncError("GitHub returned incomplete created sync PR details.")
+    except (SyncError, GitHubApiError) as create_error:
+        # A timed-out create is ambiguous; reuse only the exact same-repository PR.
         existing = open_sync_pr()
         if not existing:
             identical_trees = run(["git", "rev-parse", f"{main_sha}^{{tree}}"]) == run(
@@ -229,7 +262,7 @@ def prepare_sync() -> SyncResult:
                     "change exists or ask a maintainer to define a reviewed, "
                     "ancestry-preserving recovery."
                 ) from None
-            raise
+            raise SyncError(str(create_error)) from create_error
         url = str(existing["url"])
 
     pr = inspect_pr(url)
