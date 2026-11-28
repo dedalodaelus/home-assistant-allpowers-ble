@@ -1,0 +1,132 @@
+{
+  "fresh_verified_samples": true,
+  "physical_observation": "plausible",
+  "protocol_capture_id": "capture-0001",
+  "protocol_decoded_response_seq": 6,
+  "protocol_evidence": [
+    "capture-0001:3",
+    "capture-0001:4",
+    "capture-0001:6"
+  ],
+  "protocol_probe": "verified",
+  "protocol_route": "active_proxy",
+  "protocol_session_generation": 1,
+  "protocol_status_request_hex": "a565b1000106010000000000",
+  "protocol_status_request_seq": 3,
+  "protocol_status_write_ok_seq": 4,
+  "protocol_trace_sha256": "72903afd8991eb93bba0fb23e9b5790ef9f9172bf018e532f5141cdeb49e3394",
+  "qualification_status": "inconclusive",
+  "sample_sha256": [
+    "60754944b498f6ff4b84ad990934665fabc71a3991e3da57387594fcaf786552",
+    "f089580eef54145a5d776253f299978c2845f63ac840e28bab57fc4d46a68bdb"
+  ],
+  "samples": [
+    {
+      "sampled_at_utc": "2026-11-28T15:38:24.643401+00:00",
+      "telemetry": {
+        "battery": {
+          "sample_age_seconds": 50,
+          "value": 79,
+          "verified": true
+        },
+        "connected": {
+          "sample_age_seconds": 50,
+          "value": "on",
+          "verified": true
+        },
+        "firmware_version": {
+          "sample_age_seconds": 50,
+          "value": "0.2",
+          "verified": true
+        },
+        "hardware_version": {
+          "sample_age_seconds": 50,
+          "value": "0.3",
+          "verified": true
+        },
+        "input_power": {
+          "sample_age_seconds": 50,
+          "value": 0,
+          "verified": true
+        },
+        "output_power": {
+          "sample_age_seconds": 50,
+          "value": 0,
+          "verified": true
+        },
+        "remaining_time": {
+          "sample_age_seconds": 50,
+          "value": 4850,
+          "verified": true
+        },
+        "telemetry_available": {
+          "sample_age_seconds": 50,
+          "value": "on",
+          "verified": true
+        }
+      }
+    },
+    {
+      "sampled_at_utc": "2026-11-28T15:38:25.886871+00:00",
+      "telemetry": {
+        "battery": {
+          "sample_age_seconds": 52,
+          "value": 79,
+          "verified": true
+        },
+        "connected": {
+          "sample_age_seconds": 52,
+          "value": "on",
+          "verified": true
+        },
+        "firmware_version": {
+          "sample_age_seconds": 52,
+          "value": "0.2",
+          "verified": true
+        },
+        "hardware_version": {
+          "sample_age_seconds": 52,
+          "value": "0.3",
+          "verified": true
+        },
+        "input_power": {
+          "sample_age_seconds": 52,
+          "value": 0,
+          "verified": true
+        },
+        "output_power": {
+          "sample_age_seconds": 52,
+          "value": 0,
+          "verified": true
+        },
+        "remaining_time": {
+          "sample_age_seconds": 52,
+          "value": 4850,
+          "verified": true
+        },
+        "telemetry_available": {
+          "sample_age_seconds": 52,
+          "value": "on",
+          "verified": true
+        }
+      }
+    }
+  ],
+  "schema_version": 2,
+  "status_freshness": {
+    "capture_id": "capture-0001",
+    "capture_started_seq": 1,
+    "capture_stopped_seq": 9,
+    "decoded_response_at_utc": "2026-11-28T15:38:25.410927+00:00",
+    "decoded_response_seq": 6,
+    "session_generation": 1,
+    "status_measurement": {
+      "battery": 79,
+      "input_power": 0,
+      "output_power": 0,
+      "remaining_time": 4850
+    },
+    "status_notification_count_after": 46,
+    "status_notification_count_before": 45
+  }
+}

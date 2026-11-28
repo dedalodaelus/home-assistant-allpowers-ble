@@ -1,0 +1,16 @@
+{
+  "artifact_type": "feature_restoration",
+  "build_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+  "captured_at": "2026-11-28T15:38:22+00:00",
+  "feature": "eco_timeout",
+  "firmware_version": "0.2",
+  "hardware_revision": "0.3",
+  "model": "ALLPOWERS R600",
+  "pre_state": 1,
+  "restored": true,
+  "restored_state": 1,
+  "revision_id": "r600-hw03",
+  "route": "active_proxy",
+  "run_id": "archive-fcd1151c1ddc94d9b606bb007a5986c4aa812ba103e09d2ff8b59c60aa53e316",
+  "session_id": "archive-session-0464c5de451ef8a88b0872d8e75cf2ea"
+}
