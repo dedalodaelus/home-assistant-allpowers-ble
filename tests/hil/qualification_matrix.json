@@ -1517,8 +1517,631 @@
               "archive_sha256": "727ef6cd2e3efc87b54e0bfec90108b75999e9c5a7d1ac24554d90e38420fcc5"
             }
           ]
+        },
+        {
+          "run_id": "archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e",
+          "firmware_version": "0.2",
+          "route": "local_adapter",
+          "captured_at": "2026-11-28T15:01:57+00:00",
+          "tool_version": "unversioned",
+          "integration_version": "0.3.0",
+          "build_verification": "verified",
+          "installed_commit": "8aae2f9610acc405cf9803a6379e635e18b2a8ae",
+          "installed_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+          "checkout_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+          "build_verification_reason": null,
+          "capture_completeness": "complete",
+          "qualification_status": "pending",
+          "session_id": "archive-session-f44cb3b989c5da04b63f75e5b905fb79",
+          "build_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+          "feature_presence": {
+            "ac_output": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "dc_output": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "light_output": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "eco_mode": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "work_mode": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "eco_timeout": {
+              "status": "present",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json"
+              ],
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "evidence_sha256": {
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c"
+              }
+            },
+            "car_charger": {
+              "status": "unknown",
+              "evidence": []
+            }
+          },
+          "authorization_context": "production",
+          "authorization_context_source": "reviewed_production_session",
+          "evidence": [
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/environment.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/events.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/frames.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/manifest.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/report.md",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/session.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-ac_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-ac_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-ac_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-ac_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-ac_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-dc_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-dc_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-dc_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-dc_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-dc_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-light_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-light_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-light_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-light_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-light_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-eco_mode-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-eco_mode-restoration.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-work_mode-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-work_mode-restoration.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-eco_timeout-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T150724754895Z-eco_timeout-restoration.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/reconnect-failover-review.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-identity-claim.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol-capture.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol_probe-claim.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-fresh_telemetry-claim.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-03.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-on-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-02.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-off-transition.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-restoration.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-restoration.json",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-01.jsonl",
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-restoration.json"
+          ],
+          "scenarios": {
+            "golden_vector_replay": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "reconnect_failover": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/reconnect-failover-review.jsonl"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/reconnect-failover-review.jsonl": "536b458792400dcbdbb6e5d6cb414b41c31da86334c07763904aeb8e4800a875"
+                }
+              }
+            },
+            "rapid_consecutive_writes": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "stale_timeout_recovery": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "soak_24h": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "upgrade_reload": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            },
+            "vendor_app_contention": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            }
+          },
+          "write_capabilities": {
+            "ac_output": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-03.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-on-transition.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-02.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-off-transition.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "reviewer_independent_from_operator": false,
+                "output_transitions": [
+                  {
+                    "state": "on",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-on-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-01.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-01.jsonl"
+                  },
+                  {
+                    "state": "off",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-off-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-02.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-02.jsonl"
+                  }
+                ],
+                "final_restoration": {
+                  "state": "off",
+                  "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-03.jsonl",
+                  "frame_evidence": {
+                    "action_stage": "restoration",
+                    "frame_seq": 4,
+                    "frame_sha256": "d96c2e0daa920b47d8bc8fbffc84bbf0d178f11751e04b6a6436a95674272586",
+                    "requested_state": false,
+                    "session_generation": 7,
+                    "source_action_index": 3,
+                    "source_step_id": "ac_output_cycle",
+                    "trace_sha256": "dbdb8f50285960228c5b0d96965150d2fea2a69860633db0a1a17863bf0c999c",
+                    "transaction_sha256": "ba98ebfcbbd029ea97666a588e51bd43d84bbd1ffaab94e092ced1851d92bd1e"
+                  },
+                  "confirmed": true,
+                  "reviewer_independent_from_operator": false,
+                  "assurance": "operator_attested"
+                },
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-03.jsonl": "f818364f5530f4cab53e57d10debfedb9b13b2f6d676de7916f0e2359edd0547",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-01.jsonl": "5fc2a65da66dd172559423e4ae7b247d726f662356e4fb8c6ee14a33ea903889",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-on-transition.json": "5806a31733d28e1d4175c292fb89ca5d9f07b0a44e87312f21171f4da7a6a473",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-02.jsonl": "3dd44b3e75dde84f4be44e4ebbf46b1f30ac570212d9e502f26ecd0adb559634",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-ac_output-off-transition.json": "2762d548210f575c4520db73557bb1c0965d31cb6e47b972e799edc8349cdf58"
+                }
+              }
+            },
+            "dc_output": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-03.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-on-transition.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-02.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-off-transition.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "reviewer_independent_from_operator": false,
+                "output_transitions": [
+                  {
+                    "state": "on",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-on-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-01.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-01.jsonl"
+                  },
+                  {
+                    "state": "off",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-off-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-02.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-02.jsonl"
+                  }
+                ],
+                "final_restoration": {
+                  "state": "off",
+                  "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-03.jsonl",
+                  "frame_evidence": {
+                    "action_stage": "restoration",
+                    "frame_seq": 4,
+                    "frame_sha256": "d96c2e0daa920b47d8bc8fbffc84bbf0d178f11751e04b6a6436a95674272586",
+                    "requested_state": false,
+                    "session_generation": 7,
+                    "source_action_index": 3,
+                    "source_step_id": "dc_output_cycle",
+                    "trace_sha256": "a86401ec6521467cda85b7fc77581566bc60ec8d5929eee20f71a5e3ad867cbb",
+                    "transaction_sha256": "2d2a68c662ce6aee6de95e6445e61f32f55aa0efe920d3cede93a88f9214b057"
+                  },
+                  "confirmed": true,
+                  "reviewer_independent_from_operator": false,
+                  "assurance": "operator_attested"
+                },
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-03.jsonl": "448615904b9aabc8e74aec98c82c2af5d44e85c5f0622c488b4ac26db9f8bb7f",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-01.jsonl": "93a16748905a7787c9507a0449bc73bcac82ec1baeced1858b0113ccedc85d76",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-on-transition.json": "65e9d9636535e5c2d970822130c80a0b438c2e965ea74e3ee99c3c05cd35011b",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-02.jsonl": "bc03613fa7d4ac1260a5f77e626171cd5ccaf495d65fd53335c872ff6a0937d0",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-dc_output-off-transition.json": "e2274f4525ce577081d058665542844a6b38056e36ee4c4f9b0194581199c1ca"
+                }
+              }
+            },
+            "light_output": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-03.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-on-transition.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-02.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-off-transition.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "reviewer_independent_from_operator": false,
+                "output_transitions": [
+                  {
+                    "state": "on",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-on-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-01.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-01.jsonl"
+                  },
+                  {
+                    "state": "off",
+                    "evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-off-transition.json",
+                    "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-02.jsonl",
+                    "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-02.jsonl"
+                  }
+                ],
+                "final_restoration": {
+                  "state": "off",
+                  "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-03.jsonl",
+                  "frame_evidence": {
+                    "action_stage": "restoration",
+                    "frame_seq": 4,
+                    "frame_sha256": "d96c2e0daa920b47d8bc8fbffc84bbf0d178f11751e04b6a6436a95674272586",
+                    "requested_state": false,
+                    "session_generation": 7,
+                    "source_action_index": 3,
+                    "source_step_id": "light_output_cycle",
+                    "trace_sha256": "3c4730f37b5e34e7479df855d580aa5c2a500335d2ab01a241d8873b074a3ae7",
+                    "transaction_sha256": "8ed816f827cc20d9b22140006bcd1957fe8eb59b57b53ec2d17312e7a43e62c2"
+                  },
+                  "confirmed": true,
+                  "reviewer_independent_from_operator": false,
+                  "assurance": "operator_attested"
+                },
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-03.jsonl": "63b58532ffd72271d8b3a610aa47d26ebd468b3ff3bb2c96695ee72a18931132",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-01.jsonl": "c6599e617e432a7644d4c4752556dbf499d3257989b6635392bd90242418705c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-on-transition.json": "0fbc1389e7dddcafa181e14da128e0bd35be77d13015964fb5cf3cd6df6581ff",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-02.jsonl": "0b699903d79ef56d8d42605ad821c2b42f448057bb9a8d6112bd1808d4306ea1",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-light_output-off-transition.json": "e76fc9cb893d337231878b10979b6031b424c1f3013af1ff96b6816fb0486698"
+                }
+              }
+            },
+            "eco_mode": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-restoration.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "restoration_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-restoration.json",
+                "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-01.jsonl",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-01.jsonl": "6d3964ccff75371dcd8173cc01dce4203b66155ebf97c90fb319831e05b7553c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_mode-restoration.json": "471534e8fec50d85942d2bdb8a305d62798510b6df101bb9039ab2fd32ee24b8"
+                }
+              }
+            },
+            "work_mode": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-restoration.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "restoration_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-restoration.json",
+                "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-01.jsonl",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-01.jsonl": "bb5aed060d1b8ed6b80920a33bf9966743866b5411e6c4a3850d8730915bc8a1",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-work_mode-restoration.json": "65fc2e3143286f1812dfb5b9ca70445a32fcb2170f8134d131d00feea18816aa"
+                }
+              }
+            },
+            "eco_timeout": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-01.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-restoration.json"
+              ],
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+                "assurance": "operator_attested",
+                "restoration_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-restoration.json",
+                "restoration_capture": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-01.jsonl",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-artifacts.json": "49794a25a97086de99c1f9409aa1ded427c67d68f6d389f37497af513cd3b88d",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-01.jsonl": "57ab1ee9236aef4baefb1e64bf57f235a069f829e1ca182e89eb57ac555f6225",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e-gold-20261128T151335515805Z-eco_timeout-restoration.json": "e332fef9e9d4ab8d91ff753ea077bcf1ecfb644a7c9920f63e1ca71b6fc20dc1"
+                }
+              }
+            },
+            "car_charger": {
+              "status": "inconclusive",
+              "evidence": [],
+              "rationale": "Public archive does not establish physical qualification."
+            }
+          },
+          "archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3",
+          "content_sha256": "f44cb3b989c5da04b63f75e5b905fb79e106b582136b0cd98d14a5bf1f3b4d40",
+          "source_run_id": "13ddd4b00b65a964",
+          "reported_scenario_id": null,
+          "reported_step_ids": [],
+          "capture_summary": {
+            "by_capture": [
+              {
+                "capture_id": "capture-0001",
+                "complete": true,
+                "dropped_events": 0,
+                "dropped_frames": 0,
+                "events": 13,
+                "frames": 5,
+                "route": "local_adapter"
+              }
+            ],
+            "complete": true,
+            "count": 1,
+            "dropped_events": 0,
+            "dropped_frames": 0,
+            "events": 13,
+            "frames": 5
+          },
+          "bronze_evidence": {
+            "identity": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-identity-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-identity-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:20.929191+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json": "bc21a9d189114a8661adeb30babe8383045f6631482fe88adcbcf7c4f2f0cf6a",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-identity-claim.json": "f3373542cd6b4c57407e92a2b0fddc3d07e0100b47239104969a96b72459fcfc"
+                }
+              }
+            },
+            "protocol_probe": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/events.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/frames.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol-capture.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol_probe-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol_probe-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:20.929191+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json": "bc21a9d189114a8661adeb30babe8383045f6631482fe88adcbcf7c4f2f0cf6a",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/events.jsonl": "b7f4e3f961a52755aa14037e445b8bce8710c82131a44248bc85840047b9b1da",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/frames.jsonl": "43c34eaec6871e0267f331261eeb8e3c3eee5199dd22b28eca89302d2b1ee029",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol-capture.jsonl": "a09dac3e53ce13a8e6875d43ab3f6787ba3067010a36de9ed02a52c7c59e28ed",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol_probe-claim.json": "74ec1a4e57f332966238ee937b863b992931d4fe653e446819ddedb041dcb222"
+                }
+              },
+              "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-protocol-capture.jsonl"
+            },
+            "fresh_telemetry": {
+              "status": "pass",
+              "evidence": [
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/events.jsonl",
+                "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-fresh_telemetry-claim.json"
+              ],
+              "claim_artifact": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-fresh_telemetry-claim.json",
+              "physical_review": {
+                "outcome": "confirmed_pass",
+                "reviewed_by": "dedalodaelus",
+                "reviewed_at": "2026-11-28T15:10:20.929191+00:00",
+                "assurance": "operator_attested",
+                "evidence_sha256": {
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-bronze-read-only.json": "bc21a9d189114a8661adeb30babe8383045f6631482fe88adcbcf7c4f2f0cf6a",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/events.jsonl": "b7f4e3f961a52755aa14037e445b8bce8710c82131a44248bc85840047b9b1da",
+                  "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/bronze-fresh_telemetry-claim.json": "4e68859f09cdd111fcc9cb763c81bf95976999863338680524ff491f7a3539a6"
+                }
+              }
+            }
+          },
+          "review_history": [
+            {
+              "tier": "bronze",
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:06:10.773460+00:00",
+              "assurance": "operator_attested",
+              "claims": {
+                "identity": "inconclusive",
+                "protocol_probe": "inconclusive",
+                "fresh_telemetry": "inconclusive"
+              },
+              "archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3"
+            },
+            {
+              "tier": "gold",
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:06:17.255771+00:00",
+              "assurance": "operator_attested",
+              "archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3"
+            },
+            {
+              "tier": "bronze",
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:20.929191+00:00",
+              "assurance": "operator_attested",
+              "claims": {
+                "identity": "pass",
+                "protocol_probe": "pass",
+                "fresh_telemetry": "pass"
+              },
+              "archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3"
+            },
+            {
+              "tier": "gold",
+              "reviewed_by": "dedalodaelus",
+              "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+              "assurance": "operator_attested",
+              "archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3"
+            }
+          ]
         }
-      ]
+      ],
+      "feature_contract": {
+        "car_charger": {
+          "status": "excluded",
+          "safely_disabled": true,
+          "rationale": "car_charger is excluded/unverified because the runtime option is OFF and the normal Home Assistant control is unavailable; physical independence of the 12 V socket is not established.",
+          "evidence": [
+            "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/feature-contract-car_charger.json"
+          ],
+          "physical_review": {
+            "outcome": "confirmed_pass",
+            "reviewed_by": "dedalodaelus",
+            "reviewed_at": "2026-11-28T15:10:41.817148+00:00",
+            "assurance": "operator_attested",
+            "reviewer_independent_from_operator": false,
+            "evidence_sha256": {
+              "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/feature-contract-car_charger.json": "6330efaa2425f0b8c9c40eb5163e639cdbc5829c65b99c9dcd8682c392172239"
+            }
+          }
+        }
+      }
     },
     {
       "id": "volix-p1800-hw03",
