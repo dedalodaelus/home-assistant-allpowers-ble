@@ -1,0 +1,85 @@
+{
+  "build_provenance": {
+    "checkout_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+    "installed_commit": "a96d98678b6cae474ee245b3a8558f3a6a20a6f3",
+    "installed_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+    "installed_manifest_version": "0.3.0",
+    "runner_checkout_commit": "a96d98678b6cae474ee245b3a8558f3a6a20a6f3",
+    "verification": "verified",
+    "verification_reason": null
+  },
+  "captures": {
+    "by_capture": [
+      {
+        "capture_id": "capture-0001",
+        "complete": true,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "events": 9,
+        "frames": 3,
+        "route": "active_proxy"
+      }
+    ],
+    "complete": true,
+    "count": 1,
+    "dropped_events": 0,
+    "dropped_frames": 0,
+    "events": 9,
+    "frames": 3
+  },
+  "export_confirmed": true,
+  "files": [
+    {
+      "name": "environment.json",
+      "sha256": "b5577445030e92f1f16a380ea6c72b23b1ce53b7d2e4c6f03a769b49a76dcb08",
+      "size": 1753
+    },
+    {
+      "name": "events.jsonl",
+      "sha256": "93c4a7e0053444507ae0338438f5d08af3eb8c5efe941e2ecd4232bc71c37f07",
+      "size": 2469
+    },
+    {
+      "name": "frames.jsonl",
+      "sha256": "66d79c6ca69a75d553803bc57552bb51735e4c039e4cc4e329e3e51c9a0d5d4f",
+      "size": 602
+    },
+    {
+      "name": "report.md",
+      "sha256": "0712de89df8d9e0898b88841345bedab3c175df10d0914454907ac2ab3704952",
+      "size": 3388
+    },
+    {
+      "name": "session.json",
+      "sha256": "552e7a19c7afe2012851a2a6b3a97120252676caca3664d8aa0738691c3307b9",
+      "size": 6201
+    },
+    {
+      "name": "tier-artifacts.json",
+      "sha256": "eb8b8ae5e675376ecdc5639f7f887bffd452e517ad70fa6aac25028c02a3db67",
+      "size": 249401
+    },
+    {
+      "name": "tier-bronze-read-only.json",
+      "sha256": "d32ebeabec27d93a0cae1cfe52c41c4b9c542c5c8b7a8491df7296440cce080f",
+      "size": 3532
+    },
+    {
+      "name": "tier-execution.json",
+      "sha256": "e04a0b63d4d2a10b0c850d141fbdc9940b753a57fa855a7852657f423ad3c73d",
+      "size": 13314
+    }
+  ],
+  "omissions": [
+    "private_identifiers",
+    "raw_frame_payloads",
+    "unvalidated_trace_correlations"
+  ],
+  "privacy_policy": "allowlist",
+  "qualification_status": "inconclusive",
+  "run_id": "e7e5cb4a2acf9d0c",
+  "schema_version": 2,
+  "toolkit_schema_version": 2,
+  "toolkit_version": "unversioned",
+  "validation": "passed"
+}

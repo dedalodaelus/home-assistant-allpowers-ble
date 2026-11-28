@@ -1,0 +1,224 @@
+{
+  "data": {
+    "controls": {
+      "car_charger": {
+        "availability_verified": true,
+        "available": false
+      }
+    },
+    "device": {
+      "firmware_version": {
+        "source": "ha_device_registry",
+        "value": "0.2",
+        "verified": true
+      },
+      "hardware_version": {
+        "source": "ha_device_registry",
+        "value": "0.3",
+        "verified": true
+      },
+      "model": {
+        "source": "ha_device_registry",
+        "value": "R600",
+        "verified": true
+      }
+    },
+    "mode": "read_only_preflight",
+    "preflight": {
+      "checks": {
+        "connected": "ready",
+        "entry_loaded": "ready",
+        "telemetry_fresh": "ready"
+      },
+      "overall": "ready"
+    },
+    "qualification_status": "inconclusive",
+    "route": {
+      "requested": "auto"
+    },
+    "run_id": "e7e5cb4a2acf9d0c",
+    "runtime_capabilities": {
+      "available": true,
+      "capabilities": {
+        "car_charger_enabled": false,
+        "read_telemetry": true,
+        "write_output_controls": true,
+        "write_settings_controls": true,
+        "write_settings_keepalive": true
+      },
+      "connected": true,
+      "features": {
+        "car_charger": {
+          "physical_presence": "unknown",
+          "runtime_ready": true
+        }
+      },
+      "firmware_revision": "0.2",
+      "hardware_revision": "0.3",
+      "identity_conflicted": false,
+      "model": "R600",
+      "pending_transaction": false,
+      "schema_version": 2,
+      "session_generation": 10,
+      "settings_fresh": true,
+      "status_fresh": true,
+      "verified": true
+    },
+    "started_at": "2026-11-28T14:27:12+00:00",
+    "telemetry": {
+      "battery": {
+        "value": 79,
+        "verified": true
+      },
+      "connected": {
+        "value": "on",
+        "verified": true
+      },
+      "firmware_version": {
+        "value": "0.2",
+        "verified": true
+      },
+      "hardware_version": {
+        "value": "0.3",
+        "verified": true
+      },
+      "input_power": {
+        "value": 0,
+        "verified": true
+      },
+      "output_power": {
+        "value": 0,
+        "verified": true
+      },
+      "remaining_time": {
+        "value": 4850,
+        "verified": true
+      },
+      "telemetry_available": {
+        "value": "on",
+        "verified": true
+      }
+    },
+    "test_plan": {
+      "attained_tier": null,
+      "device": {
+        "firmware_revision": "0.2",
+        "hardware_revision": "0.3",
+        "model": "R600",
+        "verified_route": "active_proxy"
+      },
+      "operator_actions_estimate": 10,
+      "physical_inventory_preflight": {
+        "features": {
+          "ac_output": {
+            "basis": "operator_physical_inspection",
+            "outcome": "present"
+          },
+          "dc_output": {
+            "basis": "operator_physical_inspection",
+            "outcome": "present"
+          },
+          "light_output": {
+            "basis": "operator_physical_inspection",
+            "outcome": "present"
+          }
+        },
+        "source": "operator_physical_inspection"
+      },
+      "requested_tier": "silver",
+      "review_state": "pending",
+      "schema_version": 1,
+      "steps": [
+        {
+          "action": "read_only",
+          "eligibility": "eligible",
+          "feature": "telemetry",
+          "human_review": "pending",
+          "id": "read_only_probe",
+          "inventory_preflight": "unknown",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": []
+        },
+        {
+          "action": "manual",
+          "eligibility": "eligible",
+          "feature": "telemetry",
+          "human_review": "pending",
+          "id": "physical_plausibility_observation",
+          "inventory_preflight": "unknown",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": []
+        },
+        {
+          "action": "write",
+          "eligibility": "eligible",
+          "feature": "ac_output",
+          "human_review": "pending",
+          "id": "ac_output_cycle",
+          "inventory_preflight": "operator_inspected_present",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": [
+            "operator physical-inventory preflight permits acquisition only; independent review is still required"
+          ]
+        },
+        {
+          "action": "write",
+          "eligibility": "eligible",
+          "feature": "dc_output",
+          "human_review": "pending",
+          "id": "dc_output_cycle",
+          "inventory_preflight": "operator_inspected_present",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": [
+            "operator physical-inventory preflight permits acquisition only; independent review is still required"
+          ]
+        },
+        {
+          "action": "write",
+          "eligibility": "eligible",
+          "feature": "light_output",
+          "human_review": "pending",
+          "id": "light_output_cycle",
+          "inventory_preflight": "operator_inspected_present",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": [
+            "operator physical-inventory preflight permits acquisition only; independent review is still required"
+          ]
+        },
+        {
+          "action": "manual",
+          "eligibility": "eligible",
+          "feature": "telemetry",
+          "human_review": "pending",
+          "id": "basic_reconnect",
+          "inventory_preflight": "unknown",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": []
+        },
+        {
+          "action": "unknown",
+          "eligibility": "blocked",
+          "feature": "output",
+          "human_review": "pending",
+          "id": "minimum_output_requirement",
+          "outcome": "pending",
+          "physical_presence": "unknown",
+          "reasons": [
+            "no present, production-authorized or reviewed candidate output is available"
+          ]
+        }
+      ]
+    }
+  },
+  "omitted": [
+    "unknown_source_fields"
+  ],
+  "schema_version": 2,
+  "source_schema_version": 1
+}

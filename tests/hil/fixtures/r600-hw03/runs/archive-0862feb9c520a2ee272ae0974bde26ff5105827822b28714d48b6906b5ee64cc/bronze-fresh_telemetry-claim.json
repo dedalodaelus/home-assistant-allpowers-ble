@@ -1,0 +1,17 @@
+{
+  "artifact_type": "bronze_evidence",
+  "build_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+  "captured_at": "2026-11-28T14:27:12+00:00",
+  "claim": "fresh_telemetry",
+  "firmware_version": "0.2",
+  "fresh": true,
+  "freshness_basis": "capture_bound_status",
+  "hardware_revision": "0.3",
+  "model": "ALLPOWERS R600",
+  "plausible": true,
+  "revision_id": "r600-hw03",
+  "route": "active_proxy",
+  "run_id": "archive-0862feb9c520a2ee272ae0974bde26ff5105827822b28714d48b6906b5ee64cc",
+  "sample_age_seconds": 124,
+  "session_id": "archive-session-7aa7a7a64a27788a6dd65499fffb8e0e"
+}
