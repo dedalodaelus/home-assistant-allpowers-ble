@@ -1,0 +1,18 @@
+{
+  "artifact_type": "output_transition",
+  "build_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+  "captured_at": "2026-11-28T14:27:12+00:00",
+  "feature": "light_output",
+  "firmware_version": "0.2",
+  "hardware_revision": "0.3",
+  "initial_state": "on",
+  "model": "ALLPOWERS R600",
+  "observed_state": "off",
+  "requested_state": "off",
+  "restored": true,
+  "restored_state": "on",
+  "revision_id": "r600-hw03",
+  "route": "active_proxy",
+  "run_id": "archive-0862feb9c520a2ee272ae0974bde26ff5105827822b28714d48b6906b5ee64cc",
+  "session_id": "archive-session-7aa7a7a64a27788a6dd65499fffb8e0e"
+}
