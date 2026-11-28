@@ -1,0 +1,17 @@
+{
+  "artifact_type": "feature_contract",
+  "feature": "car_charger",
+  "hardware_revision": "0.3",
+  "model": "ALLPOWERS R600",
+  "normal_control_available": false,
+  "rationale": "car_charger is excluded/unverified because the runtime option is OFF and the normal Home Assistant control is unavailable; physical independence of the 12 V socket is not established.",
+  "revision_id": "r600-hw03",
+  "runtime_option_enabled": false,
+  "safely_disabled": true,
+  "source_archive_sha256": "842091ba9cb69b539b1a12b7b34a4250f425303fcaa5282fb48f12732598a8f3",
+  "source_execution": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/tier-execution.json",
+  "source_execution_sha256": "a3a647f3cc7129f750aa71e996a384c363549574b474b8e74aeb6ed39562938c",
+  "source_run_id": "archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e",
+  "source_session": "tests/hil/fixtures/r600-hw03/runs/archive-fe8dcb88377ad958bf9cb87e09ca14ca0021b3d8b35ffb86c344d1823401c24e/session.json",
+  "source_session_sha256": "3bdc0bdb0b8668a3247254a4f326bfd6c831b0e62f62cef39de9db6da3813789"
+}

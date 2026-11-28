@@ -1,0 +1,67 @@
+{
+  "data": {
+    "home_assistant": {
+      "version": {
+        "source": "ha_rest_config",
+        "value": "2026.10.4",
+        "verified": true
+      }
+    },
+    "integration": {
+      "build_match": {
+        "source": "runner_build_verification",
+        "value": "verified",
+        "verified": true
+      },
+      "checkout_fingerprint": {
+        "source": "runner_integration_files",
+        "value": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+        "verified": true
+      },
+      "installed_commit": {
+        "source": "runner_git_checkout",
+        "value": "8aae2f9610acc405cf9803a6379e635e18b2a8ae",
+        "verified": true
+      },
+      "installed_fingerprint": {
+        "source": "ha_ws_hil_build",
+        "value": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+        "verified": true
+      },
+      "installed_manifest_version": {
+        "source": "ha_ws_manifest_get",
+        "value": "0.3.0",
+        "verified": true
+      },
+      "runner_checkout_commit": {
+        "source": "runner_git_checkout",
+        "value": "8aae2f9610acc405cf9803a6379e635e18b2a8ae",
+        "verified": true
+      }
+    },
+    "runner_host": {
+      "architecture": {
+        "source": "runner_platform",
+        "value": "x86_64",
+        "verified": true
+      },
+      "kernel": {
+        "source": "runner_platform",
+        "value": "6.12.113+deb13-amd64",
+        "verified": true
+      },
+      "os": {
+        "source": "runner_platform",
+        "value": "Linux",
+        "verified": true
+      },
+      "python_version": {
+        "source": "runner_runtime",
+        "value": "3.14.10",
+        "verified": true
+      }
+    }
+  },
+  "schema_version": 2,
+  "source_schema_version": 1
+}
