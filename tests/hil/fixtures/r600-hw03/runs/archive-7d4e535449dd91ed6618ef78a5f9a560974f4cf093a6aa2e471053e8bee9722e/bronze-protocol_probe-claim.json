@@ -1,0 +1,14 @@
+{
+  "artifact_type": "bronze_evidence",
+  "build_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+  "capture_evidence": "tests/hil/fixtures/r600-hw03/runs/archive-7d4e535449dd91ed6618ef78a5f9a560974f4cf093a6aa2e471053e8bee9722e/bronze-protocol-capture.jsonl",
+  "captured_at": "2026-11-28T14:49:13+00:00",
+  "claim": "protocol_probe",
+  "firmware_version": "0.2",
+  "hardware_revision": "0.3",
+  "model": "ALLPOWERS R600",
+  "revision_id": "r600-hw03",
+  "route": "local_adapter",
+  "run_id": "archive-7d4e535449dd91ed6618ef78a5f9a560974f4cf093a6aa2e471053e8bee9722e",
+  "session_id": "archive-session-6d41e7908fc4c03fe35e6af018dcdf7a"
+}

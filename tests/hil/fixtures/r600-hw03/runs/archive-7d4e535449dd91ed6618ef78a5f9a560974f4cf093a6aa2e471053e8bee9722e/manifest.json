@@ -1,0 +1,85 @@
+{
+  "build_provenance": {
+    "checkout_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+    "installed_commit": "b506f1f1898a63e89ef4a73a7465bea64e7b2840",
+    "installed_fingerprint": "ad18bef84310aff5231b19a6ce8de508c3de53da3ae1afef08f2e82ad61f43d0",
+    "installed_manifest_version": "0.3.0",
+    "runner_checkout_commit": "b506f1f1898a63e89ef4a73a7465bea64e7b2840",
+    "verification": "verified",
+    "verification_reason": null
+  },
+  "captures": {
+    "by_capture": [
+      {
+        "capture_id": "capture-0001",
+        "complete": true,
+        "dropped_events": 0,
+        "dropped_frames": 0,
+        "events": 9,
+        "frames": 3,
+        "route": "local_adapter"
+      }
+    ],
+    "complete": true,
+    "count": 1,
+    "dropped_events": 0,
+    "dropped_frames": 0,
+    "events": 9,
+    "frames": 3
+  },
+  "export_confirmed": true,
+  "files": [
+    {
+      "name": "environment.json",
+      "sha256": "d392b1612da92662814d728b002e496a3ba5a45c592faa2f28ed532ae91db4c6",
+      "size": 1753
+    },
+    {
+      "name": "events.jsonl",
+      "sha256": "d90674b1b965600416fb5fc67a966cd1319f2794ed7d859a4470ec1ecf41422d",
+      "size": 2468
+    },
+    {
+      "name": "frames.jsonl",
+      "sha256": "7245cbb8e9e25c6353e55ee9ff326fa630c71704c1ea250d3886446fc0207bea",
+      "size": 599
+    },
+    {
+      "name": "report.md",
+      "sha256": "d84ce66408f1ffdc6f72fc82ee08ff2e1ad9e1ed9bf4e8ad4f6bd67192e15cc4",
+      "size": 3391
+    },
+    {
+      "name": "session.json",
+      "sha256": "823dc28760ad1af53b98212380163b8b570a052e631f350bc2c2c8859b6fea48",
+      "size": 6201
+    },
+    {
+      "name": "tier-artifacts.json",
+      "sha256": "93babd214821193a4715abc985fcc9f55519ece1535cdaa06b42806bf6e836d8",
+      "size": 255590
+    },
+    {
+      "name": "tier-bronze-read-only.json",
+      "sha256": "16856d984365b2e57d6b98d1e9e9b52d328fdaf2f4a8d8ab336fa06327f07b3e",
+      "size": 3531
+    },
+    {
+      "name": "tier-execution.json",
+      "sha256": "b3e2983a89682875f662a7e3de6a5c598e058c5d663f330fb4387d5684a1930b",
+      "size": 13314
+    }
+  ],
+  "omissions": [
+    "private_identifiers",
+    "raw_frame_payloads",
+    "unvalidated_trace_correlations"
+  ],
+  "privacy_policy": "allowlist",
+  "qualification_status": "inconclusive",
+  "run_id": "4843a0fb95f155da",
+  "schema_version": 2,
+  "toolkit_schema_version": 2,
+  "toolkit_version": "unversioned",
+  "validation": "passed"
+}
